@@ -2,12 +2,20 @@ import Sparkle
 import SwiftUI
 
 /// Sparkle checks the feed in Kite-Info.plist once an hour and on demand, and
-/// installs a signed update after asking.
+/// installs a signed update after asking. Debug builds never start it: every
+/// release looks newer than a Debug build, and installing one replaces the
+/// build under development.
 @Observable
 final class Updater {
     static let shared = Updater()
 
-    private let controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    #if DEBUG
+    private static let enabled = false
+    #else
+    private static let enabled = true
+    #endif
+
+    private let controller = SPUStandardUpdaterController(startingUpdater: enabled, updaterDelegate: nil, userDriverDelegate: nil)
     private(set) var canCheck = false
     private var observation: NSKeyValueObservation?
 
