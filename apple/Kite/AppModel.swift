@@ -289,6 +289,7 @@ final class AppModel {
         case .listsChanged:
             reloadAccounts()
             listChanged()
+            refreshOpenThread()
         case .syncStarted(let id):
             syncing.insert(id)
         case .syncFinished(let id):
@@ -453,6 +454,17 @@ final class AppModel {
         let start = info.kp_proc.p_un.__p_starttime
         let started = Double(start.tv_sec) + Double(start.tv_usec) / 1e6
         return (Date().timeIntervalSince1970 - started) * 1000
+    }
+
+    /// Re-renders the open conversation after mail changed (a reply came
+    /// in, a message moved). Leaves read state alone: a refresh is not a read.
+    private func refreshOpenThread() {
+        guard let threadID = selectedThreadID, openThread?.threadId == threadID, compose == nil else { return }
+        Task {
+            guard let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
+                  selectedThreadID == threadID, view.html != openThread?.html else { return }
+            openThread = view
+        }
     }
 
     func open(threadID: Int64) {

@@ -9,6 +9,7 @@ struct ComposeView: View {
     @State private var showCc = false
     @FocusState private var focus: Field?
     @State private var saveTask: Task<Void, Never>?
+    @State private var selection: TextSelection?
 
     enum Field { case to, cc, bcc, subject, body }
 
@@ -68,7 +69,7 @@ struct ComposeView: View {
             .padding(.horizontal, 28)
             .textFieldStyle(.plain)
 
-            TextEditor(text: draft.body)
+            TextEditor(text: draft.body, selection: $selection)
                 .font(.system(size: 14))
                 .lineSpacing(5)
                 .scrollContentBackground(.hidden)
@@ -105,6 +106,10 @@ struct ComposeView: View {
         .onAppear {
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
             focus = (model.compose?.to.isEmpty ?? true) ? .to : .body
+            // Replies and forwards start with the quote below; write above it.
+            if let body = model.compose?.body {
+                selection = TextSelection(insertionPoint: body.startIndex)
+            }
         }
         .onExitCommand { model.closeCompose() }
         .onDisappear { saveTask?.cancel() }
