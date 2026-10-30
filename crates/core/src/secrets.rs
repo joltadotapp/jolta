@@ -41,6 +41,11 @@ pub fn password(secret_ref: &str) -> Result<String> {
     Ok(entry(secret_ref)?.get_password()?)
 }
 
+/// The Keychain name of an account's separate SMTP password.
+pub fn smtp_ref(secret_ref: &str) -> String {
+    format!("{secret_ref}#smtp")
+}
+
 pub fn delete(secret_ref: &str) -> Result<()> {
     match entry(secret_ref)?.delete_credential() {
         Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),

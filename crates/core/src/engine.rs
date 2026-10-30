@@ -143,6 +143,12 @@ impl Engine {
         self.runtime.spawn(async move { engine.work(account, wake).await });
     }
 
+    /// The account's settings changed: its worker reconnects with them now.
+    pub fn settings_changed(&self, account: AccountId) {
+        self.wake(account);
+        (self.sink)(Event::ListsChanged);
+    }
+
     fn wake(&self, account: AccountId) {
         if let Some(w) = self.wakes.lock().unwrap_or_else(|e| e.into_inner()).get(&account) {
             w.poke();
@@ -240,6 +246,7 @@ impl Engine {
         let a = self.kite.store.read(|c| store::account(c, account))?;
         self.kite.store.write(|tx| store::delete_account(tx, account))?;
         crate::secrets::delete(&a.secret_ref)?;
+        crate::secrets::delete(&crate::secrets::smtp_ref(&a.secret_ref))?;
         self.wake(account);
         (self.sink)(Event::ListsChanged);
         Ok(())
@@ -253,7 +260,7 @@ impl Engine {
         }
     }
 
-    async fn work(self: Arc<Self>, account: Account, wake: Arc<Wake>) {
+    async fn work(self: Arc<Self>, mut account: Account, wake: Arc<Wake>) {
         let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let mut conn: Option<Link> = None;
         let poll = (account.kind == AccountKind::Graph).then_some(GRAPH_POLL);
@@ -261,10 +268,18 @@ impl Engine {
         let mut last_full = Instant::now();
         loop {
             let id = account.id;
-            if matches!(self.kite.store.read(|c| store::account(c, id)), Err(crate::Error::NotFound(_))) {
-                // The account was removed; stop syncing it.
-                self.wakes.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                return;
+            match self.kite.store.read(|c| store::account(c, id)) {
+                Err(crate::Error::NotFound(_)) => {
+                    // The account was removed; stop syncing it.
+                    self.wakes.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    return;
+                }
+                // New settings: reconnect with them.
+                Ok(current) if current != account => {
+                    account = current;
+                    conn = None;
+                }
+                _ => {}
             }
             match self.round(&account, &wake, &mut conn, started).await {
                 Ok(()) => backoff = Backoff::default(),

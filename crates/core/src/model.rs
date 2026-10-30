@@ -79,6 +79,21 @@ text_enum!(AccountKind {
     Graph => "graph",
 });
 
+// How a connection is protected: TLS from the first byte, an upgrade with
+// STARTTLS, or none (only sensible for a server on this machine).
+text_enum!(Security {
+    Tls => "tls",
+    StartTls => "starttls",
+    Plain => "none",
+});
+
+// Which login SMTP uses: the IMAP one, its own, or none.
+text_enum!(SmtpAuth {
+    SameAsIncoming => "same",
+    Separate => "separate",
+    NoAuth => "none",
+});
+
 // `System` marks folders the server manages for itself (Gmail's Starred and
 // Important, Outlook's Outbox and Conversation History). Kite keeps them out
 // of the sidebar.
@@ -114,7 +129,7 @@ impl Flags {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
     pub id: AccountId,
     pub kind: AccountKind,
@@ -126,9 +141,68 @@ pub struct Account {
     pub smtp_host: String,
     pub smtp_port: u16,
     pub secret_ref: String,
+    pub imap_security: Security,
+    pub smtp_security: Security,
+    pub smtp_auth: SmtpAuth,
+    /// The SMTP login when `smtp_auth` is `Separate`.
+    pub smtp_username: String,
+    /// Off accepts any certificate, for self-signed servers.
+    pub verify_certs: bool,
+}
+
+/// What the account settings screen can change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountSettings {
+    pub display_name: String,
+    pub address: String,
+    pub username: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_security: Security,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_security: Security,
+    pub smtp_auth: SmtpAuth,
+    pub smtp_username: String,
+    pub verify_certs: bool,
 }
 
 impl Account {
+    pub fn settings(&self) -> AccountSettings {
+        AccountSettings {
+            display_name: self.display_name.clone(),
+            address: self.address.clone(),
+            username: self.username.clone(),
+            imap_host: self.imap_host.clone(),
+            imap_port: self.imap_port,
+            imap_security: self.imap_security,
+            smtp_host: self.smtp_host.clone(),
+            smtp_port: self.smtp_port,
+            smtp_security: self.smtp_security,
+            smtp_auth: self.smtp_auth,
+            smtp_username: self.smtp_username.clone(),
+            verify_certs: self.verify_certs,
+        }
+    }
+
+    pub fn with_settings(&self, s: AccountSettings) -> Account {
+        Account {
+            display_name: s.display_name,
+            address: s.address,
+            username: s.username,
+            imap_host: s.imap_host,
+            imap_port: s.imap_port,
+            imap_security: s.imap_security,
+            smtp_host: s.smtp_host,
+            smtp_port: s.smtp_port,
+            smtp_security: s.smtp_security,
+            smtp_auth: s.smtp_auth,
+            smtp_username: s.smtp_username,
+            verify_certs: s.verify_certs,
+            ..self.clone()
+        }
+    }
+
     /// Who hosts the account, for display: "iCloud", "Fastmail", "Google".
     pub fn provider_label(&self) -> &'static str {
         let host = self.imap_host.to_ascii_lowercase();

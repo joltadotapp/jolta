@@ -559,3 +559,12 @@ final class EventBridge: CoreListener, @unchecked Sendable {
         continuation.yield(event)
     }
 }
+
+/// Errors from the core read as their message, wherever the app shows one.
+extension CoreError: @retroactive CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .Query(let message), .NotFound(let message), .SignIn(let message), .Failed(let message): message
+        }
+    }
+}

@@ -11,7 +11,7 @@ struct SettingsView: View {
             SectionsSettings(model: model).tabItem { Label("Sections", systemImage: "rectangle.split.3x1") }
             AgentsSettings(model: model).tabItem { Label("Agents", systemImage: "cpu") }
         }
-        .frame(width: 620, height: 460)
+        .frame(width: 860, height: 620)
     }
 }
 
@@ -54,72 +54,6 @@ struct SectionsSettings: View {
 }
 
 extension SectionInfo: @retroactive Identifiable {}
-
-/// Accounts: add one through the browser, or remove one with its mail.
-struct AccountsSettings: View {
-    let model: AppModel?
-    @State private var status: String?
-    @State private var signingIn = false
-    @State private var confirmRemove: AccountInfo?
-    @State private var addingIMAP = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(model?.accounts ?? []) { section in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(section.title).fontWeight(.medium)
-                        Text("\(section.account.provider) · \(section.account.address)").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Remove…") { confirmRemove = section.account }
-                }
-            }
-            Divider()
-            HStack {
-                Button("Add Google account…") { signIn(.google) }.disabled(signingIn)
-                Button("Add Microsoft 365 account…") { signIn(.microsoft) }.disabled(signingIn)
-                Button("Add iCloud or IMAP account…") { addingIMAP = true }.disabled(signingIn)
-                if signingIn { ProgressView().controlSize(.small) }
-            }
-            if let status { Text(status).font(.system(size: 12)).foregroundStyle(.secondary) }
-            Spacer()
-        }
-        .padding(20)
-        .sheet(isPresented: $addingIMAP) {
-            AddIMAPAccount(model: model) { added in
-                addingIMAP = false
-                if let added { status = "Added \(added.address). Kite is syncing it now." }
-            }
-        }
-        .confirmationDialog("Remove \(confirmRemove?.address ?? "")?", isPresented: Binding(get: { confirmRemove != nil }, set: { if !$0 { confirmRemove = nil } })) {
-            Button("Remove account and its local mail", role: .destructive) {
-                if let a = confirmRemove { try? model?.core.removeAccount(accountId: a.id) }
-                confirmRemove = nil
-            }
-        } message: {
-            Text("Mail stays on the server. Kite deletes its local copy and the account's Keychain entry.")
-        }
-    }
-
-    private func signIn(_ provider: OAuthProvider) {
-        guard let core = model?.core else { return }
-        signingIn = true
-        status = "Continue in your browser…"
-        Task {
-            do {
-                let session = try await core.beginSignIn(provider: provider)
-                if let url = URL(string: session.url()) { NSWorkspace.shared.open(url) }
-                let account = try await session.finish()
-                status = "Added \(account.address). Kite is syncing it now."
-                model?.reloadAccounts()
-            } catch {
-                status = "Sign-in failed: \(error)"
-            }
-            signingIn = false
-        }
-    }
-}
 
 /// Email and password; the servers too when Kite doesn't know them from the
 /// address. Kite signs in before it saves anything.

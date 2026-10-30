@@ -87,6 +87,93 @@ pub struct ThreadView {
     pub images_trusted: bool,
 }
 
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum ConnectionSecurity {
+    Tls,
+    StartTls,
+    Plain,
+}
+
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum SmtpLogin {
+    SameAsIncoming,
+    Separate,
+    NoAuth,
+}
+
+/// An account's connection settings, for the settings screen.
+#[derive(uniffi::Record)]
+pub struct AccountSettingsInfo {
+    pub display_name: String,
+    pub address: String,
+    pub username: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_security: ConnectionSecurity,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_security: ConnectionSecurity,
+    pub smtp_login: SmtpLogin,
+    pub smtp_username: String,
+    pub verify_certs: bool,
+}
+
+impl From<kite_core::AccountSettings> for AccountSettingsInfo {
+    fn from(s: kite_core::AccountSettings) -> Self {
+        let security = |s: kite_core::Security| match s {
+            kite_core::Security::Tls => ConnectionSecurity::Tls,
+            kite_core::Security::StartTls => ConnectionSecurity::StartTls,
+            kite_core::Security::Plain => ConnectionSecurity::Plain,
+        };
+        AccountSettingsInfo {
+            display_name: s.display_name,
+            address: s.address,
+            username: s.username,
+            imap_host: s.imap_host,
+            imap_port: s.imap_port,
+            imap_security: security(s.imap_security),
+            smtp_host: s.smtp_host,
+            smtp_port: s.smtp_port,
+            smtp_security: security(s.smtp_security),
+            smtp_login: match s.smtp_auth {
+                kite_core::SmtpAuth::SameAsIncoming => SmtpLogin::SameAsIncoming,
+                kite_core::SmtpAuth::Separate => SmtpLogin::Separate,
+                kite_core::SmtpAuth::NoAuth => SmtpLogin::NoAuth,
+            },
+            smtp_username: s.smtp_username,
+            verify_certs: s.verify_certs,
+        }
+    }
+}
+
+impl From<AccountSettingsInfo> for kite_core::AccountSettings {
+    fn from(s: AccountSettingsInfo) -> Self {
+        let security = |s: ConnectionSecurity| match s {
+            ConnectionSecurity::Tls => kite_core::Security::Tls,
+            ConnectionSecurity::StartTls => kite_core::Security::StartTls,
+            ConnectionSecurity::Plain => kite_core::Security::Plain,
+        };
+        kite_core::AccountSettings {
+            display_name: s.display_name,
+            address: s.address,
+            username: s.username,
+            imap_host: s.imap_host,
+            imap_port: s.imap_port,
+            imap_security: security(s.imap_security),
+            smtp_host: s.smtp_host,
+            smtp_port: s.smtp_port,
+            smtp_security: security(s.smtp_security),
+            smtp_auth: match s.smtp_login {
+                SmtpLogin::SameAsIncoming => kite_core::SmtpAuth::SameAsIncoming,
+                SmtpLogin::Separate => kite_core::SmtpAuth::Separate,
+                SmtpLogin::NoAuth => kite_core::SmtpAuth::NoAuth,
+            },
+            smtp_username: s.smtp_username,
+            verify_certs: s.verify_certs,
+        }
+    }
+}
+
 #[derive(uniffi::Enum)]
 pub enum CoreEvent {
     /// Stored mail changed; visible lists should reload their counts and pages.
@@ -610,6 +697,50 @@ impl Core {
     /// Loads remote images from this sender from now on, or stops.
     pub fn set_sender_trusted(&self, address: String, trusted: bool) -> Result<()> {
         Ok(self.kite.store.write(|tx| store::set_sender_trusted(tx, &address, trusted))?)
+    }
+
+    pub fn account_settings(&self, account_id: i64) -> Result<AccountSettingsInfo> {
+        Ok(self.kite.store.read(|c| store::account(c, AccountId(account_id)))?.settings().into())
+    }
+
+    /// Checks new settings against the servers, then saves them. Empty
+    /// passwords keep the stored ones.
+    pub async fn save_account_settings(
+        &self,
+        account_id: i64,
+        settings: AccountSettingsInfo,
+        password: Option<String>,
+        smtp_password: Option<String>,
+    ) -> Result<AccountInfo> {
+        let (kite, engine) = (self.kite.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let id = AccountId(account_id);
+        let account = self
+            .runtime
+            .spawn(async move { kite_core::imap::update_account(&kite, id, settings.into(), password, smtp_password).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        if let Some(engine) = engine {
+            engine.settings_changed(id);
+        }
+        Ok(AccountInfo {
+            id: account.id.0,
+            kind: account.kind.to_string(),
+            provider: account.provider_label().to_string(),
+            address: account.address,
+            display_name: account.display_name,
+        })
+    }
+
+    /// Hides or shows several folders at once.
+    pub fn set_mailboxes_hidden(&self, mailbox_ids: Vec<i64>, hidden: bool) -> Result<()> {
+        self.kite.store.write(|tx| {
+            for id in &mailbox_ids {
+                store::set_mailbox_hidden(tx, MailboxId(*id), hidden)?;
+            }
+            Ok(())
+        })?;
+        self.changed();
+        Ok(())
     }
 
     /// Keeps a folder out of the sidebar, or brings it back.

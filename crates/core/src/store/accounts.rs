@@ -16,7 +16,8 @@ pub struct NewAccount {
 }
 
 const ACCOUNT_COLS: &str =
-    "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port, secret_ref";
+    "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port, secret_ref,
+     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs";
 
 fn account_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -30,17 +31,49 @@ fn account_row(r: &Row) -> rusqlite::Result<Account> {
         smtp_host: r.get(7)?,
         smtp_port: r.get(8)?,
         secret_ref: r.get(9)?,
+        imap_security: r.get(10)?,
+        smtp_security: r.get(11)?,
+        smtp_auth: r.get(12)?,
+        smtp_username: r.get(13)?,
+        verify_certs: r.get(14)?,
     })
+}
+
+pub fn update_account(conn: &Connection, id: AccountId, s: &AccountSettings) -> Result<Account> {
+    conn.execute(
+        "UPDATE account SET display_name = ?2, address = ?3, username = ?4, imap_host = ?5, imap_port = ?6,
+                imap_security = ?7, smtp_host = ?8, smtp_port = ?9, smtp_security = ?10, smtp_auth = ?11,
+                smtp_username = ?12, verify_certs = ?13
+         WHERE id = ?1",
+        params![
+            id, s.display_name, s.address, s.username, s.imap_host, s.imap_port, s.imap_security, s.smtp_host,
+            s.smtp_port, s.smtp_security, s.smtp_auth, s.smtp_username, s.verify_certs
+        ],
+    )?;
+    account(conn, id)
+}
+
+/// TLS from the first byte on the standard ports; plain only for a local
+/// test server; STARTTLS for SMTP submission on 587 and other ports.
+pub fn default_security(host: &str, port: u16, smtp: bool) -> Security {
+    let local = ["127.0.0.1", "localhost", "::1"].contains(&host);
+    match (smtp, port) {
+        (false, 993) | (true, 465) => Security::Tls,
+        _ if local => Security::Plain,
+        (false, _) => Security::Tls,
+        (true, _) => Security::StartTls,
+    }
 }
 
 pub fn insert_account(conn: &Connection, a: &NewAccount) -> Result<Account> {
     conn.execute(
         "INSERT INTO account (kind, address, display_name, username, imap_host, imap_port,
-                              smtp_host, smtp_port, secret_ref, created)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())",
+                              smtp_host, smtp_port, secret_ref, imap_security, smtp_security, created)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, unixepoch())",
         params![
             a.kind, a.address, a.display_name, a.username, a.imap_host, a.imap_port, a.smtp_host,
-            a.smtp_port, crate::secrets::new_ref(&a.address)
+            a.smtp_port, crate::secrets::new_ref(&a.address),
+            default_security(&a.imap_host, a.imap_port, false), default_security(&a.smtp_host, a.smtp_port, true)
         ],
     )?;
     account(conn, AccountId(conn.last_insert_rowid()))

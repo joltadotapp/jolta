@@ -14,11 +14,14 @@ use std::sync::Arc;
 use async_imap::types::{Fetch, Flag, NameAttribute};
 use futures::TryStreamExt;
 use rustls_platform_verifier::ConfigVerifierExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
-use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use tokio_rustls::rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::model::*;
 use crate::store::{self, RemoteMailbox};
@@ -35,17 +38,127 @@ const FLAG_SWEEP: usize = 5000;
 /// Bodies larger than this are fetched only when opened.
 pub const MAX_BACKGROUND_BODY: u32 = 10 * 1024 * 1024;
 
-/// TLS everywhere, except plain IMAP to a server on this machine (a local
-/// test server), which never leaves the loopback interface.
-async fn open_stream(host: &str, port: u16) -> Result<Box<dyn Io>> {
-    let tcp = TcpStream::connect((host, port)).await?;
-    if port != 993 && tcp.peer_addr()?.ip().is_loopback() {
-        return Ok(Box::new(tcp));
+/// Where and how to reach a server.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: u16,
+    pub security: Security,
+    pub verify_certs: bool,
+}
+
+impl Endpoint {
+    pub fn imap(account: &Account) -> Endpoint {
+        Endpoint {
+            host: account.imap_host.clone(),
+            port: account.imap_port,
+            security: account.imap_security,
+            verify_certs: account.verify_certs,
+        }
     }
-    let config = ClientConfig::with_platform_verifier()?;
-    let server = ServerName::try_from(host.to_string())
-        .map_err(|_| Error::Other(format!("{host:?} is not a valid server name")))?;
-    Ok(Box::new(TlsConnector::from(Arc::new(config)).connect(server, tcp).await?))
+}
+
+/// Accepts any certificate but still checks the handshake signatures, for
+/// accounts whose owner turned certificate checking off (self-signed servers).
+#[derive(Debug)]
+struct AnyCertificate(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+async fn tls(endpoint: &Endpoint, tcp: TcpStream) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    let config = if endpoint.verify_certs {
+        ClientConfig::with_platform_verifier()?
+    } else {
+        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
+            .with_no_client_auth()
+    };
+    let server = ServerName::try_from(endpoint.host.clone())
+        .map_err(|_| Error::Other(format!("{:?} is not a valid server name", endpoint.host)))?;
+    Ok(TlsConnector::from(Arc::new(config)).connect(server, tcp).await?)
+}
+
+async fn read_line(tcp: &mut TcpStream) -> Result<String> {
+    let mut line = Vec::new();
+    while line.last() != Some(&b'\n') && line.len() < 8192 {
+        line.push(tcp.read_u8().await?);
+    }
+    Ok(String::from_utf8_lossy(&line).trim_end().to_string())
+}
+
+/// Opens the connection the endpoint asks for. Returns whether the server
+/// greeting was already read (STARTTLS reads it before the upgrade).
+async fn open_stream(endpoint: &Endpoint) -> Result<(Box<dyn Io>, bool)> {
+    let mut tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port)).await?;
+    match endpoint.security {
+        Security::Plain => Ok((Box::new(tcp), false)),
+        Security::Tls => Ok((Box::new(tls(endpoint, tcp).await?), false)),
+        Security::StartTls => {
+            let greeting = read_line(&mut tcp).await?;
+            if !greeting.starts_with("* OK") {
+                return Err(Error::Other(format!("{} greeted with {greeting:?}", endpoint.host)));
+            }
+            tcp.write_all(b"k0 STARTTLS\r\n").await?;
+            loop {
+                let line = read_line(&mut tcp).await?;
+                if line.starts_with("k0 OK") {
+                    break;
+                }
+                if line.starts_with("k0 ") || line.is_empty() {
+                    return Err(Error::Other(format!("{} refused STARTTLS: {line}", endpoint.host)));
+                }
+            }
+            Ok((Box::new(tls(endpoint, tcp).await?), true))
+        }
+    }
+}
+
+async fn greeted_client(endpoint: &Endpoint) -> Result<async_imap::Client<Box<dyn Io>>> {
+    let (stream, greeted) = open_stream(endpoint).await?;
+    let mut client = async_imap::Client::new(stream);
+    if !greeted {
+        client
+            .read_response()
+            .await?
+            .ok_or_else(|| Error::Other(format!("{} closed the connection before greeting", endpoint.host)))?;
+    }
+    Ok(client)
 }
 
 /// What it takes to add a password IMAP account. Hosts left empty come from
@@ -79,6 +192,8 @@ pub fn known_servers(address: &str) -> Option<(&'static str, u16, &'static str, 
 /// password instead of a second account.
 pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
     let address = setup.address.trim().to_string();
+    // A password pasted from a password manager often ends in a newline.
+    let password = setup.password.trim().to_string();
     if !address.contains('@') {
         return Err(Error::Auth(format!("“{address}” is not an email address")));
     }
@@ -100,8 +215,14 @@ pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
     }
     let mut username = None;
     let mut last_err = None;
+    let endpoint = Endpoint {
+        host: imap_host.clone(),
+        port: imap_port,
+        security: store::default_security(&imap_host, imap_port, false),
+        verify_certs: true,
+    };
     for u in usernames {
-        match connect(&imap_host, imap_port, &u, &setup.password).await {
+        match connect(&endpoint, &u, &password).await {
             Ok(mut session) => {
                 session.logout().await.ok();
                 username = Some(u);
@@ -140,7 +261,7 @@ pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
             kite.store.write(|tx| store::insert_account(tx, &new))?
         }
     };
-    if let Err(e) = secrets::set_password(&account.secret_ref, &setup.password) {
+    if let Err(e) = secrets::set_password(&account.secret_ref, &password) {
         if is_new {
             kite.store.write(|tx| store::delete_account(tx, account.id))?;
         }
@@ -149,15 +270,68 @@ pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
     Ok(account)
 }
 
-pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> Result<Session> {
-    let mut client = async_imap::Client::new(open_stream(host, port).await?);
-    client
-        .read_response()
-        .await?
-        .ok_or_else(|| Error::Other(format!("{host} closed the connection before greeting")))?;
+/// Saves new settings for an account. For IMAP accounts Kite first signs in
+/// to IMAP and SMTP with them, so a typo never replaces working settings.
+/// Passwords left empty keep the stored ones. Google and Microsoft accounts
+/// only take a new name; their servers are fixed.
+pub async fn update_account(
+    kite: &Kite,
+    id: AccountId,
+    settings: AccountSettings,
+    password: Option<String>,
+    smtp_password: Option<String>,
+) -> Result<Account> {
+    let current = kite.store.read(|c| store::account(c, id))?;
+    let mut s = settings;
+    s.display_name = s.display_name.trim().to_string();
+    if current.kind != AccountKind::Imap {
+        let s = AccountSettings { display_name: s.display_name, ..current.settings() };
+        return kite.store.write(|tx| store::update_account(tx, id, &s));
+    }
+    for field in [&mut s.address, &mut s.username, &mut s.imap_host, &mut s.smtp_host, &mut s.smtp_username] {
+        *field = field.trim().to_string();
+    }
+    if !s.address.contains('@') {
+        return Err(Error::Auth(format!("“{}” is not an email address", s.address)));
+    }
+    if s.imap_host.is_empty() || s.imap_port == 0 {
+        return Err(Error::Auth("Enter the IMAP server and port".into()));
+    }
+    let given = |p: Option<String>| p.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let new_password = given(password);
+    let new_smtp_password = given(smtp_password);
+    let candidate = current.with_settings(s.clone());
+    let password = match &new_password {
+        Some(p) => p.clone(),
+        None => secrets::password(&current.secret_ref)?,
+    };
+    let smtp_password = match (candidate.smtp_auth, &new_smtp_password) {
+        (SmtpAuth::Separate, Some(p)) => Some(p.clone()),
+        (SmtpAuth::Separate, None) => Some(
+            secrets::password(&secrets::smtp_ref(&current.secret_ref))
+                .map_err(|_| Error::Auth("Enter the SMTP password".into()))?,
+        ),
+        _ => None,
+    };
+    connect(&Endpoint::imap(&candidate), &candidate.username, &password).await?.logout().await.ok();
+    if !candidate.smtp_host.is_empty() {
+        crate::smtp::check(&candidate, &password, smtp_password.as_deref()).await?;
+    }
+    let saved = kite.store.write(|tx| store::update_account(tx, id, &s))?;
+    if let Some(p) = new_password {
+        secrets::set_password(&saved.secret_ref, &p)?;
+    }
+    if let (SmtpAuth::Separate, Some(p)) = (saved.smtp_auth, new_smtp_password) {
+        secrets::set_password(&secrets::smtp_ref(&saved.secret_ref), &p)?;
+    }
+    Ok(saved)
+}
+
+pub async fn connect(endpoint: &Endpoint, username: &str, password: &str) -> Result<Session> {
+    let client = greeted_client(endpoint).await?;
     client.login(username, password).await.map_err(|(e, _)| match e {
         async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => {
-            Error::Auth(format!("{host} refused the password ({})", server_text(&msg)))
+            Error::Auth(format!("{} refused the password ({})", endpoint.host, server_text(&msg)))
         }
         other => Error::Imap(other),
     })
@@ -176,10 +350,10 @@ fn server_text(msg: &str) -> &str {
 pub async fn connect_account(account: &Account) -> Result<Session> {
     if account.kind == AccountKind::Gmail {
         let token = crate::oauth::access_token(account).await?;
-        return connect_xoauth2(&account.imap_host, account.imap_port, &account.username, &token).await;
+        return connect_xoauth2(&Endpoint::imap(account), &account.username, &token).await;
     }
     let password = secrets::password(&account.secret_ref)?;
-    connect(&account.imap_host, account.imap_port, &account.username, &password).await
+    connect(&Endpoint::imap(account), &account.username, &password).await
 }
 
 struct XOAuth2(String);
@@ -192,12 +366,8 @@ impl async_imap::Authenticator for XOAuth2 {
     }
 }
 
-pub async fn connect_xoauth2(host: &str, port: u16, username: &str, token: &str) -> Result<Session> {
-    let mut client = async_imap::Client::new(open_stream(host, port).await?);
-    client
-        .read_response()
-        .await?
-        .ok_or_else(|| Error::Other(format!("{host} closed the connection before greeting")))?;
+pub async fn connect_xoauth2(endpoint: &Endpoint, username: &str, token: &str) -> Result<Session> {
+    let client = greeted_client(endpoint).await?;
     client
         .authenticate("XOAUTH2", XOAuth2(crate::oauth::xoauth2(username, token)))
         .await
