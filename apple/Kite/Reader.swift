@@ -3,14 +3,16 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// The reader's web view, locked down in four independent layers: the core's
-/// sanitizer and CSP, JavaScript off, subresource loading off, and a content
-/// rule list that blocks everything but local schemes. Every navigation after
-/// the initial load is cancelled; a clicked link opens in the browser only
-/// after the user confirms its real destination.
+/// The reader's web view, locked down in independent layers: the core's
+/// sanitizer and CSP, JavaScript off, and a content rule list that blocks
+/// everything but local schemes. Images come only through Kite's own `cid:`
+/// and `x-remote:` handlers; remote ones load after the user asks. Every
+/// navigation after the initial load is cancelled; a clicked link opens in
+/// the browser only after the user confirms its real destination.
 @MainActor
 final class ReaderPage {
     let page: WebPage
+    let images = ImageSource()
     /// Called when the user clicks an attachment chip in the message.
     var onAttachment: ((Int64, UInt32) -> Void)? {
         get { links.onAttachment }
@@ -22,10 +24,9 @@ final class ReaderPage {
     init() {
         var config = WebPage.Configuration()
         config.websiteDataStore = .nonPersistent()
-        config.loadsSubresources = false
         config.defaultNavigationPreferences.allowsContentJavaScript = false
-        config.urlSchemeHandlers[URLScheme("cid")!] = BlockedImages()
-        config.urlSchemeHandlers[URLScheme("x-remote")!] = BlockedImages()
+        config.urlSchemeHandlers[URLScheme("cid")!] = InlineImages(source: images)
+        config.urlSchemeHandlers[URLScheme("x-remote")!] = RemoteImages(source: images)
         if let rules = Self.ruleList {
             config.userContentController.add(rules)
         }
@@ -50,6 +51,7 @@ final class ReaderPage {
     }
 
     func show(html: String) {
+        let html = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"kite-images\">") : html
         let events = page.load(html: html, baseURL: URL(string: "about:blank")!)
         guard UserDefaults.standard.bool(forKey: "KiteReaderDebug") else { return }
         Task {
@@ -67,14 +69,75 @@ final class ReaderPage {
     }
 }
 
-/// Inline (`cid:`) and remote (`x-remote:`) images are not served yet; both answer with nothing.
-private struct BlockedImages: URLSchemeHandler {
+/// What the image handlers may serve for the page on screen.
+final class ImageSource: @unchecked Sendable {
+    var core: Core?
+    /// Set when the user asks to load this conversation's remote images.
+    var allowsRemote = false
+}
+
+private func imageReply(_ url: URL?, mime: String, data: Data) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
+    AsyncThrowingStream { continuation in
+        let response = URLResponse(url: url ?? URL(string: "about:blank")!, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil)
+        continuation.yield(.response(response))
+        continuation.yield(.data(data))
+        continuation.finish()
+    }
+}
+
+/// `cid:<message id>/<content id>`: an image part of the message itself.
+private struct InlineImages: URLSchemeHandler {
+    let source: ImageSource
+
     func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
-        AsyncThrowingStream { continuation in
-            let response = URLResponse(url: request.url ?? URL(string: "about:blank")!, mimeType: "image/gif", expectedContentLength: 0, textEncodingName: nil)
-            continuation.yield(.response(response))
-            continuation.yield(.data(Data()))
-            continuation.finish()
+        let url = request.url
+        let path = url?.absoluteString.dropFirst("cid:".count) ?? ""
+        guard let core = source.core, let slash = path.firstIndex(of: "/"), let message = Int64(path[..<slash]) else {
+            return imageReply(url, mime: "image/gif", data: Data())
+        }
+        let cid = String(path[path.index(after: slash)...]).removingPercentEncoding ?? String(path[path.index(after: slash)...])
+        return AsyncThrowingStream { continuation in
+            Task {
+                let part = try? await core.inlineImage(messageId: message, contentId: cid)
+                let response = URLResponse(url: url ?? URL(string: "about:blank")!, mimeType: part?.mimeType ?? "image/gif",
+                                           expectedContentLength: part?.bytes.count ?? 0, textEncodingName: nil)
+                continuation.yield(.response(response))
+                continuation.yield(.data(part.map { Data($0.bytes) } ?? Data()))
+                continuation.finish()
+            }
+        }
+    }
+}
+
+/// `x-remote:<http URL>`: nothing until the user loads images, then a
+/// cookieless, cacheless fetch that sends no referrer.
+private struct RemoteImages: URLSchemeHandler {
+    let source: ImageSource
+    private static let session = URLSession(configuration: {
+        let c = URLSessionConfiguration.ephemeral
+        c.httpCookieStorage = nil
+        c.urlCache = nil
+        c.httpShouldSetCookies = false
+        c.timeoutIntervalForRequest = 20
+        return c
+    }())
+
+    func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
+        let url = request.url
+        let target = url.flatMap { URL(string: String($0.absoluteString.dropFirst("x-remote:".count))) }
+        guard source.allowsRemote, let target, ["http", "https"].contains(target.scheme?.lowercased() ?? "") else {
+            return imageReply(url, mime: "image/gif", data: Data())
+        }
+        return AsyncThrowingStream { continuation in
+            Task {
+                let fetched = try? await Self.session.data(from: target)
+                let mime = (fetched?.1 as? HTTPURLResponse)?.mimeType ?? "image/gif"
+                let data = fetched?.0 ?? Data()
+                let response = URLResponse(url: url ?? target, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil)
+                continuation.yield(.response(response))
+                continuation.yield(.data(data))
+                continuation.finish()
+            }
         }
     }
 }
@@ -105,12 +168,12 @@ private struct Decider: WebPage.NavigationDeciding {
             return .cancel
         }
         if action.navigationType == .linkActivated, let url, ["http", "https", "mailto"].contains(url.scheme ?? "") {
-            confirmOpen(url)
+            Self.confirmOpen(url)
         }
         return .cancel
     }
 
-    private func confirmOpen(_ url: URL) {
+    static func confirmOpen(_ url: URL) {
         let alert = NSAlert()
         alert.messageText = "Open this link?"
         alert.informativeText = url.absoluteString
@@ -124,8 +187,18 @@ private struct Decider: WebPage.NavigationDeciding {
 
 struct ReaderView: View {
     let thread: ThreadView
+    let core: Core
     let onAttachment: (Int64, UInt32) -> Void
     @State private var reader = ReaderPage()
+    @State private var imagesLoaded = false
+
+    private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded }
+
+    private func loadImages() {
+        imagesLoaded = true
+        reader.images.allowsRemote = true
+        reader.show(html: thread.html)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -141,6 +214,20 @@ struct ReaderView: View {
                         .font(.system(size: 12.5))
                         .foregroundStyle(Color(Theme.text3))
                 }
+                if imagesBlocked {
+                    HStack(spacing: 10) {
+                        Image(systemName: "photo.badge.exclamationmark").foregroundStyle(Color(Theme.text3))
+                        Text(thread.remoteImages == 1 ? "1 remote image is blocked to protect your privacy."
+                                                      : "\(thread.remoteImages) remote images are blocked to protect your privacy.")
+                            .foregroundStyle(Color(Theme.text2))
+                        Button("Load Images", action: loadImages)
+                            .buttonStyle(.plain)
+                            .fontWeight(.medium)
+                            .foregroundStyle(Color(Theme.accent))
+                    }
+                    .font(.system(size: 12.5))
+                    .padding(.top, 8)
+                }
             }
             .padding(.horizontal, 56)
             .padding(.top, 30)
@@ -149,10 +236,31 @@ struct ReaderView: View {
                 .webViewBackForwardNavigationGestures(.disabled)
                 .webViewMagnificationGestures(.disabled)
                 .webViewLinkPreviews(.disabled)
+                .webViewContextMenu { element in
+                    if let link = element.linkURL {
+                        Button("Open Link…") { Decider.confirmOpen(link) }
+                        Button("Copy Link") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(link.absoluteString, forType: .string)
+                        }
+                        Divider()
+                    }
+                    Button("Copy") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+                    if imagesBlocked {
+                        Button("Load Images", action: loadImages)
+                    }
+                }
         }
         .onAppear {
             reader.onAttachment = onAttachment
+            reader.images.core = core
             reader.show(html: thread.html)
+            // `-KiteLoadImages YES` loads remote images at once, for checking from scripts.
+            if UserDefaults.standard.bool(forKey: "KiteLoadImages"), imagesBlocked { loadImages() }
+        }
+        .onChange(of: thread.threadId) {
+            imagesLoaded = false
+            reader.images.allowsRemote = false
         }
         .onChange(of: thread.html) { _, html in reader.show(html: html) }
     }
@@ -183,7 +291,11 @@ enum ReaderStyle {
       overflow: hidden; text-overflow: ellipsis; }
     .kite-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
     .kite-body img { max-width: 100%; height: auto; }
-    .kite-body img[src^="x-remote:"] { display: none; }
+    body:not(.kite-images) .kite-body img[src^="x-remote:"] { display: none; }
+    .kite-paper { max-width: 720px; overflow-x: auto; box-sizing: border-box; }
+    @media (prefers-color-scheme: dark) {
+      .kite-paper { background: #ffffff; color: #17171a; color-scheme: light; border-radius: 12px; padding: 22px 24px; margin-bottom: 24px; }
+    }
     .kite-body a { color: inherit; text-decoration-color: var(--tx3); }
     .kite-quote { color: var(--tx3); }
     .kite-files { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }

@@ -1,0 +1,15 @@
+From: Colleague <colleague@example.com>
+To: koen@example.com
+Subject: [Kite fixture] Outlook reply with dark text
+Date: Fri, 30 Oct 2026 11:00:00 +0100
+Message-ID: <darkmode-reply@kite.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p style="color:black;font-family:Calibri">Hi Koen,</p>
+<p style="color:windowtext">Outlook writes <b>color: windowtext</b> and black on every paragraph.</p>
+<p><span style="color:#1F497D">This line uses Outlook's dark blue signature colour.</span></p>
+<p style="color:#C00000">A deliberate dark red warning.</p>
+<p>Plain paragraph without a colour.</p>
+</body></html>

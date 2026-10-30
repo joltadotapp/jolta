@@ -89,7 +89,10 @@ pub fn delete_account(conn: &Connection, id: AccountId) -> Result<()> {
 }
 
 const MAILBOX_COLS: &str =
-    "id, account_id, remote_id, name, role, delimiter, selectable, uidvalidity, highest_modseq";
+    "id, account_id, remote_id, name, role, delimiter, selectable, uidvalidity, highest_modseq, hidden,
+     uidvalidity IS NOT NULL OR delta_link IS NOT NULL
+       OR EXISTS (SELECT 1 FROM mailbox a JOIN account c ON c.id = a.account_id
+                  WHERE a.account_id = mailbox.account_id AND c.kind = 'gmail' AND a.role = 'all' AND a.uidvalidity IS NOT NULL)";
 
 fn mailbox_row(r: &Row) -> rusqlite::Result<Mailbox> {
     Ok(Mailbox {
@@ -102,7 +105,20 @@ fn mailbox_row(r: &Row) -> rusqlite::Result<Mailbox> {
         selectable: r.get(6)?,
         uidvalidity: r.get(7)?,
         highest_modseq: r.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+        hidden: r.get(9)?,
+        synced: r.get(10)?,
     })
+}
+
+pub fn mailbox(conn: &Connection, id: MailboxId) -> Result<Mailbox> {
+    conn.query_row(&format!("SELECT {MAILBOX_COLS} FROM mailbox WHERE id = ?1"), [id], mailbox_row)
+        .optional()?
+        .ok_or_else(|| crate::Error::NotFound(format!("mailbox {}", id.0)))
+}
+
+pub fn set_mailbox_hidden(conn: &Connection, mailbox: MailboxId, hidden: bool) -> Result<()> {
+    conn.execute("UPDATE mailbox SET hidden = ?2 WHERE id = ?1", params![mailbox, hidden])?;
+    Ok(())
 }
 
 pub fn mailboxes(conn: &Connection, account: AccountId) -> Result<Vec<Mailbox>> {

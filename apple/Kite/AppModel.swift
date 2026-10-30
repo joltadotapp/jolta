@@ -51,7 +51,7 @@ struct AccountSection: Identifiable {
 final class AppModel {
     let core: Core
     private(set) var accounts: [AccountSection] = []
-    var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged() } }
+    var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
     var section: SectionInfo? { didSet { listChanged() } }
     private(set) var sections: [SectionInfo] = []
@@ -76,6 +76,8 @@ final class AppModel {
     var selectedThreadID: Int64?
     /// The list cursor's row and the list length, for "3 of 120" in the reader.
     var cursor: (row: Int, count: Int) = (0, 0)
+    /// Rows in the message list, as the list last counted them.
+    var listCount = -1
     /// Asks the message list to take keyboard focus (after search, for example).
     private(set) var focusListRequest = 0
     /// The last action, shown briefly with its undo key.
@@ -175,6 +177,35 @@ final class AppModel {
             } catch {
                 await MainActor.run { self.lastError = "\(error)" }
             }
+        }
+    }
+
+    /// Mailboxes behind the current list that no sync has gone through yet.
+    var unsyncedSource: [MailboxInfo] {
+        let boxes = accounts.flatMap(\.mailboxes)
+        switch source {
+        case .unifiedInbox: return boxes.filter { $0.role == "inbox" && !$0.synced }
+        case .role(let role): return boxes.filter { $0.role == role && !$0.synced }
+        case .mailbox(let id, _): return boxes.filter { $0.id == id && !$0.synced }
+        case .allMail: return []
+        }
+    }
+
+    /// Tells the core which mailbox is on screen, so it downloads that one first.
+    private func focusSync() {
+        let target: Int64? = switch source {
+        case .mailbox(let id, _): id
+        default: unsyncedSource.first?.id
+        }
+        core.focusMailbox(mailboxId: target)
+    }
+
+    func setHidden(_ box: MailboxInfo, _ hidden: Bool) {
+        do {
+            try core.setMailboxHidden(mailboxId: box.id, hidden: hidden)
+            if hidden, source == .mailbox(id: box.id, name: box.name) { source = .unifiedInbox }
+        } catch {
+            show(Toast(text: "\(error)", undo: nil))
         }
     }
 

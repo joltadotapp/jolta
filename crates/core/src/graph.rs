@@ -204,7 +204,9 @@ impl Graph {
         progress(SyncEvent::Mailboxes(mailboxes.len()));
         let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
         // Folders Kite created locally (a first Snoozed) have no Graph id yet.
-        for m in mailboxes.iter().filter(|m| !m.remote_id.eq_ignore_ascii_case("Snoozed")) {
+        let mut queue: Vec<Mailbox> = mailboxes.into_iter().filter(|m| !m.remote_id.eq_ignore_ascii_case("Snoozed")).collect();
+        while let Some(m) = kite.next_mailbox(&mut queue) {
+            let m = &m;
             if m.role == Some(MailboxRole::System) {
                 // Outbox and chat history aren't mail to read; drop what an earlier sync fetched.
                 let id = m.id;

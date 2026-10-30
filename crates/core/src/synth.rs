@@ -208,6 +208,7 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
                         cc: String::new(),
                         subject: subject.clone(),
                         list_id: list.map(str::to_string),
+                        list_unsubscribe: None,
                         has_attachments,
                     },
                     flags,
@@ -218,6 +219,7 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
                         snippet: crate::mime::snippet(&text),
                         text,
                         has_attachments,
+                        ..Default::default()
                     }),
                 })?;
                 if reply.is_none() {

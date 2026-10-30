@@ -18,6 +18,7 @@ struct ContentView: View {
                 .background(Color(Theme.reader))
         }
         .background(Color(Theme.bg))
+        .background(MainWindowReader())
         .foregroundStyle(Color(Theme.text))
         .font(.system(size: 13))
         .ignoresSafeArea()
@@ -89,12 +90,30 @@ struct Sidebar: View {
                     if !model.accounts.isEmpty {
                         GroupLabel("Accounts")
                         ForEach(model.accounts) { section in
+                            let folders = section.mailboxes.filter { $0.role == nil || $0.role == "inbox" }
+                            let hidden = folders.filter(\.hidden)
                             AccountHeader(title: section.title, provider: section.account.provider,
                                           syncing: model.syncing.contains(section.id))
-                            ForEach(section.mailboxes.filter { $0.role == nil || $0.role == "inbox" }, id: \.id) { box in
+                                .contextMenu {
+                                    if hidden.isEmpty {
+                                        Text("No hidden folders")
+                                    } else {
+                                        Menu("Show Hidden Folder") {
+                                            ForEach(hidden, id: \.id) { box in
+                                                Button(box.name) { model.setHidden(box, false) }
+                                            }
+                                        }
+                                    }
+                                }
+                            ForEach(folders.filter { !$0.hidden }, id: \.id) { box in
                                 NavRow(icon: nil, title: box.name, count: Int(box.unread),
                                        selected: model.source == .mailbox(id: box.id, name: box.name), indent: 26) {
                                     model.source = .mailbox(id: box.id, name: box.name)
+                                }
+                                .contextMenu {
+                                    if box.role != "inbox" {
+                                        Button("Hide Folder") { model.setHidden(box, true) }
+                                    }
                                 }
                             }
                         }
@@ -105,6 +124,7 @@ struct Sidebar: View {
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.never)
+            .overlay(alignment: .top) { TitleBarArea().frame(height: 40).padding(.leading, 80) }
             SyncFooter(model: model)
         }
     }
@@ -261,10 +281,14 @@ struct ListColumn: View {
             .padding(.leading, 22)
             .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
+            .background(TitleBarArea())
             if model.showsSections {
                 SectionBar(model: model)
             }
             MessageList(model: model)
+                .overlay {
+                    if model.listCount == 0 { EmptyList(model: model) }
+                }
                 .overlay(alignment: .bottom) {
                     if let toast = model.toast {
                         ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) })
@@ -283,7 +307,7 @@ struct SectionBar: View {
 
     var body: some View {
         let tabs: [SectionInfo?] = [nil] + model.sections.map { Optional($0) }
-        HStack(spacing: 18) {
+        HStack(spacing: 0) {
             ForEach(tabs, id: \.?.id) { c in
                 let selected = model.section?.id == c?.id
                 Button { model.section = c } label: {
@@ -296,20 +320,53 @@ struct SectionBar: View {
                             Text("\(n)").font(.system(size: 11.5).monospacedDigit()).foregroundStyle(Color(Theme.text3))
                         }
                     }
+                    .padding(.top, 6)
                     .padding(.bottom, 8)
                     .overlay(alignment: .bottom) {
                         Rectangle().fill(Color(selected ? Theme.text2 : .clear)).frame(height: 1.5)
                     }
+                    // The whole tab is the target, not just the letters.
+                    .padding(.horizontal, 9)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
             Spacer()
             KeyCap(key: "⇥")
                 .padding(.bottom, 8)
+                .padding(.trailing, 9)
         }
         .font(.system(size: 12.5))
-        .padding(.horizontal, 26)
+        .padding(.horizontal, 17)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+}
+
+/// What an empty list means: nothing there, nothing found, or not
+/// downloaded yet (a first sync works through folders one at a time).
+struct EmptyList: View {
+    let model: AppModel
+
+    var body: some View {
+        let pending = model.unsyncedSource
+        VStack(spacing: 8) {
+            if !pending.isEmpty {
+                ProgressView().controlSize(.small)
+                Text("Downloading \(model.source.title)…").foregroundStyle(Color(Theme.text2))
+                Text(model.syncing.isEmpty
+                     ? "Kite hasn't downloaded this folder yet. It starts on the next sync."
+                     : "Kite is downloading this folder next. Mail shows up here as it arrives.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(Theme.text3))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 260)
+            } else {
+                Text(model.search.isEmpty ? "No conversations" : "Nothing matches “\(model.search)”")
+                    .foregroundStyle(Color(Theme.text3))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
     }
 }
 
@@ -450,12 +507,13 @@ struct ReaderColumn: View {
             }
             .padding(.horizontal, 20)
             .frame(height: Theme.headerHeight)
+            .background(TitleBarArea())
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
             }
             if model.compose != nil {
                 ComposeView(model: model)
             } else if let thread = model.openThread {
-                ReaderView(thread: thread, onAttachment: model.openAttachment)
+                ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment)
             } else {
                 Text(model.cursor.count == 0 ? "Nothing here" : "")
                     .foregroundStyle(Color(Theme.text3))

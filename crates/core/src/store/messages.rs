@@ -64,11 +64,13 @@ pub fn insert_message(conn: &Connection, m: &NewMessage) -> Result<Inserted> {
     conn.execute(
         "INSERT INTO message (id, account_id, remote_id, thread_id, message_id, date, from_name,
                               from_addr, to_addrs, cc_addrs, subject, snippet, flags,
-                              has_attachments, size, blob, list_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                              has_attachments, size, blob, list_id, list_unsubscribe)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             id, m.account_id, m.remote_id, thread, e.message_id, m.date, e.from_name, e.from_addr,
-            e.to, e.cc, e.subject, snippet, m.flags.0, has_att, m.size, blob, e.list_id
+            e.to, e.cc, e.subject, snippet, m.flags.0, has_att, m.size, blob,
+            e.list_id.as_ref().or(m.body.as_ref().and_then(|b| b.list_id.as_ref())),
+            e.list_unsubscribe.as_ref().or(m.body.as_ref().and_then(|b| b.list_unsubscribe.as_ref()))
         ],
     )?;
     link_mailbox(conn, id, m.mailbox_id, m.uid)?;
@@ -146,11 +148,32 @@ pub fn attach_body(conn: &Connection, id: MessageId, body: &BodyInfo) -> Result<
         .optional()?;
     let Some(e) = e else { return Ok(()) };
     conn.execute(
-        "UPDATE message SET blob = ?2, snippet = ?3, has_attachments = ?4 WHERE id = ?1",
-        params![id, body.blob, body.snippet, body.has_attachments],
+        "UPDATE message SET blob = ?2, snippet = ?3, has_attachments = ?4,
+                list_id = coalesce(?5, list_id), list_unsubscribe = coalesce(?6, list_unsubscribe)
+         WHERE id = ?1",
+        params![id, body.blob, body.snippet, body.has_attachments, body.list_id, body.list_unsubscribe],
     )?;
     conn.execute("DELETE FROM message_fts WHERE rowid = ?1", [id])?;
     index_fts(conn, id, &e, &body.text)
+}
+
+/// The next messages whose stored body hasn't been read for list headers.
+pub fn header_scan_batch(conn: &Connection, limit: usize) -> Result<Vec<(MessageId, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT h.message_id, coalesce(m.blob, '') FROM header_scan h LEFT JOIN message m ON m.id = h.message_id LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Records what a header scan found and takes the message off the list.
+pub fn finish_header_scan(conn: &Connection, id: MessageId, list_id: Option<&str>, list_unsubscribe: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE message SET list_id = coalesce(?2, list_id), list_unsubscribe = coalesce(?3, list_unsubscribe) WHERE id = ?1",
+        params![id, list_id, list_unsubscribe],
+    )?;
+    conn.execute("DELETE FROM header_scan WHERE message_id = ?1", [id])?;
+    Ok(())
 }
 
 pub fn set_flags(conn: &Connection, id: MessageId, flags: Flags) -> Result<()> {

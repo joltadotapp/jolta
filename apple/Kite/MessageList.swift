@@ -19,6 +19,8 @@ struct MessageList: NSViewRepresentable {
         table.selectionHighlightStyle = .regular
         table.focusRingType = .none
         table.allowsEmptySelection = true
+        // Letters are commands; type-select would jump to a row instead.
+        table.allowsTypeSelect = false
         table.usesAutomaticRowHeights = false
         let column = NSTableColumn(identifier: .init("thread"))
         column.resizingMask = .autoresizingMask
@@ -28,7 +30,7 @@ struct MessageList: NSViewRepresentable {
         table.delegate = context.coordinator
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.openSelected)
-        table.onKey = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
+        KeyRouter.shared.handler = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
         context.coordinator.table = table
 
         let scroll = NSScrollView()
@@ -83,6 +85,8 @@ struct MessageList: NSViewRepresentable {
             count = model.count()
             lastQuery = model.query
             if count == 0, model.selectedThreadID != nil { model.closeThread() }
+            let rows = count
+            DispatchQueue.main.async { [model] in if model.listCount != rows { model.listCount = rows } }
             if !full, previous != count {
                 // An action took rows out (or sync added some): keep the
                 // cursor at the same position, which is now the next thread.
@@ -190,17 +194,22 @@ struct MessageList: NSViewRepresentable {
             table.scrollRowToVisible(next)
         }
 
-        /// Keys typed while the list has focus, looked up in the keymap.
-        /// `g` starts a two-key sequence. Returns false to let AppKit have it.
+        /// Keys typed in the main window, looked up in the keymap. `g` starts
+        /// a two-key sequence that lapses after a second and a half. Returns
+        /// false to let AppKit have the key.
         func handle(_ event: NSEvent) -> Bool {
             switch event.keyCode {
             case 36, 76: openSelected(); return true
             case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true
             default: break
             }
-            guard let typed = event.charactersIgnoringModifiers, !typed.isEmpty else { return false }
+            // `characters` keeps what Shift and Option produce, so `#` and `?`
+            // work on layouts that type them with Option (Belgian AZERTY).
+            guard let typed = event.characters?.lowercased(), !typed.isEmpty else { return false }
+            if let started = prefixTime, started.timeIntervalSinceNow < -1.5 { prefix = nil }
             if prefix == nil, typed == "g" {
                 prefix = "g"
+                prefixTime = .now
                 return true
             }
             let after = prefix
@@ -216,17 +225,11 @@ struct MessageList: NSViewRepresentable {
         }
 
         private var prefix: String?
+        private var prefixTime: Date?
     }
 }
 
 final class KeyTableView: NSTableView {
-    var onKey: ((NSEvent) -> Bool)?
-
-    override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.intersection([.command, .control, .option]).isEmpty, onKey?(event) == true { return }
-        super.keyDown(with: event)
-    }
-
     override var acceptsFirstResponder: Bool { true }
 }
 

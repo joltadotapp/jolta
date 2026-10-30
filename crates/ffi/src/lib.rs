@@ -54,6 +54,9 @@ pub struct MailboxInfo {
     pub name: String,
     pub role: Option<String>,
     pub unread: u32,
+    pub hidden: bool,
+    /// False until a sync has gone through it once.
+    pub synced: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -419,6 +422,8 @@ impl Core {
                         unread: unread.query_row([b.id], |r| r.get(0))?,
                         name: b.name,
                         role: b.role.map(|r| r.to_string()),
+                        hidden: b.hidden,
+                        synced: b.synced,
                     })
                 })
                 .collect()
@@ -580,6 +585,35 @@ impl Core {
 
     pub fn drafts(&self) -> Result<Vec<ComposeData>> {
         Ok(self.kite.store.read(store::drafts)?.into_iter().map(Into::into).collect())
+    }
+
+    /// The part an inline `cid:` image names, for the reader.
+    pub async fn inline_image(&self, message_id: i64, content_id: String) -> Result<AttachmentData> {
+        let kite = self.kite.clone();
+        self.runtime
+            .spawn(async move {
+                let raw = kite_core::imap::message_source(&kite, MessageId(message_id)).await?;
+                kite_core::render::inline_part(&raw, &content_id)
+                    .ok_or_else(|| kite_core::Error::NotFound(format!("inline image {content_id}")))
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map(|(mime_type, bytes)| AttachmentData { name: String::new(), mime_type, bytes })
+            .map_err(Into::into)
+    }
+
+    /// Keeps a folder out of the sidebar, or brings it back.
+    pub fn set_mailbox_hidden(&self, mailbox_id: i64, hidden: bool) -> Result<()> {
+        self.kite.store.write(|tx| store::set_mailbox_hidden(tx, MailboxId(mailbox_id), hidden))?;
+        self.changed();
+        Ok(())
+    }
+
+    /// The mailbox on screen, or none: it syncs before the others.
+    pub fn focus_mailbox(&self, mailbox_id: Option<i64>) {
+        if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            engine.focus_mailbox(mailbox_id.map(MailboxId));
+        }
     }
 
     /// The bytes of one attachment of a message, for opening or saving.

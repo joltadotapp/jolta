@@ -24,12 +24,16 @@ fn join_addresses(list: Option<AddressList>) -> String {
 
 fn envelope_of(m: &MessageRef) -> Envelope {
     let from = m.from().and_then(|l| l.first());
-    let list_id = m.headers().iter().find(|h| h.raw_name().eq_ignore_ascii_case("List-Id")).map(|h| {
-        let v = String::from_utf8_lossy(h.raw_value()).trim().to_string();
-        match (v.rfind('<'), v.rfind('>')) {
-            (Some(a), Some(b)) if a < b => v[a + 1..b].to_string(),
-            _ => v,
-        }
+    let header = |name: &str| {
+        m.headers()
+            .iter()
+            .find(|h| h.raw_name().eq_ignore_ascii_case(name))
+            .map(|h| String::from_utf8_lossy(h.raw_value()).trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let list_id = header("List-Id").map(|v| match (v.rfind('<'), v.rfind('>')) {
+        (Some(a), Some(b)) if a < b => v[a + 1..b].to_string(),
+        _ => v,
     });
     Envelope {
         message_id: m.message_id().map(str::to_string),
@@ -41,6 +45,7 @@ fn envelope_of(m: &MessageRef) -> Envelope {
         cc: join_addresses(m.cc()),
         subject: m.subject().unwrap_or_default().to_string(),
         list_id,
+        list_unsubscribe: header("List-Unsubscribe"),
         has_attachments: m.is_content_type("multipart", "mixed"),
     }
 }
@@ -72,13 +77,16 @@ pub fn parse_full(raw: &[u8], blob: String) -> (Envelope, BodyInfo) {
         }
         text.truncate(end);
     }
+    let envelope = envelope_of(&root);
     let body = BodyInfo {
         blob,
         snippet: snippet(&text),
         has_attachments: root.attachments().any(|a| a.attachment_name().is_some() || !a.is_text()),
         text,
+        list_id: envelope.list_id.clone(),
+        list_unsubscribe: envelope.list_unsubscribe.clone(),
     };
-    (envelope_of(&root), body)
+    (envelope, body)
 }
 
 /// The first readable words of a body: quoted lines and reply headers

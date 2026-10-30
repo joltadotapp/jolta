@@ -19,6 +19,7 @@ pub mod synth;
 pub mod when;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub use model::*;
 
@@ -75,6 +76,8 @@ pub struct Kite {
     pub store: store::Store,
     pub blobs: blobs::Blobs,
     pub data_dir: PathBuf,
+    /// The mailbox on screen. A sync takes it before the others.
+    pub focus: Arc<Mutex<Option<MailboxId>>>,
 }
 
 impl Kite {
@@ -85,6 +88,15 @@ impl Kite {
             store: store::Store::open(&data_dir.join("kite.sqlite"))?,
             blobs: blobs::Blobs::new(data_dir.join("blobs")),
             data_dir: data_dir.to_path_buf(),
+            focus: Arc::default(),
         })
+    }
+
+    /// Takes the next mailbox to sync from `queue`: the one on screen if it
+    /// is still waiting, else the first.
+    pub fn next_mailbox(&self, queue: &mut Vec<Mailbox>) -> Option<Mailbox> {
+        let focus = *self.focus.lock().unwrap_or_else(|e| e.into_inner());
+        let i = focus.and_then(|f| queue.iter().position(|m| m.id == f)).unwrap_or(0);
+        (i < queue.len()).then(|| queue.remove(i))
     }
 }

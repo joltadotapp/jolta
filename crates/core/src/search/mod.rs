@@ -150,7 +150,9 @@ fn plan(q: &Query) -> Sql {
             TermKind::Is(Status::Flagged) => format!("(m.flags & {}) != 0", Flags::FLAGGED),
             TermKind::Is(Status::Vip) => "EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)".into(),
             TermKind::Is(Status::Notification) => NOTIFICATION.into(),
-            TermKind::Is(Status::Newsletter) => format!("(m.list_id IS NOT NULL AND NOT {NOTIFICATION})"),
+            TermKind::Is(Status::Newsletter) => {
+                format!("((m.list_id IS NOT NULL OR m.list_unsubscribe IS NOT NULL) AND NOT {NOTIFICATION})")
+            }
             TermKind::Account(v) => {
                 let p = sql.param(v.clone());
                 format!("m.account_id IN (SELECT id FROM account WHERE id = ?{p} OR address = ?{p} COLLATE NOCASE)")

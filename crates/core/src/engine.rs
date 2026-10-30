@@ -64,6 +64,8 @@ struct Wake {
     notify: Notify,
     inbox_changed: AtomicBool,
     full_sync: AtomicBool,
+    /// Mailboxes the user opened that have never synced.
+    wanted: Mutex<HashSet<MailboxId>>,
 }
 
 impl Wake {
@@ -86,6 +88,12 @@ impl Engine {
         for account in engine.kite.store.read(store::accounts)? {
             engine.spawn(account);
         }
+        let (kite, sink) = (engine.kite.clone(), engine.sink.clone());
+        engine.runtime.spawn_blocking(move || match scan_list_headers(&kite) {
+            Ok(0) => {}
+            Ok(_) => sink(Event::ListsChanged),
+            Err(e) => tracing::warn!("list header scan stopped: {e}"),
+        });
         Ok(engine)
     }
 
@@ -213,6 +221,21 @@ impl Engine {
 
     /// Removes an account, its mail and its Keychain entry. Its worker stops
     /// on its next round.
+    /// The user is looking at `mailbox`: sync it before other mailboxes, and
+    /// now if it has never synced.
+    pub fn focus_mailbox(&self, mailbox: Option<MailboxId>) {
+        *self.kite.focus.lock().unwrap_or_else(|e| e.into_inner()) = mailbox;
+        let Some(id) = mailbox else { return };
+        let Ok(m) = self.kite.store.read(|c| store::mailbox(c, id)) else { return };
+        if m.synced {
+            return;
+        }
+        if let Some(w) = self.wakes.lock().unwrap_or_else(|e| e.into_inner()).get(&m.account_id) {
+            w.wanted.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+            w.poke();
+        }
+    }
+
     pub fn remove_account(&self, account: AccountId) -> Result<()> {
         let a = self.kite.store.read(|c| store::account(c, account))?;
         self.kite.store.write(|tx| store::delete_account(tx, account))?;
@@ -347,6 +370,7 @@ impl Engine {
                     .await?;
                 touched.extend(inbox.map(|m| m.id));
             }
+            touched.extend(wake.wanted.lock().unwrap_or_else(|e| e.into_inner()).drain());
             (!touched.is_empty()).then(|| Scope::Mailboxes(touched.into_iter().collect()))
         };
         let Some(scope) = scope else { return Ok(()) };
@@ -573,5 +597,32 @@ impl Backoff {
     fn next(&mut self) -> Duration {
         self.0 = (self.0 + 1).min(8);
         Duration::from_secs((1u64 << self.0).min(300))
+    }
+}
+
+/// Reads List-Id and List-Unsubscribe from bodies stored before Kite kept
+/// them, a batch per write so the app's own writes get turns. Returns how
+/// many messages it read.
+fn scan_list_headers(kite: &Kite) -> Result<usize> {
+    let mut done = 0;
+    loop {
+        let batch = kite.store.read(|c| store::header_scan_batch(c, 200))?;
+        if batch.is_empty() {
+            return Ok(done);
+        }
+        let found: Vec<_> = batch
+            .into_iter()
+            .map(|(id, blob)| {
+                let envelope = kite.blobs.get(&blob).ok().map(|raw| crate::mime::parse_envelope(&raw)).unwrap_or_default();
+                (id, envelope.list_id, envelope.list_unsubscribe)
+            })
+            .collect();
+        done += found.len();
+        kite.store.write(|tx| {
+            for (id, list_id, unsubscribe) in &found {
+                store::finish_header_scan(tx, *id, list_id.as_deref(), unsubscribe.as_deref())?;
+            }
+            Ok(())
+        })?;
     }
 }

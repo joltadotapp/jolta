@@ -77,6 +77,13 @@ pub fn attachment_bytes(raw: &[u8], index: usize) -> Option<(String, String, Vec
     Some((part.attachment_name().unwrap_or("attachment").to_string(), mime, part.decoded().into_owned()))
 }
 
+/// MIME type and bytes of the part a `cid:` URL names, for inline images.
+pub fn inline_part(raw: &[u8], content_id: &str) -> Option<(String, Vec<u8>)> {
+    let wanted = content_id.trim().trim_matches(['<', '>']);
+    let index = attachments(raw).into_iter().find(|a| a.content_id.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(wanted)))?.index;
+    attachment_bytes(raw, index as usize).map(|(_, mime, bytes)| (mime, bytes))
+}
+
 pub fn attachments(raw: &[u8]) -> Vec<Attachment> {
     let Some(msg) = MessageParser::new().parse(raw) else { return Vec::new() };
     msg.root()
@@ -156,9 +163,119 @@ pub fn filter_declarations(decls: &str) -> String {
             }
             true
         })
-        .map(str::trim)
+        .map(|d| adapt_color(d.trim()))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Dark text written for a white page disappears on a dark one. A dark
+/// `color` becomes `light-dark(original, lightened)`, which the page's color
+/// scheme resolves: unchanged in light mode and inside a `.kite-paper` card,
+/// readable in dark mode.
+fn adapt_color(decl: &str) -> String {
+    let Some((prop, value)) = decl.split_once(':') else { return decl.to_string() };
+    if !prop.trim().eq_ignore_ascii_case("color") {
+        return decl.to_string();
+    }
+    let (value, important) = match value.trim().strip_suffix("!important") {
+        Some(v) => (v.trim(), " !important"),
+        None => (value.trim(), ""),
+    };
+    match parse_color(value) {
+        Some((r, g, b)) if luminance(r, g, b) < 0.4 => {
+            let (lr, lg, lb) = lighten(r, g, b);
+            format!("color: light-dark({value}, rgb({lr} {lg} {lb})){important}")
+        }
+        _ => decl.to_string(),
+    }
+}
+
+fn parse_color(value: &str) -> Option<(u8, u8, u8)> {
+    let v = value.trim().to_ascii_lowercase();
+    if let Some(hex) = v.strip_prefix('#') {
+        let digits: Vec<u8> = hex.chars().map(|c| c.to_digit(16).map(|d| d as u8)).collect::<Option<_>>()?;
+        return match digits.len() {
+            3 | 4 => Some((digits[0] * 17, digits[1] * 17, digits[2] * 17)),
+            6 | 8 => Some((digits[0] * 16 + digits[1], digits[2] * 16 + digits[3], digits[4] * 16 + digits[5])),
+            _ => None,
+        };
+    }
+    if let Some(args) = v.strip_prefix("rgb(").or_else(|| v.strip_prefix("rgba(")).and_then(|a| a.strip_suffix(')')) {
+        let n: Vec<u8> = args
+            .split([',', ' ', '/'])
+            .filter(|p| !p.is_empty())
+            .take(3)
+            .map(|p| p.parse::<f32>().ok().map(|f| f.clamp(0.0, 255.0) as u8))
+            .collect::<Option<_>>()?;
+        return (n.len() == 3).then(|| (n[0], n[1], n[2]));
+    }
+    Some(match v.as_str() {
+        "black" | "windowtext" | "buttontext" => (0, 0, 0),
+        "navy" | "darkblue" => (0, 0, 128),
+        "maroon" | "darkred" => (128, 0, 0),
+        "green" | "darkgreen" => (0, 100, 0),
+        "purple" | "indigo" => (75, 0, 130),
+        "dimgray" | "dimgrey" => (105, 105, 105),
+        "gray" | "grey" => (128, 128, 128),
+        "darkslategray" | "darkslategrey" => (47, 79, 79),
+        "midnightblue" => (25, 25, 112),
+        _ => return None,
+    })
+}
+
+fn luminance(r: u8, g: u8, b: u8) -> f32 {
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+/// Mirrors the color's lightness in HSL and keeps its hue, so dark blue
+/// becomes light blue and black becomes the reader's text color.
+fn lighten(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    let s = if d == 0.0 { 0.0 } else { d / (1.0 - (2.0 * l - 1.0).abs()) };
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let l = (1.0 - l).clamp(0.78, 0.92);
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = match h as u32 / 60 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to(r1), to(g1), to(b1))
+}
+
+/// Mail that paints its own backgrounds (newsletters, designed mail) and has
+/// no dark-mode styles of its own was made for a light page; the reader shows
+/// it on a light card in dark mode instead of rewriting its design.
+fn paints_background(html: &str, css: &[String]) -> bool {
+    if css.iter().any(|c| c.contains("prefers-color-scheme")) {
+        return false;
+    }
+    let has = |t: &str| {
+        let t = t.to_ascii_lowercase();
+        t.contains("bgcolor=") || t.contains("background-color:") || t.contains("background:") || t.contains("background-image:")
+    };
+    has(html) || css.iter().any(|c| has(c))
 }
 
 /// Filters a stylesheet: rules with attribute selectors and at-rules other
@@ -312,8 +429,13 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let clean_builder = sanitizer();
     for m in messages {
         let (html, styles) = extract_styles(&body_html(m.raw));
-        let mut clean = clean_builder.clean(&html).to_string();
-        let files = attachments(m.raw);
+        let mut clean = clean_builder.clean(&html).to_string().replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
+        let paper = paints_background(&clean, &styles);
+        // Images the body shows inline aren't attachments to the reader.
+        let files: Vec<Attachment> = attachments(m.raw)
+            .into_iter()
+            .filter(|f| !f.content_id.as_ref().is_some_and(|c| clean.contains(&format!("cid:{}/{c}", m.id))))
+            .collect();
         if !files.is_empty() {
             clean.push_str("<div class=\"kite-files\">");
             for f in &files {
@@ -335,13 +457,14 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
         body.push_str(&format!(
             "<details class=\"kite-message\"{open}><summary><span class=\"kite-from\">{from}</span>\
              <span class=\"kite-snippet\">{snippet}</span><span class=\"kite-date\">{date}</span>\
-             <div class=\"kite-to\">to {to}</div></summary><div class=\"kite-body\" id=\"m{id}\">{clean}</div></details>",
+             <div class=\"kite-to\">to {to}</div></summary><div class=\"kite-body{paper}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
             snippet = escape(m.snippet),
             date = escape(m.date),
             to = escape(m.to),
             id = m.id,
+            paper = if paper { " kite-paper" } else { "" },
         ));
     }
     let html = format!(
@@ -385,6 +508,20 @@ input[value^="a"] { background: url(http://evil.test/5) }
 "#;
 
     #[test]
+    fn dark_text_gets_a_dark_mode_color() {
+        assert_eq!(filter_declarations("color: #333"), "color: light-dark(#333, rgb(204 204 204))");
+        assert_eq!(filter_declarations("color:black !important"), "color: light-dark(black, rgb(235 235 235)) !important");
+        assert_eq!(filter_declarations("color: #eeeeee; background-color: #000"), "color: #eeeeee; background-color: #000");
+    }
+
+    #[test]
+    fn designed_mail_goes_on_a_light_card() {
+        assert!(paints_background("<table bgcolor=\"#f4f4f4\">", &[]));
+        assert!(!paints_background("<p style=\"color: #333\">hi</p>", &[]));
+        assert!(!paints_background("<td bgcolor=\"#fff\">", &["@media (prefers-color-scheme: dark) { td { background: #000 } }".into()]));
+    }
+
+    #[test]
     fn hostile_message_loads_nothing_remote() {
         let raw = HOSTILE.replace('\n', "\r\n");
         let out = render_thread(&[view(raw.as_bytes())], "body{}");
@@ -395,7 +532,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
         }
         assert!(html.contains("x-remote:http://evil.test/pixel.gif"));
         assert_eq!(out.remote_images, 1);
-        assert!(html.contains("src=\"cid:logo@x\""));
+        assert!(html.contains("src=\"cid:1/logo@x\""), "cid URLs name their message");
         assert!(html.contains("data:image/png"));
         assert!(!html.contains("<script"));
         assert!(!html.contains("javascript:"));

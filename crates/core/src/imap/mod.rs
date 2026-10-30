@@ -402,7 +402,9 @@ pub async fn sync_session(
     progress(SyncEvent::Mailboxes(mailboxes.len()));
 
     let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
-    for mailbox in mailboxes.iter().filter(|m| m.selectable) {
+    let mut queue: Vec<Mailbox> = mailboxes.into_iter().filter(|m| m.selectable).collect();
+    while let Some(mailbox) = kite.next_mailbox(&mut queue) {
+        let mailbox = &mailbox;
         let (new, removed, flag_changes) = sync_mailbox(kite, session, account, mailbox, caps.condstore, progress).await?;
         report.new += new.len();
         report.new_messages.extend(new.iter().copied());

@@ -156,6 +156,10 @@ pub struct Mailbox {
     pub selectable: bool,
     pub uidvalidity: Option<u32>,
     pub highest_modseq: Option<u64>,
+    pub hidden: bool,
+    /// Whether a sync has gone through this mailbox once, so an empty list
+    /// means empty rather than not downloaded yet.
+    pub synced: bool,
 }
 
 /// Header fields the store keeps for every message.
@@ -170,6 +174,7 @@ pub struct Envelope {
     pub cc: String,
     pub subject: String,
     pub list_id: Option<String>,
+    pub list_unsubscribe: Option<String>,
     pub has_attachments: bool,
 }
 
@@ -180,6 +185,10 @@ pub struct BodyInfo {
     pub text: String,
     pub snippet: String,
     pub has_attachments: bool,
+    /// List headers, which a Graph listing doesn't carry: only the full
+    /// message has them.
+    pub list_id: Option<String>,
+    pub list_unsubscribe: Option<String>,
 }
 
 #[derive(Clone, Debug)]
