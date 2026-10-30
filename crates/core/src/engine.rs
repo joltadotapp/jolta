@@ -39,6 +39,12 @@ pub enum Event {
     ActionFailed(String),
     Sent { account: AccountId, subject: String },
     Woke { account: AccountId, thread: ThreadId, subject: String },
+    /// An MCP client connected for the first time and waits for approval.
+    AgentRequest { agent: i64, name: String },
+    /// An agent wrote a draft for review.
+    AgentDraft { draft: i64, subject: String },
+    /// An agent called a tool (the audit log changed).
+    AgentActivity,
     SendFailed(String),
 }
 

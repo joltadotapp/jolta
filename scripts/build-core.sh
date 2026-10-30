@@ -50,4 +50,15 @@ xcodebuild -create-xcframework \
 mkdir -p "$PKG/Sources/KiteFFI"
 cp "$WORK/swift/"*.swift "$PKG/Sources/KiteFFI/"
 
-echo "KiteFFI ($PROFILE: $TARGETS) written to $PKG"
+# kite-mcp, the stdio-to-socket helper that ships inside Kite.app.
+HELPERS="$ROOT/apple/Helpers"
+mkdir -p "$HELPERS"
+MCP_BINS=""
+for t in $TARGETS; do
+    cargo build -p kite-mcp --target "$t" $CARGO_FLAGS
+    MCP_BINS="$MCP_BINS $ROOT/target/$t/$PROFILE/kite-mcp"
+done
+# shellcheck disable=SC2086
+lipo -create $MCP_BINS -output "$HELPERS/kite-mcp"
+
+echo "KiteFFI and kite-mcp ($PROFILE: $TARGETS) written to $PKG and $HELPERS"

@@ -1059,6 +1059,7 @@ dependencies = [
  "mail-parser",
  "rusqlite",
  "rustls-platform-verifier",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
  "tokio",
@@ -1073,7 +1074,15 @@ dependencies = [
  "kite-core",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "uniffi",
+]
+
+[[package]]
+name = "kite-mcp"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

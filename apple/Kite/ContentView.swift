@@ -28,6 +28,14 @@ struct ContentView: View {
                     .onTapGesture { model.palette = nil; model.showsHelp = false }
             }
         }
+        .overlay {
+            if let agent = model.pendingAgent {
+                ZStack {
+                    Color.black.opacity(0.35).ignoresSafeArea()
+                    AgentApproval(name: agent.name) { approve, grants in model.decideAgent(approve: approve, grants: grants) }
+                }
+            }
+        }
         .overlay(alignment: .top) {
             if let mode = model.palette {
                 PaletteView(model: model, mode: mode)
@@ -259,7 +267,7 @@ struct ListColumn: View {
             MessageList(model: model)
                 .overlay(alignment: .bottom) {
                     if let toast = model.toast {
-                        ToastView(toast: toast) { model.undo() }
+                        ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) })
                             .padding(.bottom, 14)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
@@ -334,6 +342,7 @@ struct SearchField: View {
 struct ToastView: View {
     let toast: Toast
     let undo: () -> Void
+    var review: (Int64) -> Void = { _ in }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -343,6 +352,9 @@ struct ToastView: View {
                     HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z", focused: true) }
                 }
                 .buttonStyle(.plain)
+            }
+            if let draft = toast.review {
+                Button("Review") { review(draft) }.buttonStyle(.plain).fontWeight(.medium)
             }
         }
         .font(.system(size: 12.5))

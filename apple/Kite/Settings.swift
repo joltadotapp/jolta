@@ -4,6 +4,18 @@ import SwiftUI
 /// Split-inbox sections: each is a name and a search query over the inbox.
 struct SettingsView: View {
     let model: AppModel?
+
+    var body: some View {
+        TabView {
+            SectionsSettings(model: model).tabItem { Label("Sections", systemImage: "rectangle.split.3x1") }
+            AgentsSettings(model: model).tabItem { Label("Agents", systemImage: "cpu") }
+        }
+        .frame(width: 620, height: 460)
+    }
+}
+
+struct SectionsSettings: View {
+    let model: AppModel?
     @State private var sections: [SectionInfo] = []
     @State private var error: String?
 
@@ -36,7 +48,6 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 560, height: 360)
         .onAppear { sections = model?.sections ?? [] }
     }
 }

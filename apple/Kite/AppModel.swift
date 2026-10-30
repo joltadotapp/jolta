@@ -60,6 +60,11 @@ final class AppModel {
     var cursorRow: ThreadRow?
     /// The ⌘K palette, when open.
     var palette: PaletteMode?
+    /// An agent that connected for the first time and waits for approval.
+    var pendingAgent: (id: Int64, name: String)?
+    /// Bumped when agents act, so the audit view reloads.
+    private(set) var agentRevision = 0
+    private(set) var mcpStatus = "MCP server not started"
     var showsHelp = false
     var search = "" { didSet { listChanged() } }
     /// Bumped whenever the list's contents may have changed; views reload on it.
@@ -99,6 +104,7 @@ final class AppModel {
         }
         reloadAccounts()
         try core.start()
+        startMCP()
         notifier.onOpen = { [weak self] threadID in
             self?.source = .unifiedInbox
             self?.open(threadID: threadID)
@@ -155,6 +161,43 @@ final class AppModel {
             if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }
         } catch {
             lastError = "\(error)"
+        }
+    }
+
+    static let appGroup = "RWQLHW7V7V.be.example.kite"
+
+    /// The MCP socket lives in the app group container, where the sandboxed
+    /// kite-mcp helper can reach it.
+    private func startMCP() {
+        guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup) else {
+            mcpStatus = "MCP is off: no app group container"
+            return
+        }
+        let socket = group.appendingPathComponent("kite.sock").path
+        do {
+            try core.startMcp(socketPath: socket, utcOffset: utcOffset)
+            mcpStatus = "Listening on \(socket)"
+        } catch {
+            mcpStatus = "MCP is off: \(error)"
+        }
+    }
+
+    /// Path to the helper agents run, for their MCP configuration.
+    var mcpHelperPath: String {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/kite-mcp").path
+    }
+
+    func decideAgent(approve: Bool, grants: [String]) {
+        guard let agent = pendingAgent else { return }
+        try? core.decideAgent(agentId: agent.id, approve: approve, grants: grants)
+        pendingAgent = nil
+        agentRevision += 1
+        show(Toast(text: approve ? "\(agent.name) can use Kite" : "\(agent.name) was turned away", undo: nil))
+    }
+
+    func reviewDraft(_ id: Int64) {
+        if let draft = try? core.draft(draftId: id) {
+            compose = draft
         }
     }
 
@@ -227,6 +270,13 @@ final class AppModel {
             notifier.post(threadID: threadID, from: from, subject: subject)
         case .actionFailed(let message):
             show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
+        case .agentRequest(let id, let name):
+            pendingAgent = (id, name)
+            agentRevision += 1
+        case .agentDraft(let draftID, let subject):
+            show(Toast(text: "An agent wrote a draft: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil, review: draftID))
+        case .agentActivity:
+            agentRevision += 1
         case .woke(_, _, let subject):
             show(Toast(text: "Back from snooze: \(subject)", undo: nil))
         case .sent(_, let subject):
@@ -343,7 +393,7 @@ final class AppModel {
         self.toast = toast
         let id = toast.id
         Task {
-            try? await Task.sleep(for: .seconds(toast.undo == nil ? 3 : 6))
+            try? await Task.sleep(for: .seconds(toast.review != nil ? 12 : toast.undo == nil ? 3 : 6))
             if self.toast?.id == id { self.toast = nil }
         }
     }
@@ -379,6 +429,8 @@ struct Toast: Equatable {
     let id = UUID()
     let text: String
     let undo: Undo?
+    /// A draft to open for review (an agent wrote it).
+    var review: Int64?
 }
 
 /// Receives core events on the core's threads and hands them to the main actor.

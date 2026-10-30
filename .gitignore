@@ -8,3 +8,4 @@ xcuserdata/
 .audit/
 .build/
 .swiftpm/
+/apple/Helpers/

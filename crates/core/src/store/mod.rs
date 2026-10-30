@@ -4,6 +4,7 @@
 //! `Store::read_async`, which move the work onto tokio's blocking pool.
 
 mod accounts;
+mod agents;
 mod messages;
 mod ops;
 mod outbox;
@@ -18,12 +19,13 @@ use rusqlite::{Connection, OpenFlags, Transaction};
 use crate::Result;
 
 pub use accounts::*;
+pub use agents::*;
 pub use messages::*;
 pub use ops::*;
 pub use outbox::*;
 pub use sections::*;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql")];
 const READERS: usize = 4;
 
 #[derive(Clone)]

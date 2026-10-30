@@ -92,6 +92,12 @@ pub enum CoreEvent {
     Sent { account_id: i64, subject: String },
     /// A snoozed thread came back to the inbox.
     Woke { account_id: i64, thread_id: i64, subject: String },
+    /// An agent connected for the first time; ask the user to approve it.
+    AgentRequest { agent_id: i64, name: String },
+    /// An agent wrote a draft for the user to review.
+    AgentDraft { draft_id: i64, subject: String },
+    /// An agent used a tool; the audit log changed.
+    AgentActivity,
     SendFailed { message: String },
     /// The server refused an action for good; the change was rolled back.
     ActionFailed { message: String },
@@ -207,6 +213,26 @@ pub struct SnoozeInfo {
 }
 
 #[derive(uniffi::Record)]
+pub struct AgentInfo {
+    pub id: i64,
+    pub name: String,
+    /// pending, approved or denied
+    pub state: String,
+    /// read, organize, draft
+    pub grants: Vec<String>,
+    pub last_seen: i64,
+}
+
+#[derive(uniffi::Record)]
+pub struct AuditInfo {
+    pub agent: String,
+    pub tool: String,
+    pub summary: String,
+    pub outcome: String,
+    pub at: i64,
+}
+
+#[derive(uniffi::Record)]
 pub struct SnoozeChoice {
     pub label: String,
     pub at: i64,
@@ -262,6 +288,7 @@ pub struct Core {
     runtime: tokio::runtime::Runtime,
     listener: Arc<dyn CoreListener>,
     engine: Mutex<Option<Arc<Engine>>>,
+    engine_sink: Mutex<Option<kite_core::engine::Sink>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
     order: Arc<Mutex<Option<(String, Arc<Vec<(ThreadId, MessageId)>>)>>>,
@@ -298,6 +325,7 @@ impl Core {
             runtime,
             listener,
             engine: Mutex::new(None),
+            engine_sink: Mutex::new(None),
             order: Arc::new(Mutex::new(None)),
         }))
     }
@@ -411,10 +439,14 @@ impl Core {
                 Event::Woke { account, thread, subject } => {
                     CoreEvent::Woke { account_id: account.0, thread_id: thread.0, subject }
                 }
+                Event::AgentRequest { agent, name } => CoreEvent::AgentRequest { agent_id: agent, name },
+                Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
+                Event::AgentActivity => CoreEvent::AgentActivity,
                 Event::SendFailed(message) => CoreEvent::SendFailed { message },
             };
             listener.on_event(event);
         });
+        *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
         *engine = Some(Engine::start(self.kite.clone(), sink, self.runtime.handle().clone())?);
         Ok(())
     }
@@ -546,6 +578,71 @@ impl Core {
     /// A snooze time typed in plain words, or nothing if it makes no sense.
     pub fn parse_time(&self, text: String, utc_offset: i32) -> Option<i64> {
         kite_core::when::parse(&text, now(), utc_offset)
+    }
+
+    /// Serves MCP on a Unix socket at `socket_path` for agents (through
+    /// the kite-mcp helper). Needs `start` first.
+    pub fn start_mcp(&self, socket_path: String, utc_offset: i32) -> Result<()> {
+        let engine = self.running_engine()?;
+        kite_core::mcp::set_local_offset(utc_offset);
+        let (kite, sink) = (self.kite.clone(), self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let Some(sink) = sink else { return Err(CoreError::Failed { message: "the core has not been started".into() }) };
+        self.runtime.spawn(async move {
+            if let Err(e) = kite_core::mcp::serve(std::path::Path::new(&socket_path), kite, engine, sink).await {
+                tracing::error!("MCP server stopped: {e}");
+            }
+        });
+        Ok(())
+    }
+
+    pub fn agents(&self) -> Result<Vec<AgentInfo>> {
+        Ok(self
+            .kite
+            .store
+            .read(store::agents)?
+            .into_iter()
+            .map(|a| AgentInfo {
+                id: a.id,
+                name: a.name,
+                state: match a.state {
+                    store::AgentState::Pending => "pending",
+                    store::AgentState::Approved => "approved",
+                    store::AgentState::Denied => "denied",
+                }
+                .into(),
+                grants: a.grants.into_iter().map(|g| g.as_str().to_string()).collect(),
+                last_seen: a.last_seen,
+            })
+            .collect())
+    }
+
+    /// Approves an agent with these grants (read, organize, draft) on every
+    /// account, or denies it.
+    pub fn decide_agent(&self, agent_id: i64, approve: bool, grants: Vec<String>) -> Result<()> {
+        let grants: Vec<store::Grant> = grants.iter().filter_map(|g| store::Grant::parse(g)).collect();
+        Ok(self.kite.store.write(|tx| store::decide_agent(tx, agent_id, approve, &grants))?)
+    }
+
+    pub fn audit_log(&self, limit: u32) -> Result<Vec<AuditInfo>> {
+        Ok(self
+            .kite
+            .store
+            .read(|c| store::audit_log(c, limit as usize))?
+            .into_iter()
+            .map(|e| AuditInfo { agent: e.agent, tool: e.tool, summary: e.summary, outcome: e.outcome, at: e.at })
+            .collect())
+    }
+
+    pub fn agents_paused(&self) -> Result<bool> {
+        Ok(self.kite.store.read(store::agents_paused)?)
+    }
+
+    pub fn set_agents_paused(&self, paused: bool) -> Result<()> {
+        Ok(self.kite.store.write(|tx| store::set_agents_paused(tx, paused))?)
+    }
+
+    pub fn draft(&self, draft_id: i64) -> Result<Option<ComposeData>> {
+        Ok(self.kite.store.read(|c| store::draft(c, draft_id))?.map(Into::into))
     }
 
     pub fn sync_now(&self) {

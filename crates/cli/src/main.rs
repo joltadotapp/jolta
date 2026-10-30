@@ -86,6 +86,20 @@ enum Command {
         #[arg(long)]
         attach: Vec<PathBuf>,
     },
+    /// Run the engine and the MCP server on a Unix socket (for testing agents).
+    McpServe {
+        #[arg(long)]
+        socket: PathBuf,
+    },
+    /// List MCP agents, or approve or deny one.
+    Agents {
+        /// approve or deny
+        decision: Option<String>,
+        agent: Option<i64>,
+        /// Grants for approve: read,organize,draft
+        #[arg(long, default_value = "read,organize,draft")]
+        grants: String,
+    },
     /// Run the sync engine (IDLE, queued actions) and print its events.
     Watch,
     /// Act on a thread through the engine and wait until the server has it.
@@ -251,6 +265,28 @@ async fn main() -> Result<()> {
         }
         Command::Bench { runs } => bench(&kite, runs),
         Command::Dev(cmd) => dev(&kite, cmd).await,
+        Command::McpServe { socket } => {
+            let t0 = Instant::now();
+            let sink: kite_core::engine::Sink = Arc::new(move |e| eprintln!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
+            let engine = kite_core::engine::Engine::start(kite.clone(), sink.clone(), tokio::runtime::Handle::current())?;
+            eprintln!("MCP server on {}", socket.display());
+            kite_core::mcp::serve(&socket, kite.clone(), engine, sink).await?;
+            Ok(())
+        }
+        Command::Agents { decision, agent, grants } => {
+            if let (Some(d), Some(id)) = (decision, agent) {
+                let grants: Vec<_> = grants.split(',').filter_map(|g| store::Grant::parse(g.trim())).collect();
+                kite.store.write(|tx| store::decide_agent(tx, id, d == "approve", &grants))?;
+            }
+            for a in kite.store.read(store::agents)? {
+                let grants: Vec<&str> = a.grants.iter().map(|g| g.as_str()).collect();
+                println!("{:>3}  {:<24} {:?}  {}", a.id, a.name, a.state, grants.join(","));
+            }
+            for e in kite.store.read(|c| store::audit_log(c, 10))? {
+                println!("  audit: {} {} {} -> {}", e.agent, e.tool, e.summary, e.outcome);
+            }
+            Ok(())
+        }
         Command::Watch => {
             let t0 = Instant::now();
             let sink: kite_core::engine::Sink = Arc::new(move |e| println!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
