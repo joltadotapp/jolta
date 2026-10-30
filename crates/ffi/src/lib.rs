@@ -4,8 +4,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use kite_core::imap::{self, SyncOptions};
-use kite_core::{AccountId, Kite, MessageId, ThreadId, reader, search, store};
+use kite_core::actions::{Action, Context};
+use kite_core::engine::{Engine, Event};
+use kite_core::store::OpId;
+use kite_core::{AccountId, Kite, MailboxId, MessageId, ThreadId, reader, search, store};
 
 uniffi::setup_scaffolding!();
 
@@ -83,8 +85,55 @@ pub enum CoreEvent {
     /// Stored mail changed; visible lists should reload their counts and pages.
     ListsChanged,
     SyncStarted { account_id: i64 },
-    SyncFinished { account_id: i64, new_messages: u32 },
+    SyncFinished { account_id: i64 },
     SyncFailed { account_id: i64, message: String },
+    NewMail { account_id: i64, thread_id: i64, from: String, subject: String },
+    /// The server refused an action for good; the change was rolled back.
+    ActionFailed { message: String },
+}
+
+#[derive(uniffi::Enum)]
+pub enum ThreadAction {
+    Archive,
+    Trash,
+    MarkRead,
+    MarkUnread,
+    Flag,
+    Unflag,
+    MoveTo { mailbox_id: i64 },
+}
+
+/// The list an action is taken from.
+#[derive(uniffi::Enum)]
+pub enum ListContext {
+    Inbox,
+    /// A role across accounts, such as "sent" or "archive".
+    Role { role: String },
+    Mailbox { mailbox_id: i64 },
+}
+
+impl ListContext {
+    fn into_core(self) -> Result<Context> {
+        Ok(match self {
+            ListContext::Inbox => Context::Inbox,
+            ListContext::Role { role } => Context::Role(role.parse().map_err(|message| CoreError::Failed { message })?),
+            ListContext::Mailbox { mailbox_id } => Context::Mailbox(MailboxId(mailbox_id)),
+        })
+    }
+}
+
+impl From<ThreadAction> for Action {
+    fn from(a: ThreadAction) -> Action {
+        match a {
+            ThreadAction::Archive => Action::Archive,
+            ThreadAction::Trash => Action::Trash,
+            ThreadAction::MarkRead => Action::MarkRead,
+            ThreadAction::MarkUnread => Action::MarkUnread,
+            ThreadAction::Flag => Action::Flag,
+            ThreadAction::Unflag => Action::Unflag,
+            ThreadAction::MoveTo { mailbox_id } => Action::MoveTo(MailboxId(mailbox_id)),
+        }
+    }
 }
 
 #[uniffi::export(with_foreign)]
@@ -102,7 +151,7 @@ pub struct Core {
     kite: Kite,
     runtime: tokio::runtime::Runtime,
     listener: Arc<dyn CoreListener>,
-    syncing: Arc<Mutex<bool>>,
+    engine: Mutex<Option<Arc<Engine>>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
     order: Arc<Mutex<Option<(String, Arc<Vec<(ThreadId, MessageId)>>)>>>,
@@ -138,7 +187,7 @@ impl Core {
             kite,
             runtime,
             listener,
-            syncing: Arc::new(Mutex::new(false)),
+            engine: Mutex::new(None),
             order: Arc::new(Mutex::new(None)),
         }))
     }
@@ -227,46 +276,59 @@ impl Core {
         })
     }
 
-    /// Syncs every account in the background unless a sync is already running.
-    pub fn sync_all(&self) {
-        {
-            let mut running = self.syncing.lock().unwrap_or_else(|e| e.into_inner());
-            if *running {
-                return;
-            }
-            *running = true;
+    /// Starts syncing every account and keeps it up to date (IDLE, queued
+    /// actions, periodic full syncs) until the app quits.
+    pub fn start(&self) -> Result<()> {
+        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        if engine.is_some() {
+            return Ok(());
         }
-        let (kite, syncing, order) = (self.kite.clone(), self.syncing.clone(), self.order.clone());
-        let notify = {
-            let listener = self.listener.clone();
-            move |event: CoreEvent| {
-                if matches!(event, CoreEvent::ListsChanged) {
+        let (order, listener) = (self.order.clone(), self.listener.clone());
+        let sink: kite_core::engine::Sink = Arc::new(move |event| {
+            let event = match event {
+                Event::ListsChanged => {
                     *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    CoreEvent::ListsChanged
                 }
-                listener.on_event(event);
-            }
-        };
-        let listener = notify;
-        self.runtime.spawn(async move {
-            let accounts = kite.store.read_async(store::accounts).await.unwrap_or_default();
-            for a in accounts.into_iter().filter(|a| !a.imap_host.is_empty()) {
-                listener(CoreEvent::SyncStarted { account_id: a.id.0 });
-                let mut last_event = std::time::Instant::now();
-                let result = imap::sync_account(&kite, &a, SyncOptions { bodies: true }, |_| {
-                    if last_event.elapsed().as_millis() > 500 {
-                        last_event = std::time::Instant::now();
-                        listener(CoreEvent::ListsChanged);
-                    }
-                })
-                .await;
-                listener(match result {
-                    Ok(r) => CoreEvent::SyncFinished { account_id: a.id.0, new_messages: r.new as u32 },
-                    Err(e) => CoreEvent::SyncFailed { account_id: a.id.0, message: e.to_string() },
-                });
-                listener(CoreEvent::ListsChanged);
-            }
-            *syncing.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                Event::SyncStarted(a) => CoreEvent::SyncStarted { account_id: a.0 },
+                Event::SyncFinished(a) => CoreEvent::SyncFinished { account_id: a.0 },
+                Event::SyncFailed(a, message) => CoreEvent::SyncFailed { account_id: a.0, message },
+                Event::NewMail { account, thread, from, subject } => {
+                    CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject }
+                }
+                Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
+            };
+            listener.on_event(event);
         });
+        *engine = Some(Engine::start(self.kite.clone(), sink, self.runtime.handle().clone())?);
+        Ok(())
+    }
+
+    /// Applies an action to a thread right away and sends it to the server.
+    /// Returns a token for `undo`, or nothing when nothing changed.
+    pub fn perform(&self, action: ThreadAction, thread_id: i64, context: ListContext) -> Result<Option<i64>> {
+        let engine = self.running_engine()?;
+        Ok(engine.perform(ThreadId(thread_id), action.into(), context.into_core()?)?.map(|op| op.0))
+    }
+
+    pub fn undo(&self, token: i64) -> Result<()> {
+        Ok(self.running_engine()?.undo(OpId(token))?)
+    }
+
+    pub fn sync_now(&self) {
+        if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            engine.sync_now();
+        }
+    }
+}
+
+impl Core {
+    fn running_engine(&self) -> Result<Arc<Engine>> {
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or_else(|| CoreError::Failed { message: "the core has not been started".into() })
     }
 }
 

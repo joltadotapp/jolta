@@ -78,8 +78,21 @@ struct MessageList: NSViewRepresentable {
             guard let table else { return }
             pages.removeAll(keepingCapacity: true)
             let previous = count
+            let selected = table.selectedRow
             count = model.count()
             lastQuery = model.query
+            if !full, previous != count {
+                // An action took rows out (or sync added some): keep the
+                // cursor at the same position, which is now the next thread.
+                table.noteNumberOfRowsChanged()
+                table.reloadData()
+                if count > 0 {
+                    let row = max(0, min(selected, count - 1))
+                    table.selectRowIndexes([row], byExtendingSelection: false)
+                    table.scrollRowToVisible(row)
+                }
+                return
+            }
             if full {
                 table.reloadData()
                 table.scrollRowToVisible(0)
@@ -168,12 +181,31 @@ struct MessageList: NSViewRepresentable {
             table.scrollRowToVisible(next)
         }
 
+        private func current() -> ThreadRow? {
+            guard let table, table.selectedRow >= 0 else { return nil }
+            return row(at: table.selectedRow)
+        }
+
+        private func act(_ action: ThreadAction, _ label: String) {
+            guard let r = current() else { return }
+            model.act(action, label: label, threadID: r.threadId)
+        }
+
         /// Single-key shortcuts for the list. Returns false to let AppKit handle the key.
         func handle(_ event: NSEvent) -> Bool {
             switch (event.charactersIgnoringModifiers, event.keyCode) {
             case ("j", _): move(1)
             case ("k", _): move(-1)
             case (_, 36), (_, 76), ("o", _): openSelected()
+            case ("e", _): act(.archive, "Archived")
+            case ("#", _): act(.trash, "Moved to Trash")
+            case ("u", _):
+                guard let r = current() else { return true }
+                if r.unreadCount > 0 { act(.markRead, "Marked read") } else { act(.markUnread, "Marked unread") }
+            case ("s", _):
+                guard let r = current() else { return true }
+                if r.flagged { act(.unflag, "Unstarred") } else { act(.flag, "Starred") }
+            case ("z", _): model.undo()
             case (_, 48) where model.showsCategories:
                 let all = Category.allCases
                 let i = all.firstIndex(of: model.category) ?? 0

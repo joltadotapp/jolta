@@ -19,6 +19,15 @@ enum ListSource: Hashable {
         }
     }
 
+    /// Where an action taken from this list moves messages out of.
+    var actionContext: ListContext {
+        switch self {
+        case .unifiedInbox, .allMail: .inbox
+        case .role(let role): .role(role: role)
+        case .mailbox(let id, _): .mailbox(mailboxId: id)
+        }
+    }
+
     var title: String {
         switch self {
         case .unifiedInbox: "Inbox"
@@ -73,6 +82,10 @@ final class AppModel {
     var cursor: (row: Int, count: Int) = (0, 0)
     /// Asks the message list to take keyboard focus (after search, for example).
     private(set) var focusListRequest = 0
+    /// The last action, shown briefly with its undo key.
+    private(set) var toast: Toast?
+    private var markReadTask: Task<Void, Never>?
+    let notifier = Notifier()
 
     var showsCategories: Bool { source == .unifiedInbox && search.isEmpty }
 
@@ -92,7 +105,14 @@ final class AppModel {
             }
         }
         reloadAccounts()
-        core.syncAll()
+        try core.start()
+        notifier.onOpen = { [weak self] threadID in
+            self?.source = .unifiedInbox
+            self?.open(threadID: threadID)
+        }
+        if accounts.contains(where: { $0.account.provider != "Synthetic" }) {
+            notifier.requestPermission()
+        }
         // Launch arguments for checking the app from scripts:
         // `-KiteSearch "subject:x" -KiteOpenFirst YES`.
         let defaults = UserDefaults.standard
@@ -102,6 +122,15 @@ final class AppModel {
         }
         if defaults.bool(forKey: "KiteOpenFirst"), let first = page(offset: 0, limit: 1).first {
             open(threadID: first.threadId)
+            // `-KiteAction archive|trash|unread|star` acts on that thread
+            // through the same path as the keys.
+            let actions: [String: ThreadAction] = ["archive": .archive, "trash": .trash, "unread": .markUnread, "star": .flag]
+            if let name = defaults.string(forKey: "KiteAction"), let action = actions[name] {
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    act(action, label: name, threadID: first.threadId)
+                }
+            }
         }
     }
 
@@ -145,12 +174,17 @@ final class AppModel {
             listChanged()
         case .syncStarted(let id):
             syncing.insert(id)
-        case .syncFinished(let id, _):
+        case .syncFinished(let id):
             syncing.remove(id)
             lastSynced = .now
+            lastError = nil
         case .syncFailed(let id, let message):
             syncing.remove(id)
             lastError = message
+        case .newMail(_, let threadID, let from, let subject):
+            notifier.post(threadID: threadID, from: from, subject: subject)
+        case .actionFailed(let message):
+            show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
         }
     }
 
@@ -162,8 +196,40 @@ final class AppModel {
         (try? core.queryPage(query: query, offset: UInt32(offset), limit: UInt32(limit))) ?? []
     }
 
+    /// Acts on a thread (the selected one by default) and offers undo.
+    func act(_ action: ThreadAction, label: String, threadID: Int64? = nil) {
+        guard let thread = threadID ?? selectedThreadID else { return }
+        do {
+            let token = try core.perform(action: action, threadId: thread, context: source.actionContext)
+            if token != nil { show(Toast(text: label, undo: token)) }
+        } catch {
+            show(Toast(text: "\(error)", undo: nil))
+        }
+    }
+
+    func undo() {
+        guard let token = toast?.undo else { return }
+        try? core.undo(token: token)
+        show(Toast(text: "Undone", undo: nil))
+    }
+
+    private func show(_ toast: Toast) {
+        self.toast = toast
+        let id = toast.id
+        Task {
+            try? await Task.sleep(for: .seconds(toast.undo == nil ? 3 : 6))
+            if self.toast?.id == id { self.toast = nil }
+        }
+    }
+
     func open(threadID: Int64) {
         selectedThreadID = threadID
+        markReadTask?.cancel()
+        markReadTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            _ = try? core.perform(action: .markRead, threadId: threadID, context: source.actionContext)
+        }
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
             do {
@@ -176,6 +242,12 @@ final class AppModel {
             }
         }
     }
+}
+
+struct Toast: Equatable {
+    let id = UUID()
+    let text: String
+    let undo: Int64?
 }
 
 /// Receives core events on the core's threads and hands them to the main actor.

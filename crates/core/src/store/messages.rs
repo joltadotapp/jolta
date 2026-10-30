@@ -50,6 +50,9 @@ pub fn insert_message(conn: &Connection, m: &NewMessage) -> Result<Inserted> {
         conn.execute("UPDATE message SET flags = ?2 WHERE id = ?1", params![id, m.flags.0])?;
         return Ok(Inserted::Existing(id));
     }
+    if let Some(id) = adopt_moved(conn, m)? {
+        return Ok(Inserted::Existing(id));
+    }
 
     let e = &m.envelope;
     let thread = resolve_thread(conn, m)?;
@@ -71,6 +74,36 @@ pub fn insert_message(conn: &Connection, m: &NewMessage) -> Result<Inserted> {
     link_mailbox(conn, id, m.mailbox_id, m.uid)?;
     index_fts(conn, id, e, m.body.as_ref().map_or("", |b| b.text.as_str()))?;
     Ok(Inserted::New(id))
+}
+
+/// A message Kite moved into this mailbox has a link without a UID until the
+/// server reports it here. The first server message with the same
+/// Message-ID claims that link, so the move does not turn into a copy.
+fn adopt_moved(conn: &Connection, m: &NewMessage) -> Result<Option<MessageId>> {
+    let Some(message_id) = &m.envelope.message_id else { return Ok(None) };
+    let id: Option<MessageId> = conn
+        .query_row(
+            "SELECT m.id FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
+             WHERE m.account_id = ?1 AND m.message_id = ?2 AND mm.mailbox_id = ?3 AND mm.uid IS NULL
+             LIMIT 1",
+            params![m.account_id, message_id, m.mailbox_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(id) = id else { return Ok(None) };
+    conn.execute("UPDATE message SET remote_id = ?2, flags = ?3 WHERE id = ?1", params![id, m.remote_id, m.flags.0])?;
+    link_mailbox(conn, id, m.mailbox_id, m.uid)?;
+    Ok(Some(id))
+}
+
+/// Drops links Kite made locally that the server never confirmed, once no
+/// queued change could still confirm them.
+pub fn drop_unconfirmed(conn: &Connection, mailbox: MailboxId) -> Result<()> {
+    let ids: Vec<MessageId> = conn
+        .prepare("SELECT message_id FROM message_mailbox WHERE mailbox_id = ?1 AND uid IS NULL")?
+        .query_map([mailbox], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    unlink_messages(conn, mailbox, &ids)
 }
 
 fn link_mailbox(conn: &Connection, id: MessageId, mailbox: MailboxId, uid: Option<u32>) -> Result<()> {
@@ -298,4 +331,29 @@ mod tests {
         assert_eq!(base_subject("AW: [team] Re: x"), ("[team] re: x".into(), true));
         assert_eq!(base_subject("Lunch: Friday"), ("lunch: friday".into(), false));
     }
+}
+
+/// Each message's mailbox and server UID, for messages the server knows.
+pub fn server_locations(conn: &Connection, ids: &[MessageId]) -> Result<Vec<(MailboxId, u32)>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT mailbox_id, uid FROM message_mailbox WHERE message_id = ?1 AND uid IS NOT NULL")?;
+    let mut out = Vec::new();
+    for id in ids {
+        for row in stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+/// Message-ID header values of these messages, where they have one.
+pub fn header_message_ids(conn: &Connection, ids: &[MessageId]) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached("SELECT message_id FROM message WHERE id = ?1 AND message_id IS NOT NULL")?;
+    let mut out = Vec::new();
+    for id in ids {
+        if let Some(mid) = stmt.query_row([id], |r| r.get(0)).optional()? {
+            out.push(mid);
+        }
+    }
+    Ok(out)
 }

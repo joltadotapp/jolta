@@ -5,6 +5,7 @@
 
 mod accounts;
 mod messages;
+mod ops;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,8 +17,9 @@ use crate::Result;
 
 pub use accounts::*;
 pub use messages::*;
+pub use ops::*;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql")];
 const READERS: usize = 4;
 
 #[derive(Clone)]

@@ -200,6 +200,14 @@ struct ListColumn: View {
                 CategoryBar(model: model)
             }
             MessageList(model: model)
+                .overlay(alignment: .bottom) {
+                    if let toast = model.toast {
+                        ToastView(toast: toast) { model.undo() }
+                            .padding(.bottom, 14)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+                .animation(.snappy(duration: 0.22), value: model.toast)
             KeyFooter()
         }
     }
@@ -267,12 +275,38 @@ struct SearchField: View {
     }
 }
 
+struct ToastView: View {
+    let toast: Toast
+    let undo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(toast.text).lineLimit(1)
+            if toast.undo != nil {
+                Button(action: undo) {
+                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z", focused: true) }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .font(.system(size: 12.5))
+        .foregroundStyle(Color(Theme.text))
+        .fixedSize()
+        .padding(.horizontal, 14)
+        .frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+    }
+}
+
 struct KeyFooter: View {
     var body: some View {
         HStack(spacing: 14) {
             hint(["J", "K"], "move")
-            hint(["↩"], "open")
-            hint(["/"], "search")
+            hint(["E"], "archive")
+            hint(["U"], "unread")
+            hint(["Z"], "undo")
             Spacer()
             HStack(spacing: 5) { KeyCap(key: "⌘K", focused: true); Text("commands") }
         }
@@ -293,12 +327,48 @@ struct KeyFooter: View {
 
 // MARK: - Reader column
 
+struct ActionButton: View {
+    let icon: String
+    let title: String
+    let key: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon).font(.system(size: 12.5))
+                Text(title)
+                Text(key)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Color(Theme.text3))
+                    .frame(minWidth: 16, minHeight: 16)
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color(Theme.line), lineWidth: 1))
+            }
+            .font(.system(size: 12.5))
+            .foregroundStyle(Color(Theme.text2))
+            .padding(.horizontal, 8)
+            .frame(height: 28)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color(hovering ? Theme.hover : .clear)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
 struct ReaderColumn: View {
     let model: AppModel
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
+                if model.openThread != nil {
+                    ActionButton(icon: "archivebox", title: "Archive", key: "E") { model.act(.archive, label: "Archived") }
+                    ActionButton(icon: "trash", title: "Trash", key: "#") { model.act(.trash, label: "Moved to Trash") }
+                    ActionButton(icon: "envelope.badge", title: "Unread", key: "U") { model.act(.markUnread, label: "Marked unread") }
+                    ActionButton(icon: "star", title: "Star", key: "S") { model.act(.flag, label: "Starred") }
+                }
                 Spacer()
                 if model.cursor.count > 0 {
                     Text("\(model.cursor.row + 1) of \(model.cursor.count)")

@@ -2,6 +2,7 @@
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -68,6 +69,20 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         messages: u64,
     },
+    /// Run the sync engine (IDLE, queued actions) and print its events.
+    Watch,
+    /// Act on a thread through the engine and wait until the server has it.
+    Act {
+        #[arg(value_enum)]
+        action: ActionArg,
+        thread: i64,
+        /// Mailbox id the action is taken from (defaults to the inbox).
+        #[arg(long)]
+        from: Option<i64>,
+        /// Undo the action right after it reaches the server.
+        #[arg(long)]
+        undo: bool,
+    },
     /// Change a mailbox on the server directly, as another mail client would.
     #[command(subcommand)]
     Dev(DevCommand),
@@ -121,6 +136,16 @@ enum DevCommand {
     Store { account: String, mailbox: String, uids: String, change: String },
     /// Mark UIDs deleted and expunge them.
     Expunge { account: String, mailbox: String, uids: String },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ActionArg {
+    Archive,
+    Trash,
+    Read,
+    Unread,
+    Flag,
+    Unflag,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -205,6 +230,14 @@ async fn main() -> Result<()> {
         }
         Command::Bench { runs } => bench(&kite, runs),
         Command::Dev(cmd) => dev(&kite, cmd).await,
+        Command::Watch => {
+            let t0 = Instant::now();
+            let sink: kite_core::engine::Sink = Arc::new(move |e| println!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
+            let _engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+            tokio::signal::ctrl_c().await?;
+            Ok(())
+        }
+        Command::Act { action, thread, from, undo } => act(&kite, action, thread, from, undo).await,
     }
 }
 
@@ -286,6 +319,48 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool) -> Result<()> {
+    use kite_core::actions::Action;
+    let action = match action {
+        ActionArg::Archive => Action::Archive,
+        ActionArg::Trash => Action::Trash,
+        ActionArg::Read => Action::MarkRead,
+        ActionArg::Unread => Action::MarkUnread,
+        ActionArg::Flag => Action::Flag,
+        ActionArg::Unflag => Action::Unflag,
+    };
+    let sink: kite_core::engine::Sink = Arc::new(|_| {});
+    let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+    let t0 = Instant::now();
+    let account = kite.store.read(|c| {
+        Ok(c.query_row("SELECT account_id FROM thread WHERE id = ?1", [thread], |r| r.get::<_, kite_core::AccountId>(0))?)
+    })?;
+    let wait_sent = || async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !kite.store.read(|c| store::has_pending_ops(c, account))? {
+                return anyhow::Ok(());
+            }
+        }
+    };
+    let context = from.map_or(kite_core::actions::Context::Inbox, |m| kite_core::actions::Context::Mailbox(kite_core::MailboxId(m)));
+    let op = engine.perform(kite_core::ThreadId(thread), action, context)?;
+    println!("applied locally in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    let Some(op) = op else {
+        println!("nothing to change");
+        return Ok(());
+    };
+    wait_sent().await?;
+    println!("on the server after {:.2} s", t0.elapsed().as_secs_f64());
+    if undo {
+        let t1 = Instant::now();
+        engine.undo(op)?;
+        wait_sent().await?;
+        println!("undone on the server after {:.2} s", t1.elapsed().as_secs_f64());
+    }
+    Ok(())
 }
 
 async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {

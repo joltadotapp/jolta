@@ -184,6 +184,34 @@ pub struct SyncReport {
     pub removed: usize,
     pub flag_changes: usize,
     pub bodies: usize,
+    /// Messages stored for the first time, for new-mail notices.
+    pub new_messages: Vec<MessageId>,
+}
+
+impl SyncReport {
+    pub fn changed(&self) -> bool {
+        self.new + self.removed + self.flag_changes + self.bodies > 0
+    }
+}
+
+/// What the server can do, read once per connection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Caps {
+    pub condstore: bool,
+    pub moves: bool,
+    pub uidplus: bool,
+}
+
+pub async fn caps(session: &mut Session) -> Result<Caps> {
+    let c = session.capabilities().await?;
+    Ok(Caps { condstore: c.has_str("CONDSTORE"), moves: c.has_str("MOVE"), uidplus: c.has_str("UIDPLUS") })
+}
+
+/// Which mailboxes a sync covers. `All` also refreshes the mailbox list.
+#[derive(Clone, Debug)]
+pub enum Scope {
+    All,
+    Mailboxes(Vec<MailboxId>),
 }
 
 pub async fn sync_account(
@@ -193,27 +221,49 @@ pub async fn sync_account(
     mut progress: impl FnMut(SyncEvent),
 ) -> Result<SyncReport> {
     let mut session = connect_account(account).await?;
-    let condstore = session.capabilities().await?.has_str("CONDSTORE");
+    let caps = caps(&mut session).await?;
+    let report = sync_session(kite, &mut session, caps, account, &Scope::All, opts, &mut progress).await;
+    session.logout().await.ok();
+    report
+}
 
-    let remote = list_mailboxes(&mut session).await?;
+pub async fn sync_session(
+    kite: &Kite,
+    session: &mut Session,
+    caps: Caps,
+    account: &Account,
+    scope: &Scope,
+    opts: SyncOptions,
+    progress: &mut impl FnMut(SyncEvent),
+) -> Result<SyncReport> {
     let account_id = account.id;
-    let mailboxes = kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?;
+    let mailboxes = match scope {
+        Scope::All => {
+            let remote = list_mailboxes(session).await?;
+            kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?
+        }
+        Scope::Mailboxes(ids) => {
+            let ids = ids.clone();
+            kite.store
+                .read_async(move |c| Ok(store::mailboxes(c, account_id)?.into_iter().filter(|m| ids.contains(&m.id)).collect()))
+                .await?
+        }
+    };
     progress(SyncEvent::Mailboxes(mailboxes.len()));
 
     let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
     for mailbox in mailboxes.iter().filter(|m| m.selectable) {
-        let (new, removed, flag_changes) =
-            sync_mailbox(kite, &mut session, account, mailbox, condstore, &mut progress).await?;
-        report.new += new;
+        let (new, removed, flag_changes) = sync_mailbox(kite, session, account, mailbox, caps.condstore, progress).await?;
+        report.new += new.len();
+        report.new_messages.extend(new.iter().copied());
         report.removed += removed;
         report.flag_changes += flag_changes;
-        progress(SyncEvent::Mailbox { name: mailbox.name.clone(), new, removed, flag_changes });
+        progress(SyncEvent::Mailbox { name: mailbox.name.clone(), new: new.len(), removed, flag_changes });
     }
 
     if opts.bodies {
-        report.bodies = fetch_bodies(kite, &mut session, account, &mut progress).await?;
+        report.bodies = fetch_bodies(kite, session, account, progress).await?;
     }
-    session.logout().await.ok();
     Ok(report)
 }
 
@@ -224,7 +274,7 @@ async fn sync_mailbox(
     mailbox: &Mailbox,
     condstore: bool,
     progress: &mut impl FnMut(SyncEvent),
-) -> Result<(usize, usize, usize)> {
+) -> Result<(Vec<MessageId>, usize, usize)> {
     let selected = if condstore {
         session.select_condstore(&mailbox.remote_id).await?
     } else {
@@ -251,6 +301,7 @@ async fn sync_mailbox(
     let mut new: Vec<u32> = server.iter().copied().filter(|u| !local.contains_key(u)).collect();
     new.sort_unstable_by(|a, b| b.cmp(a));
     let total = new.len();
+    let mut inserted = Vec::new();
     for (i, chunk) in new.chunks(HEADER_BATCH).enumerate() {
         let fetched: Vec<Fetch> = session
             .uid_fetch(uid_set(chunk), "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])")
@@ -281,14 +332,19 @@ async fn sync_mailbox(
                 })
             })
             .collect();
-        kite.store
+        let ids = kite
+            .store
             .write_async(move |tx| {
+                let mut ids = Vec::new();
                 for m in &messages {
-                    store::insert_message(tx, m)?;
+                    if let store::Inserted::New(id) = store::insert_message(tx, m)? {
+                        ids.push(id);
+                    }
                 }
-                Ok(())
+                Ok(ids)
             })
             .await?;
+        inserted.extend(ids);
         progress(SyncEvent::Headers {
             mailbox: mailbox.name.clone(),
             done: ((i + 1) * HEADER_BATCH).min(total),
@@ -321,15 +377,111 @@ async fn sync_mailbox(
     }
     let change_count = changes.len();
     let (uidvalidity, modseq) = (selected.uid_validity, selected.highest_modseq);
+    let account_id = account.id;
     kite.store
         .write_async(move |tx| {
             for (id, flags) in &changes {
                 store::set_flags(tx, *id, *flags)?;
             }
+            if !store::has_pending_ops(tx, account_id)? {
+                store::drop_unconfirmed(tx, mailbox_id)?;
+            }
             store::set_mailbox_cursor(tx, mailbox_id, uidvalidity, modseq)
         })
         .await?;
-    Ok((total, removed_count, change_count))
+    Ok((inserted, removed_count, change_count))
+}
+
+fn flag_list(bits: u32) -> String {
+    let names = [
+        (Flags::SEEN, "\\Seen"),
+        (Flags::FLAGGED, "\\Flagged"),
+        (Flags::ANSWERED, "\\Answered"),
+        (Flags::DRAFT, "\\Draft"),
+        (Flags::DELETED, "\\Deleted"),
+    ];
+    names.iter().filter(|(b, _)| bits & b != 0).map(|(_, n)| *n).collect::<Vec<_>>().join(" ")
+}
+
+/// Sends one queued op to the server. Returns the mailboxes it changed, so
+/// the caller can sync them (a moved message gets its new UID that way).
+pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store::Op) -> Result<Vec<MailboxId>> {
+    let account = op.account;
+    let paths: HashMap<MailboxId, String> = kite
+        .store
+        .read_async(move |c| Ok(store::mailboxes(c, account)?.into_iter().map(|m| (m.id, m.remote_id)).collect()))
+        .await?;
+    let path = |m: &MailboxId| paths.get(m).cloned().ok_or_else(|| Error::NotFound(format!("mailbox {m}")));
+    match op.kind {
+        store::OpKind::Flags { add, remove } => {
+            let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
+            let locations = kite.store.read_async(move |c| store::server_locations(c, &ids)).await?;
+            let mut by_mailbox: HashMap<MailboxId, Vec<u32>> = HashMap::new();
+            for (mailbox, uid) in locations {
+                by_mailbox.entry(mailbox).or_default().push(uid);
+            }
+            for (mailbox, uids) in &by_mailbox {
+                session.select(path(mailbox)?).await?;
+                for (sign, bits) in [("+", add), ("-", remove)] {
+                    if bits != 0 {
+                        session
+                            .uid_store(uid_set(uids), format!("{sign}FLAGS.SILENT ({})", flag_list(bits)))
+                            .await?
+                            .try_collect::<Vec<_>>()
+                            .await?;
+                    }
+                }
+            }
+            Ok(by_mailbox.into_keys().collect())
+        }
+        store::OpKind::Move { from, to } => {
+            session.select(path(&from)?).await?;
+            let mut uids: Vec<u32> = op.messages.iter().filter_map(|(_, u)| *u).collect();
+            let missing: Vec<MessageId> = op.messages.iter().filter(|(_, u)| u.is_none()).map(|(m, _)| *m).collect();
+            if !missing.is_empty() {
+                let header_ids = kite.store.read_async(move |c| store::header_message_ids(c, &missing)).await?;
+                for mid in header_ids {
+                    let found = session.uid_search(format!("HEADER Message-ID \"<{}>\"", mid.replace('"', ""))).await?;
+                    uids.extend(found);
+                }
+            }
+            if uids.is_empty() {
+                return Ok(vec![from, to]);
+            }
+            let set = uid_set(&uids);
+            let target = path(&to)?;
+            if caps.moves {
+                session.uid_mv(&set, &target).await?;
+            } else {
+                session.uid_copy(&set, &target).await?;
+                session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;
+                if caps.uidplus {
+                    session.uid_expunge(&set).await?.try_collect::<Vec<_>>().await?;
+                } else {
+                    session.expunge().await?.try_collect::<Vec<_>>().await?;
+                }
+            }
+            Ok(vec![from, to])
+        }
+    }
+}
+
+/// Holds IDLE on INBOX over its own connection and calls `changed` whenever
+/// the server reports something. Returns only on a connection error.
+pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
+    let mut session = connect_account(account).await?;
+    session.examine("INBOX").await?;
+    loop {
+        let mut handle = session.idle();
+        handle.init().await?;
+        let (wait, stop) = handle.wait_with_timeout(std::time::Duration::from_secs(25 * 60));
+        let response = wait.await?;
+        drop(stop);
+        session = handle.done().await?;
+        if matches!(response, async_imap::extensions::idle::IdleResponse::NewData(_)) {
+            changed();
+        }
+    }
 }
 
 async fn store_body(kite: &Kite, id: MessageId, raw: Vec<u8>) -> Result<()> {
