@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1000000000000000000F001 /* KiteFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D001 /* KiteFFI */; };
+		A1000000000000000000F003 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D002 /* Sparkle */; };
 		A1000000000000000000F002 /* kite-mcp in Embed kite-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A03 /* kite-mcp */; };
 /* End PBXBuildFile section */
 
@@ -42,6 +43,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000000000000000000F001 /* KiteFFI in Frameworks */,
+				A1000000000000000000F003 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -90,6 +92,7 @@
 			name = Kite;
 			packageProductDependencies = (
 				A1000000000000000000D001 /* KiteFFI */,
+				A1000000000000000000D002 /* Sparkle */,
 			);
 			productName = Kite;
 			productReference = A10000000000000000000A01 /* Kite.app */;
@@ -121,6 +124,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1000000000000000000D101 /* XCLocalSwiftPackageReference "KiteFFI" */,
+				A1000000000000000000D102 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000E02 /* Products */;
@@ -225,6 +229,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Kite;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_FILE = "Kite-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -252,6 +257,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Kite;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_FILE = "Kite-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -296,10 +302,26 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		A1000000000000000000D102 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.10.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		A1000000000000000000D001 /* KiteFFI */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = KiteFFI;
+		};
+		A1000000000000000000D002 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1000000000000000000D102 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

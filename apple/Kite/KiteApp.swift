@@ -27,6 +27,7 @@ struct KiteApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
         .commands {
+            CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandMenu("Go") {
                 Button("Command Palette") { model?.palette = .commands }
                     .keyboardShortcut("k")
@@ -51,6 +52,7 @@ struct KiteApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) { _ = Updater.shared }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
@@ -78,6 +80,7 @@ struct MenuBarContent: View {
         .keyboardShortcut("o")
         Button("Sync Now") { model?.core.syncNow() }
             .disabled(model == nil)
+        CheckForUpdatesButton()
         Divider()
         Button("Quit Kite") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
