@@ -13,7 +13,7 @@ kite-core = { path = "crates/core" }
 uniffi = "=0.31.2"
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs", "io-std"] }
 futures = "0.3"
 rusqlite = { version = "0.41", features = ["bundled"] }
 async-imap = { version = "=0.12.0", default-features = false, features = ["runtime-tokio"] }

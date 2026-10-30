@@ -166,9 +166,21 @@ impl Pending {
     /// Waits for the browser to come back (up to ten minutes), then trades
     /// the code for tokens.
     pub async fn finish(self) -> Result<SignedIn> {
-        let code = tokio::time::timeout(Duration::from_secs(600), self.receive_code())
-            .await
-            .map_err(|_| Error::Auth("sign-in timed out after ten minutes".into()))??;
+        self.finish_or_paste(std::future::pending()).await
+    }
+
+    /// Like `finish`, but also accepts the redirect address pasted by hand,
+    /// for when the browser runs on another machine and 127.0.0.1 cannot
+    /// reach this one.
+    pub async fn finish_or_paste(self, pasted: impl std::future::Future<Output = Option<String>>) -> Result<SignedIn> {
+        let code = tokio::time::timeout(Duration::from_secs(600), async {
+            tokio::select! {
+                code = self.receive_code() => code,
+                Some(url) = pasted => self.code_from_query(&query_of(&url)),
+            }
+        })
+        .await
+        .map_err(|_| Error::Auth("sign-in timed out after ten minutes".into()))??;
         let mut params = vec![
             ("client_id", self.client.id.as_str()),
             ("code", code.as_str()),
@@ -207,15 +219,7 @@ impl Pending {
             let n = stream.read(&mut buf).await?;
             let request = String::from_utf8_lossy(&buf[..n]);
             let path = request.split_whitespace().nth(1).unwrap_or("/");
-            let query: HashMap<String, String> = path
-                .split_once('?')
-                .map(|(_, q)| {
-                    q.split('&')
-                        .filter_map(|kv| kv.split_once('='))
-                        .map(|(k, v)| (k.to_string(), percent_decode(v)))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let query = query_of(path);
             if query.is_empty() {
                 // A favicon or other stray request.
                 stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await.ok();
@@ -226,16 +230,33 @@ impl Pending {
                 DONE_PAGE.len()
             );
             stream.write_all(reply.as_bytes()).await.ok();
-            if query.get("state") != Some(&self.state) {
-                return Err(Error::Auth("the sign-in reply did not match this request".into()));
-            }
-            if let Some(err) = query.get("error") {
-                let detail = query.get("error_description").cloned().unwrap_or_default();
-                return Err(Error::Auth(format!("{err} {detail}").trim().to_string()));
-            }
-            return query.get("code").cloned().ok_or_else(|| Error::Auth("the sign-in reply had no code".into()));
+            return self.code_from_query(&query);
         }
     }
+
+    fn code_from_query(&self, query: &HashMap<String, String>) -> Result<String> {
+        if query.get("state") != Some(&self.state) {
+            return Err(Error::Auth("the sign-in reply did not match this request".into()));
+        }
+        if let Some(err) = query.get("error") {
+            let detail = query.get("error_description").cloned().unwrap_or_default();
+            return Err(Error::Auth(format!("{err} {detail}").trim().to_string()));
+        }
+        query.get("code").cloned().ok_or_else(|| Error::Auth("the sign-in reply had no code".into()))
+    }
+}
+
+/// The query parameters of a URL or path, decoded.
+fn query_of(url: &str) -> HashMap<String, String> {
+    url.trim()
+        .split_once('?')
+        .map(|(_, q)| {
+            q.split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.to_string(), percent_decode(v)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn percent_decode(s: &str) -> String {
@@ -263,7 +284,13 @@ fn jwt_claims(token: &str) -> Option<Value> {
     serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?).ok()
 }
 
+/// HTTPS clients use ring, the one crypto provider in Kite's TLS stack.
+pub fn init_tls() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+}
+
 async fn post_token(provider: Provider, params: &[(&str, &str)]) -> Result<Value> {
+    init_tls();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()

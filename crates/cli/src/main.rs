@@ -389,11 +389,21 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             use kite_core::oauth::{self, Provider};
             let client = Provider::Google.client(&kite.data_dir)?;
             let pending = oauth::begin(Provider::Google, client).await?;
-            println!("Opening your browser to sign in with Google. If it does not open, visit:\n{}", pending.url);
+            println!("Opening your browser to sign in with Google. If it does not open, visit:\n\n{}\n", pending.url);
+            println!("Browser on another machine? Sign in there, then paste the 127.0.0.1 address it ends on here and press Return.");
             if std::env::var_os("KITE_NO_BROWSER").is_none() {
                 std::process::Command::new("open").arg(&pending.url).status().ok();
             }
-            let signed = pending.finish().await?;
+            let pasted = async {
+                let mut line = String::new();
+                let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+                use tokio::io::AsyncBufReadExt;
+                match stdin.read_line(&mut line).await {
+                    Ok(n) if n > 0 && line.contains("code=") => Some(line),
+                    _ => std::future::pending().await,
+                }
+            };
+            let signed = pending.finish_or_paste(pasted).await?;
             let account = oauth::save_account(kite, Provider::Google, &signed)?;
             println!("Added account {}: {}. Run `kite sync {}` next.", account.id, account.address, account.id);
             Ok(())
