@@ -8,6 +8,8 @@ CREATE TABLE account (
     imap_port INTEGER NOT NULL DEFAULT 993,
     smtp_host TEXT NOT NULL DEFAULT '',
     smtp_port INTEGER NOT NULL DEFAULT 465,
+    -- Keychain account name for this account's secrets; unique across data folders.
+    secret_ref TEXT NOT NULL UNIQUE,
     created INTEGER NOT NULL
 );
 

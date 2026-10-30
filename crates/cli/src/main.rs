@@ -221,12 +221,12 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
                 smtp_host,
                 smtp_port,
             };
-            let id = kite.store.write(|tx| store::insert_account(tx, &new))?;
-            if let Err(e) = secrets::set_password(id, &password) {
-                kite.store.write(|tx| store::delete_account(tx, id))?;
+            let added = kite.store.write(|tx| store::insert_account(tx, &new))?;
+            if let Err(e) = secrets::set_password(&added.secret_ref, &password) {
+                kite.store.write(|tx| store::delete_account(tx, added.id))?;
                 return Err(e).context("saving the password in the Keychain");
             }
-            println!("Added account {id}: {}. Run `kite sync {id}` next.", new.address);
+            println!("Added account {}: {}. Run `kite sync {}` next.", added.id, added.address, added.id);
             Ok(())
         }
         AccountCommand::List => {
@@ -238,7 +238,7 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
         AccountCommand::Remove { account } => {
             let a = kite.store.read(|c| store::find_account(c, &account))?;
             kite.store.write(|tx| store::delete_account(tx, a.id))?;
-            secrets::delete(a.id)?;
+            secrets::delete(&a.secret_ref)?;
             println!("Removed account {} ({}).", a.id, a.address);
             Ok(())
         }

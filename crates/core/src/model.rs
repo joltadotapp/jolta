@@ -121,6 +121,7 @@ pub struct Account {
     pub imap_port: u16,
     pub smtp_host: String,
     pub smtp_port: u16,
+    pub secret_ref: String,
 }
 
 #[derive(Clone, Debug)]

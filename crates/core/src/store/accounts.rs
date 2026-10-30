@@ -16,7 +16,7 @@ pub struct NewAccount {
 }
 
 const ACCOUNT_COLS: &str =
-    "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port";
+    "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port, secret_ref";
 
 fn account_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -29,20 +29,21 @@ fn account_row(r: &Row) -> rusqlite::Result<Account> {
         imap_port: r.get(6)?,
         smtp_host: r.get(7)?,
         smtp_port: r.get(8)?,
+        secret_ref: r.get(9)?,
     })
 }
 
-pub fn insert_account(conn: &Connection, a: &NewAccount) -> Result<AccountId> {
+pub fn insert_account(conn: &Connection, a: &NewAccount) -> Result<Account> {
     conn.execute(
         "INSERT INTO account (kind, address, display_name, username, imap_host, imap_port,
-                              smtp_host, smtp_port, created)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
+                              smtp_host, smtp_port, secret_ref, created)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())",
         params![
             a.kind, a.address, a.display_name, a.username, a.imap_host, a.imap_port, a.smtp_host,
-            a.smtp_port
+            a.smtp_port, crate::secrets::new_ref(&a.address)
         ],
     )?;
-    Ok(AccountId(conn.last_insert_rowid()))
+    account(conn, AccountId(conn.last_insert_rowid()))
 }
 
 pub fn accounts(conn: &Connection) -> Result<Vec<Account>> {

@@ -120,7 +120,8 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
             imap_port: 0,
             smtp_host: String::new(),
             smtp_port: 0,
-        })?;
+        })?
+        .id;
         let mb = |name: &str, role| RemoteMailbox {
             remote_id: name.into(),
             name: name.into(),

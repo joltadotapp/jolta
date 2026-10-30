@@ -13,9 +13,9 @@ use std::sync::Arc;
 use async_imap::types::{Fetch, Flag, NameAttribute};
 use futures::TryStreamExt;
 use rustls_platform_verifier::ConfigVerifierExt;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::pki_types::ServerName;
 
@@ -23,7 +23,10 @@ use crate::model::*;
 use crate::store::{self, RemoteMailbox};
 use crate::{Error, Kite, Result, mime, secrets};
 
-pub type Session = async_imap::Session<TlsStream<TcpStream>>;
+pub trait Io: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug> Io for T {}
+
+pub type Session = async_imap::Session<Box<dyn Io>>;
 
 const HEADER_BATCH: usize = 250;
 const BODY_BATCH: usize = 25;
@@ -31,13 +34,21 @@ const FLAG_SWEEP: usize = 5000;
 /// Bodies larger than this are fetched only when opened.
 pub const MAX_BACKGROUND_BODY: u32 = 10 * 1024 * 1024;
 
-pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> Result<Session> {
+/// TLS everywhere, except plain IMAP to a server on this machine (a local
+/// test server), which never leaves the loopback interface.
+async fn open_stream(host: &str, port: u16) -> Result<Box<dyn Io>> {
+    let tcp = TcpStream::connect((host, port)).await?;
+    if port != 993 && tcp.peer_addr()?.ip().is_loopback() {
+        return Ok(Box::new(tcp));
+    }
     let config = ClientConfig::with_platform_verifier()?;
     let server = ServerName::try_from(host.to_string())
         .map_err(|_| Error::Other(format!("{host:?} is not a valid server name")))?;
-    let tcp = TcpStream::connect((host, port)).await?;
-    let tls = TlsConnector::from(Arc::new(config)).connect(server, tcp).await?;
-    let mut client = async_imap::Client::new(tls);
+    Ok(Box::new(TlsConnector::from(Arc::new(config)).connect(server, tcp).await?))
+}
+
+pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> Result<Session> {
+    let mut client = async_imap::Client::new(open_stream(host, port).await?);
     client
         .read_response()
         .await?
@@ -49,7 +60,7 @@ pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> R
 }
 
 pub async fn connect_account(account: &Account) -> Result<Session> {
-    let password = secrets::password(account.id)?;
+    let password = secrets::password(&account.secret_ref)?;
     connect(&account.imap_host, account.imap_port, &account.username, &password).await
 }
 
