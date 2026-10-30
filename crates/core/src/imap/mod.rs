@@ -534,7 +534,7 @@ pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
     }
 }
 
-async fn store_body(kite: &Kite, id: MessageId, raw: Vec<u8>) -> Result<()> {
+pub(crate) async fn store_body(kite: &Kite, id: MessageId, raw: Vec<u8>) -> Result<()> {
     let kite2 = kite.clone();
     tokio::task::spawn_blocking(move || {
         let hash = kite2.blobs.put(&raw)?;
@@ -596,6 +596,20 @@ pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
             return kite.store.read_async(move |c| crate::synth::raw_message(c, id, n)).await;
         }
         return kite.blobs.get(&blob);
+    }
+    let graph: Option<(Account, String)> = kite
+        .store
+        .read_async(move |c| {
+            let (account, remote): (AccountId, String) =
+                c.query_row("SELECT account_id, remote_id FROM message WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let account = store::account(c, account)?;
+            Ok((account.kind == AccountKind::Graph).then_some((account, remote)))
+        })
+        .await?;
+    if let Some((account, remote)) = graph {
+        let raw = crate::graph::Graph::new(&account)?.message_mime(&remote).await?;
+        store_body(kite, id, raw.clone()).await?;
+        return Ok(raw);
     }
     let loc = kite.store.read_async(move |c| store::message_location(c, id)).await?;
     let Some((account_id, _, path, uid, _)) = loc else {

@@ -2,6 +2,7 @@ pub mod actions;
 pub mod blobs;
 pub mod compose;
 pub mod engine;
+pub mod graph;
 pub mod imap;
 pub mod mcp;
 pub mod import;

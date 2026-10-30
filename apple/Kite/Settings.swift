@@ -77,6 +77,7 @@ struct AccountsSettings: View {
             Divider()
             HStack {
                 Button("Add Google account…") { signIn(.google) }.disabled(signingIn)
+                Button("Add Microsoft 365 account…") { signIn(.microsoft) }.disabled(signingIn)
                 if signingIn { ProgressView().controlSize(.small) }
             }
             if let status { Text(status).font(.system(size: 12)).foregroundStyle(.secondary) }

@@ -316,7 +316,10 @@ impl SignIn {
         let (kite, provider, engine) = (self.kite.clone(), self.provider, self.engine.clone());
         self.runtime
             .spawn(async move {
-                let signed = pending.finish().await?;
+                let signed = pending
+                    .finish()
+                    .await
+                    .map_err(|e| kite_core::Error::Auth(kite_core::graph::explain_sign_in_error(&e.to_string())))?;
                 let account = kite_core::oauth::save_account(&kite, provider, &signed)?;
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());

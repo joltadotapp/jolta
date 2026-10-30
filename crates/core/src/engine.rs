@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 
 use crate::actions::{self, Action, Context};
 use crate::compose::{self, Compose};
+use crate::graph::Graph;
 use crate::imap::{self, Caps, Scope, Session, SyncOptions};
 use crate::model::*;
 use crate::store::{self, OpId};
@@ -23,6 +24,14 @@ use crate::{Kite, Result, mime};
 use futures::TryStreamExt;
 
 const FULL_SYNC_EVERY: Duration = Duration::from_secs(10 * 60);
+/// Graph has no IDLE; the inbox's delta is polled this often.
+const GRAPH_POLL: Duration = Duration::from_secs(30);
+
+/// A worker's open line to its server.
+enum Link {
+    Imap(Session, Caps),
+    Graph(Graph),
+}
 const MAX_ATTEMPTS: u32 = 5;
 /// How long a sent message waits in the outbox so it can be taken back.
 pub const UNDO_SEND_SECONDS: i64 = 10;
@@ -88,12 +97,18 @@ impl Engine {
     }
 
     fn spawn(self: &Arc<Self>, account: Account) {
-        if account.imap_host.is_empty() {
+        let graph = account.kind == AccountKind::Graph;
+        if account.imap_host.is_empty() && !graph {
             return;
         }
         let wake = Arc::new(Wake::default());
         wake.full_sync.store(true, Ordering::SeqCst);
         self.wakes.lock().unwrap_or_else(|e| e.into_inner()).insert(account.id, wake.clone());
+        if graph {
+            let engine = self.clone();
+            self.runtime.spawn(async move { engine.work(account, wake).await });
+            return;
+        }
 
         let idle_wake = wake.clone();
         let idle_account = account.clone();
@@ -217,7 +232,8 @@ impl Engine {
 
     async fn work(self: Arc<Self>, account: Account, wake: Arc<Wake>) {
         let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let mut conn: Option<(Session, Caps)> = None;
+        let mut conn: Option<Link> = None;
+        let poll = (account.kind == AccountKind::Graph).then_some(GRAPH_POLL);
         let mut backoff = Backoff::default();
         let mut last_full = Instant::now();
         loop {
@@ -255,28 +271,42 @@ impl Engine {
                 .chain(until_wake)
                 .min()
                 .map_or(until_full, |s| Duration::from_secs(s as u64).min(until_full));
+            let wait = poll.map_or(until_send, |p| p.min(until_send));
             tokio::select! {
                 _ = wake.notify.notified() => {}
-                _ = tokio::time::sleep(until_send) => {}
+                _ = tokio::time::sleep(wait) => {
+                    if poll.is_some() {
+                        wake.inbox_changed.store(true, Ordering::SeqCst);
+                    }
+                }
             }
         }
     }
 
     /// One pass: connect if needed, send ops, sync.
-    async fn round(&self, account: &Account, wake: &Wake, conn: &mut Option<(Session, Caps)>, started: i64) -> Result<()> {
+    async fn round(&self, account: &Account, wake: &Wake, conn: &mut Option<Link>, started: i64) -> Result<()> {
         if conn.is_none() {
-            let mut session = imap::connect_account(account).await?;
-            let caps = imap::caps(&mut session).await?;
-            *conn = Some((session, caps));
+            *conn = Some(if account.kind == AccountKind::Graph {
+                let graph = Graph::new(account)?;
+                graph.whoami().await?;
+                Link::Graph(graph)
+            } else {
+                let mut session = imap::connect_account(account).await?;
+                let caps = imap::caps(&mut session).await?;
+                Link::Imap(session, caps)
+            });
         }
-        let (session, caps) = conn.as_mut().expect("connected above");
-        let caps = *caps;
+        let link = conn.as_mut().expect("connected above");
 
         let mut touched: HashSet<MailboxId> = HashSet::new();
         let account_id = account.id;
         self.wake_snoozed(account_id).await?;
         for op in self.kite.store.read_async(move |c| store::pending_ops(c, account_id)).await? {
-            match imap::apply_op(&self.kite, session, caps, &op).await {
+            let applied = match link {
+                Link::Imap(session, caps) => imap::apply_op(&self.kite, session, *caps, &op).await,
+                Link::Graph(g) => g.apply_op(&self.kite, &op).await,
+            };
+            match applied {
                 Ok(mailboxes) => {
                     touched.extend(mailboxes);
                     let id = op.id;
@@ -298,12 +328,12 @@ impl Engine {
             }
         }
 
-        let sent = self.send_due(account, session).await?;
+        let sent = self.send_due(account, link).await?;
         if !sent.is_empty() {
             let sent_box = self.role_mailbox(account_id, MailboxRole::Sent).await?;
             touched.extend(sent_box.map(|m| m.id));
         }
-        self.sync_drafts(account, session).await?;
+        self.sync_drafts(account, link).await?;
 
         let scope = if wake.full_sync.swap(false, Ordering::SeqCst) {
             wake.inbox_changed.store(false, Ordering::SeqCst);
@@ -328,7 +358,7 @@ impl Engine {
         let mut last_event = Instant::now();
         let sink = self.sink.clone();
         let mut dirty = false;
-        let report = imap::sync_session(&self.kite, session, caps, account, &scope, SyncOptions { bodies: true }, &mut |e| {
+        let mut on_progress = |e: imap::SyncEvent| {
             // Tell the views only when this step stored something.
             dirty |= match e {
                 imap::SyncEvent::Headers { .. } | imap::SyncEvent::Bodies { .. } => true,
@@ -340,15 +370,22 @@ impl Engine {
                 dirty = false;
                 sink(Event::ListsChanged);
             }
-        })
-        .await?;
+        };
+        let report = match link {
+            Link::Imap(session, caps) => {
+                imap::sync_session(&self.kite, session, *caps, account, &scope, SyncOptions { bodies: true }, &mut on_progress).await?
+            }
+            Link::Graph(g) => g.sync(&self.kite, &scope, &mut on_progress).await?,
+        };
         if report.changed() {
             (self.sink)(Event::ListsChanged);
         }
         if full {
             (self.sink)(Event::SyncFinished(account.id));
         }
-        self.file_sent_copies(account, session, caps, &sent).await?;
+        if let Link::Imap(session, caps) = link {
+            self.file_sent_copies(account, session, *caps, &sent).await?;
+        }
         self.announce(account.id, report.new_messages, started).await
     }
 
@@ -381,13 +418,17 @@ impl Engine {
     }
 
     /// Sends every outbox message whose undo window has passed.
-    async fn send_due(&self, account: &Account, _session: &mut Session) -> Result<Vec<store::OutboxItem>> {
+    async fn send_due(&self, account: &Account, link: &mut Link) -> Result<Vec<store::OutboxItem>> {
         let account_id = account.id;
         let due = self.kite.store.read_async(move |c| store::due_outbox(c, account_id)).await?;
         let mut sent = Vec::new();
         for item in due {
             let raw = self.kite.blobs.get(&item.blob)?;
-            match crate::smtp::send(account, &item.sender, &item.recipients, &raw).await {
+            let result = match link {
+                Link::Graph(g) => g.send_mime(&raw).await,
+                Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
+            };
+            match result {
                 Ok(()) => {
                     let done = item.clone();
                     self.kite
@@ -444,12 +485,24 @@ impl Engine {
     }
 
     /// Replaces or removes server copies of drafts that changed.
-    async fn sync_drafts(&self, account: &Account, session: &mut Session) -> Result<()> {
+    async fn sync_drafts(&self, account: &Account, link: &mut Link) -> Result<()> {
         let account_id = account.id;
         let dirty = self.kite.store.read_async(move |c| store::dirty_drafts(c, account_id)).await?;
         if dirty.is_empty() {
             return Ok(());
         }
+        let session = match link {
+            Link::Imap(session, _) => session,
+            Link::Graph(g) => {
+                for d in dirty {
+                    let built = (!d.deleted).then(|| compose::build(account, &d.compose, false)).transpose()?;
+                    g.save_draft(built.as_ref().map(|b| b.raw.as_slice()), d.server_message_id.as_deref()).await?;
+                    let (id, deleted, server_id) = (d.id, d.deleted, built.map(|b| b.message_id));
+                    self.kite.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
+                }
+                return Ok(());
+            }
+        };
         let Some(drafts_box) = self.role_mailbox(account.id, MailboxRole::Drafts).await? else {
             for d in dirty {
                 let (id, deleted) = (d.id, d.deleted);

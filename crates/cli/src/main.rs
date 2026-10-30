@@ -156,6 +156,8 @@ enum AccountCommand {
     Remove { account: String },
     /// Sign in with Google (Gmail, Workspace) in the browser.
     AddGoogle,
+    /// Sign in with Microsoft 365 in the browser.
+    AddMicrosoft,
 }
 
 #[derive(Subcommand)]
@@ -385,11 +387,15 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             println!("Added account {}: {}. Run `kite sync {}` next.", added.id, added.address, added.id);
             Ok(())
         }
-        AccountCommand::AddGoogle => {
+        AccountCommand::AddGoogle | AccountCommand::AddMicrosoft => {
             use kite_core::oauth::{self, Provider};
-            let client = Provider::Google.client(&kite.data_dir)?;
-            let pending = oauth::begin(Provider::Google, client).await?;
-            println!("Opening your browser to sign in with Google. If it does not open, visit:\n\n{}\n", pending.url);
+            let (provider, label) = match cmd {
+                AccountCommand::AddGoogle => (Provider::Google, "Google"),
+                _ => (Provider::Microsoft, "Microsoft"),
+            };
+            let client = provider.client(&kite.data_dir)?;
+            let pending = oauth::begin(provider, client).await?;
+            println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
             println!("Browser on another machine? Sign in there, then paste the 127.0.0.1 address it ends on here and press Return.");
             if std::env::var_os("KITE_NO_BROWSER").is_none() {
                 std::process::Command::new("open").arg(&pending.url).status().ok();
@@ -403,8 +409,11 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
                     _ => std::future::pending().await,
                 }
             };
-            let signed = pending.finish_or_paste(pasted).await?;
-            let account = oauth::save_account(kite, Provider::Google, &signed)?;
+            let signed = pending
+                .finish_or_paste(pasted)
+                .await
+                .map_err(|e| anyhow::anyhow!(kite_core::graph::explain_sign_in_error(&e.to_string())))?;
+            let account = oauth::save_account(kite, provider, &signed)?;
             println!("Added account {}: {}. Run `kite sync {}` next.", account.id, account.address, account.id);
             Ok(())
         }
@@ -580,12 +589,17 @@ fn read_password(from_stdin: bool, address: &str) -> Result<String> {
 async fn sync(kite: &Kite, account: Option<String>, bodies: bool) -> Result<()> {
     let accounts = match account {
         Some(spec) => vec![kite.store.read(|c| store::find_account(c, &spec))?],
-        None => kite.store.read(store::accounts)?.into_iter().filter(|a| !a.imap_host.is_empty()).collect(),
+        None => kite
+            .store
+            .read(store::accounts)?
+            .into_iter()
+            .filter(|a| !a.imap_host.is_empty() || a.kind == AccountKind::Graph)
+            .collect(),
     };
     for a in accounts {
         let t = Instant::now();
         eprintln!("Syncing {} ({})", a.id, a.address);
-        let report = imap::sync_account(kite, &a, SyncOptions { bodies }, |e| match e {
+        let mut on_event = |e| match e {
             SyncEvent::Mailboxes(n) => eprintln!("  {n} mailboxes"),
             SyncEvent::Headers { mailbox, done, total } => {
                 eprint!("\r  {mailbox}: headers {done}/{total}   ");
@@ -601,8 +615,12 @@ async fn sync(kite: &Kite, account: Option<String>, bodies: bool) -> Result<()> 
                 eprint!("\r  bodies: {done}   ");
                 std::io::stderr().flush().ok();
             }
-        })
-        .await?;
+        };
+        let report = if a.kind == AccountKind::Graph {
+            kite_core::graph::Graph::new(&a)?.sync(kite, &imap::Scope::All, &mut on_event).await?
+        } else {
+            imap::sync_account(kite, &a, SyncOptions { bodies }, on_event).await?
+        };
         if report.bodies > 0 {
             eprintln!();
         }
