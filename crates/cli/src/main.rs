@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use kite_core::imap::{self, SyncEvent, SyncOptions};
 use kite_core::search::{self, ThreadRow};
-use kite_core::store::{self, NewAccount};
+use kite_core::store;
 use kite_core::{AccountKind, Kite, MessageId, secrets, synth};
 
 #[derive(Parser)]
@@ -206,15 +206,6 @@ enum Provider {
     Imap,
 }
 
-fn guess_provider(address: &str) -> Provider {
-    let domain = address.rsplit('@').next().unwrap_or("").to_lowercase();
-    match domain.as_str() {
-        "icloud.com" | "me.com" | "mac.com" => Provider::Icloud,
-        "fastmail.com" | "fastmail.fm" | "fastmail.net" | "messagingengine.com" => Provider::Fastmail,
-        _ => Provider::Imap,
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
@@ -346,54 +337,25 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             smtp_port,
             password_stdin,
         } => {
-            let provider = provider.unwrap_or_else(|| guess_provider(&address));
+            // --provider names the servers for a custom domain on iCloud or Fastmail.
             let (imap_host, imap_port, smtp_host, smtp_port) = match (provider, imap_host) {
-                (_, Some(h)) => {
-                    let smtp = smtp_host.unwrap_or_else(|| h.replacen("imap", "smtp", 1));
-                    (h, imap_port, smtp, smtp_port)
-                }
-                (Provider::Icloud, None) => ("imap.mail.me.com".into(), 993, "smtp.mail.me.com".into(), 587),
-                (Provider::Fastmail, None) => ("imap.fastmail.com".into(), 993, "smtp.fastmail.com".into(), 465),
-                (Provider::Imap, None) => bail!("unknown provider for {address}; pass --imap-host"),
+                (Some(Provider::Icloud), None) => (Some("imap.mail.me.com".into()), 993, Some("smtp.mail.me.com".into()), 587),
+                (Some(Provider::Fastmail), None) => (Some("imap.fastmail.com".into()), 993, Some("smtp.fastmail.com".into()), 465),
+                (_, h) => (h, imap_port, smtp_host, smtp_port),
             };
             let password = read_password(password_stdin, &address)?;
-
-            let mut usernames = vec![username.unwrap_or_else(|| address.clone())];
-            if matches!(provider, Provider::Icloud) {
-                usernames.push(address.split('@').next().unwrap_or(&address).to_string());
-            }
-            let mut last_err = None;
-            let mut working = None;
-            for u in &usernames {
-                eprintln!("Signing in to {imap_host} as {u}...");
-                match imap::connect(&imap_host, imap_port, u, &password).await {
-                    Ok(mut s) => {
-                        s.logout().await.ok();
-                        working = Some(u.clone());
-                        break;
-                    }
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            let Some(username) = working else {
-                bail!("sign-in failed: {}", last_err.map(|e| e.to_string()).unwrap_or_default());
-            };
-
-            let new = NewAccount {
-                kind: AccountKind::Imap,
-                display_name: name.unwrap_or_default(),
+            eprintln!("Signing in to check the password...");
+            let setup = imap::ImapSetup {
                 address,
+                password,
+                display_name: name.unwrap_or_default(),
                 username,
+                imap_port: Some(imap_port),
+                smtp_port: Some(smtp_port),
                 imap_host,
-                imap_port,
                 smtp_host,
-                smtp_port,
             };
-            let added = kite.store.write(|tx| store::insert_account(tx, &new))?;
-            if let Err(e) = secrets::set_password(&added.secret_ref, &password) {
-                kite.store.write(|tx| store::delete_account(tx, added.id))?;
-                return Err(e).context("saving the password in the Keychain");
-            }
+            let added = imap::add_account(&kite, setup).await.context("adding the account")?;
             println!("Added account {}: {}. Run `kite sync {}` next.", added.id, added.address, added.id);
             Ok(())
         }

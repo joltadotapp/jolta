@@ -61,6 +61,7 @@ struct AccountsSettings: View {
     @State private var status: String?
     @State private var signingIn = false
     @State private var confirmRemove: AccountInfo?
+    @State private var addingIMAP = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -78,15 +79,19 @@ struct AccountsSettings: View {
             HStack {
                 Button("Add Google account…") { signIn(.google) }.disabled(signingIn)
                 Button("Add Microsoft 365 account…") { signIn(.microsoft) }.disabled(signingIn)
+                Button("Add iCloud or IMAP account…") { addingIMAP = true }.disabled(signingIn)
                 if signingIn { ProgressView().controlSize(.small) }
             }
             if let status { Text(status).font(.system(size: 12)).foregroundStyle(.secondary) }
-            Text("iCloud, Fastmail and other IMAP accounts are added with the kite command for now (scripts/add-imap-account.sh).")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(20)
+        .sheet(isPresented: $addingIMAP) {
+            AddIMAPAccount(model: model) { added in
+                addingIMAP = false
+                if let added { status = "Added \(added.address). Kite is syncing it now." }
+            }
+        }
         .confirmationDialog("Remove \(confirmRemove?.address ?? "")?", isPresented: Binding(get: { confirmRemove != nil }, set: { if !$0 { confirmRemove = nil } })) {
             Button("Remove account and its local mail", role: .destructive) {
                 if let a = confirmRemove { try? model?.core.removeAccount(accountId: a.id) }
@@ -112,6 +117,76 @@ struct AccountsSettings: View {
                 status = "Sign-in failed: \(error)"
             }
             signingIn = false
+        }
+    }
+}
+
+/// Email and password; the servers too when Kite doesn't know them from the
+/// address. Kite signs in before it saves anything.
+struct AddIMAPAccount: View {
+    let model: AppModel?
+    let done: (AccountInfo?) -> Void
+    @State private var address = ""
+    @State private var password = ""
+    @State private var imapHost = ""
+    @State private var smtpHost = ""
+    @State private var working = false
+    @State private var failure: String?
+
+    private var knowsServers: Bool { model?.core.knowsServers(address: address) ?? false }
+    private var needsServers: Bool { address.contains("@") && !knowsServers }
+    private var ready: Bool {
+        address.contains("@") && !password.isEmpty && (!needsServers || !imapHost.isEmpty) && !working
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add an iCloud or IMAP account").font(.headline)
+            Form {
+                TextField("Email", text: $address, prompt: Text("you@icloud.com"))
+                    .textContentType(.emailAddress)
+                SecureField("Password", text: $password, prompt: Text("App-specific password"))
+                if needsServers {
+                    TextField("IMAP server", text: $imapHost, prompt: Text("imap.example.com"))
+                    TextField("SMTP server", text: $smtpHost, prompt: Text("Same as IMAP with smtp"))
+                }
+            }
+            .disabled(working)
+            Text(address.contains("@") && knowsServers
+                 ? "iCloud and Fastmail need an app-specific password, not your account password. Create one at account.apple.com or in Fastmail's Settings › Privacy & Security."
+                 : "Kite checks the password with the server before saving it in your Keychain.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let failure {
+                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if working { ProgressView().controlSize(.small); Text("Signing in…").foregroundStyle(.secondary) }
+                Spacer()
+                Button("Cancel") { done(nil) }.keyboardShortcut(.cancelAction)
+                Button("Add Account") { add() }.keyboardShortcut(.defaultAction).disabled(!ready)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func add() {
+        guard let core = model?.core else { return }
+        working = true
+        failure = nil
+        Task {
+            do {
+                let added = try await core.addImapAccount(address: address, password: password,
+                                                          imapHost: needsServers ? imapHost : "",
+                                                          smtpHost: needsServers ? smtpHost : "")
+                model?.reloadAccounts()
+                done(added)
+            } catch {
+                failure = "\(error)"
+            }
+            working = false
         }
     }
 }

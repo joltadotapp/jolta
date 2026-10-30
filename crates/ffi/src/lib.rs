@@ -717,6 +717,48 @@ impl Core {
         Ok(self.running_engine()?.remove_account(AccountId(account_id))?)
     }
 
+    /// Adds an iCloud, Fastmail or other IMAP account after checking the
+    /// password with the server. Empty hosts come from the address.
+    pub async fn add_imap_account(
+        &self,
+        address: String,
+        password: String,
+        imap_host: String,
+        smtp_host: String,
+    ) -> Result<AccountInfo> {
+        let (kite, engine) = (self.kite.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let setup = kite_core::imap::ImapSetup {
+            address,
+            password,
+            imap_host: Some(imap_host),
+            smtp_host: Some(smtp_host),
+            ..Default::default()
+        };
+        self.runtime
+            .spawn(async move {
+                let account = kite_core::imap::add_account(&kite, setup).await?;
+                if let Some(engine) = engine {
+                    engine.add_account(account.clone());
+                }
+                Ok::<_, kite_core::Error>(AccountInfo {
+                    id: account.id.0,
+                    kind: account.kind.to_string(),
+                    provider: account.provider_label().to_string(),
+                    address: account.address,
+                    display_name: account.display_name,
+                })
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map_err(Into::into)
+    }
+
+    /// Whether Kite knows the servers for this address (iCloud, Fastmail),
+    /// so the add form can hide the server fields.
+    pub fn knows_servers(&self, address: String) -> bool {
+        kite_core::imap::known_servers(&address).is_some()
+    }
+
     /// Starts a browser sign-in for a Google or Microsoft account.
     pub async fn begin_sign_in(&self, provider: OAuthProvider) -> Result<Arc<SignIn>> {
         let provider = match provider {

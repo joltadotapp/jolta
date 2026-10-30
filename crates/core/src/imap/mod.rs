@@ -48,6 +48,107 @@ async fn open_stream(host: &str, port: u16) -> Result<Box<dyn Io>> {
     Ok(Box::new(TlsConnector::from(Arc::new(config)).connect(server, tcp).await?))
 }
 
+/// What it takes to add a password IMAP account. Hosts left empty come from
+/// the address for iCloud and Fastmail.
+#[derive(Clone, Debug, Default)]
+pub struct ImapSetup {
+    pub address: String,
+    pub password: String,
+    pub display_name: String,
+    pub username: Option<String>,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<u16>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+}
+
+/// Known servers for an address: (IMAP host, port, SMTP host, port).
+pub fn known_servers(address: &str) -> Option<(&'static str, u16, &'static str, u16)> {
+    let domain = address.rsplit('@').next().unwrap_or("").to_lowercase();
+    match domain.as_str() {
+        "icloud.com" | "me.com" | "mac.com" => Some(("imap.mail.me.com", 993, "smtp.mail.me.com", 587)),
+        "fastmail.com" | "fastmail.fm" | "fastmail.net" | "messagingengine.com" => {
+            Some(("imap.fastmail.com", 993, "smtp.fastmail.com", 465))
+        }
+        _ => None,
+    }
+}
+
+/// Signs in to check the password, then saves the account and its password
+/// in the Keychain. An address that already has an IMAP account gets the new
+/// password instead of a second account.
+pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
+    let address = setup.address.trim().to_string();
+    if !address.contains('@') {
+        return Err(Error::Auth(format!("“{address}” is not an email address")));
+    }
+    let known = known_servers(&address);
+    let (imap_host, imap_port, smtp_host, smtp_port) = match (setup.imap_host.filter(|h| !h.trim().is_empty()), known) {
+        (Some(h), _) => {
+            let h = h.trim().to_string();
+            let smtp = setup.smtp_host.filter(|h| !h.trim().is_empty()).unwrap_or_else(|| h.replacen("imap", "smtp", 1));
+            (h, setup.imap_port.unwrap_or(993), smtp.trim().to_string(), setup.smtp_port.unwrap_or(465))
+        }
+        (None, Some((i, ip, s, sp))) => (i.to_string(), ip, s.to_string(), sp),
+        (None, None) => return Err(Error::Auth(format!("Kite doesn't know the mail server for {address}; enter the IMAP server"))),
+    };
+
+    // iCloud takes the full address or the part before the @.
+    let mut usernames = vec![setup.username.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| address.clone())];
+    if imap_host == "imap.mail.me.com" {
+        usernames.push(address.split('@').next().unwrap_or(&address).to_string());
+    }
+    let mut username = None;
+    let mut last_err = None;
+    for u in usernames {
+        match connect(&imap_host, imap_port, &u, &setup.password).await {
+            Ok(mut session) => {
+                session.logout().await.ok();
+                username = Some(u);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let Some(username) = username else {
+        return Err(match last_err {
+            Some(Error::Auth(why)) if known.is_some() => Error::Auth(format!("{why}. Use an app-specific password, not the account password.")),
+            Some(e) => e,
+            None => Error::Auth("no username to try".into()),
+        });
+    };
+
+    let existing = kite
+        .store
+        .read(store::accounts)?
+        .into_iter()
+        .find(|a| a.kind == AccountKind::Imap && a.address.eq_ignore_ascii_case(&address));
+    let is_new = existing.is_none();
+    let account = match existing {
+        Some(a) => a,
+        None => {
+            let new = store::NewAccount {
+                kind: AccountKind::Imap,
+                address,
+                display_name: setup.display_name,
+                username,
+                imap_host,
+                imap_port,
+                smtp_host,
+                smtp_port,
+            };
+            kite.store.write(|tx| store::insert_account(tx, &new))?
+        }
+    };
+    if let Err(e) = secrets::set_password(&account.secret_ref, &setup.password) {
+        if is_new {
+            kite.store.write(|tx| store::delete_account(tx, account.id))?;
+        }
+        return Err(e);
+    }
+    Ok(account)
+}
+
 pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> Result<Session> {
     let mut client = async_imap::Client::new(open_stream(host, port).await?);
     client
@@ -55,9 +156,21 @@ pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> R
         .await?
         .ok_or_else(|| Error::Other(format!("{host} closed the connection before greeting")))?;
     client.login(username, password).await.map_err(|(e, _)| match e {
-        async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => Error::Auth(msg),
+        async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => {
+            Error::Auth(format!("{host} refused the password ({})", server_text(&msg)))
+        }
         other => Error::Imap(other),
     })
+}
+
+/// The server's own words from an async-imap NO or BAD, which arrive as
+/// `code: None, info: Some("[AUTHENTICATIONFAILED] Authentication Failed")`.
+fn server_text(msg: &str) -> &str {
+    let text = msg.split_once("info: Some(\"").map_or(msg, |(_, t)| t.trim_end_matches(&[')', '"'][..]));
+    match text.split_once("] ") {
+        Some((code, rest)) if code.starts_with('[') => rest,
+        _ => text,
+    }
 }
 
 pub async fn connect_account(account: &Account) -> Result<Session> {
@@ -637,6 +750,12 @@ pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::uid_set;
+
+    #[test]
+    fn reads_server_text() {
+        assert_eq!(super::server_text(r#"code: None, info: Some("[AUTHENTICATIONFAILED] Authentication Failed")"#), "Authentication Failed");
+        assert_eq!(super::server_text("Invalid credentials"), "Invalid credentials");
+    }
 
     #[test]
     fn compresses_uid_sets() {
