@@ -66,6 +66,17 @@ pub fn text_to_html(text: &str) -> String {
     out
 }
 
+/// Name, MIME type and decoded bytes of attachment `index`.
+pub fn attachment_bytes(raw: &[u8], index: usize) -> Option<(String, String, Vec<u8>)> {
+    let msg = MessageParser::new().parse(raw)?;
+    let part = msg.root().attachments().nth(index)?;
+    let mime = part
+        .content_type()
+        .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")))
+        .unwrap_or_else(|| "application/octet-stream".into());
+    Some((part.attachment_name().unwrap_or("attachment").to_string(), mime, part.decoded().into_owned()))
+}
+
 pub fn attachments(raw: &[u8]) -> Vec<Attachment> {
     let Some(msg) = MessageParser::new().parse(raw) else { return Vec::new() };
     msg.root()
@@ -279,6 +290,14 @@ pub struct MessageView<'a> {
     pub open: bool,
 }
 
+fn human_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1 << 20) as f64),
+        b if b >= 1 << 10 => format!("{} KB", b >> 10),
+        b => format!("{b} bytes"),
+    }
+}
+
 fn escape(s: &str) -> String {
     ammonia::clean_text(s)
 }
@@ -293,7 +312,21 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let clean_builder = sanitizer();
     for m in messages {
         let (html, styles) = extract_styles(&body_html(m.raw));
-        let clean = clean_builder.clean(&html).to_string();
+        let mut clean = clean_builder.clean(&html).to_string();
+        let files = attachments(m.raw);
+        if !files.is_empty() {
+            clean.push_str("<div class=\"kite-files\">");
+            for f in &files {
+                clean.push_str(&format!(
+                    "<a class=\"kite-file\" href=\"x-attachment:{}/{}\"><b>{}</b><small>{}</small></a>",
+                    m.id,
+                    f.index,
+                    escape(&f.name),
+                    human_size(f.size)
+                ));
+            }
+            clean.push_str("</div>");
+        }
         remote_images += clean.matches(&format!("src=\"{REMOTE_SCHEME}:")).count() as u32;
         let scope = format!("#m{}", m.id);
         for s in &styles {

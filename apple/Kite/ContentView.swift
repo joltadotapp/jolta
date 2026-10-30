@@ -305,10 +305,10 @@ struct KeyFooter: View {
         HStack(spacing: 14) {
             hint(["J", "K"], "move")
             hint(["E"], "archive")
-            hint(["U"], "unread")
+            hint(["R"], "reply")
             hint(["Z"], "undo")
             Spacer()
-            HStack(spacing: 5) { KeyCap(key: "⌘K", focused: true); Text("commands") }
+            HStack(spacing: 5) { KeyCap(key: "⌘K", focused: true); Text("commands") }.fixedSize()
         }
         .font(.system(size: 11.5))
         .foregroundStyle(Color(Theme.text3))
@@ -322,6 +322,7 @@ struct KeyFooter: View {
             ForEach(keys, id: \.self) { KeyCap(key: $0) }
             Text(label)
         }
+        .fixedSize()
     }
 }
 
@@ -362,6 +363,7 @@ struct ReaderColumn: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if model.compose == nil {
             HStack(spacing: 4) {
                 if model.openThread != nil {
                     ActionButton(icon: "archivebox", title: "Archive", key: "E") { model.act(.archive, label: "Archived") }
@@ -381,8 +383,11 @@ struct ReaderColumn: View {
             .padding(.horizontal, 20)
             .frame(height: Theme.headerHeight)
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
-            if let thread = model.openThread {
-                ReaderView(thread: thread)
+            }
+            if model.compose != nil {
+                ComposeView(model: model)
+            } else if let thread = model.openThread {
+                ReaderView(thread: thread, onAttachment: model.openAttachment)
             } else {
                 Text(model.cursor.count == 0 ? "Nothing here" : "")
                     .foregroundStyle(Color(Theme.text3))

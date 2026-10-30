@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use kite_core::actions::{Action, Context};
+use kite_core::compose::{self, AttachmentFile, Compose, ReplyKind};
 use kite_core::engine::{Engine, Event};
 use kite_core::store::OpId;
 use kite_core::{AccountId, Kite, MailboxId, MessageId, ThreadId, reader, search, store};
@@ -88,8 +89,91 @@ pub enum CoreEvent {
     SyncFinished { account_id: i64 },
     SyncFailed { account_id: i64, message: String },
     NewMail { account_id: i64, thread_id: i64, from: String, subject: String },
+    Sent { account_id: i64, subject: String },
+    SendFailed { message: String },
     /// The server refused an action for good; the change was rolled back.
     ActionFailed { message: String },
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct ComposeFile {
+    pub name: String,
+    pub mime_type: String,
+    pub path: String,
+}
+
+/// A message being written. Recipient fields are comma-separated, as typed.
+#[derive(uniffi::Record, Clone)]
+pub struct ComposeData {
+    pub account_id: Option<i64>,
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub replying_to: Option<i64>,
+    pub attachments: Vec<ComposeFile>,
+    pub draft_id: Option<i64>,
+}
+
+impl From<Compose> for ComposeData {
+    fn from(c: Compose) -> Self {
+        ComposeData {
+            account_id: c.account.map(|a| a.0),
+            to: c.to,
+            cc: c.cc,
+            bcc: c.bcc,
+            subject: c.subject,
+            body: c.body,
+            in_reply_to: c.in_reply_to,
+            references: c.references,
+            replying_to: c.replying_to.map(|m| m.0),
+            attachments: c
+                .attachments
+                .into_iter()
+                .map(|a| ComposeFile { name: a.name, mime_type: a.mime_type, path: a.path })
+                .collect(),
+            draft_id: c.draft,
+        }
+    }
+}
+
+impl From<ComposeData> for Compose {
+    fn from(c: ComposeData) -> Self {
+        Compose {
+            account: c.account_id.map(AccountId),
+            to: c.to,
+            cc: c.cc,
+            bcc: c.bcc,
+            subject: c.subject,
+            body: c.body,
+            in_reply_to: c.in_reply_to,
+            references: c.references,
+            replying_to: c.replying_to.map(MessageId),
+            attachments: c
+                .attachments
+                .into_iter()
+                .map(|a| AttachmentFile { name: a.name, mime_type: a.mime_type, path: a.path })
+                .collect(),
+            draft: c.draft_id,
+        }
+    }
+}
+
+#[derive(uniffi::Enum)]
+pub enum ReplyMode {
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+#[derive(uniffi::Record)]
+pub struct AttachmentData {
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(uniffi::Enum)]
@@ -297,6 +381,8 @@ impl Core {
                     CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject }
                 }
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
+                Event::Sent { account, subject } => CoreEvent::Sent { account_id: account.0, subject },
+                Event::SendFailed(message) => CoreEvent::SendFailed { message },
             };
             listener.on_event(event);
         });
@@ -313,6 +399,73 @@ impl Core {
 
     pub fn undo(&self, token: i64) -> Result<()> {
         Ok(self.running_engine()?.undo(OpId(token))?)
+    }
+
+    /// A blank message from the first account that can send.
+    pub fn new_compose(&self) -> Result<ComposeData> {
+        let account = self.kite.store.read(store::accounts)?.into_iter().find(|a| !a.smtp_host.is_empty());
+        Ok(Compose { account: account.map(|a| a.id), ..Default::default() }.into())
+    }
+
+    /// A reply, reply-all or forward of the newest message in a thread.
+    pub async fn reply_compose(&self, thread_id: i64, mode: ReplyMode, utc_offset: i32) -> Result<ComposeData> {
+        let kite = self.kite.clone();
+        self.runtime
+            .spawn(async move {
+                let message: MessageId = kite
+                    .store
+                    .read_async(move |c| Ok(c.query_row("SELECT max(id) FROM message WHERE thread_id = ?1", [thread_id], |r| r.get(0))?))
+                    .await?;
+                let raw = kite_core::imap::message_source(&kite, message).await?;
+                let kind = match mode {
+                    ReplyMode::Reply => ReplyKind::Reply,
+                    ReplyMode::ReplyAll => ReplyKind::ReplyAll,
+                    ReplyMode::Forward => ReplyKind::Forward,
+                };
+                kite.store.read_async(move |c| compose::reply(c, message, &raw, kind, utc_offset)).await
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Queues a message; it leaves after the undo window. Returns a token
+    /// for `cancel_send`.
+    pub fn send(&self, compose: ComposeData) -> Result<i64> {
+        Ok(self.running_engine()?.send(&compose.into())?)
+    }
+
+    /// Takes a waiting message back and returns it for editing.
+    pub fn cancel_send(&self, token: i64) -> Result<Option<ComposeData>> {
+        Ok(self.running_engine()?.cancel_send(token)?.map(Into::into))
+    }
+
+    pub fn save_draft(&self, compose: ComposeData) -> Result<i64> {
+        Ok(self.running_engine()?.save_draft(&compose.into())?)
+    }
+
+    pub fn discard_draft(&self, draft_id: i64) -> Result<()> {
+        Ok(self.running_engine()?.discard_draft(draft_id)?)
+    }
+
+    pub fn drafts(&self) -> Result<Vec<ComposeData>> {
+        Ok(self.kite.store.read(store::drafts)?.into_iter().map(Into::into).collect())
+    }
+
+    /// The bytes of one attachment of a message, for opening or saving.
+    pub async fn attachment(&self, message_id: i64, index: u32) -> Result<AttachmentData> {
+        let kite = self.kite.clone();
+        self.runtime
+            .spawn(async move {
+                let raw = kite_core::imap::message_source(&kite, MessageId(message_id)).await?;
+                kite_core::render::attachment_bytes(&raw, index as usize)
+                    .ok_or_else(|| kite_core::Error::NotFound(format!("attachment {index}")))
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map(|(name, mime_type, bytes)| AttachmentData { name, mime_type, bytes })
+            .map_err(Into::into)
     }
 
     pub fn sync_now(&self) {

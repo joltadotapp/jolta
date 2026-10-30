@@ -231,8 +231,8 @@ fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result
         })
     })?;
     conn.prepare_cached(
-        "SELECT count(*), coalesce(sum((flags & ?2) = 0), 0), coalesce(max((flags & ?3) != 0), 0),
-                coalesce(max(has_attachments), 0)
+        "SELECT count(DISTINCT coalesce(message_id, id)), coalesce(sum((flags & ?2) = 0), 0),
+                coalesce(max((flags & ?3) != 0), 0), coalesce(max(has_attachments), 0)
          FROM message WHERE thread_id = ?1",
     )?
     .query_row(rusqlite::params![thread, Flags::SEEN, Flags::FLAGGED], |r| {

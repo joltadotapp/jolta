@@ -11,6 +11,12 @@ import WebKit
 @MainActor
 final class ReaderPage {
     let page: WebPage
+    /// Called when the user clicks an attachment chip in the message.
+    var onAttachment: ((Int64, UInt32) -> Void)? {
+        get { links.onAttachment }
+        set { links.onAttachment = newValue }
+    }
+    private let links = LinkActions()
     private static var ruleList: WKContentRuleList?
 
     init() {
@@ -23,7 +29,7 @@ final class ReaderPage {
         if let rules = Self.ruleList {
             config.userContentController.add(rules)
         }
-        page = WebPage(configuration: config, navigationDecider: Decider())
+        page = WebPage(configuration: config, navigationDecider: Decider(links: links))
     }
 
     /// Compiles the block-all rule list once, before the first page is built.
@@ -74,7 +80,14 @@ private struct BlockedImages: URLSchemeHandler {
 }
 
 @MainActor
+private final class LinkActions {
+    var onAttachment: ((Int64, UInt32) -> Void)?
+}
+
+@MainActor
 private struct Decider: WebPage.NavigationDeciding {
+    let links: LinkActions
+
     func decidePolicy(for action: WebPage.NavigationAction, preferences: inout WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
         if #available(macOS 26.4, *) {
             preferences.securityRestrictionMode = .maximizeCompatibility
@@ -83,6 +96,13 @@ private struct Decider: WebPage.NavigationDeciding {
         let url = action.request.url
         if action.navigationType == .other, url?.absoluteString == "about:blank" {
             return .allow
+        }
+        if action.navigationType == .linkActivated, let url, url.scheme == "x-attachment" {
+            let parts = url.absoluteString.dropFirst("x-attachment:".count).split(separator: "/")
+            if parts.count == 2, let message = Int64(parts[0]), let index = UInt32(parts[1]) {
+                links.onAttachment?(message, index)
+            }
+            return .cancel
         }
         if action.navigationType == .linkActivated, let url, ["http", "https", "mailto"].contains(url.scheme ?? "") {
             confirmOpen(url)
@@ -104,6 +124,7 @@ private struct Decider: WebPage.NavigationDeciding {
 
 struct ReaderView: View {
     let thread: ThreadView
+    let onAttachment: (Int64, UInt32) -> Void
     @State private var reader = ReaderPage()
 
     var body: some View {
@@ -129,7 +150,10 @@ struct ReaderView: View {
                 .webViewMagnificationGestures(.disabled)
                 .webViewLinkPreviews(.disabled)
         }
-        .onAppear { reader.show(html: thread.html) }
+        .onAppear {
+            reader.onAttachment = onAttachment
+            reader.show(html: thread.html)
+        }
         .onChange(of: thread.html) { _, html in reader.show(html: html) }
     }
 }
@@ -162,5 +186,10 @@ enum ReaderStyle {
     .kite-body img[src^="x-remote:"] { display: none; }
     .kite-body a { color: inherit; text-decoration-color: var(--tx3); }
     .kite-quote { color: var(--tx3); }
+    .kite-files { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+    .kite-file { display: flex; flex-direction: column; justify-content: center; height: 44px; padding: 0 14px;
+      border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line2); text-decoration: none; color: var(--tx); cursor: default; }
+    .kite-file b { font-weight: 500; font-size: 12.5px; line-height: 16px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .kite-file small { color: var(--tx3); font-size: 11.5px; line-height: 15px; }
     """
 }

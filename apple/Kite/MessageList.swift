@@ -206,6 +206,10 @@ struct MessageList: NSViewRepresentable {
                 guard let r = current() else { return true }
                 if r.flagged { act(.unflag, "Unstarred") } else { act(.flag, "Starred") }
             case ("z", _): model.undo()
+            case ("c", _): model.startCompose()
+            case ("r", _): if let r = current() { model.reply(.reply, threadID: r.threadId) }
+            case ("a", _): if let r = current() { model.reply(.replyAll, threadID: r.threadId) }
+            case ("f", _): if let r = current() { model.reply(.forward, threadID: r.threadId) }
             case (_, 48) where model.showsCategories:
                 let all = Category.allCases
                 let i = all.firstIndex(of: model.category) ?? 0

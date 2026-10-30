@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod blobs;
+pub mod compose;
 pub mod engine;
 pub mod imap;
 pub mod import;
@@ -9,6 +10,7 @@ pub mod reader;
 pub mod render;
 pub mod search;
 pub mod secrets;
+pub mod smtp;
 pub mod store;
 pub mod synth;
 

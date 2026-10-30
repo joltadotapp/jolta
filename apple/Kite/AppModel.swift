@@ -1,4 +1,5 @@
 @preconcurrency import KiteFFI
+import AppKit
 import Foundation
 import Observation
 
@@ -84,6 +85,8 @@ final class AppModel {
     private(set) var focusListRequest = 0
     /// The last action, shown briefly with its undo key.
     private(set) var toast: Toast?
+    /// The message being written, shown in place of the reader.
+    var compose: ComposeData?
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
 
@@ -125,6 +128,12 @@ final class AppModel {
             // `-KiteAction archive|trash|unread|star` acts on that thread
             // through the same path as the keys.
             let actions: [String: ThreadAction] = ["archive": .archive, "trash": .trash, "unread": .markUnread, "star": .flag]
+            if defaults.string(forKey: "KiteAction") == "reply" {
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    reply(.reply, threadID: first.threadId)
+                }
+            }
             if let name = defaults.string(forKey: "KiteAction"), let action = actions[name] {
                 Task {
                     try? await Task.sleep(for: .seconds(2))
@@ -185,6 +194,10 @@ final class AppModel {
             notifier.post(threadID: threadID, from: from, subject: subject)
         case .actionFailed(let message):
             show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
+        case .sent(_, let subject):
+            show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
+        case .sendFailed(let message):
+            show(Toast(text: "Not sent yet: \(message)", undo: nil))
         }
     }
 
@@ -201,16 +214,94 @@ final class AppModel {
         guard let thread = threadID ?? selectedThreadID else { return }
         do {
             let token = try core.perform(action: action, threadId: thread, context: source.actionContext)
-            if token != nil { show(Toast(text: label, undo: token)) }
+            if let token { show(Toast(text: label, undo: .action(token))) }
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
     }
 
     func undo() {
-        guard let token = toast?.undo else { return }
-        try? core.undo(token: token)
-        show(Toast(text: "Undone", undo: nil))
+        switch toast?.undo {
+        case .action(let token):
+            try? core.undo(token: token)
+            show(Toast(text: "Undone", undo: nil))
+        case .send(let token):
+            if let back = try? core.cancelSend(token: token) {
+                compose = back
+                show(Toast(text: "Sending cancelled", undo: nil))
+            } else {
+                show(Toast(text: "Already sent", undo: nil))
+            }
+        case nil:
+            break
+        }
+    }
+
+    // MARK: Compose
+
+    func startCompose() {
+        compose = (try? core.newCompose()) ?? .blank
+    }
+
+    func reply(_ mode: ReplyMode, threadID: Int64? = nil) {
+        guard let thread = threadID ?? selectedThreadID else { return }
+        let offset = Int32(TimeZone.current.secondsFromGMT())
+        Task {
+            do {
+                compose = try await core.replyCompose(threadId: thread, mode: mode, utcOffset: offset)
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+        }
+    }
+
+    func sendCompose() {
+        guard let draft = compose else { return }
+        do {
+            let token = try core.send(compose: draft)
+            compose = nil
+            requestListFocus()
+            show(Toast(text: "Sending in 10 seconds", undo: .send(token)))
+        } catch {
+            show(Toast(text: "\(error)", undo: nil))
+        }
+    }
+
+    func saveDraft() {
+        guard let draft = compose, !draft.isEmpty else { return }
+        if let id = try? core.saveDraft(compose: draft), compose?.draftId == nil {
+            compose?.draftId = id
+        }
+    }
+
+    /// Closes the editor and keeps what was written as a draft.
+    func closeCompose() {
+        saveDraft()
+        if compose?.isEmpty == false { show(Toast(text: "Saved to Drafts", undo: nil)) }
+        compose = nil
+        requestListFocus()
+    }
+
+    func discardCompose() {
+        if let id = compose?.draftId { try? core.discardDraft(draftId: id) }
+        compose = nil
+        requestListFocus()
+    }
+
+    /// Opens an attachment with its default app, from a temporary copy.
+    func openAttachment(message: Int64, index: UInt32) {
+        Task {
+            do {
+                let file = try await core.attachment(messageId: message, index: index)
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("attachments/\(message)-\(index)")
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let url = dir.appendingPathComponent(file.name.replacingOccurrences(of: "/", with: "-"))
+                try Data(file.bytes).write(to: url)
+                NSWorkspace.shared.open(url)
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+        }
     }
 
     private func show(_ toast: Toast) {
@@ -245,9 +336,14 @@ final class AppModel {
 }
 
 struct Toast: Equatable {
+    enum Undo: Equatable {
+        case action(Int64)
+        case send(Int64)
+    }
+
     let id = UUID()
     let text: String
-    let undo: Int64?
+    let undo: Undo?
 }
 
 /// Receives core events on the core's threads and hands them to the main actor.

@@ -1,0 +1,217 @@
+//! Writing mail: new messages, replies and forwards, built with
+//! mail-builder into the bytes the outbox sends.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use mail_builder::MessageBuilder;
+use mail_builder::headers::address::Address as BuilderAddress;
+use mail_parser::MessageParser;
+use rusqlite::Connection;
+use sha2::{Digest, Sha256};
+
+use crate::model::*;
+use crate::{Error, Result, mime, reader, store};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyKind {
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachmentFile {
+    pub name: String,
+    pub mime_type: String,
+    pub path: String,
+}
+
+/// A message being written. Recipient fields are comma-separated lists as
+/// typed ("Ann <ann@example.com>, bob@example.com").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Compose {
+    pub account: Option<AccountId>,
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    /// The message this answers; it gets the \Answered flag once sent.
+    pub replying_to: Option<MessageId>,
+    pub attachments: Vec<AttachmentFile>,
+    /// The local draft this compose was saved as, if any.
+    pub draft: Option<i64>,
+}
+
+/// One address as (name, address).
+pub fn parse_addresses(list: &str) -> Vec<(String, String)> {
+    if list.trim().is_empty() {
+        return Vec::new();
+    }
+    let header = format!("To: {}\r\n\r\n", list.replace(['\r', '\n'], " "));
+    let Some(msg) = MessageParser::new().parse_headers(header.as_bytes()) else { return Vec::new() };
+    msg.root()
+        .to()
+        .map(|l| {
+            l.mailboxes()
+                .filter_map(|m| Some((m.name().unwrap_or_default().to_string(), m.address()?.to_string())))
+                .filter(|(_, a)| a.contains('@'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn format_addresses(list: &[(String, String)]) -> String {
+    list.iter()
+        .map(|(n, a)| if n.is_empty() { a.clone() } else { format!("{n} <{a}>") })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn prefixed(subject: &str, prefix: &str) -> String {
+    let (base, _) = store::base_subject(subject);
+    let already = subject.trim().to_lowercase().starts_with(&format!("{}:", prefix.to_lowercase()));
+    if already || base.is_empty() && subject.is_empty() {
+        subject.trim().to_string()
+    } else {
+        format!("{prefix}: {}", subject.trim())
+    }
+}
+
+fn quote(text: &str) -> String {
+    text.lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") }).collect::<Vec<_>>().join("\n")
+}
+
+/// Prefills a reply, reply-all or forward of `message` from its raw source.
+pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind, utc_offset: i32) -> Result<Compose> {
+    let (account, date): (AccountId, i64) =
+        conn.query_row("SELECT account_id, date FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let me = store::account(conn, account)?.address.to_lowercase();
+    let msg = MessageParser::new().parse(raw).ok_or_else(|| Error::Other("could not read the message".into()))?;
+    let root = msg.root();
+    let (envelope, body) = mime::parse_full(raw, String::new());
+    let pair = |m: mail_parser::Mailbox| Some((m.name().unwrap_or_default().to_string(), m.address()?.to_string()));
+    let from: Vec<(String, String)> = root.from().map(|l| l.mailboxes().filter_map(pair).collect()).unwrap_or_default();
+    let reply_to: Vec<(String, String)> = root.reply_to().map(|l| l.mailboxes().filter_map(pair).collect()).unwrap_or_default();
+    let others = |l: Option<mail_parser::AddressList>| -> Vec<(String, String)> {
+        l.map(|l| l.mailboxes().filter_map(pair).collect()).unwrap_or_default()
+    };
+    let not_me = |list: Vec<(String, String)>| -> Vec<(String, String)> {
+        list.into_iter().filter(|(_, a)| a.to_lowercase() != me).collect()
+    };
+    let sender_name = from.first().map(|(n, a)| if n.is_empty() { a.clone() } else { n.clone() }).unwrap_or_default();
+    let when = reader::format_date(date, utc_offset);
+
+    let mut c = Compose { account: Some(account), ..Default::default() };
+    match kind {
+        ReplyKind::Reply | ReplyKind::ReplyAll => {
+            let primary = if reply_to.is_empty() { from.clone() } else { reply_to };
+            let from_me = from.iter().any(|(_, a)| a.to_lowercase() == me);
+            // Replying to your own message goes to its original recipients.
+            let to = match from_me {
+                true => Some(not_me(others(root.to()))).filter(|t| !t.is_empty()).unwrap_or(primary),
+                false => primary,
+            };
+            c.to = format_addresses(&to);
+            if kind == ReplyKind::ReplyAll {
+                let mut cc = not_me(others(root.to()));
+                cc.extend(not_me(others(root.cc())));
+                cc.retain(|(_, a)| !to.iter().any(|(_, t)| t.eq_ignore_ascii_case(a)));
+                cc.dedup_by(|x, y| x.1.eq_ignore_ascii_case(&y.1));
+                c.cc = format_addresses(&cc);
+            }
+            c.subject = prefixed(&envelope.subject, "Re");
+            c.in_reply_to = envelope.message_id.clone();
+            c.references = envelope.references.clone();
+            c.references.extend(envelope.message_id.clone());
+            c.replying_to = Some(message);
+            c.body = format!("\n\nOn {when}, {sender_name} wrote:\n{}", quote(body.text.trim_end()));
+        }
+        ReplyKind::Forward => {
+            c.subject = prefixed(&envelope.subject, "Fwd");
+            c.body = format!(
+                "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {when}\nSubject: {}\nTo: {}\n\n{}",
+                format_addresses(&from),
+                envelope.subject,
+                envelope.to,
+                body.text.trim_end()
+            );
+            c.references = envelope.message_id.iter().cloned().collect();
+        }
+    }
+    Ok(c)
+}
+
+/// A built message, ready for the outbox.
+pub struct Built {
+    pub raw: Vec<u8>,
+    pub message_id: String,
+    pub from: String,
+    pub recipients: Vec<String>,
+}
+
+/// Builds the message. Drafts may have no recipients yet; sending needs one.
+pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built> {
+    let to = parse_addresses(&c.to);
+    let cc = parse_addresses(&c.cc);
+    let bcc = parse_addresses(&c.bcc);
+    if for_sending && to.is_empty() && cc.is_empty() && bcc.is_empty() {
+        return Err(Error::Other("Add at least one recipient.".into()));
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let domain = account.address.rsplit('@').next().unwrap_or("kite.invalid");
+    let message_id = format!("{}@{domain}", &hex::encode(Sha256::digest(format!("{now}{}", c.subject)))[..24]);
+
+    let list = |l: &[(String, String)]| -> BuilderAddress<'static> {
+        BuilderAddress::new_list(l.iter().map(|(n, a)| BuilderAddress::new_address(Some(n.clone()).filter(|n| !n.is_empty()), a.clone())).collect())
+    };
+    let from_name = (!account.display_name.is_empty()).then(|| account.display_name.clone());
+    let mut builder = MessageBuilder::new()
+        .from(BuilderAddress::new_address(from_name, account.address.clone()))
+        .subject(c.subject.clone())
+        .message_id(message_id.clone())
+        .text_body(c.body.clone());
+    if !to.is_empty() {
+        builder = builder.to(list(&to));
+    }
+    if !cc.is_empty() {
+        builder = builder.cc(list(&cc));
+    }
+    if let Some(irt) = &c.in_reply_to {
+        builder = builder.in_reply_to(irt.clone());
+    }
+    if !c.references.is_empty() {
+        builder = builder.references(c.references.clone());
+    }
+    for a in &c.attachments {
+        let bytes = std::fs::read(&a.path).map_err(|e| Error::Other(format!("could not read {}: {e}", a.name)))?;
+        builder = builder.attachment(a.mime_type.clone(), a.name.clone(), bytes);
+    }
+    let raw = builder.write_to_vec()?;
+    let recipients = to.iter().chain(&cc).chain(&bcc).map(|(_, a)| a.clone()).collect();
+    Ok(Built { raw, message_id, from: account.address.clone(), recipients })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_typed_recipients() {
+        assert_eq!(
+            parse_addresses("Ann Smith <ann@example.com>, bob@example.com; ,  not-an-address"),
+            vec![("Ann Smith".into(), "ann@example.com".into()), ("".into(), "bob@example.com".into())]
+        );
+        assert!(parse_addresses("  ").is_empty());
+    }
+
+    #[test]
+    fn prefixes_subjects_once() {
+        assert_eq!(prefixed("Lunch", "Re"), "Re: Lunch");
+        assert_eq!(prefixed("Re: Lunch", "Re"), "Re: Lunch");
+        assert_eq!(prefixed("RE: Lunch", "Re"), "RE: Lunch");
+        assert_eq!(prefixed("Lunch", "Fwd"), "Fwd: Lunch");
+    }
+}

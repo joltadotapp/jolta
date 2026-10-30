@@ -28,7 +28,7 @@ pub struct ThreadDetail {
 
 pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, Vec<ThreadMessage>)> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, from_name, from_addr, to_addrs, cc_addrs, date, snippet, flags, subject
+        "SELECT id, from_name, from_addr, to_addrs, cc_addrs, date, snippet, flags, subject, message_id
          FROM message WHERE thread_id = ?1 ORDER BY id",
     )?;
     let mut subject = String::new();
@@ -45,11 +45,20 @@ pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, V
                 flags: Flags(r.get(7)?),
             },
             r.get::<_, String>(8)?,
+            r.get::<_, Option<String>>(9)?,
         ))
     })?;
     let mut out = Vec::new();
+    // The same message can be stored twice (the received copy and the one
+    // in Sent); show it once.
+    let mut seen = std::collections::HashSet::new();
     for row in rows {
-        let (m, s) = row?;
+        let (m, s, header_id) = row?;
+        if let Some(h) = header_id {
+            if !seen.insert(h) {
+                continue;
+            }
+        }
         if subject.is_empty() {
             subject = s;
         }

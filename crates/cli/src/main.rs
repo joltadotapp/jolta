@@ -69,6 +69,23 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         messages: u64,
     },
+    /// Send a message through the engine (outbox, undo window, Sent copy).
+    Send {
+        account: String,
+        #[arg(long, default_value = "")]
+        to: String,
+        #[arg(long, default_value = "")]
+        subject: String,
+        #[arg(long, default_value = "")]
+        body: String,
+        /// Reply to this message id (prefills recipients, subject and quote).
+        #[arg(long)]
+        reply: Option<i64>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        attach: Vec<PathBuf>,
+    },
     /// Run the sync engine (IDLE, queued actions) and print its events.
     Watch,
     /// Act on a thread through the engine and wait until the server has it.
@@ -238,6 +255,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Act { action, thread, from, undo } => act(&kite, action, thread, from, undo).await,
+        Command::Send { account, to, subject, body, reply, all, attach } => {
+            send(&kite, &account, to, subject, body, reply, all, attach).await
+        }
     }
 }
 
@@ -319,6 +339,56 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send(
+    kite: &Kite,
+    account: &str,
+    to: String,
+    subject: String,
+    body: String,
+    reply: Option<i64>,
+    all: bool,
+    attach: Vec<PathBuf>,
+) -> Result<()> {
+    use kite_core::compose::{self, AttachmentFile, Compose, ReplyKind};
+    let a = kite.store.read(|c| store::find_account(c, account))?;
+    let mut c = match reply {
+        Some(id) => {
+            let raw = imap::message_source(kite, MessageId(id)).await?;
+            let kind = if all { ReplyKind::ReplyAll } else { ReplyKind::Reply };
+            let mut c = kite.store.read(|conn| compose::reply(conn, MessageId(id), &raw, kind, 0))?;
+            c.body = format!("{body}{}", c.body);
+            c
+        }
+        None => Compose { account: Some(a.id), to, subject, body, ..Default::default() },
+    };
+    for path in attach {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        c.attachments.push(AttachmentFile { name, mime_type: "application/octet-stream".into(), path: path.display().to_string() });
+    }
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink: kite_core::engine::Sink = Arc::new(move |e| {
+        let _ = events.send(e);
+    });
+    let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+    let t0 = Instant::now();
+    let id = engine.send(&c)?;
+    println!("queued as outbox {id}: to {} cc {} subject {:?}", c.to, c.cc, c.subject);
+    while let Some(e) = rx.recv().await {
+        match e {
+            kite_core::engine::Event::Sent { subject, .. } => {
+                println!("sent {subject:?} after {:.1} s (undo window {} s)", t0.elapsed().as_secs_f64(), kite_core::engine::UNDO_SEND_SECONDS);
+                break;
+            }
+            kite_core::engine::Event::SendFailed(m) => anyhow::bail!("send failed: {m}"),
+            _ => {}
+        }
+    }
+    // Let the engine file the Sent copy and mark the original answered.
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    Ok(())
 }
 
 async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool) -> Result<()> {
