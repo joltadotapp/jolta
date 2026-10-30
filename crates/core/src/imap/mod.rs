@@ -5,6 +5,7 @@
 //! drops expunged ones, and refreshes flags (CHANGEDSINCE when the server has
 //! CONDSTORE). Bodies follow, newest first, in a second pass.
 
+mod gmail;
 mod utf7;
 
 use std::collections::{HashMap, HashSet};
@@ -60,8 +61,37 @@ pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> R
 }
 
 pub async fn connect_account(account: &Account) -> Result<Session> {
+    if account.kind == AccountKind::Gmail {
+        let token = crate::oauth::access_token(account).await?;
+        return connect_xoauth2(&account.imap_host, account.imap_port, &account.username, &token).await;
+    }
     let password = secrets::password(&account.secret_ref)?;
     connect(&account.imap_host, account.imap_port, &account.username, &password).await
+}
+
+struct XOAuth2(String);
+
+impl async_imap::Authenticator for XOAuth2 {
+    type Response = String;
+
+    fn process(&mut self, _challenge: &[u8]) -> String {
+        self.0.clone()
+    }
+}
+
+pub async fn connect_xoauth2(host: &str, port: u16, username: &str, token: &str) -> Result<Session> {
+    let mut client = async_imap::Client::new(open_stream(host, port).await?);
+    client
+        .read_response()
+        .await?
+        .ok_or_else(|| Error::Other(format!("{host} closed the connection before greeting")))?;
+    client
+        .authenticate("XOAUTH2", XOAuth2(crate::oauth::xoauth2(username, token)))
+        .await
+        .map_err(|(e, _)| match e {
+            async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => Error::Auth(msg),
+            other => Error::Imap(other),
+        })
 }
 
 fn role_of(name: &str, attrs: &[NameAttribute]) -> Option<MailboxRole> {
@@ -91,7 +121,7 @@ fn role_of(name: &str, attrs: &[NameAttribute]) -> Option<MailboxRole> {
     }
 }
 
-async fn list_mailboxes(session: &mut Session) -> Result<Vec<RemoteMailbox>> {
+pub(crate) async fn list_mailboxes(session: &mut Session) -> Result<Vec<RemoteMailbox>> {
     let names: Vec<_> = session.list(Some(""), Some("*")).await?.try_collect().await?;
     let mut out: Vec<RemoteMailbox> = names
         .iter()
@@ -237,6 +267,9 @@ pub async fn sync_session(
     opts: SyncOptions,
     progress: &mut impl FnMut(SyncEvent),
 ) -> Result<SyncReport> {
+    if account.kind == AccountKind::Gmail {
+        return gmail::sync(kite, session, caps, account, opts, progress).await;
+    }
     let account_id = account.id;
     let mailboxes = match scope {
         Scope::All => {
@@ -393,7 +426,7 @@ async fn sync_mailbox(
     Ok((inserted, removed_count, change_count))
 }
 
-fn flag_list(bits: u32) -> String {
+pub(crate) fn flag_list(bits: u32) -> String {
     let names = [
         (Flags::SEEN, "\\Seen"),
         (Flags::FLAGGED, "\\Flagged"),
@@ -408,6 +441,10 @@ fn flag_list(bits: u32) -> String {
 /// the caller can sync them (a moved message gets its new UID that way).
 pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store::Op) -> Result<Vec<MailboxId>> {
     let account = op.account;
+    let kind = kite.store.read_async(move |c| Ok(store::account(c, account)?.kind)).await?;
+    if kind == AccountKind::Gmail {
+        return gmail::apply_op(kite, session, op).await;
+    }
     let paths: HashMap<MailboxId, String> = kite
         .store
         .read_async(move |c| Ok(store::mailboxes(c, account)?.into_iter().map(|m| (m.id, m.remote_id)).collect()))
@@ -506,7 +543,7 @@ async fn store_body(kite: &Kite, id: MessageId, raw: Vec<u8>) -> Result<()> {
     .await?
 }
 
-async fn fetch_bodies(
+pub(crate) async fn fetch_bodies(
     kite: &Kite,
     session: &mut Session,
     account: &Account,

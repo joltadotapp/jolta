@@ -83,7 +83,9 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
                     .ok_or_else(|| Error::Other("This account has no inbox.".into()))?,
             };
             let to = match action {
+                // Gmail has no Archive folder: archiving leaves the message in All Mail only.
                 Action::Archive => role_mailbox(conn, account, MailboxRole::Archive)?
+                    .or(role_mailbox(conn, account, MailboxRole::All)?)
                     .ok_or_else(|| Error::Other("This account has no Archive folder.".into()))?,
                 Action::Trash => role_mailbox(conn, account, MailboxRole::Trash)?
                     .ok_or_else(|| Error::Other("This account has no Trash folder.".into()))?,

@@ -282,6 +282,59 @@ pub fn core_greeting() -> String {
     kite_core::greeting()
 }
 
+#[derive(uniffi::Enum)]
+pub enum OAuthProvider {
+    Google,
+    Microsoft,
+}
+
+/// A browser sign-in in progress. Open `url()`, then await `finish()`.
+#[derive(uniffi::Object)]
+pub struct SignIn {
+    url: String,
+    provider: kite_core::oauth::Provider,
+    pending: Mutex<Option<kite_core::oauth::Pending>>,
+    kite: Kite,
+    runtime: tokio::runtime::Handle,
+    engine: Option<Arc<Engine>>,
+}
+
+#[uniffi::export]
+impl SignIn {
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    /// Waits for the browser to come back, then adds (or re-authorizes) the account.
+    pub async fn finish(&self) -> Result<AccountInfo> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| CoreError::Failed { message: "this sign-in already finished".into() })?;
+        let (kite, provider, engine) = (self.kite.clone(), self.provider, self.engine.clone());
+        self.runtime
+            .spawn(async move {
+                let signed = pending.finish().await?;
+                let account = kite_core::oauth::save_account(&kite, provider, &signed)?;
+                if let Some(engine) = engine {
+                    engine.add_account(account.clone());
+                }
+                Ok::<_, kite_core::Error>(AccountInfo {
+                    id: account.id.0,
+                    kind: account.kind.to_string(),
+                    provider: account.provider_label().to_string(),
+                    address: account.address,
+                    display_name: account.display_name,
+                })
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map_err(Into::into)
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct Core {
     kite: Kite,
@@ -655,6 +708,32 @@ impl Core {
 
     pub fn draft(&self, draft_id: i64) -> Result<Option<ComposeData>> {
         Ok(self.kite.store.read(|c| store::draft(c, draft_id))?.map(Into::into))
+    }
+
+    pub fn remove_account(&self, account_id: i64) -> Result<()> {
+        Ok(self.running_engine()?.remove_account(AccountId(account_id))?)
+    }
+
+    /// Starts a browser sign-in for a Google or Microsoft account.
+    pub async fn begin_sign_in(&self, provider: OAuthProvider) -> Result<Arc<SignIn>> {
+        let provider = match provider {
+            OAuthProvider::Google => kite_core::oauth::Provider::Google,
+            OAuthProvider::Microsoft => kite_core::oauth::Provider::Microsoft,
+        };
+        let client = provider.client(&self.kite.data_dir)?;
+        let pending = self
+            .runtime
+            .spawn(kite_core::oauth::begin(provider, client))
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        Ok(Arc::new(SignIn {
+            url: pending.url.clone(),
+            provider,
+            pending: Mutex::new(Some(pending)),
+            kite: self.kite.clone(),
+            runtime: self.runtime.handle().clone(),
+            engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        }))
     }
 
     pub fn sync_now(&self) {

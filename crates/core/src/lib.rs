@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod import;
 pub mod mime;
 pub mod model;
+pub mod oauth;
 pub mod reader;
 pub mod render;
 pub mod search;
@@ -78,6 +79,7 @@ pub struct Kite {
 impl Kite {
     pub fn open(data_dir: &Path) -> Result<Kite> {
         std::fs::create_dir_all(data_dir)?;
+        oauth::set_data_dir(data_dir);
         Ok(Kite {
             store: store::Store::open(&data_dir.join("kite.sqlite"))?,
             blobs: blobs::Blobs::new(data_dir.join("blobs")),

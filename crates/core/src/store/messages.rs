@@ -357,3 +357,35 @@ pub fn header_message_ids(conn: &Connection, ids: &[MessageId]) -> Result<Vec<St
     }
     Ok(out)
 }
+
+/// Gmail labels: links the message to exactly these label mailboxes, plus
+/// `all` (All Mail), which keeps its UID.
+pub fn set_labels(conn: &Connection, id: MessageId, all: MailboxId, labels: &[MailboxId]) -> Result<()> {
+    let mut current: Vec<MailboxId> = conn
+        .prepare_cached("SELECT mailbox_id FROM message_mailbox WHERE message_id = ?1 AND mailbox_id != ?2")?
+        .query_map(params![id, all], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    current.sort();
+    let mut wanted: Vec<MailboxId> = labels.iter().copied().filter(|m| *m != all).collect();
+    wanted.sort();
+    wanted.dedup();
+    if current == wanted {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM message_mailbox WHERE message_id = ?1 AND mailbox_id != ?2", params![id, all])?;
+    for m in wanted {
+        conn.execute("INSERT INTO message_mailbox (mailbox_id, message_id, uid) VALUES (?1, ?2, NULL)", params![m, id])?;
+    }
+    Ok(())
+}
+
+/// Removes messages entirely: every mailbox link, the search index row and
+/// the message row.
+pub fn delete_messages(conn: &Connection, ids: &[MessageId]) -> Result<()> {
+    for id in ids {
+        conn.execute("DELETE FROM message_mailbox WHERE message_id = ?1", [id])?;
+        conn.execute("DELETE FROM message_fts WHERE rowid = ?1", [id])?;
+        conn.execute("DELETE FROM message WHERE id = ?1", [id])?;
+    }
+    Ok(())
+}

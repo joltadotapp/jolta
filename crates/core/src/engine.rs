@@ -80,6 +80,13 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Starts syncing an account added while the engine runs.
+    pub fn add_account(self: &Arc<Self>, account: Account) {
+        if !self.wakes.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&account.id) {
+            self.spawn(account);
+        }
+    }
+
     fn spawn(self: &Arc<Self>, account: Account) {
         if account.imap_host.is_empty() {
             return;
@@ -189,6 +196,17 @@ impl Engine {
         Ok(())
     }
 
+    /// Removes an account, its mail and its Keychain entry. Its worker stops
+    /// on its next round.
+    pub fn remove_account(&self, account: AccountId) -> Result<()> {
+        let a = self.kite.store.read(|c| store::account(c, account))?;
+        self.kite.store.write(|tx| store::delete_account(tx, account))?;
+        crate::secrets::delete(&a.secret_ref)?;
+        self.wake(account);
+        (self.sink)(Event::ListsChanged);
+        Ok(())
+    }
+
     /// Syncs every account now, all mailboxes.
     pub fn sync_now(&self) {
         for w in self.wakes.lock().unwrap_or_else(|e| e.into_inner()).values() {
@@ -203,6 +221,12 @@ impl Engine {
         let mut backoff = Backoff::default();
         let mut last_full = Instant::now();
         loop {
+            let id = account.id;
+            if matches!(self.kite.store.read(|c| store::account(c, id)), Err(crate::Error::NotFound(_))) {
+                // The account was removed; stop syncing it.
+                self.wakes.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                return;
+            }
             match self.round(&account, &wake, &mut conn, started).await {
                 Ok(()) => backoff = Backoff::default(),
                 Err(e) => {

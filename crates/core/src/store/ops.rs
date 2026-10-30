@@ -184,8 +184,12 @@ pub fn revert_local(conn: &Connection, op: &Op) -> Result<()> {
             apply_local(conn, &op.inverse(), &ids)?;
         }
         OpKind::Move { from, to } => {
+            // Gmail's All Mail holds every message; a move there never took a link away.
+            let to_all: bool = conn.query_row("SELECT coalesce(role = 'all', 0) FROM mailbox WHERE id = ?1", [to], |r| r.get(0)).unwrap_or(false);
             for (id, uid) in &op.messages {
-                conn.execute("DELETE FROM message_mailbox WHERE message_id = ?1 AND mailbox_id = ?2", params![id, to])?;
+                if !to_all {
+                    conn.execute("DELETE FROM message_mailbox WHERE message_id = ?1 AND mailbox_id = ?2", params![id, to])?;
+                }
                 conn.execute(
                     "INSERT INTO message_mailbox (mailbox_id, message_id, uid) VALUES (?1, ?2, ?3)
                      ON CONFLICT DO UPDATE SET uid = excluded.uid",

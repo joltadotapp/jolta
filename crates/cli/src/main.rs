@@ -154,6 +154,8 @@ enum AccountCommand {
     },
     List,
     Remove { account: String },
+    /// Sign in with Google (Gmail, Workspace) in the browser.
+    AddGoogle,
 }
 
 #[derive(Subcommand)]
@@ -381,6 +383,19 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
                 return Err(e).context("saving the password in the Keychain");
             }
             println!("Added account {}: {}. Run `kite sync {}` next.", added.id, added.address, added.id);
+            Ok(())
+        }
+        AccountCommand::AddGoogle => {
+            use kite_core::oauth::{self, Provider};
+            let client = Provider::Google.client(&kite.data_dir)?;
+            let pending = oauth::begin(Provider::Google, client).await?;
+            println!("Opening your browser to sign in with Google. If it does not open, visit:\n{}", pending.url);
+            if std::env::var_os("KITE_NO_BROWSER").is_none() {
+                std::process::Command::new("open").arg(&pending.url).status().ok();
+            }
+            let signed = pending.finish().await?;
+            let account = oauth::save_account(kite, Provider::Google, &signed)?;
+            println!("Added account {}: {}. Run `kite sync {}` next.", account.id, account.address, account.id);
             Ok(())
         }
         AccountCommand::List => {
