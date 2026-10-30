@@ -56,6 +56,8 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // The window buttons sit here; the list scrolls below them, not under them.
+            TitleBarArea().frame(height: 44)
             ScrollView {
                 VStack(alignment: .leading, spacing: 1) {
                     NavRow(icon: "tray", title: "Inbox", count: model.unreadCount("in:inbox"),
@@ -120,11 +122,10 @@ struct Sidebar: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                .padding(.top, 52)
+                .padding(.top, 8)
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.never)
-            .overlay(alignment: .top) { TitleBarArea().frame(height: 40).padding(.leading, 80) }
             SyncFooter(model: model)
         }
     }
