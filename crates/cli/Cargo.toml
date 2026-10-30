@@ -1,0 +1,13 @@
+[package]
+name = "kite-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kite"
+path = "src/main.rs"
+
+[dependencies]
+kite-core.workspace = true
