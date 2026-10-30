@@ -17,6 +17,7 @@ struct MessageList: NSViewRepresentable {
         table.intercellSpacing = .zero
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .regular
+        table.focusRingType = .none
         table.allowsEmptySelection = true
         table.usesAutomaticRowHeights = false
         let column = NSTableColumn(identifier: .init("thread"))
@@ -32,6 +33,7 @@ struct MessageList: NSViewRepresentable {
 
         let scroll = NSScrollView()
         scroll.documentView = table
+        scroll.contentInsets = NSEdgeInsets(top: 2, left: 0, bottom: 8, right: 0)
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.automaticallyAdjustsContentInsets = false
@@ -51,8 +53,9 @@ struct MessageList: NSViewRepresentable {
             c.reload(full: false)
         }
         c.lastRevision = model.listRevision
-        if model.openThread == nil, let table = c.table, table.window?.firstResponder !== table, c.wantsFocus {
-            c.wantsFocus = false
+        if let table = c.table, c.focusRequest != model.focusListRequest || c.wantsFocus {
+            c.focusRequest = model.focusListRequest
+            c.wantsFocus = table.window == nil
             table.window?.makeFirstResponder(table)
         }
     }
@@ -64,6 +67,7 @@ struct MessageList: NSViewRepresentable {
         var lastQuery = ""
         var lastRevision = -1
         var wantsFocus = true
+        var focusRequest = 0
         private var count = 0
         private var pages: [Int: [ThreadRow]] = [:]
         private let pageSize = 100
@@ -105,11 +109,21 @@ struct MessageList: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let cell = (tableView.makeView(withIdentifier: ThreadCell.id, owner: nil) as? ThreadCell) ?? ThreadCell()
             if let r = self.row(at: row) { cell.show(r) }
+            cell.isCursor = tableView.isRowSelected(row)
             return cell
         }
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-            (tableView.makeView(withIdentifier: ThreadRowView.id, owner: nil) as? ThreadRowView) ?? ThreadRowView()
+            let view = (tableView.makeView(withIdentifier: ThreadRowView.id, owner: nil) as? ThreadRowView) ?? ThreadRowView()
+            view.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
+            return view
+        }
+
+        /// The reader follows the cursor, so j and k read through the list.
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard let table, table.selectedRow >= 0, let r = row(at: table.selectedRow) else { return }
+            model.cursor = (table.selectedRow, count)
+            if model.selectedThreadID != r.threadId { model.open(threadID: r.threadId) }
         }
 
         /// Scrolls through the whole list in screen-sized steps, one step per
@@ -152,7 +166,6 @@ struct MessageList: NSViewRepresentable {
             let next = max(0, min(count - 1, table.selectedRow + delta))
             table.selectRowIndexes([next], byExtendingSelection: false)
             table.scrollRowToVisible(next)
-            if model.openThread != nil, let r = row(at: next) { model.open(threadID: r.threadId) }
         }
 
         /// Single-key shortcuts for the list. Returns false to let AppKit handle the key.
@@ -161,7 +174,11 @@ struct MessageList: NSViewRepresentable {
             case ("j", _): move(1)
             case ("k", _): move(-1)
             case (_, 36), (_, 76), ("o", _): openSelected()
-            case (_, 53): model.closeThread()
+            case (_, 48) where model.showsCategories:
+                let all = Category.allCases
+                let i = all.firstIndex(of: model.category) ?? 0
+                let step = event.modifierFlags.contains(.shift) ? all.count - 1 : 1
+                model.category = all[(i + step) % all.count]
             default: return false
             }
             return true
@@ -176,10 +193,15 @@ final class KeyTableView: NSTableView {
         if event.modifierFlags.intersection([.command, .control, .option]).isEmpty, onKey?(event) == true { return }
         super.keyDown(with: event)
     }
+
+    override var acceptsFirstResponder: Bool { true }
 }
 
+/// Graphite's cursor row: a soft fill and an accent caret. Unread rows get a
+/// neutral dot; the accent is reserved for keyboard focus.
 final class ThreadRowView: NSTableRowView {
     static let id = NSUserInterfaceItemIdentifier("ThreadRowView")
+    var unread = false { didSet { needsDisplay = true } }
 
     init() {
         super.init(frame: .zero)
@@ -188,9 +210,32 @@ final class ThreadRowView: NSTableRowView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    override var isSelected: Bool {
+        didSet { subviews.lazy.compactMap { $0 as? ThreadCell }.first?.isCursor = isSelected }
+    }
+
+    override var isEmphasized: Bool {
+        get { false }
+        set {}
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard unread, !isSelected else { return }
+        Theme.text.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 15, y: bounds.midY - 3, width: 6, height: 6)).fill()
+    }
+
     override func drawSelection(in dirtyRect: NSRect) {
-        Theme.selection.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 1), xRadius: 6, yRadius: 6).fill()
+        Theme.fill.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
+        Theme.accent.setFill()
+        let caret = NSBezierPath()
+        let y = bounds.midY
+        caret.move(to: NSPoint(x: 9, y: y - 6))
+        caret.line(to: NSPoint(x: 15, y: y))
+        caret.line(to: NSPoint(x: 9, y: y + 6))
+        caret.close()
+        caret.fill()
     }
 }
 
@@ -199,7 +244,18 @@ final class ThreadCell: NSTableCellView {
     private let sender = NSTextField(labelWithString: "")
     private let subject = NSTextField(labelWithString: "")
     private let date = NSTextField(labelWithString: "")
-    private let dot = NSView()
+    private let clip = NSImageView()
+    private let keys = NSStackView()
+    private var row: ThreadRow?
+
+    var isCursor = false {
+        didSet {
+            guard isCursor != oldValue else { return }
+            keys.isHidden = !isCursor
+            date.isHidden = isCursor
+            clip.isHidden = isCursor || !(row?.hasAttachments ?? false)
+        }
+    }
 
     init() {
         super.init(frame: .zero)
@@ -210,52 +266,94 @@ final class ThreadCell: NSTableCellView {
             f.translatesAutoresizingMaskIntoConstraints = false
             addSubview(f)
         }
-        dot.wantsLayer = true
-        dot.layer?.cornerRadius = 3
-        dot.layer?.backgroundColor = Theme.accent.cgColor
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(dot)
+        clip.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Has attachments")
+        clip.symbolConfiguration = .init(pointSize: 11, weight: .regular)
+        clip.contentTintColor = Theme.text3
+        keys.orientation = .horizontal
+        keys.spacing = 4
+        for k in ["E", "H", "R"] { keys.addArrangedSubview(KeyCapView(key: k)) }
+        keys.isHidden = true
+        for v in [clip, keys] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
         sender.setContentCompressionResistancePriority(.required, for: .horizontal)
         date.setContentCompressionResistancePriority(.required, for: .horizontal)
+        subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         date.alignment = .right
         NSLayoutConstraint.activate([
-            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: 6),
-            dot.heightAnchor.constraint(equalToConstant: 6),
-            sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
+            sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
             sender.widthAnchor.constraint(equalToConstant: Theme.senderWidth),
             sender.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.leadingAnchor.constraint(equalTo: sender.trailingAnchor, constant: 12),
             subject.centerYAnchor.constraint(equalTo: centerYAnchor),
-            subject.trailingAnchor.constraint(lessThanOrEqualTo: date.leadingAnchor, constant: -12),
-            date.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            subject.trailingAnchor.constraint(lessThanOrEqualTo: clip.leadingAnchor, constant: -8),
+            clip.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10),
+            clip.centerYAnchor.constraint(equalTo: centerYAnchor),
+            clip.widthAnchor.constraint(equalToConstant: 14),
+            date.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+            date.widthAnchor.constraint(equalToConstant: 52),
             date.centerYAnchor.constraint(equalTo: centerYAnchor),
+            keys.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            keys.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func show(_ r: ThreadRow) {
+        row = r
         let unread = r.unreadCount > 0
-        dot.isHidden = !unread
-        let name = r.fromName.isEmpty ? r.fromAddr : r.fromName
-        sender.attributedStringValue = NSAttributedString(string: r.messageCount > 1 ? "\(name)  \(r.messageCount)" : name, attributes: [
-            .font: unread ? Theme.font(weight: .semibold) : Theme.font(weight: .regular),
-            .foregroundColor: unread ? Theme.text : Theme.secondaryText,
+        let name = NSMutableAttributedString(string: r.fromName.isEmpty ? r.fromAddr : r.fromName, attributes: [
+            .font: Theme.font(weight: unread ? .semibold : .regular),
+            .foregroundColor: unread ? Theme.text : Theme.text2,
         ])
+        if r.messageCount > 1 {
+            name.append(NSAttributedString(string: "  \(r.messageCount)", attributes: [
+                .font: Theme.font(11.5), .foregroundColor: Theme.text3,
+            ]))
+        }
+        sender.attributedStringValue = name
         let line = NSMutableAttributedString(string: r.subject.isEmpty ? "(no subject)" : r.subject, attributes: [
-            .font: unread ? Theme.font(weight: .semibold) : Theme.font(weight: .regular),
-            .foregroundColor: Theme.text,
+            .font: Theme.font(weight: unread ? .semibold : .regular),
+            .foregroundColor: unread ? Theme.text : Theme.text2,
         ])
         if !r.snippet.isEmpty {
             line.append(NSAttributedString(string: "  " + r.snippet, attributes: [
-                .font: Theme.font(weight: .regular), .foregroundColor: Theme.tertiaryText,
+                .font: Theme.font(), .foregroundColor: Theme.text3,
             ]))
         }
         subject.attributedStringValue = line
         date.attributedStringValue = NSAttributedString(string: Theme.shortDate(r.date), attributes: [
-            .font: Theme.monoFont, .foregroundColor: Theme.tertiaryText,
+            .font: Theme.timeFont, .foregroundColor: Theme.text3,
         ])
+        clip.isHidden = isCursor || !r.hasAttachments
+    }
+}
+
+/// AppKit twin of `KeyCap`, outlined in the accent because it only shows on the cursor row.
+final class KeyCapView: NSView {
+    private let key: String
+
+    init(key: String) {
+        self.key = key
+        super.init(frame: NSRect(x: 0, y: 0, width: 17, height: 17))
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 17).isActive = true
+        heightAnchor.constraint(equalToConstant: 17).isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.accent.withAlphaComponent(0.55).setStroke()
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        path.lineWidth = 1
+        path.stroke()
+        let text = NSAttributedString(string: key, attributes: [
+            .font: NSFont.systemFont(ofSize: 10.5, weight: .medium), .foregroundColor: Theme.accentText,
+        ])
+        let size = text.size()
+        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
     }
 }

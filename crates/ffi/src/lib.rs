@@ -39,6 +39,7 @@ type Result<T> = std::result::Result<T, CoreError>;
 pub struct AccountInfo {
     pub id: i64,
     pub kind: String,
+    pub provider: String,
     pub address: String,
     pub display_name: String,
 }
@@ -151,6 +152,7 @@ impl Core {
             .map(|a| AccountInfo {
                 id: a.id.0,
                 kind: a.kind.to_string(),
+                provider: a.provider_label().to_string(),
                 address: a.address,
                 display_name: a.display_name,
             })

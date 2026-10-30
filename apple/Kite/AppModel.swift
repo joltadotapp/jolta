@@ -5,20 +5,44 @@ import Observation
 /// What the message list shows. Every list is a query in the core's search language.
 enum ListSource: Hashable {
     case unifiedInbox
+    /// One role across all accounts: sent, drafts, archive, trash, spam.
+    case role(String)
     case mailbox(id: Int64, name: String)
+    case allMail
 
     var query: String {
         switch self {
         case .unifiedInbox: "in:inbox"
-        case .mailbox(let id, _) where id < 0: ""
+        case .role(let role): "in:\(role)"
         case .mailbox(let id, _): "mailbox:\(id)"
+        case .allMail: ""
         }
     }
 
     var title: String {
         switch self {
         case .unifiedInbox: "Inbox"
+        case .role(let role): role.capitalized
         case .mailbox(_, let name): name
+        case .allMail: "All mail"
+        }
+    }
+}
+
+/// The light category bar above the inbox. Becomes the user's own split-inbox
+/// sections in M7; until then, three fixed ones.
+enum Category: String, CaseIterable, Identifiable {
+    case all = "Everything"
+    case people = "People"
+    case newsletters = "Newsletters"
+
+    var id: String { rawValue }
+
+    var query: String {
+        switch self {
+        case .all: ""
+        case .people: "-has:list"
+        case .newsletters: "has:list"
         }
     }
 }
@@ -27,6 +51,7 @@ struct AccountSection: Identifiable {
     let account: AccountInfo
     let mailboxes: [MailboxInfo]
     var id: Int64 { account.id }
+    var title: String { account.displayName.isEmpty ? account.address : account.displayName }
 }
 
 @MainActor
@@ -34,17 +59,28 @@ struct AccountSection: Identifiable {
 final class AppModel {
     let core: Core
     private(set) var accounts: [AccountSection] = []
-    var source: ListSource = .unifiedInbox { didSet { listChanged() } }
+    var source: ListSource = .unifiedInbox { didSet { category = .all; listChanged() } }
+    var category: Category = .all { didSet { listChanged() } }
     var search = "" { didSet { listChanged() } }
     /// Bumped whenever the list's contents may have changed; views reload on it.
     private(set) var listRevision = 0
     private(set) var syncing: Set<Int64> = []
+    private(set) var lastSynced: Date?
     private(set) var lastError: String?
     var openThread: ThreadView?
     var selectedThreadID: Int64?
+    /// The list cursor's row and the list length, for "3 of 120" in the reader.
+    var cursor: (row: Int, count: Int) = (0, 0)
+    /// Asks the message list to take keyboard focus (after search, for example).
+    private(set) var focusListRequest = 0
+
+    var showsCategories: Bool { source == .unifiedInbox && search.isEmpty }
 
     var query: String {
-        search.trimmingCharacters(in: .whitespaces).isEmpty ? source.query : "\(source.query) \(search)"
+        var parts = [source.query]
+        if showsCategories { parts.append(category.query) }
+        parts.append(search.trimmingCharacters(in: .whitespaces))
+        return parts.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     init() throws {
@@ -61,7 +97,7 @@ final class AppModel {
         // `-KiteSearch "subject:x" -KiteOpenFirst YES`.
         let defaults = UserDefaults.standard
         if let query = defaults.string(forKey: "KiteSearch") {
-            source = .mailbox(id: -1, name: "All mail")
+            source = .allMail
             search = query
         }
         if defaults.bool(forKey: "KiteOpenFirst"), let first = page(offset: 0, limit: 1).first {
@@ -84,6 +120,20 @@ final class AppModel {
         }
     }
 
+    /// Roles that exist in at least one account, in sidebar order.
+    var roles: [String] {
+        let present = Set(accounts.flatMap { $0.mailboxes.compactMap(\.role) })
+        return ["drafts", "sent", "archive", "spam", "trash"].filter(present.contains)
+    }
+
+    func unreadCount(_ query: String) -> Int {
+        (try? core.queryCount(query: "\(query) is:unread")).map(Int.init) ?? 0
+    }
+
+    func requestListFocus() {
+        focusListRequest += 1
+    }
+
     private func listChanged() {
         listRevision += 1
     }
@@ -97,6 +147,7 @@ final class AppModel {
             syncing.insert(id)
         case .syncFinished(let id, _):
             syncing.remove(id)
+            lastSynced = .now
         case .syncFailed(let id, let message):
             syncing.remove(id)
             lastError = message
@@ -124,10 +175,6 @@ final class AppModel {
                 lastError = "\(error)"
             }
         }
-    }
-
-    func closeThread() {
-        openThread = nil
     }
 }
 

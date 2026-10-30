@@ -56,6 +56,13 @@ enum Command {
         #[arg(long)]
         raw: bool,
     },
+    /// Store .eml files in a mailbox without a server (fixtures, tests).
+    Import {
+        account: String,
+        /// Mailbox id, or a role such as inbox.
+        mailbox: String,
+        files: Vec<PathBuf>,
+    },
     /// Generate a synthetic account with this many messages.
     Gen {
         #[arg(long, default_value_t = 100_000)]
@@ -151,6 +158,20 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Show { id, raw } => show(&kite, MessageId(id), raw).await,
+        Command::Import { account, mailbox, files } => {
+            let a = kite.store.read(|c| store::find_account(c, &account))?;
+            let boxes = kite.store.read(|c| store::mailboxes(c, a.id))?;
+            let target = boxes
+                .iter()
+                .find(|b| b.id.0.to_string() == mailbox || b.role.is_some_and(|r| r.as_str() == mailbox))
+                .with_context(|| format!("no mailbox {mailbox} in {}", a.address))?;
+            for f in files {
+                let raw = std::fs::read(&f).with_context(|| format!("reading {}", f.display()))?;
+                let id = kite_core::import::import_raw(&kite, a.id, target.id, &raw)?;
+                println!("{id}  {}", f.display());
+            }
+            Ok(())
+        }
         Command::Gen { messages } => {
             let t = Instant::now();
             let id = synth::generate(&kite, messages, |n| {

@@ -1,0 +1,34 @@
+From: Hostile Sender <evil@example.com>
+To: koen@example.com
+Subject: Leak check: hostile newsletter
+Message-ID: <leak-check@kite.invalid>
+Date: Thu, 30 Oct 2026 09:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head>
+<link rel="stylesheet" href="http://127.0.0.1:18080/1.css">
+<link rel="prefetch" href="http://127.0.0.1:18080/2">
+<style>@import url(http://127.0.0.1:18080/3.css); body { background: url('http://127.0.0.1:18080/4.png'); } h1 { color: #c0392b }
+@font-face { font-family: x; src: url(http://127.0.0.1:18080/5.woff) }
+input[value^="a"] { background: url(http://127.0.0.1:18080/6) }</style>
+<meta http-equiv="refresh" content="0;url=http://127.0.0.1:18080/7">
+</head>
+<body onload="fetch('http://127.0.0.1:18080/8')">
+<h1>Hostile newsletter</h1>
+<p>Every resource in this message points at the local logging server.</p>
+<img src="http://127.0.0.1:18080/9.gif" width="1" height="1">
+<img srcset="http://127.0.0.1:18080/10.png 2x">
+<script>new Image().src = 'http://127.0.0.1:18080/11'</script>
+<iframe src="http://127.0.0.1:18080/12"></iframe>
+<object data="http://127.0.0.1:18080/13"></object>
+<embed src="http://127.0.0.1:18080/14">
+<video src="http://127.0.0.1:18080/15" poster="http://127.0.0.1:18080/16"></video>
+<audio src="http://127.0.0.1:18080/17"></audio>
+<form action="http://127.0.0.1:18080/18"><input type="image" src="http://127.0.0.1:18080/19"></form>
+<div style="background:url(http://127.0.0.1:18080/20)">styled</div>
+<table background="http://127.0.0.1:18080/21"><tr><td background="http://127.0.0.1:18080/22">cell</td></tr></table>
+<svg><image href="http://127.0.0.1:18080/23"/><use href="http://127.0.0.1:18080/24#x"/></svg>
+<a href="https://example.com/real-destination">A normal link</a>
+<a ping="http://127.0.0.1:18080/25" href="https://example.com">A link with ping</a>
+</body></html>

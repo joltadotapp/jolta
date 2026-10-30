@@ -35,6 +35,8 @@ pub enum TermKind {
     /// typed, so results update as you type.
     Text { field: Option<TextField>, text: String, phrase: bool, prefix: bool },
     HasAttachment,
+    /// Mail sent through a mailing list (it has a List-Id): newsletters.
+    HasList,
     Is(Status),
     In(String),
     Label(String),
@@ -143,7 +145,8 @@ pub fn parse(input: &str) -> Result<Query> {
             Some("subject") => text(Some(TextField::Subject)),
             Some("has") => match t.value.to_lowercase().as_str() {
                 "attachment" | "attachments" => TermKind::HasAttachment,
-                v => return Err(Error::Query(format!("has:{v} is not supported; try has:attachment"))),
+                "list" => TermKind::HasList,
+                v => return Err(Error::Query(format!("has:{v} is not supported; try has:attachment or has:list"))),
             },
             Some("is") => TermKind::Is(match t.value.to_lowercase().as_str() {
                 "unread" => Status::Unread,
@@ -224,6 +227,7 @@ mod tests {
             ]
         );
         assert_eq!(kinds("mailbox:12"), vec![(false, TermKind::Mailbox(12))]);
+        assert_eq!(kinds("-has:list"), vec![(true, TermKind::HasList)]);
         assert!(parse("mailbox:inbox").is_err());
     }
 

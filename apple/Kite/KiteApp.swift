@@ -16,11 +16,13 @@ struct KiteApp: App {
                     ProgressView()
                 }
             }
-            .frame(minWidth: 900, minHeight: 560)
+            .frame(minWidth: 1140, minHeight: 600)
             .task {
                 await ReaderPage.prepare()
                 do { model = try AppModel() } catch { failure = "Kite could not open its data: \(error)" }
             }
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1440, height: 900)
     }
 }

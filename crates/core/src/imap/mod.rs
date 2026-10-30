@@ -388,17 +388,17 @@ async fn fetch_bodies(
 
 /// The raw message, from the blob store or else downloaded now.
 pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
-    let loc = kite.store.read_async(move |c| store::message_location(c, id)).await?;
-    let Some((account_id, _, path, uid, blob)) = loc else {
-        return Err(Error::NotFound(format!("message {id}")));
-    };
-    if let Some(blob) = blob {
+    if let Some(blob) = kite.store.read_async(move |c| store::message_blob(c, id)).await? {
         if let Some(n) = blob.strip_prefix("synth:") {
             let n = n.parse().unwrap_or(0);
             return kite.store.read_async(move |c| crate::synth::raw_message(c, id, n)).await;
         }
         return kite.blobs.get(&blob);
     }
+    let loc = kite.store.read_async(move |c| store::message_location(c, id)).await?;
+    let Some((account_id, _, path, uid, _)) = loc else {
+        return Err(Error::NotFound(format!("message {id}")));
+    };
     let account = kite.store.read_async(move |c| store::account(c, account_id)).await?;
     let mut session = connect_account(&account).await?;
     session.examine(&path).await?;

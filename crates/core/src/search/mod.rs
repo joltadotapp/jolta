@@ -138,6 +138,7 @@ fn plan(q: &Query) -> Sql {
                 format!("EXISTS (SELECT 1 FROM message_mailbox x WHERE x.message_id = m.id AND x.mailbox_id = {id})")
             }
             TermKind::HasAttachment => "m.has_attachments = 1".into(),
+            TermKind::HasList => "m.list_id IS NOT NULL".into(),
             TermKind::Is(Status::Unread) => format!("(m.flags & {}) = 0", Flags::SEEN),
             TermKind::Is(Status::Read) => format!("(m.flags & {}) != 0", Flags::SEEN),
             TermKind::Is(Status::Flagged) => format!("(m.flags & {}) != 0", Flags::FLAGGED),

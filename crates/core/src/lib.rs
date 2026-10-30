@@ -1,5 +1,6 @@
 pub mod blobs;
 pub mod imap;
+pub mod import;
 pub mod mime;
 pub mod model;
 pub mod reader;

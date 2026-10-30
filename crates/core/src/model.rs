@@ -124,6 +124,23 @@ pub struct Account {
     pub secret_ref: String,
 }
 
+impl Account {
+    /// Who hosts the account, for display: "iCloud", "Fastmail", "Google".
+    pub fn provider_label(&self) -> &'static str {
+        let host = self.imap_host.to_ascii_lowercase();
+        match self.kind {
+            AccountKind::Gmail => "Google",
+            AccountKind::Graph => "Microsoft 365",
+            AccountKind::Imap if host.is_empty() => "Synthetic",
+            AccountKind::Imap if host.ends_with("mail.me.com") => "iCloud",
+            AccountKind::Imap if host.contains("fastmail") => "Fastmail",
+            AccountKind::Imap if host.ends_with("gmail.com") => "Google",
+            AccountKind::Imap if host == "127.0.0.1" || host == "localhost" => "Local",
+            AccountKind::Imap => "IMAP",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Mailbox {
     pub id: MailboxId,
