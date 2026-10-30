@@ -39,24 +39,6 @@ enum ListSource: Hashable {
     }
 }
 
-/// The light category bar above the inbox. Becomes the user's own split-inbox
-/// sections in M7; until then, three fixed ones.
-enum Category: String, CaseIterable, Identifiable {
-    case all = "Everything"
-    case people = "People"
-    case newsletters = "Newsletters"
-
-    var id: String { rawValue }
-
-    var query: String {
-        switch self {
-        case .all: ""
-        case .people: "-has:list"
-        case .newsletters: "has:list"
-        }
-    }
-}
-
 struct AccountSection: Identifiable {
     let account: AccountInfo
     let mailboxes: [MailboxInfo]
@@ -69,8 +51,16 @@ struct AccountSection: Identifiable {
 final class AppModel {
     let core: Core
     private(set) var accounts: [AccountSection] = []
-    var source: ListSource = .unifiedInbox { didSet { category = .all; listChanged() } }
-    var category: Category = .all { didSet { listChanged() } }
+    var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged() } }
+    /// The split-inbox section shown over the inbox; nil shows everything.
+    var section: SectionInfo? { didSet { listChanged() } }
+    private(set) var sections: [SectionInfo] = []
+    private(set) var snoozed: [SnoozeInfo] = []
+    /// The thread under the list cursor.
+    var cursorRow: ThreadRow?
+    /// The ⌘K palette, when open.
+    var palette: PaletteMode?
+    var showsHelp = false
     var search = "" { didSet { listChanged() } }
     /// Bumped whenever the list's contents may have changed; views reload on it.
     private(set) var listRevision = 0
@@ -90,11 +80,11 @@ final class AppModel {
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
 
-    var showsCategories: Bool { source == .unifiedInbox && search.isEmpty }
+    var showsSections: Bool { source == .unifiedInbox && search.isEmpty && !sections.isEmpty }
 
     var query: String {
         var parts = [source.query]
-        if showsCategories { parts.append(category.query) }
+        if showsSections, let section { parts.append(section.query) }
         parts.append(search.trimmingCharacters(in: .whitespaces))
         return parts.filter { !$0.isEmpty }.joined(separator: " ")
     }
@@ -122,6 +112,13 @@ final class AppModel {
         if let query = defaults.string(forKey: "KiteSearch") {
             source = .allMail
             search = query
+        }
+        // `-KitePalette commands|snooze|move` opens the palette, for screenshots.
+        switch defaults.string(forKey: "KitePalette") {
+        case "commands": palette = .commands
+        case "snooze": palette = .snooze
+        case "move": palette = .move
+        default: break
         }
         if defaults.bool(forKey: "KiteOpenFirst"), let first = page(offset: 0, limit: 1).first {
             open(threadID: first.threadId)
@@ -153,15 +150,44 @@ final class AppModel {
     func reloadAccounts() {
         do {
             accounts = try core.accounts().map { AccountSection(account: $0, mailboxes: try core.mailboxes(accountId: $0.id)) }
+            sections = try core.sections()
+            snoozed = try core.snoozed()
+            if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }
         } catch {
             lastError = "\(error)"
         }
     }
 
+    func saveSections(_ list: [SectionInfo]) throws {
+        try core.setSections(sections: list)
+        reloadAccounts()
+    }
+
+    /// Cycles the split-inbox tabs: Everything, then each section.
+    func nextSection(backwards: Bool = false) {
+        guard showsSections else { return }
+        let all: [SectionInfo?] = [nil] + sections.map { Optional($0) }
+        let i = all.firstIndex { $0?.id == section?.id } ?? 0
+        section = all[(i + (backwards ? all.count - 1 : 1)) % all.count]
+    }
+
+    func toggleVIP() {
+        guard let address = cursorRow?.fromAddr, !address.isEmpty else { return }
+        let vip = (try? core.isVip(address: address)) ?? false
+        try? core.setVip(address: address, vip: !vip)
+        show(Toast(text: vip ? "\(address) is no longer a VIP" : "\(address) is now a VIP", undo: nil))
+    }
+
+    func snooze(until: Int64, label: String) {
+        act(.snooze(until: until), label: "Snoozed until \(label)")
+    }
+
+    var utcOffset: Int32 { Int32(TimeZone.current.secondsFromGMT()) }
+
     /// Roles that exist in at least one account, in sidebar order.
     var roles: [String] {
         let present = Set(accounts.flatMap { $0.mailboxes.compactMap(\.role) })
-        return ["drafts", "sent", "archive", "spam", "trash"].filter(present.contains)
+        return ["snoozed", "drafts", "sent", "archive", "spam", "trash"].filter(present.contains)
     }
 
     func unreadCount(_ query: String) -> Int {
@@ -170,6 +196,13 @@ final class AppModel {
 
     func requestListFocus() {
         focusListRequest += 1
+    }
+
+    /// Asks the search field to take keyboard focus.
+    private(set) var focusSearchRequest = 0
+
+    func requestSearchFocus() {
+        focusSearchRequest += 1
     }
 
     private func listChanged() {
@@ -194,6 +227,8 @@ final class AppModel {
             notifier.post(threadID: threadID, from: from, subject: subject)
         case .actionFailed(let message):
             show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
+        case .woke(_, _, let subject):
+            show(Toast(text: "Back from snooze: \(subject)", undo: nil))
         case .sent(_, let subject):
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
         case .sendFailed(let message):

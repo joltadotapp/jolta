@@ -90,6 +90,8 @@ pub enum CoreEvent {
     SyncFailed { account_id: i64, message: String },
     NewMail { account_id: i64, thread_id: i64, from: String, subject: String },
     Sent { account_id: i64, subject: String },
+    /// A snoozed thread came back to the inbox.
+    Woke { account_id: i64, thread_id: i64, subject: String },
     SendFailed { message: String },
     /// The server refused an action for good; the change was rolled back.
     ActionFailed { message: String },
@@ -185,6 +187,29 @@ pub enum ThreadAction {
     Flag,
     Unflag,
     MoveTo { mailbox_id: i64 },
+    /// Hide the thread until this unix time.
+    Snooze { until: i64 },
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct SectionInfo {
+    pub id: i64,
+    pub name: String,
+    pub query: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct SnoozeInfo {
+    pub thread_id: i64,
+    pub account_id: i64,
+    pub wake_at: i64,
+    pub subject: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct SnoozeChoice {
+    pub label: String,
+    pub at: i64,
 }
 
 /// The list an action is taken from.
@@ -216,6 +241,7 @@ impl From<ThreadAction> for Action {
             ThreadAction::Flag => Action::Flag,
             ThreadAction::Unflag => Action::Unflag,
             ThreadAction::MoveTo { mailbox_id } => Action::MoveTo(MailboxId(mailbox_id)),
+            ThreadAction::Snooze { until } => Action::Snooze(until),
         }
     }
 }
@@ -382,6 +408,9 @@ impl Core {
                 }
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
                 Event::Sent { account, subject } => CoreEvent::Sent { account_id: account.0, subject },
+                Event::Woke { account, thread, subject } => {
+                    CoreEvent::Woke { account_id: account.0, thread_id: thread.0, subject }
+                }
                 Event::SendFailed(message) => CoreEvent::SendFailed { message },
             };
             listener.on_event(event);
@@ -468,6 +497,57 @@ impl Core {
             .map_err(Into::into)
     }
 
+    pub fn sections(&self) -> Result<Vec<SectionInfo>> {
+        Ok(self
+            .kite
+            .store
+            .read(store::sections)?
+            .into_iter()
+            .map(|s| SectionInfo { id: s.id, name: s.name, query: s.query })
+            .collect())
+    }
+
+    /// Replaces the split-inbox sections, in order. Each query must parse.
+    pub fn set_sections(&self, sections: Vec<SectionInfo>) -> Result<()> {
+        for s in &sections {
+            search::parse(&s.query)?;
+        }
+        let list: Vec<(String, String)> = sections.into_iter().map(|s| (s.name, s.query)).collect();
+        self.kite.store.write(|tx| store::set_sections(tx, &list))?;
+        self.changed();
+        Ok(())
+    }
+
+    pub fn set_vip(&self, address: String, vip: bool) -> Result<()> {
+        self.kite.store.write(|tx| store::set_vip(tx, &address, vip))?;
+        self.changed();
+        Ok(())
+    }
+
+    pub fn is_vip(&self, address: String) -> Result<bool> {
+        Ok(self.kite.store.read(|c| store::is_vip(c, &address))?)
+    }
+
+    /// Sleeping threads, soonest first.
+    pub fn snoozed(&self) -> Result<Vec<SnoozeInfo>> {
+        Ok(self
+            .kite
+            .store
+            .read(store::snoozed)?
+            .into_iter()
+            .map(|s| SnoozeInfo { thread_id: s.thread.0, account_id: s.account.0, wake_at: s.wake_at, subject: s.subject })
+            .collect())
+    }
+
+    pub fn snooze_presets(&self, utc_offset: i32) -> Vec<SnoozeChoice> {
+        kite_core::when::presets(now(), utc_offset).into_iter().map(|(label, at)| SnoozeChoice { label, at }).collect()
+    }
+
+    /// A snooze time typed in plain words, or nothing if it makes no sense.
+    pub fn parse_time(&self, text: String, utc_offset: i32) -> Option<i64> {
+        kite_core::when::parse(&text, now(), utc_offset)
+    }
+
     pub fn sync_now(&self) {
         if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             engine.sync_now();
@@ -475,7 +555,17 @@ impl Core {
     }
 }
 
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
 impl Core {
+    /// Drops the cached list order and tells the app that lists changed.
+    fn changed(&self) {
+        *self.order.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.listener.on_event(CoreEvent::ListsChanged);
+    }
+
     fn running_engine(&self) -> Result<Arc<Engine>> {
         self.engine
             .lock()

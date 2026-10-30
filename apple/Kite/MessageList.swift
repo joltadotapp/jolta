@@ -136,6 +136,7 @@ struct MessageList: NSViewRepresentable {
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard let table, table.selectedRow >= 0, let r = row(at: table.selectedRow) else { return }
             model.cursor = (table.selectedRow, count)
+            model.cursorRow = r
             if model.selectedThreadID != r.threadId { model.open(threadID: r.threadId) }
         }
 
@@ -181,44 +182,32 @@ struct MessageList: NSViewRepresentable {
             table.scrollRowToVisible(next)
         }
 
-        private func current() -> ThreadRow? {
-            guard let table, table.selectedRow >= 0 else { return nil }
-            return row(at: table.selectedRow)
-        }
-
-        private func act(_ action: ThreadAction, _ label: String) {
-            guard let r = current() else { return }
-            model.act(action, label: label, threadID: r.threadId)
-        }
-
-        /// Single-key shortcuts for the list. Returns false to let AppKit handle the key.
+        /// Keys typed while the list has focus, looked up in the keymap.
+        /// `g` starts a two-key sequence. Returns false to let AppKit have it.
         func handle(_ event: NSEvent) -> Bool {
-            switch (event.charactersIgnoringModifiers, event.keyCode) {
-            case ("j", _): move(1)
-            case ("k", _): move(-1)
-            case (_, 36), (_, 76), ("o", _): openSelected()
-            case ("e", _): act(.archive, "Archived")
-            case ("#", _): act(.trash, "Moved to Trash")
-            case ("u", _):
-                guard let r = current() else { return true }
-                if r.unreadCount > 0 { act(.markRead, "Marked read") } else { act(.markUnread, "Marked unread") }
-            case ("s", _):
-                guard let r = current() else { return true }
-                if r.flagged { act(.unflag, "Unstarred") } else { act(.flag, "Starred") }
-            case ("z", _): model.undo()
-            case ("c", _): model.startCompose()
-            case ("r", _): if let r = current() { model.reply(.reply, threadID: r.threadId) }
-            case ("a", _): if let r = current() { model.reply(.replyAll, threadID: r.threadId) }
-            case ("f", _): if let r = current() { model.reply(.forward, threadID: r.threadId) }
-            case (_, 48) where model.showsCategories:
-                let all = Category.allCases
-                let i = all.firstIndex(of: model.category) ?? 0
-                let step = event.modifierFlags.contains(.shift) ? all.count - 1 : 1
-                model.category = all[(i + step) % all.count]
-            default: return false
+            switch event.keyCode {
+            case 36, 76: openSelected(); return true
+            case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true
+            default: break
+            }
+            guard let typed = event.charactersIgnoringModifiers, !typed.isEmpty else { return false }
+            if prefix == nil, typed == "g" {
+                prefix = "g"
+                return true
+            }
+            let after = prefix
+            prefix = nil
+            guard let command = Command.forKey(typed, after: after) else { return after != nil }
+            switch command {
+            case .next: move(1)
+            case .previous: move(-1)
+            case .open: openSelected()
+            default: model.run(command)
             }
             return true
         }
+
+        private var prefix: String?
     }
 }
 

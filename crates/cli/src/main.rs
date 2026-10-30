@@ -99,7 +99,7 @@ enum Command {
         /// Undo the action right after it reaches the server.
         #[arg(long)]
         undo: bool,
-        /// For snooze: when to wake, in plain words ("tomorrow 9am", "in 2h").
+        /// For snooze: when to wake, in plain words ("tomorrow 9am", "in 2h"), in UTC.
         #[arg(long)]
         until: Option<String>,
     },

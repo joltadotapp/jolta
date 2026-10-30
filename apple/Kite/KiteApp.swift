@@ -26,6 +26,21 @@ struct KiteApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
+        .commands {
+            CommandMenu("Go") {
+                Button("Command Palette") { model?.palette = .commands }
+                    .keyboardShortcut("k")
+                Button("Keyboard Shortcuts") { model?.showsHelp.toggle() }
+                    .keyboardShortcut("/", modifiers: .command)
+                Divider()
+                Button("Sync Now") { model?.core.syncNow() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+        }
+
+        Settings {
+            SettingsView(model: model)
+        }
 
         MenuBarExtra {
             MenuBarContent(model: model)

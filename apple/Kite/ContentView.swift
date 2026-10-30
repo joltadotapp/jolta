@@ -21,6 +21,22 @@ struct ContentView: View {
         .foregroundStyle(Color(Theme.text))
         .font(.system(size: 13))
         .ignoresSafeArea()
+        .overlay {
+            if model.palette != nil || model.showsHelp {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .onTapGesture { model.palette = nil; model.showsHelp = false }
+            }
+        }
+        .overlay(alignment: .top) {
+            if let mode = model.palette {
+                PaletteView(model: model, mode: mode)
+                    .id(mode)
+                    .padding(.top, 110)
+            } else if model.showsHelp {
+                HelpView(model: model).padding(.top, 110)
+            }
+        }
     }
 }
 
@@ -41,6 +57,25 @@ struct Sidebar: View {
                             NavRow(icon: Self.icon(role), title: role.capitalized,
                                    count: role == "drafts" ? 0 : model.unreadCount("in:\(role)"),
                                    selected: model.source == .role(role)) { model.source = .role(role) }
+                        }
+                    }
+                    if !model.snoozed.isEmpty {
+                        GroupLabel("Next to wake")
+                        ForEach(model.snoozed.prefix(5), id: \.threadId) { s in
+                            Button { model.source = .role("snoozed"); model.open(threadID: s.threadId) } label: {
+                                HStack(spacing: 10) {
+                                    Text(Self.wake(s.wakeAt))
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(Color(Theme.text3))
+                                        .frame(width: 74, alignment: .leading)
+                                    Text(s.subject).lineLimit(1).foregroundStyle(Color(Theme.text2))
+                                }
+                                .font(.system(size: 12))
+                                .padding(.horizontal, 10)
+                                .frame(height: 24)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     if !model.accounts.isEmpty {
@@ -66,8 +101,30 @@ struct Sidebar: View {
         }
     }
 
+    private static let wakeTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    private static let wakeDay: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE HH:mm")
+        return f
+    }()
+
+    /// `14:00` today, `Fri 08` this week, `3 Nov` later.
+    static func wake(_ unix: Int64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(unix))
+        if Calendar.current.isDateInToday(date) { return wakeTime.string(from: date) }
+        if date.timeIntervalSinceNow < 6 * 86_400 { return wakeDay.string(from: date) }
+        return Theme.shortDate(unix)
+    }
+
     static func icon(_ role: String) -> String {
         switch role {
+        case "snoozed": "clock"
+        case "inbox": "tray"
         case "drafts": "pencil"
         case "sent": "paperplane"
         case "archive": "archivebox"
@@ -196,8 +253,8 @@ struct ListColumn: View {
             .padding(.leading, 22)
             .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
-            if model.showsCategories {
-                CategoryBar(model: model)
+            if model.showsSections {
+                SectionBar(model: model)
             }
             MessageList(model: model)
                 .overlay(alignment: .bottom) {
@@ -213,19 +270,20 @@ struct ListColumn: View {
     }
 }
 
-struct CategoryBar: View {
+struct SectionBar: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        let tabs: [SectionInfo?] = [nil] + model.sections.map { Optional($0) }
         HStack(spacing: 18) {
-            ForEach(Category.allCases) { c in
-                let selected = model.category == c
-                Button { model.category = c } label: {
+            ForEach(tabs, id: \.?.id) { c in
+                let selected = model.section?.id == c?.id
+                Button { model.section = c } label: {
                     HStack(spacing: 5) {
-                        Text(c.rawValue)
+                        Text(c?.name ?? "Everything")
                             .fontWeight(selected ? .medium : .regular)
                             .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
-                        let n = model.unreadCount(["in:inbox", c.query].joined(separator: " "))
+                        let n = model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " "))
                         if n > 0 {
                             Text("\(n)").font(.system(size: 11.5).monospacedDigit()).foregroundStyle(Color(Theme.text3))
                         }
@@ -269,9 +327,7 @@ struct SearchField: View {
         .padding(.trailing, 5)
         .frame(width: 196, height: 28)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
-        .background {
-            Button("") { focused = true }.keyboardShortcut("/", modifiers: []).hidden()
-        }
+        .onChange(of: model.focusSearchRequest) { focused = true }
     }
 }
 
