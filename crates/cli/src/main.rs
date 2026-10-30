@@ -68,6 +68,9 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         messages: u64,
     },
+    /// Change a mailbox on the server directly, as another mail client would.
+    #[command(subcommand)]
+    Dev(DevCommand),
     /// Time list and search queries over the store.
     Bench {
         #[arg(long, default_value_t = 30)]
@@ -100,6 +103,24 @@ enum AccountCommand {
     },
     List,
     Remove { account: String },
+}
+
+#[derive(Subcommand)]
+enum DevCommand {
+    /// APPEND .eml files to a mailbox (by server path, such as INBOX).
+    Append {
+        account: String,
+        mailbox: String,
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        seen: bool,
+    },
+    /// UID SEARCH, printing matching UIDs. Example criteria: SUBJECT "test".
+    Search { account: String, mailbox: String, criteria: Vec<String> },
+    /// UID STORE. Example: kite dev store 3 INBOX 12,14 '+FLAGS (\Flagged)'
+    Store { account: String, mailbox: String, uids: String, change: String },
+    /// Mark UIDs deleted and expunge them.
+    Expunge { account: String, mailbox: String, uids: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -183,6 +204,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Bench { runs } => bench(&kite, runs),
+        Command::Dev(cmd) => dev(&kite, cmd).await,
     }
 }
 
@@ -264,6 +286,46 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
+    use futures::TryStreamExt;
+    let (account, mailbox) = match &cmd {
+        DevCommand::Append { account, mailbox, .. }
+        | DevCommand::Search { account, mailbox, .. }
+        | DevCommand::Store { account, mailbox, .. }
+        | DevCommand::Expunge { account, mailbox, .. } => (account.clone(), mailbox.clone()),
+    };
+    let a = kite.store.read(|c| store::find_account(c, &account))?;
+    let mut session = imap::connect_account(&a).await?;
+    match cmd {
+        DevCommand::Append { files, seen, .. } => {
+            for f in files {
+                let raw = std::fs::read(&f).with_context(|| format!("reading {}", f.display()))?;
+                session.append(&mailbox, if seen { Some("(\\Seen)") } else { None }, None, &raw).await?;
+                println!("appended {}", f.display());
+            }
+        }
+        DevCommand::Search { criteria, .. } => {
+            session.select(&mailbox).await?;
+            let mut uids: Vec<u32> = session.uid_search(criteria.join(" ")).await?.into_iter().collect();
+            uids.sort_unstable();
+            println!("{}", uids.iter().map(u32::to_string).collect::<Vec<_>>().join(" "));
+        }
+        DevCommand::Store { uids, change, .. } => {
+            session.select(&mailbox).await?;
+            let n = session.uid_store(&uids, &change).await?.try_collect::<Vec<_>>().await?.len();
+            println!("changed {n} message(s)");
+        }
+        DevCommand::Expunge { uids, .. } => {
+            session.select(&mailbox).await?;
+            session.uid_store(&uids, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;
+            let n = session.expunge().await?.try_collect::<Vec<_>>().await?.len();
+            println!("expunged {n} message(s)");
+        }
+    }
+    session.logout().await.ok();
+    Ok(())
 }
 
 fn read_password(from_stdin: bool, address: &str) -> Result<String> {
