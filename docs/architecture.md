@@ -73,7 +73,7 @@ One model covers Gmail labels, IMAP folders and Graph folders. A message belongs
 | `agent`, `agent_grant`, `audit` | MCP clients, their permissions, and every action they took | |
 | `message_fts` | FTS5, contentless: subject, from, to, body text | Rowid is `message.id`. |
 
-Raw RFC 822 messages are stored as files under the app container, named by SHA-256. Headers and snippets go to SQLite on first sync; bodies download on demand and in the background for recent mail.
+Raw RFC 822 messages are stored as files in the data folder (`~/Library/Application Support/Kite/blobs`), named by SHA-256. The SQLite file sits next to them; see `decisions.md` for why the folder is not the app group container. Headers and snippets go to SQLite on first sync; bodies download on demand and in the background for recent mail.
 
 ## Sync
 
@@ -118,7 +118,7 @@ The Swift side keeps a page cache per visible list and asks for rows by index as
 
 ## MCP
 
-The core runs the MCP server and listens on `kite.sock` in the app group container while the app runs. An agent's config points at `Kite.app/Contents/MacOS/kite-mcp`, which only copies bytes between stdio and the socket. Tools in the MVP are `search`, `read_thread`, `list_mailboxes`, `create_draft`, `label`, `archive` and `snooze`. Every tool result wraps email content in a block marked as untrusted data. Each agent has grants per account and per tool, and every call is written to `audit`. Sending is not an agent tool; an agent can only create a draft that the user sends.
+The core runs the MCP server and listens on `kite.sock` in the app group container while the app runs. It speaks MCP's JSON-RPC directly (one message per line; `initialize`, `tools/list`, `tools/call`, `ping`) instead of using rmcp: tools are all Kite needs, and the hand-written server avoids rmcp's fast-moving 3.x API. An agent's config points at `Kite.app/Contents/MacOS/kite-mcp`, which only copies bytes between stdio and the socket. Tools in the MVP are `search`, `read_thread`, `list_mailboxes`, `create_draft`, `label`, `archive` and `snooze`. Every tool result wraps email content in a block marked as untrusted data. Each agent has grants per account and per tool, and every call is written to `audit`. Sending is not an agent tool; an agent can only create a draft that the user sends.
 
 ## Performance budgets
 
