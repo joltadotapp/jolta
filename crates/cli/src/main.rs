@@ -64,6 +64,8 @@ enum Command {
         mailbox: String,
         files: Vec<PathBuf>,
     },
+    /// Time opening a thread for the reader, phase by phase.
+    Open { thread: i64 },
     /// Generate a synthetic account with this many messages.
     Gen {
         #[arg(long, default_value_t = 100_000)]
@@ -239,6 +241,22 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Show { id, raw } => show(&kite, MessageId(id), raw).await,
+        Command::Open { thread } => {
+            let t = Instant::now();
+            let (_, messages) = kite.store.read(|c| kite_core::reader::thread_messages(c, kite_core::ThreadId(thread)))?;
+            println!("load rows: {:.2} ms ({} messages)", t.elapsed().as_secs_f64() * 1000.0, messages.len());
+            for m in &messages {
+                let t = Instant::now();
+                let raw = imap::message_source(&kite, m.id).await?;
+                println!("  source {}: {:.2} ms, {} bytes", m.id.0, t.elapsed().as_secs_f64() * 1000.0, raw.len());
+            }
+            for _ in 0..3 {
+                let t = Instant::now();
+                let detail = kite_core::reader::open_thread(&kite, kite_core::ThreadId(thread), "", 0).await?;
+                println!("open_thread total: {:.2} ms, {} bytes of HTML", t.elapsed().as_secs_f64() * 1000.0, detail.rendered.html.len());
+            }
+            Ok(())
+        }
         Command::Import { account, mailbox, files } => {
             let a = kite.store.read(|c| store::find_account(c, &account))?;
             let boxes = kite.store.read(|c| store::mailboxes(c, a.id))?;

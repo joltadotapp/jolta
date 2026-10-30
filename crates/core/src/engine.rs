@@ -123,7 +123,9 @@ impl Engine {
     /// server. Returns a token for `undo`.
     pub fn perform(&self, thread: ThreadId, action: Action, context: Context) -> Result<Option<OpId>> {
         let queued = self.kite.store.write(|tx| actions::perform(tx, thread, action, context))?;
-        (self.sink)(Event::ListsChanged);
+        if queued.is_some() {
+            (self.sink)(Event::ListsChanged);
+        }
         Ok(queued.map(|(account, op)| {
             self.wake(account);
             op
@@ -301,9 +303,17 @@ impl Engine {
         }
         let mut last_event = Instant::now();
         let sink = self.sink.clone();
-        let report = imap::sync_session(&self.kite, session, caps, account, &scope, SyncOptions { bodies: true }, &mut |_| {
-            if last_event.elapsed() > Duration::from_millis(700) {
+        let mut dirty = false;
+        let report = imap::sync_session(&self.kite, session, caps, account, &scope, SyncOptions { bodies: true }, &mut |e| {
+            // Tell the views only when this step stored something.
+            dirty |= match e {
+                imap::SyncEvent::Headers { .. } | imap::SyncEvent::Bodies { .. } => true,
+                imap::SyncEvent::Mailbox { new, removed, flag_changes, .. } => new + removed + flag_changes > 0,
+                imap::SyncEvent::Mailboxes(_) => false,
+            };
+            if dirty && last_event.elapsed() > Duration::from_millis(700) {
                 last_event = Instant::now();
+                dirty = false;
                 sink(Event::ListsChanged);
             }
         })

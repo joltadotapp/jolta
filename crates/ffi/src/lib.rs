@@ -370,7 +370,19 @@ impl Core {
         .map_err(Into::into)
     }
 
+    /// Threads matching a query, for badges. Leaves the list cache alone.
     pub fn query_count(&self, query: String) -> Result<u32> {
+        if let Some((cached, order)) = self.order.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if *cached == query {
+                return Ok(order.len() as u32);
+            }
+        }
+        let q = search::parse(&query)?;
+        Ok(self.kite.store.read(|c| search::query_count(c, &q))?)
+    }
+
+    /// Length of the list being shown; caches its order for `query_page`.
+    pub fn list_count(&self, query: String) -> Result<u32> {
         Ok(self.order(&query)?.len() as u32)
     }
 

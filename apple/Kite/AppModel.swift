@@ -128,6 +128,15 @@ final class AppModel {
         }
         if defaults.bool(forKey: "KiteOpenFirst"), let first = page(offset: 0, limit: 1).first {
             open(threadID: first.threadId)
+            if defaults.bool(forKey: "KiteTiming") {
+                Task {
+                    for _ in 0..<5 {
+                        try? await Task.sleep(for: .seconds(1))
+                        selectedThreadID = nil
+                        open(threadID: first.threadId)
+                    }
+                }
+            }
             // `-KiteAction archive|trash|unread|star` acts on that thread
             // through the same path as the keys.
             let actions: [String: ThreadAction] = ["archive": .archive, "trash": .trash, "unread": .markUnread, "star": .flag]
@@ -153,15 +162,27 @@ final class AppModel {
         return home + "/Library/Application Support/Kite"
     }
 
+    /// Reloads the sidebar's data. The counts read the whole store, so they
+    /// run off the main thread and only the result lands here.
     func reloadAccounts() {
-        do {
-            accounts = try core.accounts().map { AccountSection(account: $0, mailboxes: try core.mailboxes(accountId: $0.id)) }
-            sections = try core.sections()
-            snoozed = try core.snoozed()
-            if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }
-        } catch {
-            lastError = "\(error)"
+        let core = core
+        Task.detached(priority: .userInitiated) {
+            do {
+                let accounts = try core.accounts().map { AccountSection(account: $0, mailboxes: try core.mailboxes(accountId: $0.id)) }
+                let sections = try core.sections()
+                let snoozed = try core.snoozed()
+                await MainActor.run { self.apply(accounts: accounts, sections: sections, snoozed: snoozed) }
+            } catch {
+                await MainActor.run { self.lastError = "\(error)" }
+            }
         }
+    }
+
+    private func apply(accounts: [AccountSection], sections: [SectionInfo], snoozed: [SnoozeInfo]) {
+        self.accounts = accounts
+        self.sections = sections
+        self.snoozed = snoozed
+        if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }
     }
 
     static let appGroup = "RWQLHW7V7V.be.example.kite"
@@ -233,9 +254,20 @@ final class AppModel {
         return ["snoozed", "drafts", "sent", "archive", "spam", "trash"].filter(present.contains)
     }
 
+    /// Unread threads for a badge, computed once per list change.
     func unreadCount(_ query: String) -> Int {
-        (try? core.queryCount(query: "\(query) is:unread")).map(Int.init) ?? 0
+        if badgeRevision != listRevision {
+            badges.removeAll(keepingCapacity: true)
+            badgeRevision = listRevision
+        }
+        if let n = badges[query] { return n }
+        let n = (try? core.queryCount(query: "\(query) is:unread")).map(Int.init) ?? 0
+        badges[query] = n
+        return n
     }
+
+    @ObservationIgnored private var badges: [String: Int] = [:]
+    @ObservationIgnored private var badgeRevision = -1
 
     func requestListFocus() {
         focusListRequest += 1
@@ -287,7 +319,7 @@ final class AppModel {
     }
 
     func count() -> Int {
-        (try? core.queryCount(query: query)).map(Int.init) ?? 0
+        (try? core.listCount(query: query)).map(Int.init) ?? 0
     }
 
     func page(offset: Int, limit: Int) -> [ThreadRow] {
@@ -398,8 +430,34 @@ final class AppModel {
         }
     }
 
+    /// `-KiteTiming YES` appends launch and open timings to timing.txt in the data folder.
+    static func timing(_ line: String) {
+        guard UserDefaults.standard.bool(forKey: "KiteTiming") else { return }
+        let url = URL(fileURLWithPath: dataDirectory + "/timing.txt")
+        let text = line + "\n"
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(text.utf8))
+            try? handle.close()
+        } else {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Milliseconds since the process started.
+    static var sinceLaunch: Double {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        sysctl(&mib, 4, &info, &size, nil, 0)
+        let start = info.kp_proc.p_un.__p_starttime
+        let started = Double(start.tv_sec) + Double(start.tv_usec) / 1e6
+        return (Date().timeIntervalSince1970 - started) * 1000
+    }
+
     func open(threadID: Int64) {
         selectedThreadID = threadID
+        let opening = ContinuousClock.now
         markReadTask?.cancel()
         markReadTask = Task {
             try? await Task.sleep(for: .seconds(1))
@@ -412,6 +470,9 @@ final class AppModel {
                 let view = try await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: offset)
                 if selectedThreadID == threadID {
                     openThread = view
+                    let ms = (ContinuousClock.now - opening).components
+                    Self.timing(String(format: "open thread %lld: %.1f ms (%d messages)", threadID,
+                                       Double(ms.seconds) * 1000 + Double(ms.attoseconds) / 1e15, view.messageCount))
                 }
             } catch {
                 lastError = "\(error)"

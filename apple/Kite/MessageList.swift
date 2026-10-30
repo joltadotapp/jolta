@@ -68,6 +68,7 @@ struct MessageList: NSViewRepresentable {
         var lastRevision = -1
         var wantsFocus = true
         var focusRequest = 0
+        private var reportedLaunch = false
         private var count = 0
         private var pages: [Int: [ThreadRow]] = [:]
         private let pageSize = 100
@@ -97,6 +98,12 @@ struct MessageList: NSViewRepresentable {
                 table.reloadData()
                 table.scrollRowToVisible(0)
                 if count > 0 { table.selectRowIndexes([0], byExtendingSelection: false) }
+                if !reportedLaunch, count > 0 {
+                    reportedLaunch = true
+                    DispatchQueue.main.async {
+                        AppModel.timing(String(format: "launch to first rows drawn: %.0f ms (%d threads)", AppModel.sinceLaunch, self.count))
+                    }
+                }
             } else {
                 if previous != count { table.noteNumberOfRowsChanged() }
                 let visible = table.rows(in: table.visibleRect)
