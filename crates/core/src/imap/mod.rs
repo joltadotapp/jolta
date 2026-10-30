@@ -1,0 +1,413 @@
+//! IMAP engine for plain IMAP accounts (iCloud, Fastmail, others).
+//!
+//! A sync lists the mailboxes, then per mailbox: compares the server's UID
+//! list with the store's, fetches headers of new messages newest first,
+//! drops expunged ones, and refreshes flags (CHANGEDSINCE when the server has
+//! CONDSTORE). Bodies follow, newest first, in a second pass.
+
+mod utf7;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use async_imap::types::{Fetch, Flag, NameAttribute};
+use futures::TryStreamExt;
+use rustls_platform_verifier::ConfigVerifierExt;
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
+use tokio_rustls::rustls::ClientConfig;
+use tokio_rustls::rustls::pki_types::ServerName;
+
+use crate::model::*;
+use crate::store::{self, RemoteMailbox};
+use crate::{Error, Kite, Result, mime, secrets};
+
+pub type Session = async_imap::Session<TlsStream<TcpStream>>;
+
+const HEADER_BATCH: usize = 250;
+const BODY_BATCH: usize = 25;
+const FLAG_SWEEP: usize = 5000;
+/// Bodies larger than this are fetched only when opened.
+pub const MAX_BACKGROUND_BODY: u32 = 10 * 1024 * 1024;
+
+pub async fn connect(host: &str, port: u16, username: &str, password: &str) -> Result<Session> {
+    let config = ClientConfig::with_platform_verifier()?;
+    let server = ServerName::try_from(host.to_string())
+        .map_err(|_| Error::Other(format!("{host:?} is not a valid server name")))?;
+    let tcp = TcpStream::connect((host, port)).await?;
+    let tls = TlsConnector::from(Arc::new(config)).connect(server, tcp).await?;
+    let mut client = async_imap::Client::new(tls);
+    client
+        .read_response()
+        .await?
+        .ok_or_else(|| Error::Other(format!("{host} closed the connection before greeting")))?;
+    client.login(username, password).await.map_err(|(e, _)| match e {
+        async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => Error::Auth(msg),
+        other => Error::Imap(other),
+    })
+}
+
+pub async fn connect_account(account: &Account) -> Result<Session> {
+    let password = secrets::password(account.id)?;
+    connect(&account.imap_host, account.imap_port, &account.username, &password).await
+}
+
+fn role_of(name: &str, attrs: &[NameAttribute]) -> Option<MailboxRole> {
+    for a in attrs {
+        let role = match a {
+            NameAttribute::All => MailboxRole::All,
+            NameAttribute::Archive => MailboxRole::Archive,
+            NameAttribute::Drafts => MailboxRole::Drafts,
+            NameAttribute::Junk => MailboxRole::Spam,
+            NameAttribute::Sent => MailboxRole::Sent,
+            NameAttribute::Trash => MailboxRole::Trash,
+            _ => continue,
+        };
+        return Some(role);
+    }
+    if name.eq_ignore_ascii_case("INBOX") {
+        return Some(MailboxRole::Inbox);
+    }
+    match name.to_lowercase().as_str() {
+        "sent" | "sent messages" | "sent items" | "sent mail" => Some(MailboxRole::Sent),
+        "drafts" => Some(MailboxRole::Drafts),
+        "archive" | "archives" => Some(MailboxRole::Archive),
+        "trash" | "deleted messages" | "deleted items" | "bin" => Some(MailboxRole::Trash),
+        "junk" | "spam" | "junk e-mail" | "junk mail" => Some(MailboxRole::Spam),
+        _ => None,
+    }
+}
+
+async fn list_mailboxes(session: &mut Session) -> Result<Vec<RemoteMailbox>> {
+    let names: Vec<_> = session.list(Some(""), Some("*")).await?.try_collect().await?;
+    let mut out: Vec<RemoteMailbox> = names
+        .iter()
+        .map(|n| {
+            let display = utf7::decode(n.name());
+            let leaf = match n.delimiter() {
+                Some(d) => display.rsplit(d).next().unwrap_or(&display).to_string(),
+                None => display.clone(),
+            };
+            let name = if n.name().eq_ignore_ascii_case("INBOX") { "Inbox".to_string() } else { display };
+            RemoteMailbox {
+                role: role_of(&leaf, n.attributes()),
+                remote_id: n.name().to_string(),
+                name,
+                delimiter: n.delimiter().map(str::to_string),
+                selectable: !n.attributes().iter().any(|a| matches!(a, NameAttribute::NoSelect)),
+            }
+        })
+        .collect();
+    // Only one mailbox per role: the first one the server marked keeps it.
+    let mut taken = HashSet::new();
+    for m in &mut out {
+        if let Some(r) = m.role {
+            if !taken.insert(r) {
+                m.role = None;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn flags_of(fetch: &Fetch) -> Flags {
+    let mut f = Flags::default();
+    for flag in fetch.flags() {
+        f = match flag {
+            Flag::Seen => f.with(Flags::SEEN, true),
+            Flag::Flagged => f.with(Flags::FLAGGED, true),
+            Flag::Answered => f.with(Flags::ANSWERED, true),
+            Flag::Draft => f.with(Flags::DRAFT, true),
+            Flag::Deleted => f.with(Flags::DELETED, true),
+            _ => f,
+        };
+    }
+    f
+}
+
+/// Compresses UIDs into an IMAP sequence set such as `1:5,7,9:12`.
+pub fn uid_set(uids: &[u32]) -> String {
+    let mut sorted = uids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let start = sorted[i];
+        let mut end = start;
+        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
+            i += 1;
+            end = sorted[i];
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        if start == end {
+            out.push_str(&start.to_string());
+        } else {
+            out.push_str(&format!("{start}:{end}"));
+        }
+        i += 1;
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SyncOptions {
+    pub bodies: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum SyncEvent {
+    Mailboxes(usize),
+    Mailbox { name: String, new: usize, removed: usize, flag_changes: usize },
+    Headers { mailbox: String, done: usize, total: usize },
+    Bodies { done: usize },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SyncReport {
+    pub mailboxes: usize,
+    pub new: usize,
+    pub removed: usize,
+    pub flag_changes: usize,
+    pub bodies: usize,
+}
+
+pub async fn sync_account(
+    kite: &Kite,
+    account: &Account,
+    opts: SyncOptions,
+    mut progress: impl FnMut(SyncEvent),
+) -> Result<SyncReport> {
+    let mut session = connect_account(account).await?;
+    let condstore = session.capabilities().await?.has_str("CONDSTORE");
+
+    let remote = list_mailboxes(&mut session).await?;
+    let account_id = account.id;
+    let mailboxes = kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?;
+    progress(SyncEvent::Mailboxes(mailboxes.len()));
+
+    let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
+    for mailbox in mailboxes.iter().filter(|m| m.selectable) {
+        let (new, removed, flag_changes) =
+            sync_mailbox(kite, &mut session, account, mailbox, condstore, &mut progress).await?;
+        report.new += new;
+        report.removed += removed;
+        report.flag_changes += flag_changes;
+        progress(SyncEvent::Mailbox { name: mailbox.name.clone(), new, removed, flag_changes });
+    }
+
+    if opts.bodies {
+        report.bodies = fetch_bodies(kite, &mut session, account, &mut progress).await?;
+    }
+    session.logout().await.ok();
+    Ok(report)
+}
+
+async fn sync_mailbox(
+    kite: &Kite,
+    session: &mut Session,
+    account: &Account,
+    mailbox: &Mailbox,
+    condstore: bool,
+    progress: &mut impl FnMut(SyncEvent),
+) -> Result<(usize, usize, usize)> {
+    let selected = if condstore {
+        session.select_condstore(&mailbox.remote_id).await?
+    } else {
+        session.select(&mailbox.remote_id).await?
+    };
+    let mailbox_id = mailbox.id;
+    let mut since_modseq = mailbox.highest_modseq;
+    if mailbox.uidvalidity.is_some() && mailbox.uidvalidity != selected.uid_validity {
+        kite.store.write_async(move |tx| store::clear_mailbox(tx, mailbox_id)).await?;
+        since_modseq = None;
+    }
+
+    let local = kite.store.read_async(move |c| store::mailbox_uids(c, mailbox_id)).await?;
+    let server: HashSet<u32> =
+        if selected.exists == 0 { HashSet::new() } else { session.uid_search("ALL").await? };
+
+    let removed: Vec<MessageId> =
+        local.iter().filter(|(uid, _)| !server.contains(uid)).map(|(_, (id, _))| *id).collect();
+    let removed_count = removed.len();
+    if !removed.is_empty() {
+        kite.store.write_async(move |tx| store::unlink_messages(tx, mailbox_id, &removed)).await?;
+    }
+
+    let mut new: Vec<u32> = server.iter().copied().filter(|u| !local.contains_key(u)).collect();
+    new.sort_unstable_by(|a, b| b.cmp(a));
+    let total = new.len();
+    for (i, chunk) in new.chunks(HEADER_BATCH).enumerate() {
+        let fetched: Vec<Fetch> = session
+            .uid_fetch(uid_set(chunk), "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])")
+            .await?
+            .try_collect()
+            .await?;
+        let messages: Vec<NewMessage> = fetched
+            .iter()
+            .filter_map(|f| {
+                let uid = f.uid?;
+                let header = f.header().unwrap_or_default();
+                let date = f
+                    .internal_date()
+                    .map(|d| d.timestamp())
+                    .or_else(|| mime::header_date(header))
+                    .unwrap_or(0);
+                Some(NewMessage {
+                    account_id: account.id,
+                    remote_id: format!("{}/{}/{uid}", mailbox.id, selected.uid_validity.unwrap_or(0)),
+                    mailbox_id: mailbox.id,
+                    uid: Some(uid),
+                    date,
+                    envelope: mime::parse_envelope(header),
+                    flags: flags_of(f),
+                    size: f.size.unwrap_or(0),
+                    thread_hint: None,
+                    body: None,
+                })
+            })
+            .collect();
+        kite.store
+            .write_async(move |tx| {
+                for m in &messages {
+                    store::insert_message(tx, m)?;
+                }
+                Ok(())
+            })
+            .await?;
+        progress(SyncEvent::Headers {
+            mailbox: mailbox.name.clone(),
+            done: ((i + 1) * HEADER_BATCH).min(total),
+            total,
+        });
+    }
+
+    let mut changes: Vec<(MessageId, Flags)> = Vec::new();
+    let known: HashMap<u32, (MessageId, Flags)> =
+        local.into_iter().filter(|(uid, _)| server.contains(uid)).collect();
+    if !known.is_empty() {
+        let fetched: Vec<Fetch> = match (condstore, since_modseq) {
+            (true, Some(modseq)) => {
+                session.uid_fetch("1:*", format!("(UID FLAGS) (CHANGEDSINCE {modseq})")).await?.try_collect().await?
+            }
+            _ => {
+                let mut uids: Vec<u32> = known.keys().copied().collect();
+                uids.sort_unstable_by(|a, b| b.cmp(a));
+                uids.truncate(FLAG_SWEEP);
+                session.uid_fetch(uid_set(&uids), "(UID FLAGS)").await?.try_collect().await?
+            }
+        };
+        for f in &fetched {
+            let Some((id, old)) = f.uid.and_then(|u| known.get(&u)) else { continue };
+            let flags = flags_of(f);
+            if flags != *old {
+                changes.push((*id, flags));
+            }
+        }
+    }
+    let change_count = changes.len();
+    let (uidvalidity, modseq) = (selected.uid_validity, selected.highest_modseq);
+    kite.store
+        .write_async(move |tx| {
+            for (id, flags) in &changes {
+                store::set_flags(tx, *id, *flags)?;
+            }
+            store::set_mailbox_cursor(tx, mailbox_id, uidvalidity, modseq)
+        })
+        .await?;
+    Ok((total, removed_count, change_count))
+}
+
+async fn store_body(kite: &Kite, id: MessageId, raw: Vec<u8>) -> Result<()> {
+    let kite2 = kite.clone();
+    tokio::task::spawn_blocking(move || {
+        let hash = kite2.blobs.put(&raw)?;
+        let (_, body) = mime::parse_full(&raw, hash);
+        kite2.store.write(|tx| store::attach_body(tx, id, &body))
+    })
+    .await?
+}
+
+async fn fetch_bodies(
+    kite: &Kite,
+    session: &mut Session,
+    account: &Account,
+    progress: &mut impl FnMut(SyncEvent),
+) -> Result<usize> {
+    let account_id = account.id;
+    let mut before = i64::MAX;
+    let mut done = 0;
+    let mut paths: HashMap<MailboxId, String> = HashMap::new();
+    for m in kite.store.read_async(move |c| store::mailboxes(c, account_id)).await? {
+        paths.insert(m.id, m.remote_id);
+    }
+    loop {
+        let batch = kite
+            .store
+            .read_async(move |c| store::messages_without_body(c, account_id, MAX_BACKGROUND_BODY, before, BODY_BATCH))
+            .await?;
+        let Some(last) = batch.last() else { break };
+        before = last.0.0;
+
+        let mut by_mailbox: HashMap<MailboxId, Vec<(u32, MessageId)>> = HashMap::new();
+        for (id, mailbox, uid) in batch {
+            by_mailbox.entry(mailbox).or_default().push((uid, id));
+        }
+        for (mailbox, items) in by_mailbox {
+            let Some(path) = paths.get(&mailbox) else { continue };
+            session.examine(path).await?;
+            let uids: Vec<u32> = items.iter().map(|(u, _)| *u).collect();
+            let ids: HashMap<u32, MessageId> = items.into_iter().collect();
+            let fetched: Vec<Fetch> =
+                session.uid_fetch(uid_set(&uids), "(UID BODY.PEEK[])").await?.try_collect().await?;
+            for f in fetched {
+                let (Some(uid), Some(raw)) = (f.uid, f.body()) else { continue };
+                let Some(&id) = ids.get(&uid) else { continue };
+                store_body(kite, id, raw.to_vec()).await?;
+                done += 1;
+            }
+        }
+        progress(SyncEvent::Bodies { done });
+    }
+    Ok(done)
+}
+
+/// The raw message, from the blob store or else downloaded now.
+pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
+    let loc = kite.store.read_async(move |c| store::message_location(c, id)).await?;
+    let Some((account_id, _, path, uid, blob)) = loc else {
+        return Err(Error::NotFound(format!("message {id}")));
+    };
+    if let Some(blob) = blob {
+        if let Some(n) = blob.strip_prefix("synth:") {
+            return Ok(crate::synth::body_text(n.parse().unwrap_or(0)).into_bytes());
+        }
+        return kite.blobs.get(&blob);
+    }
+    let account = kite.store.read_async(move |c| store::account(c, account_id)).await?;
+    let mut session = connect_account(&account).await?;
+    session.examine(&path).await?;
+    let fetched: Vec<Fetch> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])").await?.try_collect().await?;
+    session.logout().await.ok();
+    let raw = fetched
+        .iter()
+        .find_map(|f| f.body())
+        .ok_or_else(|| Error::NotFound(format!("message {id} is no longer on the server")))?
+        .to_vec();
+    store_body(kite, id, raw.clone()).await?;
+    Ok(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uid_set;
+
+    #[test]
+    fn compresses_uid_sets() {
+        assert_eq!(uid_set(&[9, 1, 2, 3, 5, 10, 11, 3]), "1:3,5,9:11");
+        assert_eq!(uid_set(&[7]), "7");
+    }
+}
