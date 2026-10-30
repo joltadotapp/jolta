@@ -135,7 +135,13 @@ pub struct SignedIn {
 pub async fn begin(provider: Provider, client: Client) -> Result<Pending> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
-    let redirect = format!("http://127.0.0.1:{port}/");
+    // Microsoft matches the registered "http://localhost" (any port) and
+    // treats 127.0.0.1 as a different host; Google asks for 127.0.0.1.
+    let host = match provider {
+        Provider::Google => "127.0.0.1",
+        Provider::Microsoft => "localhost",
+    };
+    let redirect = format!("http://{host}:{port}/");
     let verifier = random_url_safe(32)?;
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let state = random_url_safe(16)?;

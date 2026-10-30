@@ -396,7 +396,7 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             let client = provider.client(&kite.data_dir)?;
             let pending = oauth::begin(provider, client).await?;
             println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
-            println!("Browser on another machine? Sign in there, then paste the 127.0.0.1 address it ends on here and press Return.");
+            println!("Browser on another machine? Sign in there, then paste the address it ends on (127.0.0.1 or localhost) here and press Return.");
             if std::env::var_os("KITE_NO_BROWSER").is_none() {
                 std::process::Command::new("open").arg(&pending.url).status().ok();
             }
