@@ -726,7 +726,7 @@ impl Core {
         let client = provider.client(&self.kite.data_dir)?;
         let pending = self
             .runtime
-            .spawn(kite_core::oauth::begin(provider, client))
+            .spawn(kite_core::oauth::begin(provider, client, 0))
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         Ok(Arc::new(SignIn {

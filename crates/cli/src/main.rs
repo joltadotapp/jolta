@@ -155,9 +155,17 @@ enum AccountCommand {
     List,
     Remove { account: String },
     /// Sign in with Google (Gmail, Workspace) in the browser.
-    AddGoogle,
-    /// Sign in with Microsoft 365 in the browser.
-    AddMicrosoft,
+    AddGoogle {
+        /// Listen for the sign-in on this port, for an SSH tunnel (see add-microsoft).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
+    /// Sign in with Microsoft 365 in the browser. From another machine:
+    /// ssh -L 8765:127.0.0.1:8765 <this mac>, then run with --port 8765.
+    AddMicrosoft {
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -176,6 +184,8 @@ enum DevCommand {
     Store { account: String, mailbox: String, uids: String, change: String },
     /// Mark UIDs deleted and expunge them.
     Expunge { account: String, mailbox: String, uids: String },
+    /// GET a Microsoft Graph path (such as /me/mailFolders/inbox/messages) and print the JSON.
+    Graph { account: String, path: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -387,19 +397,28 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             println!("Added account {}: {}. Run `kite sync {}` next.", added.id, added.address, added.id);
             Ok(())
         }
-        AccountCommand::AddGoogle | AccountCommand::AddMicrosoft => {
+        AccountCommand::AddGoogle { port } | AccountCommand::AddMicrosoft { port } => {
             use kite_core::oauth::{self, Provider};
             let (provider, label) = match cmd {
-                AccountCommand::AddGoogle => (Provider::Google, "Google"),
+                AccountCommand::AddGoogle { .. } => (Provider::Google, "Google"),
                 _ => (Provider::Microsoft, "Microsoft"),
             };
             let client = provider.client(&kite.data_dir)?;
-            let pending = oauth::begin(provider, client).await?;
+            let pending = oauth::begin(provider, client, port).await?;
             println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
-            println!("Browser on another machine? Sign in there, then paste the address it ends on (127.0.0.1 or localhost) here and press Return.");
+            if port == 0 {
+                println!("Browser on another machine? Connect with ssh -L 8765:127.0.0.1:8765 and run this again with --port 8765.");
+                println!("For short addresses, pasting the 127.0.0.1 or localhost address it ends on here also works.");
+            } else {
+                println!("Waiting on port {port}. Through an SSH tunnel, the browser's redirect comes straight here.");
+            }
             if std::env::var_os("KITE_NO_BROWSER").is_none() {
                 std::process::Command::new("open").arg(&pending.url).status().ok();
             }
+            // A terminal in line-editing mode takes at most 1024 characters per
+            // line; Microsoft's redirect is longer. Read raw input instead.
+            let raw_tty = std::io::stdin().is_terminal()
+                && std::process::Command::new("stty").arg("-icanon").stdin(std::process::Stdio::inherit()).status().is_ok_and(|s| s.success());
             let pasted = async {
                 let mut line = String::new();
                 let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
@@ -409,10 +428,11 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
                     _ => std::future::pending().await,
                 }
             };
-            let signed = pending
-                .finish_or_paste(pasted)
-                .await
-                .map_err(|e| anyhow::anyhow!(kite_core::graph::explain_sign_in_error(&e.to_string())))?;
+            let signed = pending.finish_or_paste(pasted).await;
+            if raw_tty {
+                std::process::Command::new("stty").arg("icanon").stdin(std::process::Stdio::inherit()).status().ok();
+            }
+            let signed = signed.map_err(|e| anyhow::anyhow!(kite_core::graph::explain_sign_in_error(&e.to_string())))?;
             let account = oauth::save_account(kite, provider, &signed)?;
             println!("Added account {}: {}. Run `kite sync {}` next.", account.id, account.address, account.id);
             Ok(())
@@ -533,11 +553,18 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
 
 async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
     use futures::TryStreamExt;
+    if let DevCommand::Graph { account, path } = &cmd {
+        let a = kite.store.read(|c| store::find_account(c, account))?;
+        let json = kite_core::graph::Graph::new(&a)?.get(path).await?;
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
     let (account, mailbox) = match &cmd {
         DevCommand::Append { account, mailbox, .. }
         | DevCommand::Search { account, mailbox, .. }
         | DevCommand::Store { account, mailbox, .. }
         | DevCommand::Expunge { account, mailbox, .. } => (account.clone(), mailbox.clone()),
+        DevCommand::Graph { .. } => unreachable!("handled above"),
     };
     let a = kite.store.read(|c| store::find_account(c, &account))?;
     let mut session = imap::connect_account(&a).await?;
@@ -560,6 +587,7 @@ async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
             let n = session.uid_store(&uids, &change).await?.try_collect::<Vec<_>>().await?.len();
             println!("changed {n} message(s)");
         }
+        DevCommand::Graph { .. } => unreachable!("handled above"),
         DevCommand::Expunge { uids, .. } => {
             session.select(&mailbox).await?;
             session.uid_store(&uids, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;

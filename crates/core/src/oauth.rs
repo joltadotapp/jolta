@@ -132,8 +132,10 @@ pub struct SignedIn {
     pub expires_in: u64,
 }
 
-pub async fn begin(provider: Provider, client: Client) -> Result<Pending> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+/// Starts a sign-in. `port` 0 picks a free port; a fixed port lets the
+/// redirect come in through an SSH tunnel from another machine's browser.
+pub async fn begin(provider: Provider, client: Client, port: u16) -> Result<Pending> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let port = listener.local_addr()?.port();
     // Microsoft matches the registered "http://localhost" (any port) and
     // treats 127.0.0.1 as a different host; Google asks for 127.0.0.1.
@@ -221,9 +223,18 @@ impl Pending {
     async fn receive_code(&self) -> Result<String> {
         loop {
             let (mut stream, _) = self.listener.accept().await?;
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await?;
-            let request = String::from_utf8_lossy(&buf[..n]);
+            // The request line can arrive in pieces (through an SSH tunnel, say);
+            // read until it is complete.
+            let mut buf = Vec::with_capacity(8192);
+            let mut chunk = [0u8; 4096];
+            while !buf.windows(2).any(|w| w == b"\r\n") && buf.len() < 64 * 1024 {
+                let n = stream.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let request = String::from_utf8_lossy(&buf);
             let path = request.split_whitespace().nth(1).unwrap_or("/");
             let query = query_of(path);
             if query.is_empty() {

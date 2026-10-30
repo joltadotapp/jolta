@@ -128,7 +128,7 @@ impl Graph {
         unreachable!("the last attempt returns")
     }
 
-    async fn get(&self, url: &str) -> Result<Value> {
+    pub async fn get(&self, url: &str) -> Result<Value> {
         let (_, bytes) = self.send(reqwest::Method::GET, url, None).await?;
         serde_json::from_slice(&bytes).map_err(http_error)
     }
