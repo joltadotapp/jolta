@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::model::*;
 use crate::render::{self, MessageView, Rendered};
-use crate::{Kite, Result, imap};
+use crate::{Kite, Result, imap, store};
 
 #[derive(Clone, Debug)]
 pub struct ThreadMessage {
@@ -24,6 +24,10 @@ pub struct ThreadDetail {
     pub subject: String,
     pub messages: Vec<ThreadMessage>,
     pub rendered: Rendered,
+    /// Who sent the remote images, when one sender sent them all.
+    pub image_sender: Option<String>,
+    /// Whether every message with remote images comes from a trusted sender.
+    pub images_trusted: bool,
 }
 
 pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, Vec<ThreadMessage>)> {
@@ -114,5 +118,20 @@ pub async fn open_thread(kite: &Kite, thread: ThreadId, app_css: &str, utc_offse
         })
         .collect();
     let rendered = render::render_thread(&views, app_css);
-    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered })
+    let mut senders: Vec<String> = messages
+        .iter()
+        .zip(&rendered.remote_by_message)
+        .filter(|(m, n)| **n > 0 && !m.from_addr.is_empty())
+        .map(|(m, _)| m.from_addr.to_ascii_lowercase())
+        .collect();
+    senders.sort_unstable();
+    senders.dedup();
+    let check = senders.clone();
+    let images_trusted = !check.is_empty()
+        && kite
+            .store
+            .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
+            .await?;
+    let image_sender = (senders.len() == 1).then(|| senders.remove(0));
+    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted })
 }

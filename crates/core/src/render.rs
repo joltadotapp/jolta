@@ -22,6 +22,8 @@ pub struct Rendered {
     pub html: String,
     /// Number of remote images that are blocked until the user allows them.
     pub remote_images: u32,
+    /// The same count per message, in the order they were given.
+    pub remote_by_message: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -168,26 +170,65 @@ pub fn filter_declarations(decls: &str) -> String {
         .join("; ")
 }
 
-/// Dark text written for a white page disappears on a dark one. A dark
-/// `color` becomes `light-dark(original, lightened)`, which the page's color
-/// scheme resolves: unchanged in light mode and inside a `.kite-paper` card,
-/// readable in dark mode.
+/// Mail is written for a white page. In dark mode the reader recolors it
+/// the way Outlook does: a dark `color` gets lighter and a light background
+/// gets darker, each as `light-dark(original, adapted)` so light mode keeps
+/// the original. Images keep their colors.
 fn adapt_color(decl: &str) -> String {
     let Some((prop, value)) = decl.split_once(':') else { return decl.to_string() };
-    if !prop.trim().eq_ignore_ascii_case("color") {
-        return decl.to_string();
-    }
+    let prop = prop.trim().to_ascii_lowercase();
     let (value, important) = match value.trim().strip_suffix("!important") {
         Some(v) => (v.trim(), " !important"),
         None => (value.trim(), ""),
     };
-    match parse_color(value) {
-        Some((r, g, b)) if luminance(r, g, b) < 0.4 => {
-            let (lr, lg, lb) = lighten(r, g, b);
-            format!("color: light-dark({value}, rgb({lr} {lg} {lb})){important}")
-        }
-        _ => decl.to_string(),
+    let adapted = match prop.as_str() {
+        "color" => parse_color(value).and_then(dark_text),
+        "background-color" | "background" => parse_color(value).and_then(dark_background),
+        _ => None,
+    };
+    match adapted {
+        Some((r, g, b)) => format!("{prop}: light-dark({value}, rgb({r} {g} {b})){important}"),
+        None => decl.to_string(),
     }
+}
+
+/// Dark text, mirrored to a light shade of the same hue.
+fn dark_text((r, g, b): (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+    (luminance(r, g, b) < 0.4).then(|| with_lightness((r, g, b), |l| (1.0 - l).clamp(0.78, 0.92)))
+}
+
+/// A light background, mirrored to a dark shade. White lands on the reader's
+/// own background and lighter greys stay a step apart, so a white card on a
+/// grey page is still a card.
+fn dark_background((r, g, b): (u8, u8, u8)) -> Option<(u8, u8, u8)> {
+    (luminance(r, g, b) > 0.45).then(|| with_lightness((r, g, b), |l| (0.09 + (1.0 - l)).clamp(0.09, 0.3)))
+}
+
+type Adapt = fn((u8, u8, u8)) -> Option<(u8, u8, u8)>;
+
+/// `bgcolor` and `<font color>` are attributes, which can't hold
+/// `light-dark()`; dark mode gets a rule per value, scoped to the message.
+fn dark_attribute_rules(html: &str, scope: &str) -> String {
+    let mut rules = String::new();
+    let mut seen = HashSet::new();
+    let attrs: [(&str, &str, &str, Adapt); 2] =
+        [("bgcolor", "", "background-color", dark_background), ("color", "font", "color", dark_text)];
+    for (name, element, property, adapt) in attrs {
+        let needle = format!(" {name}=\"");
+        let mut rest = html;
+        while let Some(i) = rest.find(&needle) {
+            rest = &rest[i + needle.len()..];
+            let Some(end) = rest.find('"') else { break };
+            let value = &rest[..end];
+            if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '#') || !seen.insert((name, value.to_ascii_lowercase())) {
+                continue;
+            }
+            if let Some((r, g, b)) = parse_color(value).and_then(adapt) {
+                rules.push_str(&format!("{scope} {element}[{name}=\"{value}\" i]{{{property}: rgb({r} {g} {b})}}\n"));
+            }
+        }
+    }
+    if rules.is_empty() { rules } else { format!("@media (prefers-color-scheme: dark){{\n{rules}}}\n") }
 }
 
 fn parse_color(value: &str) -> Option<(u8, u8, u8)> {
@@ -231,9 +272,8 @@ fn luminance(r: u8, g: u8, b: u8) -> f32 {
     0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 }
 
-/// Mirrors the color's lightness in HSL and keeps its hue, so dark blue
-/// becomes light blue and black becomes the reader's text color.
-fn lighten(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+/// The same hue and saturation at the lightness `f` picks from the old one.
+fn with_lightness((r, g, b): (u8, u8, u8), f: impl Fn(f32) -> f32) -> (u8, u8, u8) {
     let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
     let (max, min) = (r.max(g).max(b), r.min(g).min(b));
     let l = (max + min) / 2.0;
@@ -248,7 +288,7 @@ fn lighten(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     } else {
         60.0 * ((r - g) / d + 4.0)
     };
-    let l = (1.0 - l).clamp(0.78, 0.92);
+    let l = f(l);
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
     let (r1, g1, b1) = match h as u32 / 60 {
@@ -264,18 +304,10 @@ fn lighten(r: u8, g: u8, b: u8) -> (u8, u8, u8) {
     (to(r1), to(g1), to(b1))
 }
 
-/// Mail that paints its own backgrounds (newsletters, designed mail) and has
-/// no dark-mode styles of its own was made for a light page; the reader shows
-/// it on a light card in dark mode instead of rewriting its design.
-fn paints_background(html: &str, css: &[String]) -> bool {
-    if css.iter().any(|c| c.contains("prefers-color-scheme")) {
-        return false;
-    }
-    let has = |t: &str| {
-        let t = t.to_ascii_lowercase();
-        t.contains("bgcolor=") || t.contains("background-color:") || t.contains("background:") || t.contains("background-image:")
-    };
-    has(html) || css.iter().any(|c| has(c))
+/// Table-built mail (newsletters, receipts) has a layout of its own: the
+/// reader centers it at its own width instead of the reading measure.
+fn has_layout(html: &str) -> bool {
+    html.contains("<table")
 }
 
 /// Filters a stylesheet: rules with attribute selectors and at-rules other
@@ -312,13 +344,34 @@ pub fn filter_css(css: &str, scope: &str) -> String {
         } else if head.starts_with('@') || head.contains('[') || head.contains('\\') {
             continue;
         } else {
-            let decls = filter_declarations(body);
+            let selectors = scope_selectors(head, scope);
+            let mut decls = filter_declarations(body);
+            if selectors.split(", ").any(|sel| sel == scope) {
+                decls = without_layout(&decls);
+            }
             if !decls.is_empty() {
-                out.push_str(&format!("{}{{{decls}}}\n", scope_selectors(head, scope)));
+                out.push_str(&format!("{selectors}{{{decls}}}\n"));
             }
         }
     }
     out.replace("</", "<\\/")
+}
+
+/// The message's `html` and `body` rules land on the reader's own message
+/// box, which sizes and centers the message; they keep colors and fonts but
+/// not widths, heights, margins or padding (a `min-width: 750px` there
+/// forced sideways scrolling).
+fn without_layout(decls: &str) -> String {
+    decls
+        .split("; ")
+        .filter(|d| {
+            let prop = d.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+            !["width", "min-width", "max-width", "height", "min-height", "max-height", "margin", "padding"]
+                .iter()
+                .any(|p| prop == *p || prop.starts_with(&format!("{p}-")))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn scope_selectors(head: &str, scope: &str) -> String {
@@ -425,12 +478,12 @@ fn escape(s: &str) -> String {
 pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let mut body = String::new();
     let mut css = String::new();
-    let mut remote_images = 0;
+    let mut remote_by_message = Vec::with_capacity(messages.len());
     let clean_builder = sanitizer();
     for m in messages {
         let (html, styles) = extract_styles(&body_html(m.raw));
         let mut clean = clean_builder.clean(&html).to_string().replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
-        let paper = paints_background(&clean, &styles);
+        let wide = has_layout(&clean);
         // Images the body shows inline aren't attachments to the reader.
         let files: Vec<Attachment> = attachments(m.raw)
             .into_iter()
@@ -449,22 +502,23 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
             }
             clean.push_str("</div>");
         }
-        remote_images += clean.matches(&format!("src=\"{REMOTE_SCHEME}:")).count() as u32;
+        remote_by_message.push(clean.matches(&format!("src=\"{REMOTE_SCHEME}:")).count() as u32);
         let scope = format!("#m{}", m.id);
         for s in &styles {
             css.push_str(&filter_css(s, &scope));
         }
+        css.push_str(&dark_attribute_rules(&clean, &scope));
         body.push_str(&format!(
             "<details class=\"kite-message\"{open}><summary><span class=\"kite-from\">{from}</span>\
              <span class=\"kite-snippet\">{snippet}</span><span class=\"kite-date\">{date}</span>\
-             <div class=\"kite-to\">to {to}</div></summary><div class=\"kite-body{paper}\" id=\"m{id}\">{clean}</div></details>",
+             <div class=\"kite-to\">to {to}</div></summary><div class=\"kite-body{layout}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
             snippet = escape(m.snippet),
             date = escape(m.date),
             to = escape(m.to),
             id = m.id,
-            paper = if paper { " kite-paper" } else { "" },
+            layout = if wide { " kite-wide" } else { "" },
         ));
     }
     let html = format!(
@@ -475,7 +529,7 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
          <style>{}</style><style>{css}</style></head><body>{body}</body></html>",
         app_css.replace("</", "<\\/")
     );
-    Rendered { html, remote_images }
+    Rendered { html, remote_images: remote_by_message.iter().sum(), remote_by_message }
 }
 
 #[cfg(test)]
@@ -515,10 +569,20 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     #[test]
-    fn designed_mail_goes_on_a_light_card() {
-        assert!(paints_background("<table bgcolor=\"#f4f4f4\">", &[]));
-        assert!(!paints_background("<p style=\"color: #333\">hi</p>", &[]));
-        assert!(!paints_background("<td bgcolor=\"#fff\">", &["@media (prefers-color-scheme: dark) { td { background: #000 } }".into()]));
+    fn body_rules_keep_colors_but_not_layout() {
+        let css = filter_css("body { min-width: 750px; margin: 0 !important; color: #fff; } .x { width: 600px }", "#m1");
+        assert!(css.contains("#m1{color: #fff}"), "{css}");
+        assert!(css.contains("#m1 .x{width: 600px}"), "{css}");
+    }
+
+    #[test]
+    fn light_backgrounds_turn_dark() {
+        assert_eq!(filter_declarations("background-color: #ffffff"), "background-color: light-dark(#ffffff, rgb(23 23 23))");
+        assert_eq!(filter_declarations("background:#0a1a33"), "background:#0a1a33", "dark backgrounds stay");
+        let rules = dark_attribute_rules(r##"<table bgcolor="#f4f4f4"><tr><td bgcolor="#0a1a33"><font color="#333">x</font>"##, "#m1");
+        assert!(rules.contains("#m1 [bgcolor=\"#f4f4f4\" i]{background-color: rgb(34 34 34)}"), "{rules}");
+        assert!(!rules.contains("0a1a33"), "{rules}");
+        assert!(rules.contains("#m1 font[color=\"#333\" i]{color: rgb(204 204 204)}"), "{rules}");
     }
 
     #[test]

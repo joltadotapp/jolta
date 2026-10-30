@@ -34,6 +34,20 @@ pub fn set_vip(conn: &Connection, address: &str, vip: bool) -> Result<()> {
     Ok(())
 }
 
+/// Remote images from a trusted sender load without asking.
+pub fn set_sender_trusted(conn: &Connection, address: &str, trusted: bool) -> Result<()> {
+    if trusted {
+        conn.execute("INSERT OR IGNORE INTO trusted_sender (address) VALUES (?1)", [address.trim()])?;
+    } else {
+        conn.execute("DELETE FROM trusted_sender WHERE address = ?1", [address.trim()])?;
+    }
+    Ok(())
+}
+
+pub fn is_sender_trusted(conn: &Connection, address: &str) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM trusted_sender WHERE address = ?1)", [address.trim()], |r| r.get(0))?)
+}
+
 pub fn is_vip(conn: &Connection, address: &str) -> Result<bool> {
     Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM vip WHERE address = ?1)", [address], |r| r.get(0))?)
 }

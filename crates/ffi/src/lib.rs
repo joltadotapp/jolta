@@ -82,6 +82,9 @@ pub struct ThreadView {
     pub message_count: u32,
     pub html: String,
     pub remote_images: u32,
+    /// The one sender of this conversation's remote images, or empty.
+    pub image_sender: String,
+    pub images_trusted: bool,
 }
 
 #[derive(uniffi::Enum)]
@@ -484,6 +487,8 @@ impl Core {
             message_count: detail.messages.len() as u32,
             html: detail.rendered.html,
             remote_images: detail.rendered.remote_images,
+            image_sender: detail.image_sender.unwrap_or_default(),
+            images_trusted: detail.images_trusted,
         })
     }
 
@@ -600,6 +605,11 @@ impl Core {
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
             .map(|(mime_type, bytes)| AttachmentData { name: String::new(), mime_type, bytes })
             .map_err(Into::into)
+    }
+
+    /// Loads remote images from this sender from now on, or stops.
+    pub fn set_sender_trusted(&self, address: String, trusted: bool) -> Result<()> {
+        Ok(self.kite.store.write(|tx| store::set_sender_trusted(tx, &address, trusted))?)
     }
 
     /// Keeps a folder out of the sidebar, or brings it back.

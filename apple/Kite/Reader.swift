@@ -191,13 +191,34 @@ struct ReaderView: View {
     let onAttachment: (Int64, UInt32) -> Void
     @State private var reader = ReaderPage()
     @State private var imagesLoaded = false
+    /// Set when the user trusts or stops trusting the sender in this view.
+    @State private var trustOverride: Bool?
+    @State private var shownThread: Int64?
 
-    private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded }
+    private var trusted: Bool { trustOverride ?? thread.imagesTrusted }
+    private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
+
+    private func render() {
+        if shownThread != thread.threadId {
+            shownThread = thread.threadId
+            imagesLoaded = false
+            trustOverride = nil
+        }
+        reader.images.allowsRemote = imagesLoaded || trusted
+        reader.show(html: thread.html)
+    }
 
     private func loadImages() {
         imagesLoaded = true
-        reader.images.allowsRemote = true
-        reader.show(html: thread.html)
+        render()
+    }
+
+    private func trustSender(_ trust: Bool) {
+        guard !thread.imageSender.isEmpty else { return }
+        try? core.setSenderTrusted(address: thread.imageSender, trusted: trust)
+        trustOverride = trust
+        imagesLoaded = trust
+        render()
     }
 
     var body: some View {
@@ -217,13 +238,22 @@ struct ReaderView: View {
                 if imagesBlocked {
                     HStack(spacing: 10) {
                         Image(systemName: "photo.badge.exclamationmark").foregroundStyle(Color(Theme.text3))
-                        Text(thread.remoteImages == 1 ? "1 remote image is blocked to protect your privacy."
-                                                      : "\(thread.remoteImages) remote images are blocked to protect your privacy.")
+                        Text(thread.remoteImages == 1 ? "1 remote image blocked" : "\(thread.remoteImages) remote images blocked")
                             .foregroundStyle(Color(Theme.text2))
+                            .fixedSize()
+                            .help("Kite blocks remote images so senders can't see when you read their mail.")
                         Button("Load Images", action: loadImages)
                             .buttonStyle(.plain)
                             .fontWeight(.medium)
                             .foregroundStyle(Color(Theme.accent))
+                        if !thread.imageSender.isEmpty {
+                            Button("Always from \(thread.imageSender)") { trustSender(true) }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color(Theme.text2))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help("Load remote images from this sender without asking")
+                        }
                     }
                     .font(.system(size: 12.5))
                     .padding(.top, 8)
@@ -248,21 +278,22 @@ struct ReaderView: View {
                     Button("Copy") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
                     if imagesBlocked {
                         Button("Load Images", action: loadImages)
+                        if !thread.imageSender.isEmpty {
+                            Button("Always Load Images from \(thread.imageSender)") { trustSender(true) }
+                        }
+                    } else if trusted, !thread.imageSender.isEmpty {
+                        Button("Stop Loading Images from \(thread.imageSender)") { trustSender(false) }
                     }
                 }
         }
         .onAppear {
             reader.onAttachment = onAttachment
             reader.images.core = core
-            reader.show(html: thread.html)
+            render()
             // `-KiteLoadImages YES` loads remote images at once, for checking from scripts.
             if UserDefaults.standard.bool(forKey: "KiteLoadImages"), imagesBlocked { loadImages() }
         }
-        .onChange(of: thread.threadId) {
-            imagesLoaded = false
-            reader.images.allowsRemote = false
-        }
-        .onChange(of: thread.html) { _, html in reader.show(html: html) }
+        .onChange(of: thread.html) { render() }
     }
 }
 
@@ -274,7 +305,7 @@ enum ReaderStyle {
     @media (prefers-color-scheme: dark) { :root { --bg:#161619; --tx:#ececee; --tx2:#a6a6ae; --tx3:#8d8d97; --line2:#1c1c20; --acc:#ff6b2c; } }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx);
       font: 14px/22px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
-    body { padding: 0 56px 40px; }
+    body { padding: 0 clamp(16px, 5vw, 56px) 40px; }
     ::selection { background: color-mix(in oklab, var(--acc) 30%, transparent); }
     .kite-message { border-top: 1px solid var(--line2); }
     .kite-message > summary { list-style: none; cursor: default; display: flex; gap: 14px; align-items: center;
@@ -291,11 +322,8 @@ enum ReaderStyle {
       overflow: hidden; text-overflow: ellipsis; }
     .kite-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
     .kite-body img { max-width: 100%; height: auto; }
-    body:not(.kite-images) .kite-body img[src^="x-remote:"] { display: none; }
-    .kite-paper { max-width: 720px; overflow-x: auto; box-sizing: border-box; }
-    @media (prefers-color-scheme: dark) {
-      .kite-paper { background: #ffffff; color: #17171a; color-scheme: light; border-radius: 12px; padding: 22px 24px; margin-bottom: 24px; }
-    }
+    body:not(.kite-images):not(#kite-a):not(#kite-b) .kite-body img[src^="x-remote:"] { display: none !important; }
+    .kite-body.kite-wide { max-width: 100%; width: fit-content; margin: 0 auto; overflow-x: auto; }
     .kite-body a { color: inherit; text-decoration-color: var(--tx3); }
     .kite-quote { color: var(--tx3); }
     .kite-files { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
