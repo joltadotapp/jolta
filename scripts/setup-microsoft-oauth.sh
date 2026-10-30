@@ -178,6 +178,7 @@ finish() {
   fi
   printf '\n'
 }
+
 # ──────────────────────────────────────────────────────────────────────────
 # STAGES: author this section. One stage() per step the human takes.
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
