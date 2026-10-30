@@ -83,7 +83,7 @@ async fn fetch(session: &mut Session, set: &str, items: &str) -> Result<Vec<GmFe
                         AttributeValue::Rfc822Size(s) => f.size = *s,
                         AttributeValue::GmailMsgId(id) => f.msgid = *id,
                         AttributeValue::GmailThrId(id) => f.thrid = *id,
-                        AttributeValue::GmailLabels(labels) => f.labels = labels.iter().map(|l| l.to_string()).collect(),
+                        AttributeValue::GmailLabels(labels) => f.labels = labels.iter().map(|l| unescape(l)).collect(),
                         AttributeValue::BodySection { section: Some(SectionPath::Full(MessageSection::Header)), data: Some(d), .. } => {
                             f.header = d.to_vec()
                         }
@@ -106,8 +106,25 @@ async fn fetch(session: &mut Session, set: &str, items: &str) -> Result<Vec<GmFe
     }
 }
 
+/// Gmail sends labels as quoted strings (`"\\\\Inbox"`) and the parser keeps
+/// the escapes; undo them.
+fn unescape(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut chars = label.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Label names as Gmail spells them in X-GM-LABELS, mapped to mailboxes.
-fn label_map(mailboxes: &[Mailbox]) -> HashMap<String, MailboxId> {
+fn label_map(mailboxes: &[Mailbox], important: Option<&str>) -> HashMap<String, MailboxId> {
     let mut map = HashMap::new();
     for m in mailboxes {
         map.insert(m.remote_id.clone(), m.id);
@@ -115,7 +132,7 @@ fn label_map(mailboxes: &[Mailbox]) -> HashMap<String, MailboxId> {
             Some(MailboxRole::Inbox) => Some("\\Inbox"),
             Some(MailboxRole::Sent) => Some("\\Sent"),
             Some(MailboxRole::Drafts) => Some("\\Draft"),
-            _ if m.remote_id.ends_with("/Important") => Some("\\Important"),
+            _ if Some(m.remote_id.as_str()) == important => Some("\\Important"),
             _ => None,
         };
         if let Some(s) = system {
@@ -151,6 +168,7 @@ pub async fn sync(
 ) -> Result<SyncReport> {
     let account_id = account.id;
     let remote = list_mailboxes(session).await?;
+    let important = remote.iter().find(|m| m.important).map(|m| m.remote_id.clone());
     let mailboxes = kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?;
     progress(SyncEvent::Mailboxes(mailboxes.len()));
     let all = mailboxes
@@ -158,7 +176,7 @@ pub async fn sync(
         .find(|m| m.role == Some(MailboxRole::All))
         .cloned()
         .ok_or_else(|| Error::Other("this Gmail account shows no All Mail folder; is it enabled for IMAP?".into()))?;
-    let labels = label_map(&mailboxes);
+    let labels = label_map(&mailboxes, important.as_deref());
     let label_ids = |names: &[String]| -> Vec<MailboxId> { names.iter().filter_map(|l| labels.get(l).copied()).collect() };
 
     let selected = if caps.condstore { session.select_condstore(&all.remote_id).await? } else { session.select(&all.remote_id).await? };
@@ -333,6 +351,13 @@ mod tests {
         assert_eq!(internal_date("30-Oct-2026 12:27:04 +0000"), Some(1_793_363_224));
         assert_eq!(internal_date(" 1-Jan-1970 01:00:00 +0100"), Some(0));
         assert_eq!(internal_date("nonsense"), None);
+    }
+
+    #[test]
+    fn unescapes_labels() {
+        assert_eq!(unescape("\\\\Inbox"), "\\Inbox");
+        assert_eq!(unescape("Work"), "Work");
+        assert_eq!(unescape("a\\\"b"), "a\"b");
     }
 
     #[test]

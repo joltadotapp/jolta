@@ -31,4 +31,6 @@ scripts/build-core.sh
 xcodebuild -project apple/Kite.xcodeproj -scheme Kite -configuration Debug build
 ```
 
+Build the `kite` CLI with `scripts/build-cli.sh`, never plain `cargo build`: the script signs it with the Apple Development certificate. An unsigned `kite` has a new identity after every build, so its first Keychain read opens a password dialog on the Mac mini's screen, which is headless, and the command hangs.
+
 Rust toolchain and dependency versions are pinned in `rust-toolchain.toml` and the workspace `Cargo.toml`. UniFFI is pinned to `=0.31.2`; don't bump it without checking `uniffi-bindgen-cs` support.

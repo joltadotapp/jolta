@@ -125,6 +125,7 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
         })?
         .id;
         let mb = |name: &str, role| RemoteMailbox {
+            important: false,
             remote_id: name.into(),
             name: name.into(),
             role: Some(role),

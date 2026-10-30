@@ -117,6 +117,8 @@ pub fn mailboxes(conn: &Connection, account: AccountId) -> Result<Vec<Mailbox>> 
 }
 
 pub struct RemoteMailbox {
+    /// Gmail's Important label (the `\\Important` attribute); not stored.
+    pub important: bool,
     pub remote_id: String,
     pub name: String,
     pub role: Option<MailboxRole>,

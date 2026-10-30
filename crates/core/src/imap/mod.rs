@@ -133,6 +133,7 @@ pub(crate) async fn list_mailboxes(session: &mut Session) -> Result<Vec<RemoteMa
             };
             let name = if n.name().eq_ignore_ascii_case("INBOX") { "Inbox".to_string() } else { display };
             RemoteMailbox {
+                important: n.attributes().iter().any(|a| matches!(a, NameAttribute::Extension(e) if e.eq_ignore_ascii_case("\\Important"))),
                 role: role_of(&leaf, n.attributes()),
                 remote_id: n.name().to_string(),
                 name,
