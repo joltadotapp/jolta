@@ -38,6 +38,7 @@ pub enum Event {
     NewMail { account: AccountId, thread: ThreadId, from: String, subject: String },
     ActionFailed(String),
     Sent { account: AccountId, subject: String },
+    Woke { account: AccountId, thread: ThreadId, subject: String },
     SendFailed(String),
 }
 
@@ -210,12 +211,17 @@ impl Engine {
             }
             let until_full = FULL_SYNC_EVERY.saturating_sub(last_full.elapsed());
             let account_id = account.id;
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            let until_wake = self.kite.store.read(|c| store::next_wake(c, account_id)).ok().flatten().map(|t| (t - now).max(0));
             let until_send = self
                 .kite
                 .store
                 .read(|c| store::next_send_in(c, account_id))
                 .ok()
                 .flatten()
+                .into_iter()
+                .chain(until_wake)
+                .min()
                 .map_or(until_full, |s| Duration::from_secs(s as u64).min(until_full));
             tokio::select! {
                 _ = wake.notify.notified() => {}
@@ -236,6 +242,7 @@ impl Engine {
 
         let mut touched: HashSet<MailboxId> = HashSet::new();
         let account_id = account.id;
+        self.wake_snoozed(account_id).await?;
         for op in self.kite.store.read_async(move |c| store::pending_ops(c, account_id)).await? {
             match imap::apply_op(&self.kite, session, caps, &op).await {
                 Ok(mailboxes) => {
@@ -303,6 +310,27 @@ impl Engine {
         }
         self.file_sent_copies(account, session, caps, &sent).await?;
         self.announce(account.id, report.new_messages, started).await
+    }
+
+    /// Moves snoozed threads whose time has come back to the inbox.
+    async fn wake_snoozed(&self, account: AccountId) -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let due = self.kite.store.read_async(move |c| store::due_snoozes(c, account, now)).await?;
+        for (id, thread) in due {
+            let subject = self
+                .kite
+                .store
+                .write_async(move |tx| {
+                    actions::wake(tx, id, thread)?;
+                    Ok(tx
+                        .query_row("SELECT subject FROM message WHERE thread_id = ?1 ORDER BY id DESC LIMIT 1", [thread], |r| r.get(0))
+                        .unwrap_or_default())
+                })
+                .await?;
+            (self.sink)(Event::Woke { account, thread, subject });
+            (self.sink)(Event::ListsChanged);
+        }
+        Ok(())
     }
 
     async fn role_mailbox(&self, account: AccountId, role: MailboxRole) -> Result<Option<Mailbox>> {

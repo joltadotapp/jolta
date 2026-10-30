@@ -46,6 +46,12 @@ fn fts_term(field: Option<TextField>, text: &str, phrase: bool, prefix: bool) ->
     }
 }
 
+/// Automated senders. LIKE ignores ASCII case.
+const NOTIFICATION: &str = "(m.from_addr LIKE 'noreply%' OR m.from_addr LIKE 'no-reply%' \
+     OR m.from_addr LIKE 'donotreply%' OR m.from_addr LIKE 'do-not-reply%' OR m.from_addr LIKE 'notification%' \
+     OR m.from_addr LIKE 'notify%' OR m.from_addr LIKE 'alert%' OR m.from_addr LIKE '%@notifications.%' \
+     OR m.from_addr LIKE '%@notify.%' OR m.from_addr LIKE 'mailer-daemon%')";
+
 const MAILBOX_MATCH: &str = "(b.role = ?1 OR b.name = ?1 COLLATE NOCASE OR b.remote_id = ?1 COLLATE NOCASE)";
 
 fn mailbox_match(param: usize) -> String {
@@ -142,6 +148,9 @@ fn plan(q: &Query) -> Sql {
             TermKind::Is(Status::Unread) => format!("(m.flags & {}) = 0", Flags::SEEN),
             TermKind::Is(Status::Read) => format!("(m.flags & {}) != 0", Flags::SEEN),
             TermKind::Is(Status::Flagged) => format!("(m.flags & {}) != 0", Flags::FLAGGED),
+            TermKind::Is(Status::Vip) => "EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)".into(),
+            TermKind::Is(Status::Notification) => NOTIFICATION.into(),
+            TermKind::Is(Status::Newsletter) => format!("(m.list_id IS NOT NULL AND NOT {NOTIFICATION})"),
             TermKind::Account(v) => {
                 let p = sql.param(v.clone());
                 format!("m.account_id IN (SELECT id FROM account WHERE id = ?{p} OR address = ?{p} COLLATE NOCASE)")

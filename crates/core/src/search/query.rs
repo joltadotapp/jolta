@@ -27,6 +27,12 @@ pub enum Status {
     Unread,
     Read,
     Flagged,
+    /// From a sender marked as VIP.
+    Vip,
+    /// Mailing-list mail that is not a notification.
+    Newsletter,
+    /// Automated mail: no-reply senders, alerts, notifications.
+    Notification,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,7 +158,12 @@ pub fn parse(input: &str) -> Result<Query> {
                 "unread" => Status::Unread,
                 "read" => Status::Read,
                 "starred" | "flagged" => Status::Flagged,
-                v => return Err(Error::Query(format!("is:{v} is not supported; try is:unread, is:read or is:starred"))),
+                "vip" => Status::Vip,
+                "newsletter" | "newsletters" => Status::Newsletter,
+                "notification" | "notifications" => Status::Notification,
+                v => return Err(Error::Query(format!(
+                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter or is:notification"
+                ))),
             }),
             Some("in") => TermKind::In(t.value.clone()),
             Some("mailbox") => TermKind::Mailbox(

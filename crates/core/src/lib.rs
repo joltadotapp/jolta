@@ -13,6 +13,7 @@ pub mod secrets;
 pub mod smtp;
 pub mod store;
 pub mod synth;
+pub mod when;
 
 use std::path::{Path, PathBuf};
 

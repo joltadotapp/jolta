@@ -99,6 +99,9 @@ enum Command {
         /// Undo the action right after it reaches the server.
         #[arg(long)]
         undo: bool,
+        /// For snooze: when to wake, in plain words ("tomorrow 9am", "in 2h").
+        #[arg(long)]
+        until: Option<String>,
     },
     /// Change a mailbox on the server directly, as another mail client would.
     #[command(subcommand)]
@@ -163,6 +166,7 @@ enum ActionArg {
     Unread,
     Flag,
     Unflag,
+    Snooze,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -254,7 +258,7 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Command::Act { action, thread, from, undo } => act(&kite, action, thread, from, undo).await,
+        Command::Act { action, thread, from, undo, until } => act(&kite, action, thread, from, undo, until).await,
         Command::Send { account, to, subject, body, reply, all, attach } => {
             send(&kite, &account, to, subject, body, reply, all, attach).await
         }
@@ -391,8 +395,13 @@ async fn send(
     Ok(())
 }
 
-async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool) -> Result<()> {
+async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>) -> Result<()> {
     use kite_core::actions::Action;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let wake_at = match &until {
+        Some(text) => Some(kite_core::when::parse(text, now, 0).with_context(|| format!("can't read {text:?} as a time"))?),
+        None => None,
+    };
     let action = match action {
         ActionArg::Archive => Action::Archive,
         ActionArg::Trash => Action::Trash,
@@ -400,6 +409,7 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
         ActionArg::Unread => Action::MarkUnread,
         ActionArg::Flag => Action::Flag,
         ActionArg::Unflag => Action::Unflag,
+        ActionArg::Snooze => Action::Snooze(wake_at.context("snooze needs --until")?),
     };
     let sink: kite_core::engine::Sink = Arc::new(|_| {});
     let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;

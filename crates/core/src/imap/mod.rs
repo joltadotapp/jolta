@@ -86,6 +86,7 @@ fn role_of(name: &str, attrs: &[NameAttribute]) -> Option<MailboxRole> {
         "archive" | "archives" => Some(MailboxRole::Archive),
         "trash" | "deleted messages" | "deleted items" | "bin" => Some(MailboxRole::Trash),
         "junk" | "spam" | "junk e-mail" | "junk mail" => Some(MailboxRole::Spam),
+        "snoozed" => Some(MailboxRole::Snoozed),
         _ => None,
     }
 }
@@ -450,10 +451,21 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store
             }
             let set = uid_set(&uids);
             let target = path(&to)?;
-            if caps.moves {
-                session.uid_mv(&set, &target).await?;
-            } else {
-                session.uid_copy(&set, &target).await?;
+            let moved = if caps.moves { session.uid_mv(&set, &target).await } else { session.uid_copy(&set, &target).await };
+            if let Err(e) = moved {
+                // NO [TRYCREATE]: the target does not exist yet (a first snooze).
+                if !e.to_string().to_uppercase().contains("TRYCREATE") && !e.to_string().to_uppercase().contains("NONEXISTENT") {
+                    return Err(e.into());
+                }
+                session.create(&target).await?;
+                session.select(path(&from)?).await?;
+                if caps.moves {
+                    session.uid_mv(&set, &target).await?;
+                } else {
+                    session.uid_copy(&set, &target).await?;
+                }
+            }
+            if !caps.moves {
                 session.uid_store(&set, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;
                 if caps.uidplus {
                     session.uid_expunge(&set).await?.try_collect::<Vec<_>>().await?;

@@ -19,6 +19,8 @@ pub enum Action {
     Flag,
     Unflag,
     MoveTo(MailboxId),
+    /// Move to the Snoozed mailbox until this unix time, then back.
+    Snooze(i64),
 }
 
 /// The list an action is taken from; moves take messages out of it.
@@ -69,7 +71,7 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
             OpKind::Flags { add: 0, remove: Flags::FLAGGED },
             ids(conn, &format!("{in_thread} AND (flags & {}) != 0", Flags::FLAGGED), [thread])?,
         ),
-        Action::Archive | Action::Trash | Action::MoveTo(_) => {
+        Action::Archive | Action::Trash | Action::MoveTo(_) | Action::Snooze(_) => {
             let role = match context {
                 Context::Mailbox(m) => Some(m),
                 Context::Role(r) => role_mailbox(conn, account, r)?,
@@ -86,6 +88,7 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
                 Action::Trash => role_mailbox(conn, account, MailboxRole::Trash)?
                     .ok_or_else(|| Error::Other("This account has no Trash folder.".into()))?,
                 Action::MoveTo(m) => m,
+                Action::Snooze(_) => snoozed_mailbox(conn, account)?,
                 _ => unreachable!("only moves reach here"),
             };
             if from == to {
@@ -97,10 +100,39 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
                  WHERE m.thread_id = ?1 AND mm.mailbox_id = ?2",
                 params![thread, from],
             )?;
+            if let Action::Snooze(wake_at) = action {
+                if messages.is_empty() {
+                    return Ok(None);
+                }
+                conn.execute("DELETE FROM snooze WHERE thread_id = ?1 AND state = 'sleeping'", [thread])?;
+                conn.execute(
+                    "INSERT INTO snooze (account_id, thread_id, wake_at) VALUES (?1, ?2, ?3)",
+                    params![account, thread, wake_at],
+                )?;
+            }
             (OpKind::Move { from, to }, messages)
         }
     };
     queue(conn, account, &kind, &messages)
+}
+
+/// The account's Snoozed mailbox. The first snooze adds it locally; the
+/// server copy is created when the move reaches the server.
+fn snoozed_mailbox(conn: &Connection, account: AccountId) -> Result<MailboxId> {
+    if let Some(m) = role_mailbox(conn, account, MailboxRole::Snoozed)? {
+        return Ok(m);
+    }
+    conn.execute(
+        "INSERT INTO mailbox (account_id, remote_id, name, role, delimiter, selectable)
+         VALUES (?1, 'Snoozed', 'Snoozed', 'snoozed', NULL, 1)
+         ON CONFLICT (account_id, remote_id) DO UPDATE SET role = 'snoozed'",
+        [account],
+    )?;
+    Ok(MailboxId(conn.query_row(
+        "SELECT id FROM mailbox WHERE account_id = ?1 AND remote_id = 'Snoozed'",
+        [account],
+        |r| r.get(0),
+    )?))
 }
 
 fn queue(conn: &Connection, account: AccountId, kind: &OpKind, messages: &[MessageId]) -> Result<Option<(AccountId, OpId)>> {
@@ -119,14 +151,43 @@ pub fn undo(conn: &Connection, id: OpId) -> Result<Option<(AccountId, OpId)>> {
         "pending" => {
             store::revert_local(conn, &op)?;
             store::cancel_op(conn, id)?;
+            forget_snooze(conn, &op)?;
             Ok(None)
         }
         "done" => {
             let messages: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
+            forget_snooze(conn, &op)?;
             queue(conn, op.account, &op.inverse(), &messages)
         }
         _ => Ok(None),
     }
+}
+
+/// Undoing a snooze also cancels its wake-up.
+fn forget_snooze(conn: &Connection, op: &Op) -> Result<()> {
+    if let OpKind::Move { to, .. } = op.kind {
+        if role_mailbox(conn, op.account, MailboxRole::Snoozed)? == Some(to) {
+            for (m, _) in &op.messages {
+                conn.execute(
+                    "DELETE FROM snooze WHERE state = 'sleeping' AND thread_id = (SELECT thread_id FROM message WHERE id = ?1)",
+                    [m],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Wakes a snoozed thread: back to the inbox, unread.
+pub fn wake(conn: &Connection, snooze: i64, thread: ThreadId) -> Result<Vec<(AccountId, OpId)>> {
+    store::snooze_woken(conn, snooze)?;
+    let mut ops = Vec::new();
+    let account = thread_account(conn, thread)?;
+    if let Some(inbox) = role_mailbox(conn, account, MailboxRole::Inbox)? {
+        ops.extend(perform(conn, thread, Action::MoveTo(inbox), Context::Role(MailboxRole::Snoozed))?);
+    }
+    ops.extend(perform(conn, thread, Action::MarkUnread, Context::Inbox)?);
+    Ok(ops)
 }
 
 /// Reverts an op the server refused for good.
