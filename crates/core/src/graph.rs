@@ -27,6 +27,9 @@ const WELL_KNOWN: &[(&str, MailboxRole)] = &[
     ("archive", MailboxRole::Archive),
     ("deleteditems", MailboxRole::Trash),
     ("junkemail", MailboxRole::Spam),
+    ("outbox", MailboxRole::System),
+    ("conversationhistory", MailboxRole::System),
+    ("syncissues", MailboxRole::System),
 ];
 
 pub struct Graph {
@@ -154,18 +157,28 @@ impl Graph {
             }
         }
         let mut out = Vec::new();
-        let mut queue: Vec<(String, String)> = vec![("/me/mailFolders?$top=100&$select=id,displayName,childFolderCount".into(), String::new())];
-        while let Some((url, prefix)) = queue.pop() {
+        // A system folder's children (Sync Issues/Conflicts) are system folders too.
+        let mut queue: Vec<(String, String, bool)> =
+            vec![("/me/mailFolders?$top=100&$select=id,displayName,childFolderCount".into(), String::new(), false)];
+        while let Some((url, prefix, in_system)) = queue.pop() {
             let mut next = Some(url);
             while let Some(u) = next {
                 let page = self.get(&u).await?;
                 for f in page["value"].as_array().cloned().unwrap_or_default() {
                     let id = f["id"].as_str().unwrap_or_default().to_string();
                     let name = format!("{prefix}{}", f["displayName"].as_str().unwrap_or_default());
+                    let role = if in_system {
+                        Some(MailboxRole::System)
+                    } else {
+                        roles.get(&id).copied().or_else(|| name.eq_ignore_ascii_case("Snoozed").then_some(MailboxRole::Snoozed))
+                    };
                     if f["childFolderCount"].as_u64().unwrap_or(0) > 0 {
-                        queue.push((format!("/me/mailFolders/{id}/childFolders?$top=100&$select=id,displayName,childFolderCount"), format!("{name}/")));
+                        queue.push((
+                            format!("/me/mailFolders/{id}/childFolders?$top=100&$select=id,displayName,childFolderCount"),
+                            format!("{name}/"),
+                            role == Some(MailboxRole::System),
+                        ));
                     }
-                    let role = roles.get(&id).copied().or_else(|| (name.eq_ignore_ascii_case("Snoozed")).then_some(MailboxRole::Snoozed));
                     out.push(RemoteMailbox { important: false, remote_id: id, name, role, delimiter: Some("/".into()), selectable: true });
                 }
                 next = page["@odata.nextLink"].as_str().map(str::to_string);
@@ -192,6 +205,12 @@ impl Graph {
         let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
         // Folders Kite created locally (a first Snoozed) have no Graph id yet.
         for m in mailboxes.iter().filter(|m| !m.remote_id.eq_ignore_ascii_case("Snoozed")) {
+            if m.role == Some(MailboxRole::System) {
+                // Outbox and chat history aren't mail to read; drop what an earlier sync fetched.
+                let id = m.id;
+                kite.store.write_async(move |tx| store::clear_mailbox(tx, id)).await?;
+                continue;
+            }
             self.sync_folder(kite, m, &mut report, progress).await?;
         }
         report.bodies = self.fetch_bodies(kite).await?;

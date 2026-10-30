@@ -79,6 +79,9 @@ text_enum!(AccountKind {
     Graph => "graph",
 });
 
+// `System` marks folders the server manages for itself (Gmail's Starred and
+// Important, Outlook's Outbox and Conversation History). Kite keeps them out
+// of the sidebar.
 text_enum!(MailboxRole {
     Inbox => "inbox",
     Sent => "sent",
@@ -88,6 +91,7 @@ text_enum!(MailboxRole {
     Spam => "spam",
     Snoozed => "snoozed",
     All => "all",
+    System => "system",
 });
 
 /// IMAP-style message flags, stored as a bit set.

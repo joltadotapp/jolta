@@ -258,7 +258,8 @@ pub async fn sync(
         report.flag_changes = changes.len();
         kite.store
             .write_async(move |tx| {
-                for (id, flags, labels) in &changes {
+                let pending = store::pending_messages(tx, account_id)?;
+                for (id, flags, labels) in changes.iter().filter(|(id, ..)| !pending.contains(id)) {
                     store::set_flags(tx, *id, *flags)?;
                     store::set_labels(tx, *id, all_id, labels)?;
                 }

@@ -103,6 +103,8 @@ fn role_of(name: &str, attrs: &[NameAttribute]) -> Option<MailboxRole> {
             NameAttribute::Junk => MailboxRole::Spam,
             NameAttribute::Sent => MailboxRole::Sent,
             NameAttribute::Trash => MailboxRole::Trash,
+            NameAttribute::Flagged => MailboxRole::System,
+            NameAttribute::Extension(e) if e.eq_ignore_ascii_case("\\Important") => MailboxRole::System,
             _ => continue,
         };
         return Some(role);
@@ -145,7 +147,7 @@ pub(crate) async fn list_mailboxes(session: &mut Session) -> Result<Vec<RemoteMa
     // Only one mailbox per role: the first one the server marked keeps it.
     let mut taken = HashSet::new();
     for m in &mut out {
-        if let Some(r) = m.role {
+        if let Some(r) = m.role.filter(|r| *r != MailboxRole::System) {
             if !taken.insert(r) {
                 m.role = None;
             }
@@ -367,11 +369,13 @@ async fn sync_mailbox(
                 })
             })
             .collect();
+        let account_id = account.id;
         let ids = kite
             .store
             .write_async(move |tx| {
+                let moving = store::pending_move_uids(tx, account_id, mailbox_id)?;
                 let mut ids = Vec::new();
-                for m in &messages {
+                for m in messages.iter().filter(|m| !m.uid.is_some_and(|u| moving.contains(&u))) {
                     if let store::Inserted::New(id) = store::insert_message(tx, m)? {
                         ids.push(id);
                     }
@@ -415,7 +419,8 @@ async fn sync_mailbox(
     let account_id = account.id;
     kite.store
         .write_async(move |tx| {
-            for (id, flags) in &changes {
+            let pending = store::pending_messages(tx, account_id)?;
+            for (id, flags) in changes.iter().filter(|(id, _)| !pending.contains(id)) {
                 store::set_flags(tx, *id, *flags)?;
             }
             if !store::has_pending_ops(tx, account_id)? {

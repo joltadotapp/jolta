@@ -467,6 +467,15 @@ final class AppModel {
         }
     }
 
+    /// An empty list has nothing under the cursor, so the reader goes blank.
+    func closeThread() {
+        markReadTask?.cancel()
+        selectedThreadID = nil
+        openThread = nil
+        cursorRow = nil
+        cursor = (0, 0)
+    }
+
     func open(threadID: Int64) {
         selectedThreadID = threadID
         let opening = ContinuousClock.now

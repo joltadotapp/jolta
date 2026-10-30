@@ -82,6 +82,7 @@ struct MessageList: NSViewRepresentable {
             let selected = table.selectedRow
             count = model.count()
             lastQuery = model.query
+            if count == 0, model.selectedThreadID != nil { model.closeThread() }
             if !full, previous != count {
                 // An action took rows out (or sync added some): keep the
                 // cursor at the same position, which is now the next thread.

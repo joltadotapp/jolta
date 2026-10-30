@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Result;
@@ -146,6 +148,23 @@ pub fn pending_ops(conn: &Connection, account: AccountId) -> Result<Vec<Op>> {
         conn.prepare(&format!("SELECT {OP_COLS} FROM op WHERE account_id = ?1 AND state = 'pending' ORDER BY id"))?;
     let rows = stmt.query_map([account], op_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Messages with an op the server hasn't confirmed yet. Until it does, the
+/// server still reports their old flags and labels, so sync leaves them be.
+pub fn pending_messages(conn: &Connection, account: AccountId) -> Result<HashSet<MessageId>> {
+    Ok(pending_ops(conn, account)?.into_iter().flat_map(|op| op.messages).map(|(id, _)| id).collect())
+}
+
+/// UIDs that pending moves took out of `mailbox`. The server still lists them
+/// there until the move lands; sync must not link them back in.
+pub fn pending_move_uids(conn: &Connection, account: AccountId, mailbox: MailboxId) -> Result<HashSet<u32>> {
+    Ok(pending_ops(conn, account)?
+        .into_iter()
+        .filter(|op| matches!(op.kind, OpKind::Move { from, .. } if from == mailbox))
+        .flat_map(|op| op.messages)
+        .filter_map(|(_, uid)| uid)
+        .collect())
 }
 
 pub fn has_pending_ops(conn: &Connection, account: AccountId) -> Result<bool> {
