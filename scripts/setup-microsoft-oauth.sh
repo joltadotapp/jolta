@@ -184,7 +184,7 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=4
+TOTAL_STAGES=3
 ENV_FILE="$HOME/Library/Application Support/Kite/oauth-clients.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 
@@ -198,6 +198,7 @@ step "Name: Kite."
 step "Supported account types: Accounts in any organizational directory and personal Microsoft accounts."
 step "Redirect URI: platform 'Public client/native (mobile & desktop)', value http://localhost"
 step "Click Register."
+note "'Allow public client flows' can stay at No: Kite signs in through the browser with PKCE, which does not need it."
 pause "Registered?"
 
 stage "Copy the application ID"
@@ -205,11 +206,6 @@ step "On the app's Overview page, copy 'Application (client) ID'."
 printf '\n'
 ask MICROSOFT_CLIENT_ID "Application (client) ID:"
 write_env MICROSOFT_CLIENT_ID "$MICROSOFT_CLIENT_ID"
-
-stage "Allow the desktop sign-in flow"
-step "Open Authentication in the app's left menu."
-step "Under 'Advanced settings', set 'Allow public client flows' to Yes. Click Save."
-pause "Saved?"
 
 stage "Add the mail permissions"
 step "Open API permissions, click Add a permission, choose Microsoft Graph, then Delegated permissions."
