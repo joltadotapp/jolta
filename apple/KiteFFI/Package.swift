@@ -11,7 +11,11 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(name: "kite_ffiFFI", path: "KiteFFI.xcframework"),
-        .target(name: "KiteFFI", dependencies: ["kite_ffiFFI"]),
+        .target(
+            name: "KiteFFI",
+            dependencies: ["kite_ffiFFI"],
+            linkerSettings: [.linkedFramework("Security"), .linkedFramework("SystemConfiguration")]
+        ),
     ],
     swiftLanguageModes: [.v5]
 )

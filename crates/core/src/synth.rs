@@ -3,6 +3,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::Connection;
+
 use crate::model::*;
 use crate::store::{self, NewAccount, RemoteMailbox};
 use crate::{Kite, Result};
@@ -230,4 +232,19 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
         progress(n);
     }
     Ok(account)
+}
+
+/// A minimal RFC 822 message for synthetic message `n`, so it opens like real mail.
+pub fn raw_message(conn: &Connection, id: MessageId, n: u64) -> Result<Vec<u8>> {
+    let (from_name, from_addr, to, subject): (String, String, String, String) = conn.query_row(
+        "SELECT from_name, from_addr, to_addrs, subject FROM message WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let body = body_text(n).replace('\n', "\r\n");
+    Ok(format!(
+        "From: {from_name} <{from_addr}>\r\nTo: {to}\r\nSubject: {subject}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
+    )
+    .into_bytes())
 }

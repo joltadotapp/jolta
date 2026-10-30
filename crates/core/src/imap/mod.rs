@@ -394,7 +394,8 @@ pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
     };
     if let Some(blob) = blob {
         if let Some(n) = blob.strip_prefix("synth:") {
-            return Ok(crate::synth::body_text(n.parse().unwrap_or(0)).into_bytes());
+            let n = n.parse().unwrap_or(0);
+            return kite.store.read_async(move |c| crate::synth::raw_message(c, id, n)).await;
         }
         return kite.blobs.get(&blob);
     }

@@ -19,3 +19,4 @@ apple-native-keyring-store = { workspace = true, features = ["keychain"] }
 sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true
+ammonia.workspace = true

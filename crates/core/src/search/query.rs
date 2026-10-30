@@ -38,6 +38,8 @@ pub enum TermKind {
     Is(Status),
     In(String),
     Label(String),
+    /// One mailbox by its store id; how the sidebar lists a mailbox.
+    Mailbox(i64),
     Account(String),
     /// Unix seconds at the start of the given UTC day.
     Before(i64),
@@ -150,6 +152,9 @@ pub fn parse(input: &str) -> Result<Query> {
                 v => return Err(Error::Query(format!("is:{v} is not supported; try is:unread, is:read or is:starred"))),
             }),
             Some("in") => TermKind::In(t.value.clone()),
+            Some("mailbox") => TermKind::Mailbox(
+                t.value.parse().map_err(|_| Error::Query(format!("mailbox:{} needs a mailbox id", t.value)))?,
+            ),
             Some("label") => TermKind::Label(t.value.clone()),
             Some("account") => TermKind::Account(t.value.clone()),
             Some("before") => TermKind::Before(parse_date(&t.value)?),
@@ -218,6 +223,8 @@ mod tests {
                 (false, TermKind::Account("2".into())),
             ]
         );
+        assert_eq!(kinds("mailbox:12"), vec![(false, TermKind::Mailbox(12))]);
+        assert!(parse("mailbox:inbox").is_err());
     }
 
     #[test]

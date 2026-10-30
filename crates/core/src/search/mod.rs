@@ -83,7 +83,9 @@ fn plan(q: &Query) -> Sql {
         })
         .collect();
     let driver_mailbox = q.terms.iter().position(|t| {
-        !t.negated && matches!(t.kind, TermKind::In(ref v) | TermKind::Label(ref v) if !is_anywhere(v))
+        !t.negated
+            && (matches!(t.kind, TermKind::In(ref v) | TermKind::Label(ref v) if !is_anywhere(v))
+                || matches!(t.kind, TermKind::Mailbox(_)))
     });
 
     if !positive_text.is_empty() {
@@ -92,11 +94,17 @@ fn plan(q: &Query) -> Sql {
         let p = sql.param(positive_text.join(" AND "));
         sql.conds.push(format!("message_fts MATCH ?{p}"));
     } else if let Some(i) = driver_mailbox {
-        let (TermKind::In(v) | TermKind::Label(v)) = &q.terms[i].kind else { unreachable!() };
-        let p = sql.param(v.clone());
         sql.from = "message_mailbox mm JOIN message m ON m.id = mm.message_id".into();
         sql.order = "mm.message_id DESC";
-        sql.conds.push(format!("mm.mailbox_id IN (SELECT b.id FROM mailbox b WHERE {})", mailbox_match(p)));
+        let cond = match &q.terms[i].kind {
+            TermKind::Mailbox(id) => format!("mm.mailbox_id = {id}"),
+            TermKind::In(v) | TermKind::Label(v) => {
+                let p = sql.param(v.clone());
+                format!("mm.mailbox_id IN (SELECT b.id FROM mailbox b WHERE {})", mailbox_match(p))
+            }
+            _ => unreachable!("driver_mailbox only picks mailbox terms"),
+        };
+        sql.conds.push(cond);
     } else {
         sql.from = "message m".into();
         sql.order = "m.id DESC";
@@ -123,6 +131,12 @@ fn plan(q: &Query) -> Sql {
                     mailbox_match(p)
                 )
             }
+            TermKind::Mailbox(id) => {
+                if Some(i) == driver_mailbox && positive_text.is_empty() {
+                    continue;
+                }
+                format!("EXISTS (SELECT 1 FROM message_mailbox x WHERE x.message_id = m.id AND x.mailbox_id = {id})")
+            }
             TermKind::HasAttachment => "m.has_attachments = 1".into(),
             TermKind::Is(Status::Unread) => format!("(m.flags & {}) = 0", Flags::SEEN),
             TermKind::Is(Status::Read) => format!("(m.flags & {}) != 0", Flags::SEEN),
@@ -148,8 +162,19 @@ fn where_clause(sql: &Sql) -> String {
 }
 
 /// Threads matching the query, newest first: `offset` threads skipped, then
-/// up to `limit` returned.
+/// up to `limit` returned. Stops reading once the page is full.
 pub fn query_page(conn: &Connection, q: &Query, offset: usize, limit: usize) -> Result<Vec<ThreadRow>> {
+    let hits = scan(conn, q, Some(offset + limit))?;
+    thread_rows(conn, hits.get(offset..).unwrap_or_default())
+}
+
+/// Every matching thread in list order, as (thread, newest matching message).
+/// One scan gives the count and lets any page be cut out without re-reading.
+pub fn query_order(conn: &Connection, q: &Query) -> Result<Vec<(ThreadId, MessageId)>> {
+    scan(conn, q, None)
+}
+
+fn scan(conn: &Connection, q: &Query, stop_after: Option<usize>) -> Result<Vec<(ThreadId, MessageId)>> {
     let sql = plan(q);
     let text = format!(
         "SELECT m.id, m.thread_id FROM {}{} ORDER BY {}",
@@ -160,17 +185,21 @@ pub fn query_page(conn: &Connection, q: &Query, offset: usize, limit: usize) -> 
     let mut stmt = conn.prepare_cached(&text)?;
     let mut rows = stmt.query(params_from_iter(sql.params.iter()))?;
     let mut seen = HashSet::new();
-    let mut hits = Vec::with_capacity(limit);
+    let mut hits = Vec::new();
     while let Some(row) = rows.next()? {
         let thread: ThreadId = row.get(1)?;
-        if seen.insert(thread) && seen.len() > offset {
+        if seen.insert(thread) {
             hits.push((thread, row.get::<_, MessageId>(0)?));
-            if hits.len() == limit {
+            if Some(hits.len()) == stop_after {
                 break;
             }
         }
     }
-    hits.into_iter().map(|(t, m)| thread_row(conn, t, m)).collect()
+    Ok(hits)
+}
+
+pub fn thread_rows(conn: &Connection, hits: &[(ThreadId, MessageId)]) -> Result<Vec<ThreadRow>> {
+    hits.iter().map(|&(t, m)| thread_row(conn, t, m)).collect()
 }
 
 /// Number of threads matching the query.

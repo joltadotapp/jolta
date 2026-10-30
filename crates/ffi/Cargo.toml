@@ -16,3 +16,5 @@ path = "src/bin/uniffi-bindgen-swift.rs"
 [dependencies]
 kite-core.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
+thiserror.workspace = true
+tokio.workspace = true
