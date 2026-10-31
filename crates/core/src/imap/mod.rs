@@ -372,7 +372,11 @@ pub async fn connect_xoauth2(endpoint: &Endpoint, username: &str, token: &str) -
         .authenticate("XOAUTH2", XOAuth2(crate::oauth::xoauth2(username, token)))
         .await
         .map_err(|(e, _)| match e {
-            async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => Error::Auth(msg),
+            async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => Error::Auth(format!(
+                "Gmail refused {username} ({}). Kite may not have access to this mailbox: use Sign In Again \
+                 in Settings › Accounts and allow Kite to read, compose and send your email.",
+                server_text(&msg)
+            )),
             other => Error::Imap(other),
         })
 }

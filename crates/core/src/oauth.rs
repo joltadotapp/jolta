@@ -56,6 +56,16 @@ impl Provider {
         }
     }
 
+    /// The scope Kite cannot work without, where the user can refuse it and
+    /// still finish signing in: Google's consent screen shows it as a
+    /// checkbox, and Gmail then answers every login with AUTHENTICATIONFAILED.
+    fn required_scope(self) -> Option<&'static str> {
+        match self {
+            Provider::Google => Some("https://mail.google.com/"),
+            Provider::Microsoft => None,
+        }
+    }
+
     fn env_prefix(self) -> &'static str {
         match self {
             Provider::Google => "GOOGLE",
@@ -204,6 +214,15 @@ impl Pending {
             .as_str()
             .ok_or_else(|| Error::Auth("the provider sent no refresh token".into()))?
             .to_string();
+        if let (Some(wanted), Some(granted)) = (self.provider.required_scope(), tokens["scope"].as_str()) {
+            if !granted.split_whitespace().any(|s| s.eq_ignore_ascii_case(wanted)) {
+                return Err(Error::Auth(
+                    "you didn't give Kite access to your mail. Sign in again and tick the box that lets Kite \
+                     read, compose and send your email."
+                        .into(),
+                ));
+            }
+        }
         let access_token = tokens["access_token"].as_str().unwrap_or_default().to_string();
         let claims = tokens["id_token"].as_str().and_then(jwt_claims).unwrap_or(Value::Null);
         let email = claims["email"]
