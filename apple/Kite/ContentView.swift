@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     let model: AppModel
+    @AppStorage("ListWidth") private var listWidth = Double(Theme.listWidth)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -10,9 +11,13 @@ struct ContentView: View {
                 .frame(width: Theme.sidebarWidth)
                 .background(Color(Theme.side))
                 .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+            // The chosen width, sized before the reader (which keeps its 480 pt
+            // minimum): a narrow window takes width from the list first.
             ListColumn(model: model)
-                .frame(minWidth: 420, idealWidth: Theme.listWidth, maxWidth: Theme.listWidth)
-                .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+                .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
+                .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
+                .layoutPriority(1)
+                .zIndex(1)
             ReaderColumn(model: model)
                 .frame(minWidth: 480, maxWidth: .infinity)
                 .background(Color(Theme.reader))
@@ -53,6 +58,54 @@ struct ContentView: View {
             } else if model.showsHelp {
                 HelpView(model: model).padding(.top, 110)
             }
+        }
+    }
+}
+
+/// The line between list and reader. Dragging it sets the list's width;
+/// a double click goes back to the default. An AppKit view, so it gets the
+/// clicks ahead of the message list's table underneath.
+struct ColumnResizer: NSViewRepresentable {
+    @Binding var width: Double
+
+    func makeNSView(context: Context) -> Handle { Handle() }
+
+    func updateNSView(_ handle: Handle, context: Context) {
+        handle.width = width
+        handle.onChange = { width = $0 }
+    }
+
+    final class Handle: NSView {
+        var width = 0.0
+        var onChange: (Double) -> Void = { _ in }
+        private var start: (x: CGFloat, width: Double)?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .columnResize)
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            Theme.line2.setFill()
+            NSRect(x: bounds.midX - 0.5, y: 0, width: 1, height: bounds.height).fill()
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 {
+                onChange(Double(Theme.listWidth))
+            } else {
+                start = (event.locationInWindow.x, width)
+            }
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start else { return }
+            onChange(min(max(start.width + event.locationInWindow.x - start.x, 380), 900))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            start = nil
         }
     }
 }
@@ -530,6 +583,7 @@ struct ActionButton: View {
     let icon: String
     let title: String
     let key: String
+    var showsTitle = true
     let action: () -> Void
     @State private var hovering = false
 
@@ -537,7 +591,7 @@ struct ActionButton: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Image(systemName: icon).font(.system(size: 12.5))
-                Text(title)
+                if showsTitle { Text(title) }
                 Text(key)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(Color(Theme.text3))
@@ -553,21 +607,33 @@ struct ActionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .help(title)
     }
 }
 
 struct ReaderColumn: View {
     let model: AppModel
 
+    private func actions(titles: Bool) -> some View {
+        HStack(spacing: 4) {
+            ActionButton(icon: "archivebox", title: "Archive", key: "E", showsTitle: titles) { model.act(.archive, label: "Archived") }
+            ActionButton(icon: "trash", title: "Trash", key: "#", showsTitle: titles) { model.act(.trash, label: "Moved to Trash") }
+            ActionButton(icon: "envelope.badge", title: "Unread", key: "U", showsTitle: titles) { model.act(.markUnread, label: "Marked unread") }
+            ActionButton(icon: "star", title: "Star", key: "S", showsTitle: titles) { model.act(.flag, label: "Starred") }
+        }
+        .fixedSize()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if model.compose == nil {
             HStack(spacing: 4) {
                 if model.openThread != nil || model.isMultiSelection {
-                    ActionButton(icon: "archivebox", title: "Archive", key: "E") { model.act(.archive, label: "Archived") }
-                    ActionButton(icon: "trash", title: "Trash", key: "#") { model.act(.trash, label: "Moved to Trash") }
-                    ActionButton(icon: "envelope.badge", title: "Unread", key: "U") { model.act(.markUnread, label: "Marked unread") }
-                    ActionButton(icon: "star", title: "Star", key: "S") { model.act(.flag, label: "Starred") }
+                    // A narrow reader keeps the icons and keys and drops the words.
+                    ViewThatFits(in: .horizontal) {
+                        actions(titles: true)
+                        actions(titles: false)
+                    }
                 }
                 Spacer()
                 if model.cursor.count > 0, !model.isMultiSelection {
