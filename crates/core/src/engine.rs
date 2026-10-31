@@ -178,6 +178,27 @@ impl Engine {
         Ok(())
     }
 
+    /// Marks every unread message the query matches read. Returns undo tokens.
+    pub fn mark_all_read(&self, query: &crate::search::Query) -> Result<Vec<OpId>> {
+        let queued = self.kite.store.write(|tx| {
+            let unread = crate::search::query_messages(tx, query)?;
+            actions::mark_read(tx, &unread)
+        })?;
+        if !queued.is_empty() {
+            (self.sink)(Event::ListsChanged);
+        }
+        self.wake_all(&queued);
+        Ok(queued.into_iter().map(|(_, op)| op).collect())
+    }
+
+    /// Empties these folders for good, on this Mac now and on the server next.
+    pub fn empty(&self, mailboxes: &[MailboxId]) -> Result<()> {
+        let queued = self.kite.store.write(|tx| mailboxes.iter().map(|&m| actions::empty(tx, m)).collect::<Result<Vec<_>>>())?;
+        (self.sink)(Event::ListsChanged);
+        self.wake_all(&queued);
+        Ok(())
+    }
+
     fn wake_all(&self, ops: &[(AccountId, OpId)]) {
         let mut accounts: Vec<AccountId> = ops.iter().map(|&(a, _)| a).collect();
         accounts.sort_unstable();

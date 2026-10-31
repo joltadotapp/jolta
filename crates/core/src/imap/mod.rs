@@ -736,6 +736,15 @@ pub(crate) fn flag_list(bits: u32) -> String {
 /// the caller can sync them (a moved message gets its new UID that way).
 pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store::Op) -> Result<Vec<MailboxId>> {
     let account = op.account;
+    if let store::OpKind::Empty { mailbox } = op.kind {
+        // The same for Gmail: deleting from [Gmail]/Trash deletes for good.
+        let path = kite.store.read_async(move |c| Ok(store::mailbox(c, mailbox)?.remote_id)).await?;
+        if session.select(&path).await?.exists > 0 {
+            session.uid_store("1:*", "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;
+            session.expunge().await?.try_collect::<Vec<_>>().await?;
+        }
+        return Ok(vec![mailbox]);
+    }
     let kind = kite.store.read_async(move |c| Ok(store::account(c, account)?.kind)).await?;
     if kind == AccountKind::Gmail {
         return gmail::apply_op(kite, session, op).await;
@@ -807,6 +816,7 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store
             }
             Ok(vec![from, to])
         }
+        store::OpKind::Empty { .. } => unreachable!("handled above"),
     }
 }
 

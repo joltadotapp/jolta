@@ -149,6 +149,16 @@ final class AppModel {
             source = .allMail
             search = query
         }
+        // `-KiteEmpty <mailbox id>` asks to empty that one Trash folder.
+        if let id = Int64(defaults.string(forKey: "KiteEmpty") ?? "") {
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                if let box = accounts.flatMap(\.mailboxes).first(where: { $0.id == id }) {
+                    source = .mailbox(id: box.id, name: box.name)
+                    confirmEmpty = source
+                }
+            }
+        }
         // `-KitePalette commands|snooze|move` opens the palette, for screenshots.
         switch defaults.string(forKey: "KitePalette") {
         case "commands": palette = .commands
@@ -417,6 +427,40 @@ final class AppModel {
             let tokens = try core.perform(action: action, threadIds: threads, context: source.actionContext)
             let text = threads.count > 1 ? "\(label): \(threads.count) conversations" : label
             if !tokens.isEmpty { show(Toast(text: text, undo: .action(tokens))) }
+        } catch {
+            show(Toast(text: "\(error)", undo: nil))
+        }
+    }
+
+    /// Marks everything unread in a list read; the current list by default.
+    func markAllRead(_ list: ListSource? = nil) {
+        let target = list ?? source
+        do {
+            let tokens = try core.markAllRead(query: list == nil ? query : target.query)
+            show(Toast(text: tokens.isEmpty ? "Nothing unread in \(target.title)" : "Marked all read in \(target.title)",
+                       undo: tokens.isEmpty ? nil : .action(tokens)))
+        } catch {
+            show(Toast(text: "\(error)", undo: nil))
+        }
+    }
+
+    /// Trash folders behind a list: one account's, or every account's.
+    func trashFolders(_ list: ListSource) -> [MailboxInfo] {
+        let boxes = accounts.flatMap(\.mailboxes)
+        switch list {
+        case .role("trash"): return boxes.filter { $0.role == "trash" }
+        case .mailbox(let id, _): return boxes.filter { $0.id == id && $0.role == "trash" }
+        default: return []
+        }
+    }
+
+    /// Asks before emptying Trash: there is no undo.
+    var confirmEmpty: ListSource?
+
+    func emptyTrash(_ list: ListSource) {
+        do {
+            try core.emptyMailboxes(mailboxIds: trashFolders(list).map(\.id))
+            show(Toast(text: "Trash emptied", undo: nil))
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }

@@ -284,6 +284,15 @@ fn sort_text(text: &str) -> String {
         .collect()
 }
 
+/// Every message the query matches, ignoring threads.
+pub fn query_messages(conn: &Connection, q: &Query) -> Result<Vec<MessageId>> {
+    let sql = plan(q);
+    let text = format!("SELECT m.id FROM {}{}", sql.from, where_clause(&sql));
+    let mut stmt = conn.prepare_cached(&text)?;
+    let ids = stmt.query_map(params_from_iter(sql.params.iter()), |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
 pub fn thread_rows(conn: &Connection, hits: &[(ThreadId, MessageId)]) -> Result<Vec<ThreadRow>> {
     hits.iter().map(|&(t, m)| thread_row(conn, t, m)).collect()
 }

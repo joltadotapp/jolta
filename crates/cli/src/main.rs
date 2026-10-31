@@ -119,6 +119,10 @@ enum Command {
         #[arg(long)]
         until: Option<String>,
     },
+    /// Mark every unread message matching a query read, and wait until the server has it.
+    MarkAllRead { query: String },
+    /// Delete everything in a mailbox for good (Empty Trash), here and on the server.
+    Empty { mailbox: i64 },
     /// Change a mailbox on the server directly, as another mail client would.
     #[command(subcommand)]
     Dev(DevCommand),
@@ -318,6 +322,11 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Act { action, thread, from, undo, until } => act(&kite, action, thread, from, undo, until).await,
+        Command::MarkAllRead { query } => {
+            let q = kite_core::search::parse(&format!("{query} is:unread"))?;
+            list_action(&kite, |engine| Ok(engine.mark_all_read(&q)?.len())).await
+        }
+        Command::Empty { mailbox } => list_action(&kite, |engine| Ok(engine.empty(&[kite_core::MailboxId(mailbox)]).map(|_| 1)?)).await,
         Command::Send { account, to, subject, body, reply, all, attach } => {
             send(&kite, &account, to, subject, body, reply, all, attach).await
         }
@@ -510,6 +519,28 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
         wait_sent().await?;
         println!("undone on the server after {:.2} s", t1.elapsed().as_secs_f64());
     }
+    Ok(())
+}
+
+/// Runs an action over a whole list through the engine and waits until
+/// every account has sent its queued ops.
+async fn list_action(kite: &Kite, action: impl FnOnce(&kite_core::engine::Engine) -> Result<usize>) -> Result<()> {
+    let sink: kite_core::engine::Sink = Arc::new(|_| {});
+    let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+    let last: i64 = kite.store.read(|c| Ok(c.query_row("SELECT coalesce(max(id), 0) FROM op", [], |r| r.get(0))?))?;
+    let t0 = Instant::now();
+    let ops = action(&engine)?;
+    println!("{ops} op(s) applied locally in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let pending: bool = kite
+            .store
+            .read(|c| Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM op WHERE id > ?1 AND state = 'pending')", [last], |r| r.get(0))?))?;
+        if !pending {
+            break;
+        }
+    }
+    println!("on the server after {:.2} s", t0.elapsed().as_secs_f64());
     Ok(())
 }
 

@@ -312,6 +312,7 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, op: &store::Op) -> Res
             }
             Ok(vec![])
         }
+        OpKind::Empty { .. } => unreachable!("imap::apply_op empties folders for Gmail too"),
         OpKind::Move { from, to } => {
             let (from, to) = (find(from), find(to));
             if let Some(t) = to.as_ref().filter(|t| t.role == Some(MailboxRole::Trash)) {

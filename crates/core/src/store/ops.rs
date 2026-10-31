@@ -12,6 +12,9 @@ pub struct OpId(pub i64);
 pub enum OpKind {
     Flags { add: u32, remove: u32 },
     Move { from: MailboxId, to: MailboxId },
+    /// Deletes everything in the server folder for good (Empty Trash). The
+    /// local copies are gone before it runs; it has no inverse.
+    Empty { mailbox: MailboxId },
 }
 
 #[derive(Clone, Debug)]
@@ -26,11 +29,12 @@ pub struct Op {
 }
 
 impl Op {
-    /// The op that undoes this one.
-    pub fn inverse(&self) -> OpKind {
+    /// The op that undoes this one, if one can.
+    pub fn inverse(&self) -> Option<OpKind> {
         match self.kind {
-            OpKind::Flags { add, remove } => OpKind::Flags { add: remove, remove: add },
-            OpKind::Move { from, to } => OpKind::Move { from: to, to: from },
+            OpKind::Flags { add, remove } => Some(OpKind::Flags { add: remove, remove: add }),
+            OpKind::Move { from, to } => Some(OpKind::Move { from: to, to: from }),
+            OpKind::Empty { .. } => None,
         }
     }
 }
@@ -106,6 +110,26 @@ pub fn apply_local(conn: &Connection, kind: &OpKind, messages: &[MessageId]) -> 
                 )?;
                 changed.push((id, uid));
             }
+            OpKind::Empty { mailbox } => {
+                let Some(uid) = conn
+                    .query_row(
+                        "SELECT uid FROM message_mailbox WHERE message_id = ?1 AND mailbox_id = ?2",
+                        params![id, mailbox],
+                        |r| r.get::<_, Option<u32>>(0),
+                    )
+                    .optional()?
+                else {
+                    continue;
+                };
+                conn.execute("DELETE FROM message_mailbox WHERE message_id = ?1 AND mailbox_id = ?2", params![id, mailbox])?;
+                // A message filed elsewhere too (a Gmail label) keeps its row.
+                let elsewhere: bool =
+                    conn.query_row("SELECT EXISTS (SELECT 1 FROM message_mailbox WHERE message_id = ?1)", [id], |r| r.get(0))?;
+                if !elsewhere {
+                    super::delete_messages(conn, &[id])?;
+                }
+                changed.push((id, uid));
+            }
         }
     }
     Ok(changed)
@@ -115,6 +139,7 @@ pub fn insert_op(conn: &Connection, account: AccountId, kind: &OpKind, messages:
     let (name, from, to, add, remove) = match *kind {
         OpKind::Flags { add, remove } => ("flags", None, None, add, remove),
         OpKind::Move { from, to } => ("move", Some(from), Some(to), 0, 0),
+        OpKind::Empty { mailbox } => ("empty", Some(mailbox), None, 0, 0),
     };
     conn.execute(
         "INSERT INTO op (account_id, kind, messages, from_mailbox, to_mailbox, add_flags, remove_flags, created)
@@ -128,6 +153,7 @@ fn op_row(r: &rusqlite::Row) -> rusqlite::Result<Op> {
     let kind: String = r.get(2)?;
     let kind = match kind.as_str() {
         "move" => OpKind::Move { from: r.get(4)?, to: r.get(5)? },
+        "empty" => OpKind::Empty { mailbox: r.get(4)? },
         _ => OpKind::Flags { add: r.get(6)?, remove: r.get(7)? },
     };
     Ok(Op { id: OpId(r.get(0)?), account: r.get(1)?, kind, messages: decode(&r.get::<_, String>(3)?), attempts: r.get(8)? })
@@ -199,8 +225,12 @@ pub fn fail_attempt(conn: &Connection, id: OpId, error: &str, give_up: bool) -> 
 pub fn revert_local(conn: &Connection, op: &Op) -> Result<()> {
     let ids: Vec<MessageId> = op.messages.iter().map(|(id, _)| *id).collect();
     match op.kind {
-        OpKind::Flags { .. } => {
-            apply_local(conn, &op.inverse(), &ids)?;
+        OpKind::Flags { add, remove } => {
+            apply_local(conn, &OpKind::Flags { add: remove, remove: add }, &ids)?;
+        }
+        OpKind::Empty { mailbox } => {
+            // The local copies are gone; a full sync of the folder brings back what the server kept.
+            conn.execute("UPDATE mailbox SET uidvalidity = NULL, delta_link = NULL WHERE id = ?1", [mailbox])?;
         }
         OpKind::Move { from, to } => {
             // Gmail's All Mail holds every message; a move there never took a link away.

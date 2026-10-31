@@ -74,6 +74,14 @@ struct PaletteView: View {
                 })
             }
         }
+        out.append(PaletteItem(id: "mark-all-read", title: "Mark All as Read", detail: model.source.title, icon: "envelope.open") { [model] in
+            model.markAllRead()
+        })
+        if !model.trashFolders(model.source).isEmpty {
+            out.append(PaletteItem(id: "empty-trash", title: "Empty Trash…", icon: "trash.slash") { [model] in
+                model.confirmEmpty = model.source
+            })
+        }
         out.append(PaletteItem(id: "sync", title: "Sync now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
             model.showsHelp = true

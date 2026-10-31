@@ -360,6 +360,10 @@ impl Graph {
     }
 
     pub async fn apply_op(&self, kite: &Kite, op: &store::Op) -> Result<Vec<MailboxId>> {
+        if let OpKind::Empty { mailbox } = op.kind {
+            self.empty_folder(kite, mailbox).await?;
+            return Ok(vec![mailbox]);
+        }
         let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
         let remotes: Vec<String> = kite
             .store
@@ -386,6 +390,7 @@ impl Graph {
                 }
                 Ok(vec![])
             }
+            OpKind::Empty { .. } => unreachable!("handled above"),
             OpKind::Move { from, to } => {
                 let destination = self.folder_id(kite, to).await?;
                 for r in &remotes {
@@ -394,6 +399,30 @@ impl Graph {
                 Ok(vec![from, to])
             }
         }
+    }
+
+    /// Deletes every message in the folder, as Outlook's Empty Folder does:
+    /// Exchange keeps them in Recoverable Items for its retention period.
+    async fn empty_folder(&self, kite: &Kite, mailbox: MailboxId) -> Result<()> {
+        let folder = self.folder_id(kite, mailbox).await?;
+        let page = format!("/me/mailFolders/{folder}/messages?$select=id&$top=100");
+        // Each pass deletes a page; a folder of 100,000 messages takes 1,000 passes.
+        for _ in 0..1000 {
+            let listed = self.get(&page).await?;
+            let ids: Vec<&str> = listed["value"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
+            if ids.is_empty() {
+                return Ok(());
+            }
+            for id in ids {
+                match self.send(reqwest::Method::DELETE, &format!("/me/messages/{id}"), None).await {
+                    Err(Error::Other(e)) if e.starts_with("Microsoft Graph 404") => {}
+                    other => {
+                        other?;
+                    }
+                }
+            }
+        }
+        Err(Error::Other("the folder still had messages after 100,000 deletions".into()))
     }
 
     /// Sends a message Kite built; Graph keeps a copy in Sent Items.

@@ -114,6 +114,10 @@ struct MessageList: NSViewRepresentable {
                     table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<min(count, visible.location + visible.length)),
                                      columnIndexes: [0])
                 }
+                // Reloading cells leaves row views alone, and they draw the unread dot.
+                table.enumerateAvailableRowViews { view, row in
+                    (view as? ThreadRowView)?.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
+                }
             }
             guard count > 0 else { return }
             var kept = model.rows(of: model.selectedThreads)

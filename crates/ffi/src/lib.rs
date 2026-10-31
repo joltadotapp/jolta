@@ -663,6 +663,18 @@ impl Core {
         Ok(engine.perform(&threads, action.into(), context.into_core()?)?.into_iter().map(|op| op.0).collect())
     }
 
+    /// Marks every unread message in the list read. Returns undo tokens.
+    pub fn mark_all_read(&self, query: String) -> Result<Vec<i64>> {
+        let q = search::parse(&format!("{query} is:unread"))?;
+        Ok(self.running_engine()?.mark_all_read(&q)?.into_iter().map(|op| op.0).collect())
+    }
+
+    /// Deletes everything in these folders for good, here and on the server.
+    pub fn empty_mailboxes(&self, mailbox_ids: Vec<i64>) -> Result<()> {
+        let ids: Vec<MailboxId> = mailbox_ids.into_iter().map(MailboxId).collect();
+        Ok(self.running_engine()?.empty(&ids)?)
+    }
+
     pub fn undo(&self, tokens: Vec<i64>) -> Result<()> {
         let ops: Vec<OpId> = tokens.into_iter().map(OpId).collect();
         Ok(self.running_engine()?.undo(&ops)?)

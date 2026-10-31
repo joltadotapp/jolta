@@ -19,6 +19,14 @@ struct ContentView: View {
         }
         .background(Color(Theme.bg))
         .background(MainWindowReader())
+        .alert("Empty Trash?", isPresented: Binding(get: { model.confirmEmpty != nil }, set: { if !$0 { model.confirmEmpty = nil } }),
+               presenting: model.confirmEmpty) { list in
+            Button("Empty Trash", role: .destructive) { model.emptyTrash(list) }
+            Button("Cancel", role: .cancel) {}
+        } message: { list in
+            let accounts = model.trashFolders(list).compactMap { box in model.accounts.first { $0.id == box.accountId }?.title }
+            Text("Everything in Trash in \(ListFormatter.localizedString(byJoining: accounts)) is deleted for good, on this Mac and on the server. You can't undo this.")
+        }
         .foregroundStyle(Color(Theme.text))
         .font(.system(size: 13))
         .ignoresSafeArea()
@@ -62,12 +70,14 @@ struct Sidebar: View {
                 VStack(alignment: .leading, spacing: 1) {
                     NavRow(icon: "tray", title: "Inbox", count: model.unreadCount("in:inbox"),
                            selected: model.source == .unifiedInbox) { model.source = .unifiedInbox }
+                        .contextMenu { ListActions(model: model, list: .unifiedInbox) }
                     if !model.roles.isEmpty {
                         GroupLabel("Mailboxes")
                         ForEach(model.roles, id: \.self) { role in
                             NavRow(icon: Self.icon(role), title: role.capitalized,
                                    count: role == "drafts" ? 0 : model.unreadCount("in:\(role)"),
                                    selected: model.source == .role(role)) { model.source = .role(role) }
+                                .contextMenu { ListActions(model: model, list: .role(role)) }
                         }
                     }
                     if !model.snoozed.isEmpty {
@@ -113,7 +123,9 @@ struct Sidebar: View {
                                     model.source = .mailbox(id: box.id, name: box.name)
                                 }
                                 .contextMenu {
+                                    ListActions(model: model, list: .mailbox(id: box.id, name: box.name))
                                     if box.role != "inbox" {
+                                        Divider()
                                         Button("Hide Folder") { model.setHidden(box, true) }
                                     }
                                 }
@@ -258,6 +270,19 @@ struct SyncFooter: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1).padding(.horizontal, 10) }
+    }
+}
+
+/// What a folder's context menu offers for the whole list.
+struct ListActions: View {
+    let model: AppModel
+    let list: ListSource
+
+    var body: some View {
+        Button("Mark All as Read") { model.markAllRead(list) }
+        if !model.trashFolders(list).isEmpty {
+            Button("Empty Trash…") { model.confirmEmpty = list }
+        }
     }
 }
 
