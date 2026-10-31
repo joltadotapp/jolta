@@ -359,9 +359,12 @@ struct SectionBar: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            KeyCap(key: "⇥")
-                .padding(.bottom, 8)
-                .padding(.trailing, 9)
+            HStack(spacing: 5) {
+                KeyCap(key: "⇥")
+                Text("next").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            }
+            .padding(.bottom, 8)
+            .padding(.trailing, 9)
         }
         .font(.system(size: 12.5))
         .padding(.horizontal, 17)
