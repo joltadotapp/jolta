@@ -11,7 +11,7 @@ use rusqlite::{Connection, params_from_iter};
 pub use query::{Query, Status, Term, TermKind, TextField, parse};
 
 use crate::model::*;
-use crate::store::date_to_id_floor;
+use crate::store::{base_subject, date_to_id_floor};
 use crate::Result;
 
 /// One row of a message list: a thread, shown through its newest matching message.
@@ -180,16 +180,79 @@ pub fn query_page(conn: &Connection, q: &Query, offset: usize, limit: usize) -> 
     thread_rows(conn, hits.get(offset..).unwrap_or_default())
 }
 
+/// What a list is sorted on. Each key has a natural direction: dates newest
+/// first, names and subjects A to Z. `reversed` flips it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sort {
+    pub key: SortKey,
+    pub reversed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortKey {
+    #[default]
+    Date,
+    /// The name the list shows, or the address when there is no name.
+    Sender,
+    /// The subject without reply and forward prefixes, as threading reads it.
+    Subject,
+}
+
 /// Every matching thread in list order, as (thread, newest matching message).
 /// One scan gives the count and lets any page be cut out without re-reading.
-pub fn query_order(conn: &Connection, q: &Query) -> Result<Vec<(ThreadId, MessageId)>> {
-    scan(conn, q, None)
+/// Threads with the same sender or subject stay newest first.
+pub fn query_order(conn: &Connection, q: &Query, sort: Sort) -> Result<Vec<(ThreadId, MessageId)>> {
+    if sort.key == SortKey::Date {
+        let mut hits = scan(conn, q, None)?;
+        if sort.reversed {
+            hits.reverse();
+        }
+        return Ok(hits);
+    }
+    let mut keyed = Vec::new();
+    for_each_thread(conn, q, ", m.from_name, m.from_addr, m.subject", |thread, message, row| {
+        let key = match sort.key {
+            SortKey::Sender => {
+                let name: Option<String> = row.get(2)?;
+                let shown = match name.filter(|n| !n.trim().is_empty()) {
+                    Some(name) => name,
+                    None => row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                };
+                sort_text(&shown)
+            }
+            _ => sort_text(&base_subject(&row.get::<_, Option<String>>(4)?.unwrap_or_default()).0),
+        };
+        keyed.push((key, (thread, message)));
+        Ok(true)
+    })?;
+    // Empty names and subjects go last in either direction.
+    keyed.sort_by(|(a, _), (b, _)| {
+        a.is_empty().cmp(&b.is_empty()).then_with(|| if sort.reversed { b.cmp(a) } else { a.cmp(b) })
+    });
+    Ok(keyed.into_iter().map(|(_, hit)| hit).collect())
 }
 
 fn scan(conn: &Connection, q: &Query, stop_after: Option<usize>) -> Result<Vec<(ThreadId, MessageId)>> {
+    let mut hits = Vec::new();
+    for_each_thread(conn, q, "", |thread, message, _| {
+        hits.push((thread, message));
+        Ok(Some(hits.len()) != stop_after)
+    })?;
+    Ok(hits)
+}
+
+/// Walks matching messages newest first and calls `each` once per thread,
+/// with its newest matching message and the row (`m.id`, `m.thread_id`, then
+/// `extra` columns). Stops when `each` returns false.
+fn for_each_thread(
+    conn: &Connection,
+    q: &Query,
+    extra: &str,
+    mut each: impl FnMut(ThreadId, MessageId, &rusqlite::Row) -> Result<bool>,
+) -> Result<()> {
     let sql = plan(q);
     let text = format!(
-        "SELECT m.id, m.thread_id FROM {}{} ORDER BY {}",
+        "SELECT m.id, m.thread_id{extra} FROM {}{} ORDER BY {}",
         sql.from,
         where_clause(&sql),
         sql.order
@@ -197,17 +260,28 @@ fn scan(conn: &Connection, q: &Query, stop_after: Option<usize>) -> Result<Vec<(
     let mut stmt = conn.prepare_cached(&text)?;
     let mut rows = stmt.query(params_from_iter(sql.params.iter()))?;
     let mut seen = HashSet::new();
-    let mut hits = Vec::new();
     while let Some(row) = rows.next()? {
         let thread: ThreadId = row.get(1)?;
-        if seen.insert(thread) {
-            hits.push((thread, row.get::<_, MessageId>(0)?));
-            if Some(hits.len()) == stop_after {
-                break;
-            }
+        if seen.insert(thread) && !each(thread, row.get(0)?, row)? {
+            break;
         }
     }
-    Ok(hits)
+    Ok(())
+}
+
+/// Lowercase with accents dropped, so `Émile` sorts with `emile` and quotes
+/// around a display name don't put it first.
+fn sort_text(text: &str) -> String {
+    const FOLD: [(&str, char); 14] = [
+        ("àáâãäåāăą", 'a'), ("çćĉċč", 'c'), ("ďđ", 'd'), ("èéêëēĕėęě", 'e'), ("ìíîïĩīĭįı", 'i'),
+        ("ľĺļł", 'l'), ("ñńņňŉ", 'n'), ("òóôõöøōŏő", 'o'), ("ŕŗř", 'r'), ("śŝşš", 's'),
+        ("ţťŧ", 't'), ("ùúûüũūŭůűų", 'u'), ("ýÿŷ", 'y'), ("źżž", 'z'),
+    ];
+    text.trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace())
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| if c.is_ascii() { c } else { FOLD.iter().find(|(from, _)| from.contains(c)).map_or(c, |&(_, to)| to) })
+        .collect()
 }
 
 pub fn thread_rows(conn: &Connection, hits: &[(ThreadId, MessageId)]) -> Result<Vec<ThreadRow>> {
@@ -254,4 +328,41 @@ fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result
         Ok(())
     })?;
     Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sort_text_folds_case_accents_and_quotes() {
+        assert_eq!(sort_text("\"Émile Dupré\""), "emile dupre\"");
+        assert_eq!(sort_text("  Ångström"), "angstrom");
+        assert!(sort_text("Émile") < sort_text("Frank"));
+    }
+
+    #[test]
+    fn sorts_by_sender_and_subject_with_ties_newest_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id INTEGER PRIMARY KEY, thread_id INTEGER, from_name TEXT, from_addr TEXT, subject TEXT);
+             INSERT INTO message VALUES
+               (1, 10, 'Zoë', 'z@x', 'Re: Budget'),
+               (2, 20, '', 'anna@x', 'Lunch'),
+               (3, 30, 'Émile', 'e@x', ''),
+               (4, 40, 'anna', 'anna@y', 'Fwd: budget'),
+               (5, 20, 'Anna', 'anna@x', 'Re: Lunch');",
+        )
+        .unwrap();
+        let q = parse("").unwrap();
+        let threads = |key, reversed| -> Vec<i64> {
+            query_order(&conn, &q, Sort { key, reversed }).unwrap().into_iter().map(|(t, _)| t.0).collect()
+        };
+        assert_eq!(threads(SortKey::Date, false), [20, 40, 30, 10]);
+        assert_eq!(threads(SortKey::Date, true), [10, 30, 40, 20]);
+        assert_eq!(threads(SortKey::Sender, false), [20, 40, 30, 10]);
+        assert_eq!(threads(SortKey::Sender, true), [10, 30, 20, 40]);
+        assert_eq!(threads(SortKey::Subject, false), [40, 10, 20, 30]);
+        assert_eq!(threads(SortKey::Subject, true), [20, 40, 10, 30]);
+    }
 }

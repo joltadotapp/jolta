@@ -31,7 +31,8 @@ enum Theme {
         .systemFont(ofSize: size, weight: weight)
     }
 
-    static let timeFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    /// Digits line up; letters stay proportional so `26/10/24` fits the 52 pt date column.
+    static let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
 
     static func dynamic(dark: UInt32, light: UInt32) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -59,11 +60,11 @@ enum Theme {
 
     private static let full: DateFormatter = {
         let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("d MMM yy")
+        f.setLocalizedDateFormatFromTemplate("ddMMyy")
         return f
     }()
 
-    /// Today: `09:32`. This week: `Tue`. This year: `26 Oct`. Older: `26 Oct 24`.
+    /// Today: `09:32`. This week: `Tue`. This year: `26 Oct`. Older: `26/10/24`, in the locale's order.
     static func shortDate(_ unix: Int64) -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(unix))
         let cal = Calendar.current

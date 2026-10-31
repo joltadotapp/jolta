@@ -74,6 +74,12 @@ final class AppModel {
     private(set) var lastError: String?
     var openThread: ThreadView?
     var selectedThreadID: Int64?
+    /// Threads selected in the list, in list order. With more than one,
+    /// actions apply to all of them and the reader shows how many.
+    private(set) var selectedThreads: [Int64] = []
+    var isMultiSelection: Bool { selectedThreads.count > 1 }
+    /// Each list's sort, keyed by its source query and kept across launches.
+    private var sorts: [String: String] = UserDefaults.standard.dictionary(forKey: "ListSorts") as? [String: String] ?? [:]
     /// The list cursor's row and the list length, for "3 of 120" in the reader.
     var cursor: (row: Int, count: Int) = (0, 0)
     /// Rows in the message list, as the list last counted them.
@@ -86,6 +92,28 @@ final class AppModel {
     var compose: ComposeData?
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
+
+    var sort: ListSort {
+        get {
+            let saved = sorts[source.query] ?? ""
+            let key: SortKey = switch saved.trimmingCharacters(in: ["-"]) {
+            case "sender": .sender
+            case "subject": .subject
+            default: .date
+            }
+            return ListSort(key: key, reversed: saved.hasPrefix("-"))
+        }
+        set {
+            let name = switch newValue.key {
+            case .date: "date"
+            case .sender: "sender"
+            case .subject: "subject"
+            }
+            sorts[source.query] = (newValue.reversed ? "-" : "") + name
+            UserDefaults.standard.set(sorts, forKey: "ListSorts")
+            listChanged()
+        }
+    }
 
     var showsSections: Bool { source == .unifiedInbox && search.isEmpty && !sections.isEmpty }
 
@@ -351,19 +379,44 @@ final class AppModel {
     }
 
     func count() -> Int {
-        (try? core.listCount(query: query)).map(Int.init) ?? 0
+        (try? core.listCount(query: query, sort: sort)).map(Int.init) ?? 0
     }
 
     func page(offset: Int, limit: Int) -> [ThreadRow] {
-        (try? core.queryPage(query: query, offset: UInt32(offset), limit: UInt32(limit))) ?? []
+        (try? core.queryPage(query: query, sort: sort, offset: UInt32(offset), limit: UInt32(limit))) ?? []
     }
 
-    /// Acts on a thread (the selected one by default) and offers undo.
+    /// Thread ids for these list rows, in list order.
+    func threadIDs(rows: IndexSet) -> [Int64] {
+        rows.rangeView.flatMap { range in
+            (try? core.listThreadIds(query: query, sort: sort, offset: UInt32(range.lowerBound), limit: UInt32(range.count))) ?? []
+        }
+    }
+
+    /// The rows these threads are on now; threads no longer in the list are left out.
+    func rows(of threads: [Int64]) -> IndexSet {
+        guard !threads.isEmpty else { return [] }
+        let positions = (try? core.listPositions(query: query, sort: sort, threadIds: threads)) ?? []
+        return IndexSet(positions.map(Int.init))
+    }
+
+    /// Several threads selected: the reader steps aside for a count.
+    func select(_ threads: [Int64]) {
+        selectedThreads = threads
+        guard threads.count > 1 else { return }
+        markReadTask?.cancel()
+        selectedThreadID = nil
+        openThread = nil
+    }
+
+    /// Acts on a thread, or on the selection when none is named, and offers undo.
     func act(_ action: ThreadAction, label: String, threadID: Int64? = nil) {
-        guard let thread = threadID ?? selectedThreadID else { return }
+        let threads = threadID.map { [$0] } ?? (isMultiSelection ? selectedThreads : selectedThreadID.map { [$0] } ?? [])
+        guard !threads.isEmpty else { return }
         do {
-            let token = try core.perform(action: action, threadId: thread, context: source.actionContext)
-            if let token { show(Toast(text: label, undo: .action(token))) }
+            let tokens = try core.perform(action: action, threadIds: threads, context: source.actionContext)
+            let text = threads.count > 1 ? "\(label): \(threads.count) conversations" : label
+            if !tokens.isEmpty { show(Toast(text: text, undo: .action(tokens))) }
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
@@ -371,8 +424,8 @@ final class AppModel {
 
     func undo() {
         switch toast?.undo {
-        case .action(let token):
-            try? core.undo(token: token)
+        case .action(let tokens):
+            try? core.undo(tokens: tokens)
             show(Toast(text: "Undone", undo: nil))
         case .send(let token):
             if let back = try? core.cancelSend(token: token) {
@@ -502,6 +555,7 @@ final class AppModel {
     func closeThread() {
         markReadTask?.cancel()
         selectedThreadID = nil
+        selectedThreads = []
         openThread = nil
         cursorRow = nil
         cursor = (0, 0)
@@ -509,12 +563,13 @@ final class AppModel {
 
     func open(threadID: Int64) {
         selectedThreadID = threadID
+        selectedThreads = [threadID]
         let opening = ContinuousClock.now
         markReadTask?.cancel()
         markReadTask = Task {
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled, selectedThreadID == threadID else { return }
-            _ = try? core.perform(action: .markRead, threadId: threadID, context: source.actionContext)
+            _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
         }
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
@@ -535,7 +590,7 @@ final class AppModel {
 
 struct Toast: Equatable {
     enum Undo: Equatable {
-        case action(Int64)
+        case action([Int64])
         case send(Int64)
     }
 

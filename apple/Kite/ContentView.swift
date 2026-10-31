@@ -277,6 +277,7 @@ struct ListColumn: View {
                     Text("\(unread) unread").font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 }
                 Spacer()
+                SortMenu(model: model)
                 SearchField(model: model)
             }
             .padding(.leading, 22)
@@ -368,6 +369,49 @@ struct EmptyList: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
+    }
+}
+
+/// Date, sender or subject; choosing the current key again flips its direction.
+struct SortMenu: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        let sort = model.sort
+        Menu {
+            ForEach([SortKey.date, .sender, .subject], id: \.self) { key in
+                Toggle(Self.name(key), isOn: Binding(
+                    get: { sort.key == key },
+                    set: { _ in model.sort = ListSort(key: key, reversed: sort.key == key && !sort.reversed) }))
+            }
+            Divider()
+            Picker("Direction", selection: Binding(get: { sort.reversed }, set: { model.sort = ListSort(key: sort.key, reversed: $0) })) {
+                Text(sort.key == .date ? "Newest First" : "A to Z").tag(false)
+                Text(sort.key == .date ? "Oldest First" : "Z to A").tag(true)
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            HStack(spacing: 4) {
+                Text(Self.name(sort.key))
+                Image(systemName: sort.reversed ? "arrow.up" : "arrow.down").font(.system(size: 9.5, weight: .semibold))
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(Color(Theme.text3))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Sort conversations")
+    }
+
+    static func name(_ key: SortKey) -> String {
+        switch key {
+        case .date: "Date"
+        case .sender: "Sender"
+        case .subject: "Subject"
+        }
     }
 }
 
@@ -491,14 +535,14 @@ struct ReaderColumn: View {
         VStack(spacing: 0) {
             if model.compose == nil {
             HStack(spacing: 4) {
-                if model.openThread != nil {
+                if model.openThread != nil || model.isMultiSelection {
                     ActionButton(icon: "archivebox", title: "Archive", key: "E") { model.act(.archive, label: "Archived") }
                     ActionButton(icon: "trash", title: "Trash", key: "#") { model.act(.trash, label: "Moved to Trash") }
                     ActionButton(icon: "envelope.badge", title: "Unread", key: "U") { model.act(.markUnread, label: "Marked unread") }
                     ActionButton(icon: "star", title: "Star", key: "S") { model.act(.flag, label: "Starred") }
                 }
                 Spacer()
-                if model.cursor.count > 0 {
+                if model.cursor.count > 0, !model.isMultiSelection {
                     Text("\(model.cursor.row + 1) of \(model.cursor.count)")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(Color(Theme.text3))
@@ -513,6 +557,16 @@ struct ReaderColumn: View {
             }
             if model.compose != nil {
                 ComposeView(model: model)
+            } else if model.isMultiSelection {
+                VStack(spacing: 6) {
+                    Text("\(model.selectedThreads.count) conversations selected")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Color(Theme.text2))
+                    Text("Archive, Trash, Unread and Star act on all of them.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text3))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let thread = model.openThread {
                 ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment)
             } else {

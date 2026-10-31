@@ -277,6 +277,32 @@ pub struct AttachmentData {
     pub bytes: Vec<u8>,
 }
 
+/// How the message list is sorted. Each key has a natural direction: dates
+/// newest first, senders and subjects A to Z. `reversed` flips it.
+#[derive(uniffi::Record, Clone, Copy, PartialEq, Eq)]
+pub struct ListSort {
+    pub key: SortKey,
+    pub reversed: bool,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Date,
+    Sender,
+    Subject,
+}
+
+impl From<ListSort> for search::Sort {
+    fn from(s: ListSort) -> search::Sort {
+        let key = match s.key {
+            SortKey::Date => search::SortKey::Date,
+            SortKey::Sender => search::SortKey::Sender,
+            SortKey::Subject => search::SortKey::Subject,
+        };
+        search::Sort { key, reversed: s.reversed }
+    }
+}
+
 #[derive(uniffi::Enum)]
 pub enum ThreadAction {
     Archive,
@@ -440,20 +466,20 @@ pub struct Core {
     engine_sink: Mutex<Option<kite_core::engine::Sink>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
-    order: Arc<Mutex<Option<(String, Arc<Vec<(ThreadId, MessageId)>>)>>>,
+    order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>>,
 }
 
 impl Core {
-    fn order(&self, query: &str) -> Result<Arc<Vec<(ThreadId, MessageId)>>> {
+    fn order(&self, query: &str, sort: ListSort) -> Result<Arc<Vec<(ThreadId, MessageId)>>> {
         let mut cache = self.order.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((q, order)) = cache.as_ref() {
-            if q == query {
+        if let Some((q, s, order)) = cache.as_ref() {
+            if q == query && *s == sort {
                 return Ok(order.clone());
             }
         }
         let q = search::parse(query)?;
-        let order = Arc::new(self.kite.store.read(|c| search::query_order(c, &q))?);
-        *cache = Some((query.to_string(), order.clone()));
+        let order = Arc::new(self.kite.store.read(|c| search::query_order(c, &q, sort.into()))?);
+        *cache = Some((query.to_string(), sort, order.clone()));
         Ok(order)
     }
 }
@@ -523,7 +549,7 @@ impl Core {
 
     /// Threads matching a query, for badges. Leaves the list cache alone.
     pub fn query_count(&self, query: String) -> Result<u32> {
-        if let Some((cached, order)) = self.order.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some((cached, _, order)) = self.order.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if *cached == query {
                 return Ok(order.len() as u32);
             }
@@ -533,15 +559,13 @@ impl Core {
     }
 
     /// Length of the list being shown; caches its order for `query_page`.
-    pub fn list_count(&self, query: String) -> Result<u32> {
-        Ok(self.order(&query)?.len() as u32)
+    pub fn list_count(&self, query: String, sort: ListSort) -> Result<u32> {
+        Ok(self.order(&query, sort)?.len() as u32)
     }
 
-    pub fn query_page(&self, query: String, offset: u32, limit: u32) -> Result<Vec<ThreadRow>> {
-        let order = self.order(&query)?;
-        let start = (offset as usize).min(order.len());
-        let end = (start + limit as usize).min(order.len());
-        let rows = self.kite.store.read(|c| search::thread_rows(c, &order[start..end]))?;
+    pub fn query_page(&self, query: String, sort: ListSort, offset: u32, limit: u32) -> Result<Vec<ThreadRow>> {
+        let order = self.order(&query, sort)?;
+        let rows = self.kite.store.read(|c| search::thread_rows(c, slice(&order, offset, limit)))?;
         Ok(rows
             .into_iter()
             .map(|r| ThreadRow {
@@ -559,6 +583,20 @@ impl Core {
                 has_attachments: r.has_attachments,
             })
             .collect())
+    }
+
+    /// Thread ids for a run of list rows, without loading the rows: a
+    /// selection of thousands costs a slice of the cached order.
+    pub fn list_thread_ids(&self, query: String, sort: ListSort, offset: u32, limit: u32) -> Result<Vec<i64>> {
+        Ok(slice(&self.order(&query, sort)?, offset, limit).iter().map(|(t, _)| t.0).collect())
+    }
+
+    /// Where these threads sit in the list now, in list order. Threads that
+    /// left the list are skipped.
+    pub fn list_positions(&self, query: String, sort: ListSort, thread_ids: Vec<i64>) -> Result<Vec<u32>> {
+        let wanted: std::collections::HashSet<i64> = thread_ids.into_iter().collect();
+        let order = self.order(&query, sort)?;
+        Ok(order.iter().enumerate().filter(|(_, (t, _))| wanted.contains(&t.0)).map(|(i, _)| i as u32).collect())
     }
 
     pub async fn open_thread(&self, thread_id: i64, app_css: String, utc_offset: i32) -> Result<ThreadView> {
@@ -618,13 +656,16 @@ impl Core {
 
     /// Applies an action to a thread right away and sends it to the server.
     /// Returns a token for `undo`, or nothing when nothing changed.
-    pub fn perform(&self, action: ThreadAction, thread_id: i64, context: ListContext) -> Result<Option<i64>> {
+    /// Acts on every thread at once. Returns undo tokens, empty when nothing changed.
+    pub fn perform(&self, action: ThreadAction, thread_ids: Vec<i64>, context: ListContext) -> Result<Vec<i64>> {
         let engine = self.running_engine()?;
-        Ok(engine.perform(ThreadId(thread_id), action.into(), context.into_core()?)?.map(|op| op.0))
+        let threads: Vec<ThreadId> = thread_ids.into_iter().map(ThreadId).collect();
+        Ok(engine.perform(&threads, action.into(), context.into_core()?)?.into_iter().map(|op| op.0).collect())
     }
 
-    pub fn undo(&self, token: i64) -> Result<()> {
-        Ok(self.running_engine()?.undo(OpId(token))?)
+    pub fn undo(&self, tokens: Vec<i64>) -> Result<()> {
+        let ops: Vec<OpId> = tokens.into_iter().map(OpId).collect();
+        Ok(self.running_engine()?.undo(&ops)?)
     }
 
     /// A blank message from the first account that can send.
@@ -961,6 +1002,11 @@ impl Core {
             engine.sync_now();
         }
     }
+}
+
+fn slice<T>(order: &[T], offset: u32, limit: u32) -> &[T] {
+    let start = (offset as usize).min(order.len());
+    &order[start..(start + limit as usize).min(order.len())]
 }
 
 fn now() -> i64 {

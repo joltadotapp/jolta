@@ -325,9 +325,10 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
                     Action::Snooze(at)
                 }
             };
-            match ctx.engine.perform(ThreadId(thread), action, Context::Inbox).map_err(|e| e.to_string())? {
-                Some(_) => Ok(format!("Done: {name} thread {thread}.")),
-                None => Ok(format!("Nothing to change: thread {thread} is not in the inbox.")),
+            if ctx.engine.perform(&[ThreadId(thread)], action, Context::Inbox).map_err(|e| e.to_string())?.is_empty() {
+                Ok(format!("Nothing to change: thread {thread} is not in the inbox."))
+            } else {
+                Ok(format!("Done: {name} thread {thread}."))
             }
         }
         "create_draft" => {

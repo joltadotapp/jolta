@@ -157,24 +157,34 @@ impl Engine {
 
     /// Applies an action locally, tells the views, and queues it for the
     /// server. Returns a token for `undo`.
-    pub fn perform(&self, thread: ThreadId, action: Action, context: Context) -> Result<Option<OpId>> {
-        let queued = self.kite.store.write(|tx| actions::perform(tx, thread, action, context))?;
-        if queued.is_some() {
+    /// Applies `action` to each thread in one transaction, so the list
+    /// changes once. Returns the queued ops; threads with nothing to change
+    /// queue none.
+    pub fn perform(&self, threads: &[ThreadId], action: Action, context: Context) -> Result<Vec<OpId>> {
+        let queued = self.kite.store.write(|tx| {
+            threads.iter().filter_map(|&t| actions::perform(tx, t, action, context).transpose()).collect::<Result<Vec<_>>>()
+        })?;
+        if !queued.is_empty() {
             (self.sink)(Event::ListsChanged);
         }
-        Ok(queued.map(|(account, op)| {
-            self.wake(account);
-            op
-        }))
+        self.wake_all(&queued);
+        Ok(queued.into_iter().map(|(_, op)| op).collect())
     }
 
-    pub fn undo(&self, op: OpId) -> Result<()> {
-        let queued = self.kite.store.write(|tx| actions::undo(tx, op))?;
+    pub fn undo(&self, ops: &[OpId]) -> Result<()> {
+        let queued = self.kite.store.write(|tx| ops.iter().filter_map(|&op| actions::undo(tx, op).transpose()).collect::<Result<Vec<_>>>())?;
         (self.sink)(Event::ListsChanged);
-        if let Some((account, _)) = queued {
+        self.wake_all(&queued);
+        Ok(())
+    }
+
+    fn wake_all(&self, ops: &[(AccountId, OpId)]) {
+        let mut accounts: Vec<AccountId> = ops.iter().map(|&(a, _)| a).collect();
+        accounts.sort_unstable();
+        accounts.dedup();
+        for account in accounts {
             self.wake(account);
         }
-        Ok(())
     }
 
     /// Queues a message for sending after the undo window. Returns a token

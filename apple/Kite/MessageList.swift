@@ -19,6 +19,7 @@ struct MessageList: NSViewRepresentable {
         table.selectionHighlightStyle = .regular
         table.focusRingType = .none
         table.allowsEmptySelection = true
+        table.allowsMultipleSelection = true
         // Letters are commands; type-select would jump to a row instead.
         table.allowsTypeSelect = false
         table.usesAutomaticRowHeights = false
@@ -52,7 +53,7 @@ struct MessageList: NSViewRepresentable {
         if c.lastQuery != model.query {
             c.reload(full: true)
         } else if c.lastRevision != model.listRevision {
-            c.reload(full: false)
+            c.reload(full: false, resorted: c.lastSort != model.sort)
         }
         c.lastRevision = model.listRevision
         if let table = c.table, c.focusRequest != model.focusListRequest || c.wantsFocus {
@@ -67,6 +68,7 @@ struct MessageList: NSViewRepresentable {
         let model: AppModel
         weak var table: KeyTableView?
         var lastQuery = ""
+        var lastSort = ListSort(key: .date, reversed: false)
         var lastRevision = -1
         var wantsFocus = true
         var focusRequest = 0
@@ -77,28 +79,20 @@ struct MessageList: NSViewRepresentable {
 
         init(model: AppModel) { self.model = model }
 
-        func reload(full: Bool) {
+        /// A new list starts at the top. A changed list keeps the selected
+        /// threads selected wherever they moved; when they left it (archived,
+        /// moved), the cursor stays at the same height, on the next thread.
+        func reload(full: Bool, resorted: Bool = false) {
             guard let table else { return }
             pages.removeAll(keepingCapacity: true)
             let previous = count
-            let selected = table.selectedRow
+            let anchor = table.selectedRowIndexes.first ?? 0
             count = model.count()
             lastQuery = model.query
-            if count == 0, model.selectedThreadID != nil { model.closeThread() }
+            lastSort = model.sort
+            if count == 0, model.selectedThreadID != nil || !model.selectedThreads.isEmpty { model.closeThread() }
             let rows = count
             DispatchQueue.main.async { [model] in if model.listCount != rows { model.listCount = rows } }
-            if !full, previous != count {
-                // An action took rows out (or sync added some): keep the
-                // cursor at the same position, which is now the next thread.
-                table.noteNumberOfRowsChanged()
-                table.reloadData()
-                if count > 0 {
-                    let row = max(0, min(selected, count - 1))
-                    table.selectRowIndexes([row], byExtendingSelection: false)
-                    table.scrollRowToVisible(row)
-                }
-                return
-            }
             if full {
                 table.reloadData()
                 table.scrollRowToVisible(0)
@@ -109,14 +103,25 @@ struct MessageList: NSViewRepresentable {
                         AppModel.timing(String(format: "launch to first rows drawn: %.0f ms (%d threads)", AppModel.sinceLaunch, self.count))
                     }
                 }
+                return
+            }
+            if previous != count || resorted {
+                table.noteNumberOfRowsChanged()
+                table.reloadData()
             } else {
-                if previous != count { table.noteNumberOfRowsChanged() }
                 let visible = table.rows(in: table.visibleRect)
                 if visible.length > 0 {
                     table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<min(count, visible.location + visible.length)),
                                      columnIndexes: [0])
                 }
             }
+            guard count > 0 else { return }
+            var kept = model.rows(of: model.selectedThreads)
+            if kept.isEmpty { kept = [min(anchor, count - 1)] }
+            if kept != table.selectedRowIndexes {
+                table.selectRowIndexes(kept, byExtendingSelection: false)
+            }
+            if resorted || previous != count, let first = kept.first { table.scrollRowToVisible(first) }
         }
 
         func row(at index: Int) -> ThreadRow? {
@@ -134,7 +139,7 @@ struct MessageList: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let cell = (tableView.makeView(withIdentifier: ThreadCell.id, owner: nil) as? ThreadCell) ?? ThreadCell()
             if let r = self.row(at: row) { cell.show(r) }
-            cell.isCursor = tableView.isRowSelected(row)
+            cell.mark = tableView.isRowSelected(row) ? (tableView.numberOfSelectedRows > 1 ? .selected : .cursor) : .none
             return cell
         }
 
@@ -145,11 +150,17 @@ struct MessageList: NSViewRepresentable {
         }
 
         /// The reader follows the cursor, so j and k read through the list.
+        /// Shift-click and Command-click select several threads instead.
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard let table, table.selectedRow >= 0, let r = row(at: table.selectedRow) else { return }
+            table.enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
             model.cursor = (table.selectedRow, count)
             model.cursorRow = r
-            if model.selectedThreadID != r.threadId { model.open(threadID: r.threadId) }
+            if table.numberOfSelectedRows > 1 {
+                model.select(model.threadIDs(rows: table.selectedRowIndexes))
+            } else if model.selectedThreadID != r.threadId {
+                model.open(threadID: r.threadId)
+            }
         }
 
         /// Scrolls through the whole list in screen-sized steps, one step per
@@ -247,7 +258,14 @@ final class ThreadRowView: NSTableRowView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override var isSelected: Bool {
-        didSet { subviews.lazy.compactMap { $0 as? ThreadCell }.first?.isCursor = isSelected }
+        didSet { updateMark() }
+    }
+
+    /// One selected row is the keyboard cursor; several are a selection.
+    func updateMark() {
+        let several = ((superview as? NSTableView)?.numberOfSelectedRows ?? 0) > 1
+        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = isSelected ? (several ? .selected : .cursor) : .none
+        needsDisplay = true
     }
 
     override var isEmphasized: Bool {
@@ -264,6 +282,7 @@ final class ThreadRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.fill.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
+        guard ((superview as? NSTableView)?.numberOfSelectedRows ?? 0) <= 1 else { return }
         Theme.accent.setFill()
         let caret = NSBezierPath()
         let y = bounds.midY
@@ -284,12 +303,16 @@ final class ThreadCell: NSTableCellView {
     private let keys = NSStackView()
     private var row: ThreadRow?
 
-    var isCursor = false {
+    enum Mark { case none, selected, cursor }
+
+    /// The cursor row trades its date for action key hints; rows in a
+    /// selection of several keep their dates.
+    var mark = Mark.none {
         didSet {
-            guard isCursor != oldValue else { return }
-            keys.isHidden = !isCursor
-            date.isHidden = isCursor
-            clip.isHidden = isCursor || !(row?.hasAttachments ?? false)
+            guard mark != oldValue else { return }
+            keys.isHidden = mark != .cursor
+            date.isHidden = mark == .cursor
+            clip.isHidden = mark == .cursor || !(row?.hasAttachments ?? false)
         }
     }
 
@@ -363,7 +386,7 @@ final class ThreadCell: NSTableCellView {
         date.attributedStringValue = NSAttributedString(string: Theme.shortDate(r.date), attributes: [
             .font: Theme.timeFont, .foregroundColor: Theme.text3,
         ])
-        clip.isHidden = isCursor || !r.hasAttachments
+        clip.isHidden = mark == .cursor || !r.hasAttachments
     }
 }
 

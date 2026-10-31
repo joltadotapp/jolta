@@ -496,7 +496,7 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
         }
     };
     let context = from.map_or(kite_core::actions::Context::Inbox, |m| kite_core::actions::Context::Mailbox(kite_core::MailboxId(m)));
-    let op = engine.perform(kite_core::ThreadId(thread), action, context)?;
+    let op = engine.perform(&[kite_core::ThreadId(thread)], action, context)?.pop();
     println!("applied locally in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
     let Some(op) = op else {
         println!("nothing to change");
@@ -506,7 +506,7 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
     println!("on the server after {:.2} s", t0.elapsed().as_secs_f64());
     if undo {
         let t1 = Instant::now();
-        engine.undo(op)?;
+        engine.undo(&[op])?;
         wait_sent().await?;
         println!("undone on the server after {:.2} s", t1.elapsed().as_secs_f64());
     }
