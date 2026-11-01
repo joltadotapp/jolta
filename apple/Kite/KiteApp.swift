@@ -28,6 +28,10 @@ struct KiteApp: App {
         .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
+            CommandMenu("Conversation") {
+                Button("Unsubscribe") { model?.run(.unsubscribe) }
+                    .keyboardShortcut("u")
+            }
             CommandMenu("Go") {
                 Button("Command Palette") { model?.palette = .commands }
                     .keyboardShortcut("k")

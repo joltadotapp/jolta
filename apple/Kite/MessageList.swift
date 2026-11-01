@@ -213,6 +213,8 @@ struct MessageList: NSViewRepresentable {
         /// a two-key sequence that lapses after a second and a half. Returns
         /// false to let AppKit have the key.
         func handle(_ event: NSEvent) -> Bool {
+            // ⌘ shortcuts belong to the menus (⌘U is Unsubscribe, not U).
+            if event.modifierFlags.contains(.command) { return false }
             switch event.keyCode {
             case 36, 76: openSelected(); return true
             case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true

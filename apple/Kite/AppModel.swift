@@ -335,6 +335,31 @@ final class AppModel {
         show(Toast(text: text, undo: .vips(changed, !vip)))
     }
 
+    /// Leaves the mailing list behind the open or highlighted conversation,
+    /// then archives it. A list that only offers a web page gets that page
+    /// opened in the browser.
+    func unsubscribe() {
+        guard let thread = selectedThreadID ?? cursorRow?.threadId else { return }
+        show(Toast(text: "Unsubscribing…", undo: nil))
+        Task {
+            do {
+                switch try await core.unsubscribe(threadId: thread) {
+                case .unsubscribed(let list):
+                    act(.archive, label: "Unsubscribed from \(list) and archived", threadID: thread)
+                case .emailed(_, let to):
+                    act(.archive, label: "Sent an unsubscribe email to \(to) and archived", threadID: thread)
+                case .openPage(let list, let url):
+                    if let page = URL(string: url) { NSWorkspace.shared.open(page) }
+                    act(.archive, label: "Opened \(list)'s unsubscribe page and archived", threadID: thread)
+                case .notAList:
+                    show(Toast(text: "This conversation has no unsubscribe link", undo: nil))
+                }
+            } catch {
+                show(Toast(text: "Couldn't unsubscribe: \(error)", undo: nil))
+            }
+        }
+    }
+
     func snooze(until: Int64, label: String) {
         act(.snooze(until: until), label: "Snoozed until \(label)")
     }

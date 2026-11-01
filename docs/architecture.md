@@ -106,6 +106,7 @@ Keep the UniFFI surface small and coarse. Lists cross as pages, never whole mail
 - `snooze(target, until)`, sections CRUD
 - `vips()` and `set_vips(addresses, vip)`. Rows and reader messages carry a `vip` flag, and new-mail events say whether the sender is a VIP, so the app can limit banners to VIPs.
 - `suggest_addresses(typed, account, recipients)`, `forget_address`, `set_address_book`: compose suggestions from people you sent to or replied to, ranked by how often and how recently, with mail from the chosen account counting double. The list is built from the store (about 80 ms for 23,000 sent messages), cached, and rebuilt in the background when older than two minutes. The app may hand over the Mac's Contacts as a lower-ranked source; they never leave the process.
+- `unsubscribe(thread)` reads `List-Unsubscribe` from the message source and leaves the list: an RFC 8058 one-click POST when offered over HTTPS, else an unsubscribe email from the receiving account through the outbox, else the web page for the app to open.
 - `reply_compose(thread, Forward)` saves the original's attachments under `<data dir>/forwards/<message id>/` and lists them on the compose. Images the HTML shows inline stay behind.
 - `CoreListener.on_event(CoreEvent)`: list changed (with query ids), sync status, new mail, agent approval request, errors
 

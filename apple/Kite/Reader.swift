@@ -189,6 +189,7 @@ struct ReaderView: View {
     let thread: ThreadView
     let core: Core
     let onAttachment: (Int64, UInt32) -> Void
+    var onUnsubscribe: () -> Void = {}
     @State private var reader = ReaderPage()
     @State private var imagesLoaded = false
     /// Set when the user trusts or stops trusting the sender in this view.
@@ -230,10 +231,24 @@ struct ReaderView: View {
                     .foregroundStyle(Color(Theme.text))
                     .textSelection(.enabled)
                     .frame(maxWidth: 560, alignment: .leading)
-                if thread.messageCount > 1 {
-                    Text("\(thread.messageCount) messages")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Color(Theme.text3))
+                if thread.messageCount > 1 || thread.mailingList {
+                    HStack(spacing: 14) {
+                        if thread.messageCount > 1 {
+                            Text("\(thread.messageCount) messages").foregroundStyle(Color(Theme.text3))
+                        }
+                        if thread.mailingList {
+                            Button(action: onUnsubscribe) {
+                                HStack(spacing: 6) {
+                                    Text("Unsubscribe")
+                                    Text("⌘U").font(.system(size: 11)).foregroundStyle(Color(Theme.text3))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color(Theme.text2))
+                            .help("Leave this mailing list and archive the conversation")
+                        }
+                    }
+                    .font(.system(size: 12.5))
                 }
                 if imagesBlocked {
                     HStack(spacing: 10) {

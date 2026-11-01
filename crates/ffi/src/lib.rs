@@ -88,6 +88,18 @@ pub struct ThreadView {
     /// The one sender of this conversation's remote images, or empty.
     pub image_sender: String,
     pub images_trusted: bool,
+    /// The conversation comes from a mailing list that can be left.
+    pub mailing_list: bool,
+}
+
+#[derive(uniffi::Enum)]
+pub enum UnsubscribeResult {
+    Unsubscribed { list: String },
+    /// An unsubscribe email to `to` is in the outbox.
+    Emailed { list: String, to: String },
+    /// The list only offers a page where the reader confirms by hand.
+    OpenPage { list: String, url: String },
+    NotAList,
 }
 
 #[derive(uniffi::Enum, Clone, Copy)]
@@ -638,7 +650,54 @@ impl Core {
             remote_images: detail.rendered.remote_images,
             image_sender: detail.image_sender.unwrap_or_default(),
             images_trusted: detail.images_trusted,
+            mailing_list: self.kite.store.read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM message WHERE thread_id = ?1 AND list_unsubscribe IS NOT NULL)",
+                    [thread_id],
+                    |r| r.get(0),
+                )?)
+            })?,
         })
+    }
+
+    /// Leaves the mailing list behind a conversation: a one-click request,
+    /// an unsubscribe email from the account that received it, or, when the
+    /// list only offers a web page, that page for the app to open.
+    pub async fn unsubscribe(&self, thread_id: i64) -> Result<UnsubscribeResult> {
+        let kite = self.kite.clone();
+        let engine = self.running_engine()?;
+        self.runtime
+            .spawn(async move {
+                let found: Option<(MessageId, AccountId, String)> = kite
+                    .store
+                    .read_async(move |c| {
+                        let row = c.query_row(
+                            "SELECT id, account_id, CASE from_name WHEN '' THEN from_addr ELSE from_name END FROM message
+                             WHERE thread_id = ?1 ORDER BY list_unsubscribe IS NULL, date DESC LIMIT 1",
+                            [thread_id],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        );
+                        Ok(row.ok())
+                    })
+                    .await?;
+                let Some((message, account, list)) = found else { return Ok(UnsubscribeResult::NotAList) };
+                let raw = kite_core::imap::message_source(&kite, message).await?;
+                Ok::<_, kite_core::Error>(match kite_core::unsubscribe::method(&raw) {
+                    None => UnsubscribeResult::NotAList,
+                    Some(kite_core::unsubscribe::Method::OneClick(url)) => {
+                        kite_core::unsubscribe::one_click(&url).await?;
+                        UnsubscribeResult::Unsubscribed { list }
+                    }
+                    Some(kite_core::unsubscribe::Method::Mail { to, subject, body }) => {
+                        engine.send(&Compose { account: Some(account), to: to.clone(), subject, body, ..Default::default() })?;
+                        UnsubscribeResult::Emailed { list, to }
+                    }
+                    Some(kite_core::unsubscribe::Method::Page(url)) => UnsubscribeResult::OpenPage { list, url },
+                })
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map_err(Into::into)
     }
 
     /// Starts syncing every account and keeps it up to date (IDLE, queued

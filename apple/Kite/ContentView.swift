@@ -702,7 +702,7 @@ struct ReaderColumn: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let thread = model.openThread {
-                ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment)
+                ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment, onUnsubscribe: model.unsubscribe)
             } else {
                 Text(model.cursor.count == 0 ? "Nothing here" : "")
                     .foregroundStyle(Color(Theme.text3))
