@@ -9,7 +9,7 @@ struct SettingsView: View {
         TabView {
             AccountsSettings(model: model).tabItem { Label("Accounts", systemImage: "person.crop.circle") }
             SectionsSettings(model: model).tabItem { Label("Sections", systemImage: "rectangle.split.3x1") }
-            VIPSettings(model: model).tabItem { Label("VIPs", systemImage: "checkmark.seal") }
+            PeopleSettings(model: model).tabItem { Label("People", systemImage: "person.2") }
             AgentsSettings(model: model).tabItem { Label("Agents", systemImage: "cpu") }
         }
         .frame(width: 860, height: 620)
@@ -56,14 +56,16 @@ struct SectionsSettings: View {
 
 extension SectionInfo: @retroactive Identifiable {}
 
-/// The senders that matter most: a seal in the list, a VIP section, and
-/// optionally the only mail that gets a banner.
-struct VIPSettings: View {
+/// VIPs (a seal in the list, a VIP section, optionally the only mail that
+/// gets a banner) and where address suggestions come from.
+struct PeopleSettings: View {
     let model: AppModel?
     @State private var vips: [String] = []
     @State private var address = ""
     @State private var error: String?
     @AppStorage("NewMailBanners") private var banners = NewMailBanners.all
+    @AppStorage(AddressBook.key) private var contacts = false
+    @State private var contactsRefused = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -85,7 +87,7 @@ struct VIPSettings: View {
                     Text("No VIPs yet").foregroundStyle(.secondary)
                 }
             }
-            .frame(minHeight: 220)
+            .frame(minHeight: 140)
             HStack {
                 TextField("", text: $address, prompt: Text("name@example.com"))
                     .frame(width: 280)
@@ -100,7 +102,19 @@ struct VIPSettings: View {
                 Text("None").tag(NewMailBanners.none)
             }
             .pickerStyle(.radioGroup)
-            Spacer()
+            Divider().padding(.vertical, 6)
+            Text("Address suggestions").font(.system(size: 13, weight: .semibold))
+            Text("As you type in To, Cc and Bcc, Kite suggests people you've written to or replied to, the most frequent and recent first. Hover over a suggestion and click × to stop suggesting it.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Also suggest people from Contacts", isOn: $contacts)
+                .onChange(of: contacts) { _, on in toggleContacts(on) }
+            if contactsRefused {
+                Text("Kite can't read Contacts. Allow it in System Settings › Privacy & Security › Contacts.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+            }
         }
         .padding(20)
         .onAppear(perform: load)
@@ -108,6 +122,20 @@ struct VIPSettings: View {
 
     private func load() {
         vips = (try? model?.core.vips()) ?? []
+    }
+
+    private func toggleContacts(_ on: Bool) {
+        guard let core = model?.core else { return }
+        guard on else { return AddressBook.load(into: core) }
+        contactsRefused = false
+        Task {
+            if await AddressBook.requestAccess() {
+                AddressBook.load(into: core)
+            } else {
+                contactsRefused = true
+                contacts = false
+            }
+        }
     }
 
     private func add() {

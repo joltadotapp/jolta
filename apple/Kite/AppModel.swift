@@ -135,6 +135,7 @@ final class AppModel {
         reloadAccounts()
         try core.start()
         startMCP()
+        AddressBook.load(into: core)
         notifier.onOpen = { [weak self] threadID in
             self?.source = .unifiedInbox
             self?.open(threadID: threadID)

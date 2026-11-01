@@ -273,7 +273,7 @@ fn for_each_thread(
 
 /// Lowercase with accents dropped, so `Émile` sorts with `emile` and quotes
 /// around a display name don't put it first.
-fn sort_text(text: &str) -> String {
+pub(crate) fn sort_text(text: &str) -> String {
     const FOLD: [(&str, char); 14] = [
         ("àáâãäåāăą", 'a'), ("çćĉċč", 'c'), ("ďđ", 'd'), ("èéêëēĕėęě", 'e'), ("ìíîïĩīĭįı", 'i'),
         ("ľĺļł", 'l'), ("ñńņňŉ", 'n'), ("òóôõöøōŏő", 'o'), ("ŕŗř", 'r'), ("śŝşš", 's'),

@@ -1,7 +1,7 @@
 import Foundation
 import UserNotifications
 
-/// Which new mail gets a banner, set in Settings › VIPs.
+/// Which new mail gets a banner, set in Settings › People.
 enum NewMailBanners: String, CaseIterable {
     case all, vips, none
 

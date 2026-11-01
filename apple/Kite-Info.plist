@@ -12,5 +12,7 @@
 	<integer>3600</integer>
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
+	<key>NSContactsUsageDescription</key>
+	<string>Kite suggests people from Contacts when you type in To, Cc and Bcc. Contacts stay on this Mac.</string>
 </dict>
 </plist>

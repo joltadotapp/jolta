@@ -3,11 +3,13 @@
 //! through `CoreListener`.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kite_core::actions::{Action, Context};
 use kite_core::compose::{self, AttachmentFile, Compose, ReplyKind};
 use kite_core::engine::{Engine, Event};
 use kite_core::store::OpId;
+use kite_core::people::{self, People};
 use kite_core::{AccountId, Kite, MailboxId, MessageId, ThreadId, reader, search, store};
 
 uniffi::setup_scaffolding!();
@@ -317,6 +319,12 @@ pub enum ThreadAction {
     Snooze { until: i64 },
 }
 
+#[derive(uniffi::Record)]
+pub struct PersonInfo {
+    pub name: String,
+    pub address: String,
+}
+
 #[derive(uniffi::Record, Clone)]
 pub struct SectionInfo {
     pub id: i64,
@@ -468,6 +476,18 @@ pub struct Core {
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
     order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>>,
+    /// Address suggestions, rebuilt when older than `PEOPLE_FRESH` or when
+    /// the address book or forgotten addresses change.
+    people: Arc<Mutex<Option<(Instant, Arc<People>)>>>,
+    address_book: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+const PEOPLE_FRESH: Duration = Duration::from_secs(120);
+
+fn build_people(kite: &Kite, book: &Mutex<Vec<(String, String)>>) -> kite_core::Result<People> {
+    let book = book.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    kite.store.read(|c| People::build(c, now, &book))
 }
 
 impl Core {
@@ -503,6 +523,8 @@ impl Core {
             engine: Mutex::new(None),
             engine_sink: Mutex::new(None),
             order: Arc::new(Mutex::new(None)),
+            people: Arc::new(Mutex::new(None)),
+            address_book: Arc::new(Mutex::new(Vec::new())),
         }))
     }
 
@@ -726,7 +748,10 @@ impl Core {
     /// Queues a message; it leaves after the undo window. Returns a token
     /// for `cancel_send`.
     pub fn send(&self, compose: ComposeData) -> Result<i64> {
-        Ok(self.running_engine()?.send(&compose.into())?)
+        let token = self.running_engine()?.send(&compose.into())?;
+        // The people just written to rank higher once Sent has synced.
+        self.people_stale();
+        Ok(token)
     }
 
     /// Takes a waiting message back and returns it for editing.
@@ -874,6 +899,34 @@ impl Core {
     /// Every VIP address, A to Z.
     pub fn vips(&self) -> Result<Vec<String>> {
         Ok(self.kite.store.read(store::vips)?)
+    }
+
+    /// People to suggest for what was typed in a recipient field, best
+    /// first. Mail sent from `account_id` ranks higher; addresses already
+    /// in `recipients` (the fields as typed) are left out.
+    pub fn suggest_addresses(&self, typed: String, account_id: Option<i64>, recipients: String) -> Result<Vec<PersonInfo>> {
+        let people = self.people()?;
+        let skip: Vec<String> = compose::parse_addresses(&recipients).into_iter().map(|(_, a)| a).collect();
+        Ok(people
+            .suggest(&typed, account_id.map(AccountId), &skip, 6)
+            .into_iter()
+            .map(|p| PersonInfo { name: p.name, address: p.address })
+            .collect())
+    }
+
+    /// Stops suggesting an address until mail is sent to it again.
+    pub fn forget_address(&self, address: String) -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        self.kite.store.write(|tx| people::forget(tx, &address, now))?;
+        *self.people.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
+    }
+
+    /// People from an address book (the Mac's Contacts), suggested after
+    /// the people you write to. An empty list turns the source off.
+    pub fn set_address_book(&self, people: Vec<PersonInfo>) {
+        *self.address_book.lock().unwrap_or_else(|e| e.into_inner()) = people.into_iter().map(|p| (p.name, p.address)).collect();
+        self.people_stale();
     }
 
     /// Sleeping threads, soonest first.
@@ -1047,6 +1100,36 @@ fn now() -> i64 {
 
 impl Core {
     /// Drops the cached list order and tells the app that lists changed.
+    /// The suggestion list. Building it reads all sent mail (about 80 ms
+    /// for 23,000 sent messages), so only the first build blocks; a stale
+    /// list keeps answering while a new one builds in the background.
+    fn people(&self) -> Result<Arc<People>> {
+        let mut cache = self.people.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((built, people)) = cache.as_mut() {
+            let people = people.clone();
+            if built.elapsed() >= PEOPLE_FRESH {
+                *built = Instant::now();
+                let (kite, book, slot) = (self.kite.clone(), self.address_book.clone(), self.people.clone());
+                std::thread::spawn(move || {
+                    if let Ok(fresh) = build_people(&kite, &book) {
+                        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), Arc::new(fresh)));
+                    }
+                });
+            }
+            return Ok(people);
+        }
+        let people = Arc::new(build_people(&self.kite, &self.address_book)?);
+        *cache = Some((Instant::now(), people.clone()));
+        Ok(people)
+    }
+
+    /// Rebuilds the suggestion list in the background at the next lookup.
+    fn people_stale(&self) {
+        if let Some((built, _)) = self.people.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            *built = Instant::now().checked_sub(PEOPLE_FRESH).unwrap_or(*built);
+        }
+    }
+
     fn changed(&self) {
         *self.order.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.listener.on_event(CoreEvent::ListsChanged);

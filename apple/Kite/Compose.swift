@@ -57,7 +57,7 @@ struct ComposeView: View {
                     }
                 }
                 FieldRow(label: "To") {
-                    TextField("", text: draft.to).focused($focus, equals: .to)
+                    recipientField(draft.to, .to)
                     if !showCc {
                         Button("Cc Bcc") { showCc = true; focus = .cc }
                             .buttonStyle(.plain)
@@ -65,14 +65,19 @@ struct ComposeView: View {
                             .foregroundStyle(Color(Theme.text3))
                     }
                 }
+                .zIndex(focus == .to ? 1 : 0)
                 if showCc {
-                    FieldRow(label: "Cc") { TextField("", text: draft.cc).focused($focus, equals: .cc) }
-                    FieldRow(label: "Bcc") { TextField("", text: draft.bcc).focused($focus, equals: .bcc) }
+                    FieldRow(label: "Cc") { recipientField(draft.cc, .cc) }
+                        .zIndex(focus == .cc ? 1 : 0)
+                    FieldRow(label: "Bcc") { recipientField(draft.bcc, .bcc) }
+                        .zIndex(focus == .bcc ? 1 : 0)
                 }
                 FieldRow(label: "Subject") { TextField("", text: draft.subject).focused($focus, equals: .subject) }
             }
             .padding(.horizontal, 28)
             .textFieldStyle(.plain)
+            // Suggestions hang over the subject and the body.
+            .zIndex(1)
 
             TextEditor(text: draft.body, selection: $selection)
                 .font(.system(size: 14))
@@ -109,6 +114,9 @@ struct ComposeView: View {
         }
         .background(Color(Theme.reader))
         .onAppear {
+            // The first suggestion reads all sent mail; do it before the first keystroke.
+            let core = model.core
+            Task.detached(priority: .utility) { _ = try? core.suggestAddresses(typed: "", accountId: nil, recipients: "") }
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
             focus = (model.compose?.to.isEmpty ?? true) ? .to : .body
             // Replies and forwards start with the quote below; write above it.
@@ -118,6 +126,13 @@ struct ComposeView: View {
         }
         .onExitCommand { model.closeCompose() }
         .onDisappear { saveTask?.cancel() }
+    }
+
+    private func recipientField(_ text: Binding<String>, _ field: Field) -> some View {
+        let d = draft.wrappedValue
+        return RecipientField(text: text, core: model.core, account: d.accountId,
+                              recipients: [d.to, d.cc, d.bcc].joined(separator: ", "), active: focus == field)
+            .focused($focus, equals: field)
     }
 
     /// Saves the draft a few seconds after the last edit.

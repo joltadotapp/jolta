@@ -9,6 +9,7 @@ pub mod import;
 pub mod mime;
 pub mod model;
 pub mod oauth;
+pub mod people;
 pub mod reader;
 pub mod render;
 pub mod search;
