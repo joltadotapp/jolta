@@ -73,6 +73,7 @@ pub struct ThreadRow {
     pub unread_count: u32,
     pub flagged: bool,
     pub has_attachments: bool,
+    pub vip: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -181,7 +182,7 @@ pub enum CoreEvent {
     SyncStarted { account_id: i64 },
     SyncFinished { account_id: i64 },
     SyncFailed { account_id: i64, message: String },
-    NewMail { account_id: i64, thread_id: i64, from: String, subject: String },
+    NewMail { account_id: i64, thread_id: i64, from: String, subject: String, vip: bool },
     Sent { account_id: i64, subject: String },
     /// A snoozed thread came back to the inbox.
     Woke { account_id: i64, thread_id: i64, subject: String },
@@ -581,6 +582,7 @@ impl Core {
                 unread_count: r.unread_count,
                 flagged: r.flagged,
                 has_attachments: r.has_attachments,
+                vip: r.vip,
             })
             .collect())
     }
@@ -634,8 +636,8 @@ impl Core {
                 Event::SyncStarted(a) => CoreEvent::SyncStarted { account_id: a.0 },
                 Event::SyncFinished(a) => CoreEvent::SyncFinished { account_id: a.0 },
                 Event::SyncFailed(a, message) => CoreEvent::SyncFailed { account_id: a.0, message },
-                Event::NewMail { account, thread, from, subject } => {
-                    CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject }
+                Event::NewMail { account, thread, from, subject, vip } => {
+                    CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject, vip }
                 }
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
                 Event::Sent { account, subject } => CoreEvent::Sent { account_id: account.0, subject },
@@ -682,7 +684,12 @@ impl Core {
 
     /// A blank message from the first account that can send.
     pub fn new_compose(&self) -> Result<ComposeData> {
-        let account = self.kite.store.read(store::accounts)?.into_iter().find(|a| !a.smtp_host.is_empty());
+        let account = self
+            .kite
+            .store
+            .read(store::accounts)?
+            .into_iter()
+            .find(|a| !a.smtp_host.is_empty() && a.provider_label() != "Synthetic");
         Ok(Compose { account: account.map(|a| a.id), ..Default::default() }.into())
     }
 
@@ -701,7 +708,14 @@ impl Core {
                     ReplyMode::ReplyAll => ReplyKind::ReplyAll,
                     ReplyMode::Forward => ReplyKind::Forward,
                 };
-                kite.store.read_async(move |c| compose::reply(c, message, &raw, kind, utc_offset)).await
+                let raw = Arc::new(raw);
+                let source = raw.clone();
+                let mut c = kite.store.read_async(move |c| compose::reply(c, message, &source, kind, utc_offset)).await?;
+                if kind == ReplyKind::Forward {
+                    let dir = kite.data_dir.join("forwards").join(message.0.to_string());
+                    c.attachments = compose::forward_attachments(&raw, &dir)?;
+                }
+                Ok::<_, kite_core::Error>(c)
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
@@ -846,14 +860,20 @@ impl Core {
         Ok(())
     }
 
-    pub fn set_vip(&self, address: String, vip: bool) -> Result<()> {
-        self.kite.store.write(|tx| store::set_vip(tx, &address, vip))?;
+    /// Marks these senders as VIPs, or stops.
+    pub fn set_vips(&self, addresses: Vec<String>, vip: bool) -> Result<()> {
+        self.kite.store.write(|tx| addresses.iter().try_for_each(|a| store::set_vip(tx, a, vip)))?;
         self.changed();
         Ok(())
     }
 
     pub fn is_vip(&self, address: String) -> Result<bool> {
         Ok(self.kite.store.read(|c| store::is_vip(c, &address))?)
+    }
+
+    /// Every VIP address, A to Z.
+    pub fn vips(&self) -> Result<Vec<String>> {
+        Ok(self.kite.store.read(store::vips)?)
     }
 
     /// Sleeping threads, soonest first.

@@ -14,7 +14,12 @@ struct ComposeView: View {
     enum Field { case to, cc, bcc, subject, body }
 
     private var draft: Binding<ComposeData> {
-        Binding(get: { model.compose ?? ComposeData.blank }, set: { model.compose = $0; scheduleSave() })
+        // A field that commits as the view closes must not reopen a discarded or sent message.
+        Binding(get: { model.compose ?? ComposeData.blank }, set: {
+            guard model.compose != nil else { return }
+            model.compose = $0
+            scheduleSave()
+        })
     }
 
     private var senders: [AccountInfo] {
@@ -151,6 +156,7 @@ private struct FieldRow<Content: View>: View {
             content
         }
         .font(.system(size: 13.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 40)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }

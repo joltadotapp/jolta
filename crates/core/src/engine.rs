@@ -44,7 +44,7 @@ pub enum Event {
     SyncStarted(AccountId),
     SyncFinished(AccountId),
     SyncFailed(AccountId, String),
-    NewMail { account: AccountId, thread: ThreadId, from: String, subject: String },
+    NewMail { account: AccountId, thread: ThreadId, from: String, subject: String, vip: bool },
     ActionFailed(String),
     Sent { account: AccountId, subject: String },
     Woke { account: AccountId, thread: ThreadId, subject: String },
@@ -612,7 +612,8 @@ impl Engine {
             .store
             .read_async(move |c| {
                 let mut stmt = c.prepare(
-                    "SELECT m.thread_id, CASE m.from_name WHEN '' THEN m.from_addr ELSE m.from_name END, m.subject
+                    "SELECT m.thread_id, CASE m.from_name WHEN '' THEN m.from_addr ELSE m.from_name END, m.subject,
+                            EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)
                      FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
                      JOIN mailbox b ON b.id = mm.mailbox_id AND b.role = 'inbox'
                      WHERE m.id = ?1 AND (m.flags & 1) = 0 AND m.date >= ?2",
@@ -620,7 +621,7 @@ impl Engine {
                 let mut out = Vec::new();
                 for id in ids.iter().take(5) {
                     if let Ok(row) = stmt.query_row(rusqlite::params![id, started - NEW_MAIL_WINDOW], |r| {
-                        Ok((r.get::<_, ThreadId>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                        Ok((r.get::<_, ThreadId>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?))
                     }) {
                         out.push(row);
                     }
@@ -628,8 +629,8 @@ impl Engine {
                 Ok(out)
             })
             .await?;
-        for (thread, from, subject) in fresh {
-            (self.sink)(Event::NewMail { account, thread, from, subject });
+        for (thread, from, subject, vip) in fresh {
+            (self.sink)(Event::NewMail { account, thread, from, subject, vip });
         }
         Ok(())
     }

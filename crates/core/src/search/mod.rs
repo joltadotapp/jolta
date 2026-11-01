@@ -29,6 +29,8 @@ pub struct ThreadRow {
     pub unread_count: u32,
     pub flagged: bool,
     pub has_attachments: bool,
+    /// The shown message's sender is a VIP.
+    pub vip: bool,
 }
 
 fn fts_string(text: &str, phrase: bool, prefix: bool) -> String {
@@ -306,7 +308,9 @@ pub fn query_count(conn: &Connection, q: &Query) -> Result<u32> {
 
 fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result<ThreadRow> {
     let mut row = conn.prepare_cached(
-        "SELECT account_id, date, from_name, from_addr, subject, snippet FROM message WHERE id = ?1",
+        "SELECT account_id, date, from_name, from_addr, subject, snippet,
+                EXISTS (SELECT 1 FROM vip v WHERE v.address = message.from_addr)
+         FROM message WHERE id = ?1",
     )?
     .query_row([message], |r| {
         Ok(ThreadRow {
@@ -322,6 +326,7 @@ fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result
             unread_count: 0,
             flagged: false,
             has_attachments: false,
+            vip: r.get(6)?,
         })
     })?;
     conn.prepare_cached(

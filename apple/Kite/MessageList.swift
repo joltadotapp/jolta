@@ -364,13 +364,37 @@ final class ThreadCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// The seal in front of a VIP's name. It leads the name so truncation never hides it.
+    private static let vipMark: NSTextAttachment = {
+        let mark = NSTextAttachment()
+        let config = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
+        guard let symbol = NSImage(systemSymbolName: "checkmark.seal.fill", accessibilityDescription: "VIP")?
+            .withSymbolConfiguration(config) else { return mark }
+        // Tinted as it draws, so the check stays cut out and the colour follows the appearance.
+        let image = NSImage(size: symbol.size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            Theme.text2.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        image.accessibilityDescription = "VIP"
+        mark.image = image
+        mark.bounds = NSRect(x: 0, y: -1.5, width: symbol.size.width, height: symbol.size.height)
+        return mark
+    }()
+
     func show(_ r: ThreadRow) {
         row = r
         let unread = r.unreadCount > 0
-        let name = NSMutableAttributedString(string: r.fromName.isEmpty ? r.fromAddr : r.fromName, attributes: [
+        let name = NSMutableAttributedString()
+        if r.vip {
+            name.append(NSAttributedString(attachment: Self.vipMark))
+            name.append(NSAttributedString(string: " "))
+        }
+        name.append(NSAttributedString(string: r.fromName.isEmpty ? r.fromAddr : r.fromName, attributes: [
             .font: Theme.font(weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
-        ])
+        ]))
         if r.messageCount > 1 {
             name.append(NSAttributedString(string: "  \(r.messageCount)", attributes: [
                 .font: Theme.font(11.5), .foregroundColor: Theme.text3,

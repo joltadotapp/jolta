@@ -304,11 +304,34 @@ final class AppModel {
         section = all[(i + (backwards ? all.count - 1 : 1)) % all.count]
     }
 
+    /// Makes the senders of the selected conversations VIPs, or, when they
+    /// all are already, stops. Your own addresses are left out.
     func toggleVIP() {
-        guard let address = cursorRow?.fromAddr, !address.isEmpty else { return }
-        let vip = (try? core.isVip(address: address)) ?? false
-        try? core.setVip(address: address, vip: !vip)
-        show(Toast(text: vip ? "\(address) is no longer a VIP" : "\(address) is now a VIP", undo: nil))
+        let rows: [ThreadRow] = if isMultiSelection {
+            rows(of: selectedThreads).rangeView.flatMap { page(offset: $0.lowerBound, limit: $0.count) }
+        } else {
+            cursorRow.map { [$0] } ?? []
+        }
+        let mine = Set(accounts.map { $0.account.address.lowercased() })
+        var seen = Set<String>()
+        let senders = rows.map(\.fromAddr).filter { !$0.isEmpty && !mine.contains($0.lowercased()) && seen.insert($0.lowercased()).inserted }
+        guard !senders.isEmpty else { return }
+        let current = senders.filter { (try? core.isVip(address: $0)) ?? false }
+        let vip = current.count < senders.count
+        let changed = vip ? senders.filter { !current.contains($0) } : senders
+        do {
+            try core.setVips(addresses: changed, vip: vip)
+        } catch {
+            return show(Toast(text: "\(error)", undo: nil))
+        }
+        let who = changed.count == 1 ? changed[0] : "\(changed.count) senders"
+        let text = switch (vip, changed.count == 1) {
+        case (true, true): "\(who) is now a VIP"
+        case (true, false): "\(who) are now VIPs"
+        case (false, true): "\(who) is no longer a VIP"
+        case (false, false): "\(who) are no longer VIPs"
+        }
+        show(Toast(text: text, undo: .vips(changed, !vip)))
     }
 
     func snooze(until: Int64, label: String) {
@@ -368,8 +391,10 @@ final class AppModel {
         case .syncFailed(let id, let message):
             syncing.remove(id)
             lastError = message
-        case .newMail(_, let threadID, let from, let subject):
-            notifier.post(threadID: threadID, from: from, subject: subject)
+        case .newMail(_, let threadID, let from, let subject, let vip):
+            if NewMailBanners.current.shows(vip: vip) {
+                notifier.post(threadID: threadID, from: from, subject: subject)
+            }
         case .actionFailed(let message):
             show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
         case .agentRequest(let id, let name):
@@ -470,6 +495,9 @@ final class AppModel {
         switch toast?.undo {
         case .action(let tokens):
             try? core.undo(tokens: tokens)
+            show(Toast(text: "Undone", undo: nil))
+        case .vips(let addresses, let vip):
+            try? core.setVips(addresses: addresses, vip: vip)
             show(Toast(text: "Undone", undo: nil))
         case .send(let token):
             if let back = try? core.cancelSend(token: token) {
@@ -636,6 +664,8 @@ struct Toast: Equatable {
     enum Undo: Equatable {
         case action([Int64])
         case send(Int64)
+        /// Set these senders' VIP mark back to this.
+        case vips([String], Bool)
     }
 
     let id = UUID()

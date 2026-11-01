@@ -350,11 +350,19 @@ struct ListColumn: View {
                 Text(model.search.isEmpty ? model.source.title : "Search")
                     .font(.system(size: 15, weight: .semibold))
                     .tracking(-0.15)
+                    .lineLimit(1)
+                    .layoutPriority(1)
                 let unread = model.unreadCount(model.query)
-                if unread > 0 {
-                    Text("\(unread) unread").font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
+                // A narrow list drops the unread count rather than wrap it.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 0) {
+                        if unread > 0 {
+                            Text("\(unread) unread").font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).fixedSize()
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer()
                 SortMenu(model: model)
                 SearchField(model: model)
             }
@@ -388,11 +396,36 @@ struct SectionBar: View {
     var body: some View {
         let tabs: [SectionInfo?] = [nil] + model.sections.map { Optional($0) }
         HStack(spacing: 0) {
+            // Tabs that outgrow a narrow list scroll sideways instead of wrapping.
+            ScrollView(.horizontal) {
+                HStack(spacing: 0) { self.tabs(tabs) }
+            }
+            .scrollIndicators(.never)
+            .scrollBounceBehavior(.basedOnSize)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 5) {
+                    KeyCap(key: "⇥")
+                    Text("next").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                }
+                .fixedSize()
+                .padding(.leading, 8)
+                Color.clear.frame(width: 0)
+            }
+            .padding(.bottom, 8)
+            .padding(.trailing, 9)
+        }
+        .font(.system(size: 12.5))
+        .padding(.horizontal, 17)
+        .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+
+    private func tabs(_ tabs: [SectionInfo?]) -> some View {
             ForEach(tabs, id: \.?.id) { c in
                 let selected = model.section?.id == c?.id
                 Button { model.section = c } label: {
                     HStack(spacing: 5) {
                         Text(c?.name ?? "Everything")
+                            .lineLimit(1)
                             .fontWeight(selected ? .medium : .regular)
                             .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
                         let n = model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " "))
@@ -411,17 +444,6 @@ struct SectionBar: View {
                 }
                 .buttonStyle(.plain)
             }
-            Spacer()
-            HStack(spacing: 5) {
-                KeyCap(key: "⇥")
-                Text("next").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
-            }
-            .padding(.bottom, 8)
-            .padding(.trailing, 9)
-        }
-        .font(.system(size: 12.5))
-        .padding(.horizontal, 17)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
 }
 
@@ -516,7 +538,8 @@ struct SearchField: View {
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
-        .frame(width: 196, height: 28)
+        .frame(minWidth: 130, idealWidth: 196, maxWidth: 196)
+        .frame(height: 28)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
         .onChange(of: model.focusSearchRequest) { focused = true }
     }
@@ -600,7 +623,7 @@ struct ActionButton: View {
             }
             .font(.system(size: 12.5))
             .foregroundStyle(Color(Theme.text2))
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 7)
             .frame(height: 28)
             .background(RoundedRectangle(cornerRadius: 7).fill(Color(hovering ? Theme.hover : .clear)))
             .contentShape(Rectangle())
@@ -614,35 +637,52 @@ struct ActionButton: View {
 struct ReaderColumn: View {
     let model: AppModel
 
-    private func actions(titles: Bool) -> some View {
+    /// `titles` names the triage buttons, `replyTitles` the reply ones, which
+    /// lose their words first when the reader narrows.
+    private func actions(titles: Bool, replyTitles: Bool) -> some View {
         HStack(spacing: 4) {
             ActionButton(icon: "archivebox", title: "Archive", key: "E", showsTitle: titles) { model.act(.archive, label: "Archived") }
             ActionButton(icon: "trash", title: "Trash", key: "#", showsTitle: titles) { model.act(.trash, label: "Moved to Trash") }
             ActionButton(icon: "envelope.badge", title: "Unread", key: "U", showsTitle: titles) { model.act(.markUnread, label: "Marked unread") }
             ActionButton(icon: "star", title: "Star", key: "S", showsTitle: titles) { model.act(.flag, label: "Starred") }
+            if !model.isMultiSelection {
+                Rectangle().fill(Color(Theme.line)).frame(width: 1, height: 16).padding(.horizontal, 2)
+                ActionButton(icon: "arrowshape.turn.up.left", title: "Reply", key: "R", showsTitle: replyTitles) { model.reply(.reply) }
+                ActionButton(icon: "arrowshape.turn.up.right", title: "Forward", key: "F", showsTitle: replyTitles) { model.reply(.forward) }
+            }
         }
         .fixedSize()
+    }
+
+    private func bar(titles: Bool, replyTitles: Bool, position: Bool, jk: Bool) -> some View {
+        HStack(spacing: 4) {
+            if model.openThread != nil || model.isMultiSelection {
+                actions(titles: titles, replyTitles: replyTitles)
+            }
+            Spacer(minLength: 12)
+            if position, model.cursor.count > 0, !model.isMultiSelection {
+                Text("\(model.cursor.row + 1) of \(model.cursor.count)")
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundStyle(Color(Theme.text3))
+                    .fixedSize()
+                    .padding(.trailing, 6)
+            }
+            if jk { HStack(spacing: 3) { KeyCap(key: "K"); KeyCap(key: "J") } }
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if model.compose == nil {
-            HStack(spacing: 4) {
-                if model.openThread != nil || model.isMultiSelection {
-                    // A narrow reader keeps the icons and keys and drops the words.
-                    ViewThatFits(in: .horizontal) {
-                        actions(titles: true)
-                        actions(titles: false)
-                    }
-                }
-                Spacer()
-                if model.cursor.count > 0, !model.isMultiSelection {
-                    Text("\(model.cursor.row + 1) of \(model.cursor.count)")
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(Color(Theme.text3))
-                        .padding(.trailing, 6)
-                }
-                HStack(spacing: 3) { KeyCap(key: "K"); KeyCap(key: "J") }
+            // A narrowing reader sheds, in turn, the reply buttons' words, the
+            // position, the J K hint and the triage buttons' words.
+            ViewThatFits(in: .horizontal) {
+                bar(titles: true, replyTitles: true, position: true, jk: true)
+                bar(titles: true, replyTitles: false, position: true, jk: true)
+                bar(titles: true, replyTitles: false, position: false, jk: true)
+                bar(titles: true, replyTitles: false, position: false, jk: false)
+                bar(titles: false, replyTitles: false, position: true, jk: true)
+                bar(titles: false, replyTitles: false, position: false, jk: false)
             }
             .padding(.horizontal, 20)
             .frame(height: Theme.headerHeight)
@@ -656,7 +696,7 @@ struct ReaderColumn: View {
                     Text("\(model.selectedThreads.count) conversations selected")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(Color(Theme.text2))
-                    Text("Archive, Trash, Unread and Star act on all of them.")
+                    Text("Archive, Trash, Unread, Star and VIP (!) act on all of them.")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(Theme.text3))
                 }

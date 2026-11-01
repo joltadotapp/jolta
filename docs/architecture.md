@@ -104,6 +104,8 @@ Keep the UniFFI surface small and coarse. Lists cross as pages, never whole mail
 - `perform(action, target) -> UndoToken` and `undo(token)`
 - `compose(...)`, `send(draft) -> UndoToken`
 - `snooze(target, until)`, sections CRUD
+- `vips()` and `set_vips(addresses, vip)`. Rows and reader messages carry a `vip` flag, and new-mail events say whether the sender is a VIP, so the app can limit banners to VIPs.
+- `reply_compose(thread, Forward)` saves the original's attachments under `<data dir>/forwards/<message id>/` and lists them on the compose. Images the HTML shows inline stay behind.
 - `CoreListener.on_event(CoreEvent)`: list changed (with query ids), sync status, new mail, agent approval request, errors
 
 The Swift side keeps a page cache per visible list and asks for rows by index as the table scrolls.

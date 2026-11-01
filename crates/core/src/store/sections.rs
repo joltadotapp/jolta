@@ -49,7 +49,14 @@ pub fn is_sender_trusted(conn: &Connection, address: &str) -> Result<bool> {
 }
 
 pub fn is_vip(conn: &Connection, address: &str) -> Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM vip WHERE address = ?1)", [address], |r| r.get(0))?)
+    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM vip WHERE address = ?1)", [address.trim()], |r| r.get(0))?)
+}
+
+/// Every VIP address, A to Z.
+pub fn vips(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT address FROM vip ORDER BY address")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 #[derive(Clone, Debug)]

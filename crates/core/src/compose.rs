@@ -1,6 +1,8 @@
 //! Writing mail: new messages, replies and forwards, built with
 //! mail-builder into the bytes the outbox sends.
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mail_builder::MessageBuilder;
@@ -144,6 +146,49 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
     Ok(c)
 }
 
+/// Saves the attachments of a message being forwarded into `dir`, so the
+/// forward can carry them. Images its HTML shows inline stay behind: the
+/// forward is plain text, and they are mostly logos.
+pub fn forward_attachments(raw: &[u8], dir: &Path) -> Result<Vec<AttachmentFile>> {
+    let Some(msg) = MessageParser::new().parse(raw) else { return Ok(Vec::new()) };
+    let html = msg.body_html(0).unwrap_or_default().to_lowercase();
+    let _ = std::fs::remove_dir_all(dir);
+    let mut used = HashSet::new();
+    let mut files = Vec::new();
+    for part in msg.root().attachments() {
+        let inline = part.content_id().is_some_and(|id| html.contains(&format!("cid:{}", id.trim_matches(['<', '>']).to_lowercase())));
+        if inline {
+            continue;
+        }
+        let name = file_name(part.attachment_name().unwrap_or("attachment"));
+        let mut saved = name.clone();
+        let mut n = 2;
+        while !used.insert(saved.to_lowercase()) {
+            saved = match name.rsplit_once('.') {
+                Some((stem, ext)) if !stem.is_empty() => format!("{stem} {n}.{ext}"),
+                _ => format!("{name} {n}"),
+            };
+            n += 1;
+        }
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(&saved);
+        std::fs::write(&path, part.decoded())?;
+        let mime_type = part
+            .content_type()
+            .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")))
+            .unwrap_or_else(|| "application/octet-stream".into());
+        files.push(AttachmentFile { name, mime_type, path: path.to_string_lossy().into_owned() });
+    }
+    Ok(files)
+}
+
+/// An attachment name made safe to use as a file name.
+fn file_name(name: &str) -> String {
+    let clean: String = name.chars().map(|c| if c == '/' || c == '\\' || c == ':' || c.is_control() { '_' } else { c }).collect();
+    let clean = clean.trim().trim_start_matches('.').to_string();
+    if clean.is_empty() { "attachment".into() } else { clean }
+}
+
 /// A built message, ready for the outbox.
 pub struct Built {
     pub raw: Vec<u8>,
@@ -205,6 +250,27 @@ mod tests {
             vec![("Ann Smith".into(), "ann@example.com".into()), ("".into(), "bob@example.com".into())]
         );
         assert!(parse_addresses("  ").is_empty());
+    }
+
+    #[test]
+    fn forwards_carry_attachments_but_not_inline_images() {
+        let raw = "From: a@example.com\r\nSubject: Invoice\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"x\"\r\n\r\n\
+            --x\r\nContent-Type: text/html\r\n\r\n<p>Hi</p><img src=\"cid:logo@a\">\r\n\
+            --x\r\nContent-Type: image/png\r\nContent-ID: <logo@a>\r\nContent-Transfer-Encoding: base64\r\n\r\naGk=\r\n\
+            --x\r\nContent-Type: application/pdf; name=\"../inv.pdf\"\r\nContent-Disposition: attachment; filename=\"../inv.pdf\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n\
+            --x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"_inv.pdf\"\r\n\r\nsecond\r\n\
+            --x--\r\n";
+        let dir = std::env::temp_dir().join(format!("kite-fwd-{}", std::process::id()));
+        let files = forward_attachments(raw.as_bytes(), &dir).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["_inv.pdf", "_inv.pdf"], "the inline logo stays behind and the path is defused");
+        assert_eq!(files[0].mime_type, "application/pdf");
+        assert_eq!(std::fs::read(&files[0].path).unwrap(), b"%PDF-");
+        assert!(files[1].path.ends_with("_inv 2.pdf"), "same names get their own files: {}", files[1].path);
+        assert!(files.iter().all(|f| Path::new(&f.path).starts_with(&dir)));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub struct ThreadMessage {
     pub date: i64,
     pub snippet: String,
     pub flags: Flags,
+    pub vip: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -32,7 +33,8 @@ pub struct ThreadDetail {
 
 pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, Vec<ThreadMessage>)> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, from_name, from_addr, to_addrs, cc_addrs, date, snippet, flags, subject, message_id
+        "SELECT id, from_name, from_addr, to_addrs, cc_addrs, date, snippet, flags, subject, message_id,
+                EXISTS (SELECT 1 FROM vip v WHERE v.address = message.from_addr)
          FROM message WHERE thread_id = ?1 ORDER BY id",
     )?;
     let mut subject = String::new();
@@ -47,6 +49,7 @@ pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, V
                 date: r.get(5)?,
                 snippet: r.get(6)?,
                 flags: Flags(r.get(7)?),
+                vip: r.get(10)?,
             },
             r.get::<_, String>(8)?,
             r.get::<_, Option<String>>(9)?,
@@ -115,6 +118,7 @@ pub async fn open_thread(kite: &Kite, thread: ThreadId, app_css: &str, utc_offse
             snippet: &m.snippet,
             raw: &raws[i],
             open: i == last || !m.flags.has(Flags::SEEN),
+            vip: m.vip,
         })
         .collect();
     let rendered = render::render_thread(&views, app_css);

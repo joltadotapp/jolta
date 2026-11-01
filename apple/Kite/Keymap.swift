@@ -89,7 +89,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .reply: "arrowshape.turn.up.left"
         case .replyAll: "arrowshape.turn.up.left.2"
         case .forward: "arrowshape.turn.up.right"
-        case .toggleVIP: "person.crop.circle.badge.checkmark"
+        case .toggleVIP: "checkmark.seal"
         case .nextSection: "rectangle.split.3x1"
         case .help: "keyboard"
         case .goInbox: "tray"

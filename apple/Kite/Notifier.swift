@@ -1,6 +1,23 @@
 import Foundation
 import UserNotifications
 
+/// Which new mail gets a banner, set in Settings › VIPs.
+enum NewMailBanners: String, CaseIterable {
+    case all, vips, none
+
+    static var current: NewMailBanners {
+        UserDefaults.standard.string(forKey: "NewMailBanners").flatMap(Self.init) ?? .all
+    }
+
+    func shows(vip: Bool) -> Bool {
+        switch self {
+        case .all: true
+        case .vips: vip
+        case .none: false
+        }
+    }
+}
+
 /// New-mail banners. Clicking one opens its thread.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {

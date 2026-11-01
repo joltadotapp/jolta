@@ -9,6 +9,7 @@ struct SettingsView: View {
         TabView {
             AccountsSettings(model: model).tabItem { Label("Accounts", systemImage: "person.crop.circle") }
             SectionsSettings(model: model).tabItem { Label("Sections", systemImage: "rectangle.split.3x1") }
+            VIPSettings(model: model).tabItem { Label("VIPs", systemImage: "checkmark.seal") }
             AgentsSettings(model: model).tabItem { Label("Agents", systemImage: "cpu") }
         }
         .frame(width: 860, height: 620)
@@ -54,6 +55,78 @@ struct SectionsSettings: View {
 }
 
 extension SectionInfo: @retroactive Identifiable {}
+
+/// The senders that matter most: a seal in the list, a VIP section, and
+/// optionally the only mail that gets a banner.
+struct VIPSettings: View {
+    let model: AppModel?
+    @State private var vips: [String] = []
+    @State private var address = ""
+    @State private var error: String?
+    @AppStorage("NewMailBanners") private var banners = NewMailBanners.all
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("VIPs").font(.system(size: 13, weight: .semibold))
+            Text("Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            List {
+                ForEach(vips, id: \.self) { vip in
+                    HStack {
+                        Image(systemName: "checkmark.seal.fill").foregroundStyle(.secondary)
+                        Text(vip)
+                        Spacer()
+                        Button("Remove") { set([vip], false) }
+                    }
+                }
+                if vips.isEmpty {
+                    Text("No VIPs yet").foregroundStyle(.secondary)
+                }
+            }
+            .frame(minHeight: 220)
+            HStack {
+                TextField("", text: $address, prompt: Text("name@example.com"))
+                    .frame(width: 280)
+                    .onSubmit(add)
+                Button("Add VIP", action: add).disabled(!address.contains("@"))
+                if let error { Text(error).foregroundStyle(.red).font(.system(size: 12)).lineLimit(2) }
+            }
+            Divider().padding(.vertical, 6)
+            Picker("New mail banners", selection: $banners) {
+                Text("Every new message in the Inbox").tag(NewMailBanners.all)
+                Text("Only mail from VIPs").tag(NewMailBanners.vips)
+                Text("None").tag(NewMailBanners.none)
+            }
+            .pickerStyle(.radioGroup)
+            Spacer()
+        }
+        .padding(20)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        vips = (try? model?.core.vips()) ?? []
+    }
+
+    private func add() {
+        let typed = address.trimmingCharacters(in: .whitespaces)
+        guard typed.contains("@") else { return }
+        set([typed], true)
+        address = ""
+    }
+
+    private func set(_ addresses: [String], _ vip: Bool) {
+        do {
+            try model?.core.setVips(addresses: addresses, vip: vip)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+        load()
+    }
+}
 
 /// Email and password; the servers too when Kite doesn't know them from the
 /// address. Kite signs in before it saves anything.

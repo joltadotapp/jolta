@@ -312,6 +312,8 @@ enum ReaderStyle {
       height: 42px; white-space: nowrap; font-size: 13px; }
     .kite-message > summary::-webkit-details-marker { display: none; }
     .kite-from { font-weight: 600; width: 120px; flex: none; overflow: hidden; text-overflow: ellipsis; }
+    .kite-vip { flex: none; margin-left: -8px; padding: 0 5px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--tx3);
+      color: var(--tx2); font-size: 9.5px; font-weight: 600; letter-spacing: .05em; line-height: 15px; }
     .kite-snippet { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--tx3); }
     .kite-date { color: var(--tx3); font: 11.5px ui-monospace, SFMono-Regular, monospace; }
     .kite-to { display: none; }
