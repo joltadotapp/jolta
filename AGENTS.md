@@ -14,7 +14,7 @@ Read these before changing anything:
 - Functionality first. Write a test only where the plan names one or where logic can break silently. No CI, fuzzing, lint configs or benchmark tracking until the MVP works.
 - Keep tooling minimal: cargo, one build script, a hand-made Xcode project. Ask before adding a tool or a build step.
 - Every dependency must be MIT, Apache-2.0, BSD, ISC, Zlib or MPL-2.0. No GPL, AGPL or LGPL code, copied or linked.
-- Gmail data never passes through a server we run. No relays, no hosted services, no telemetry containing mail data.
+- Kite works fully without any server of ours. An optional subscription service may come later for features that need one, such as shared conversations or sending while the Mac is off; it adds to the app and never gates the core. No telemetry containing mail data. Once Gmail data reaches a server we run, Google's security assessment (CASA) applies; see `docs/decisions.md`.
 - Mail logic stays in Rust. Swift renders and forwards user intents.
 - Verify each milestone on the real artifact: the `kite` CLI against a real account, or the app running on the Mac mini.
 
