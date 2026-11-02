@@ -43,62 +43,91 @@ struct AgentApproval: View {
     }
 }
 
-/// Settings: which agents may do what, what they did, and a switch to stop them all.
+/// Settings › Agents: which agents may do what, and a switch to stop them all.
 struct AgentsSettings: View {
-    let model: AppModel?
+    let model: AppModel
     @State private var agents: [AgentInfo] = []
-    @State private var log: [AuditInfo] = []
     @State private var paused = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Toggle("Pause all agents", isOn: $paused)
-                .toggleStyle(.switch)
-                .onChange(of: paused) { _, on in try? model?.core.setAgentsPaused(paused: on) }
-            if let model {
-                Text("Agent config: command \(model.mcpHelperPath)").font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                Text(model.mcpStatus).font(.system(size: 11)).foregroundStyle(.secondary)
+        SettingsScroll {
+            SettingsSection("Agents", footer: "Agents connect through Kite's MCP server. They never see your passwords, everything they do is logged under Activity, and they cannot send mail: drafts wait in Kite for you.") {
+                SettingsRow(title: "Pause all agents", detail: "Refuses every agent request until you turn this off.") {
+                    Toggle("Pause all agents", isOn: $paused)
+                        .settingsSwitch()
+                        .onChange(of: paused) { _, on in try? model.core.setAgentsPaused(paused: on) }
+                }
+                SettingsRow(title: "Connect an agent", detail: model.mcpStatus) {
+                    Button("Copy Command") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(model.mcpHelperPath, forType: .string)
+                    }
+                    .help(model.mcpHelperPath)
+                }
+                SettingsBlock {
+                    Text(model.mcpHelperPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color(Theme.text3))
+                        .textSelection(.enabled)
+                }
             }
-            Text("Agents").font(.system(size: 13, weight: .semibold)).padding(.top, 6)
-            ForEach(agents, id: \.id) { a in
-                HStack {
-                    Text(a.name)
-                    Text(a.state).foregroundStyle(.secondary)
-                    Text(a.grants.joined(separator: ", ")).foregroundStyle(.secondary).font(.system(size: 11))
-                    Spacer()
-                    if a.state == "approved" {
-                        Button("Revoke") { try? model?.core.decideAgent(agentId: a.id, approve: false, grants: []); reload() }
-                    } else {
-                        Button("Allow read and drafts") { try? model?.core.decideAgent(agentId: a.id, approve: true, grants: ["read", "draft"]); reload() }
+            SettingsSection("Connected agents") {
+                ForEach(agents, id: \.id) { a in
+                    SettingsRow(title: a.name, detail: a.state == "approved"
+                                ? "Allowed: \(a.grants.isEmpty ? "nothing" : a.grants.joined(separator: ", "))"
+                                : a.state.capitalized) {
+                        if a.state == "approved" {
+                            Button("Revoke") { try? model.core.decideAgent(agentId: a.id, approve: false, grants: []); reload() }
+                        } else {
+                            Button("Allow Read and Drafts") { try? model.core.decideAgent(agentId: a.id, approve: true, grants: ["read", "draft"]); reload() }
+                        }
                     }
                 }
-                .font(.system(size: 12.5))
-            }
-            Text("Activity").font(.system(size: 13, weight: .semibold)).padding(.top, 6)
-            List(Array(log.enumerated()), id: \.offset) { _, e in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(e.agent).fontWeight(.medium)
-                        Text(e.tool)
-                        Spacer()
-                        Text(Date(timeIntervalSince1970: TimeInterval(e.at)).formatted(date: .abbreviated, time: .shortened))
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(e.summary).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
-                    if e.outcome != "ok" { Text(e.outcome).font(.system(size: 11)).foregroundStyle(.orange).lineLimit(2) }
+                if agents.isEmpty {
+                    SettingsRow("No agents yet", detail: "An agent shows up here the first time it connects, and Kite asks you to allow it.")
                 }
-                .font(.system(size: 12))
             }
-            .frame(minHeight: 200)
         }
-        .padding(20)
         .onAppear(perform: reload)
-        .onChange(of: model?.agentRevision) { reload() }
+        .onChange(of: model.agentRevision) { reload() }
     }
 
     private func reload() {
-        agents = (try? model?.core.agents()) ?? []
-        log = (try? model?.core.auditLog(limit: 200)) ?? []
-        paused = (try? model?.core.agentsPaused()) ?? false
+        agents = (try? model.core.agents()) ?? []
+        paused = (try? model.core.agentsPaused()) ?? false
+    }
+}
+
+/// Settings › Activity: everything agents did, newest first.
+struct ActivitySettings: View {
+    let model: AppModel
+    @State private var log: [AuditInfo] = []
+
+    var body: some View {
+        SettingsScroll {
+            SettingsSection("Recent activity", footer: "The last 200 requests from agents.") {
+                ForEach(Array(log.enumerated()), id: \.offset) { _, e in
+                    SettingsBlock {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(e.agent).fontWeight(.medium)
+                                Text(e.tool).foregroundStyle(Color(Theme.text2))
+                                Spacer()
+                                Text(Date(timeIntervalSince1970: TimeInterval(e.at)).formatted(date: .abbreviated, time: .shortened))
+                                    .foregroundStyle(Color(Theme.text3))
+                            }
+                            Text(e.summary).font(.system(size: 11, design: .monospaced)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                            if e.outcome != "ok" { Text(e.outcome).font(.system(size: 11)).foregroundStyle(.orange).lineLimit(2) }
+                        }
+                        .font(.system(size: 12.5))
+                    }
+                }
+                if log.isEmpty {
+                    SettingsRow("Nothing yet", detail: "Agent requests appear here as they happen.")
+                }
+            }
+        }
+        .onAppear { log = (try? model.core.auditLog(limit: 200)) ?? [] }
+        .onChange(of: model.agentRevision) { log = (try? model.core.auditLog(limit: 200)) ?? [] }
     }
 }

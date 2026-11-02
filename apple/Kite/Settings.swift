@@ -2,64 +2,150 @@
 import SwiftUI
 
 /// Split-inbox sections: each is a name and a search query over the inbox.
-struct SettingsView: View {
-    let model: AppModel?
-
-    var body: some View {
-        TabView {
-            AccountsSettings(model: model).tabItem { Label("Accounts", systemImage: "person.crop.circle") }
-            SectionsSettings(model: model).tabItem { Label("Sections", systemImage: "rectangle.split.3x1") }
-            PeopleSettings(model: model).tabItem { Label("People", systemImage: "person.2") }
-            SnippetsSettings(model: model).tabItem { Label("Snippets", systemImage: "text.badge.plus") }
-            AgentsSettings(model: model).tabItem { Label("Agents", systemImage: "cpu") }
-        }
-        .frame(width: 860, height: 620)
-    }
-}
-
 struct SectionsSettings: View {
-    let model: AppModel?
+    let model: AppModel
     @State private var sections: [SectionInfo] = []
+    @State private var saved: [SectionInfo] = []
     @State private var error: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Inbox sections").font(.system(size: 13, weight: .semibold))
-            Text("Each section is a tab over the inbox showing the conversations its query matches. Queries use the search language: from:, to:, subject:, has:attachment, has:list, is:unread, is:vip, is:newsletter, is:notification.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Table($sections) {
-                TableColumn("Name") { $s in TextField("", text: $s.name) }.width(140)
-                TableColumn("Query") { $s in TextField("", text: $s.query).font(.system(size: 12, design: .monospaced)) }
+        SettingsScroll {
+            SettingsSection("Inbox sections",
+                            footer: "Each section is a tab over the inbox showing the conversations its query matches. Queries use the search language: from:, to:, subject:, has:attachment, has:list, is:unread, is:vip, is:newsletter, is:notification.") {
+                ForEach($sections) { $s in
+                    SettingsBlock {
+                        HStack(spacing: 10) {
+                            TextField("Name", text: $s.name).settingsField(width: 150)
+                            TextField("Query", text: $s.query).settingsField(width: nil, mono: true)
+                            Button { sections.removeAll { $0.id == s.id } } label: { Image(systemName: "trash") }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color(Theme.text3))
+                                .help("Remove this section")
+                        }
+                    }
+                }
+                if sections.isEmpty {
+                    SettingsRow("No sections", detail: "The inbox shows one list. Add a section to split it into tabs.")
+                }
+            } accessory: {
+                Button("Add Section") {
+                    sections.append(SectionInfo(id: -Int64(sections.count + 1), name: "New section", query: "from:"))
+                }
             }
-            .frame(minHeight: 180)
-            HStack {
-                Button("Add") { sections.append(SectionInfo(id: -Int64(sections.count + 1), name: "New section", query: "from:")) }
-                Button("Remove last") { if !sections.isEmpty { sections.removeLast() } }
-                Spacer()
-                if let error { Text(error).foregroundStyle(.red).font(.system(size: 12)).lineLimit(2) }
-                Button("Save") {
+        }
+        .safeAreaInset(edge: .bottom) {
+            if sections != saved || error != nil {
+                SaveBar(message: error, failed: true, revert: { sections = saved; error = nil }) {
                     do {
-                        try model?.saveSections(sections)
+                        try model.saveSections(sections)
+                        saved = model.sections
+                        sections = saved
                         error = nil
                     } catch {
                         self.error = "\(error)"
                     }
                 }
-                .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
-        .onAppear { sections = model?.sections ?? [] }
+        .onAppear {
+            saved = model.sections
+            sections = saved
+        }
     }
 }
 
 extension SectionInfo: @retroactive Identifiable {}
 
+/// Save and Revert under a page whose changes apply together.
+struct SaveBar: View {
+    var message: String?
+    var failed = false
+    var working = false
+    var workingText = "Saving…"
+    let revert: () -> Void
+    let save: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if working {
+                ProgressView().controlSize(.small)
+                Text(workingText).foregroundStyle(Color(Theme.text3))
+            } else if let message {
+                Text(message).foregroundStyle(failed ? Color.red : Color(Theme.text3)).lineLimit(2)
+            } else {
+                Text("Unsaved changes").foregroundStyle(Color(Theme.text3))
+            }
+            Spacer()
+            Button("Revert", action: revert).disabled(working)
+            Button("Save", action: save).keyboardShortcut(.defaultAction).tint(Color(Theme.accent)).disabled(working)
+        }
+        .font(.system(size: 12.5))
+        .padding(.horizontal, 32)
+        .frame(height: 52)
+        .background(Color(Theme.bg))
+        .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+}
+
+/// The senders that matter most: a seal in the list and a VIP section.
+struct VIPSettings: View {
+    let model: AppModel
+    @State private var vips: [String] = []
+    @State private var address = ""
+    @State private var error: String?
+
+    var body: some View {
+        SettingsScroll {
+            SettingsSection("VIPs", footer: "Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender. General › New mail banners can limit banners to VIPs.") {
+                ForEach(vips, id: \.self) { vip in
+                    SettingsBlock {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark.seal.fill").foregroundStyle(Color(Theme.text3))
+                            Text(vip)
+                            Spacer()
+                            Button("Remove") { set([vip], false) }
+                        }
+                    }
+                }
+                SettingsBlock {
+                    HStack(spacing: 10) {
+                        TextField("", text: $address, prompt: Text("name@example.com")).settingsField(width: nil).onSubmit(add)
+                        Button("Add VIP", action: add).disabled(!address.contains("@"))
+                    }
+                }
+                if let error {
+                    SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
+                }
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        vips = (try? model.core.vips()) ?? []
+    }
+
+    private func add() {
+        let typed = address.trimmingCharacters(in: .whitespaces)
+        guard typed.contains("@") else { return }
+        set([typed], true)
+        address = ""
+    }
+
+    private func set(_ addresses: [String], _ vip: Bool) {
+        do {
+            try model.core.setVips(addresses: addresses, vip: vip)
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+        load()
+    }
+}
+
 /// Reusable text for the compose window (⌘;), saved as you type.
 struct SnippetsSettings: View {
-    let model: AppModel?
+    let model: AppModel
     @State private var snippets: [SnippetInfo] = []
     @State private var selected: Int64?
     @State private var name = ""
@@ -67,70 +153,80 @@ struct SnippetsSettings: View {
     @State private var saveTask: Task<Void, Never>?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                List(snippets, id: \.id, selection: $selected) { s in
-                    Text(s.name.isEmpty ? "Untitled" : s.name).tag(Optional(s.id))
+        SettingsScroll {
+            SettingsSection("Snippets", footer: "Press ⌘; while writing to insert one at the cursor.") {
+                ForEach(snippets, id: \.id) { s in
+                    Button { pick(s.id) } label: {
+                        SettingsBlock {
+                            HStack(spacing: 12) {
+                                Text(s.name.isEmpty ? "Untitled" : s.name).fontWeight(.medium)
+                                Text(preview(s.body)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                                Spacer()
+                                if s.id == selected { Image(systemName: "pencil").foregroundStyle(Color(Theme.accent)) }
+                            }
+                        }
+                        .background(s.id == selected ? Color(Theme.fill) : .clear)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .frame(width: 200)
-                HStack(spacing: 6) {
-                    Button { add() } label: { Image(systemName: "plus") }
-                    Button { remove() } label: { Image(systemName: "minus") }.disabled(selected == nil)
+                if snippets.isEmpty {
+                    SettingsRow("No snippets yet", detail: "Snippets are text you reuse while writing, like a thank-you or directions.")
                 }
+            } accessory: {
+                Button("New Snippet", action: add)
             }
-            VStack(alignment: .leading, spacing: 10) {
-                if let core = model?.core, selected != nil {
-                    TextField("Name", text: $name, prompt: Text("Name, as you search for it"))
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: name) { scheduleSave() }
-                    RichTextEditor(text: $text, core: core, fontSize: 13)
-                        .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-                        .onChange(of: text) { scheduleSave() }
-                } else {
-                    Text("Snippets are text you reuse while writing. Press ⌘; in a message to insert one.")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if selected != nil {
+                SettingsSection("Edit snippet", footer: "{first name}, {name} and {email} fill in from the message's first recipient. ⌘B, ⌘I and ⇧⌘K format the text. Saved as you type.") {
+                    SettingsRow(title: "Name", detail: "What you type to find it.") {
+                        TextField("", text: $name).settingsField().onChange(of: name) { scheduleSave() }
+                    }
+                    SettingsBlock {
+                        RichTextEditor(text: $text, core: model.core, fontSize: 13)
+                            .settingsEditor(height: 180)
+                            .onChange(of: text) { scheduleSave() }
+                    }
+                } accessory: {
+                    Button("Delete", role: .destructive, action: remove)
                 }
-                Text("{first name}, {name} and {email} fill in from the message's first recipient. ⌘B, ⌘I and ⇧⌘K format the text.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
             }
         }
-        .padding(20)
         .onAppear(perform: load)
-        .onChange(of: selected) { old, new in
-            if let old { save(old) }
-            show(new)
-        }
         .onDisappear { if let selected { save(selected) } }
     }
 
-    private func load() {
-        snippets = (try? model?.core.snippets()) ?? []
-        if selected == nil { selected = snippets.first?.id }
-        show(selected)
+    private func preview(_ body: String) -> String {
+        model.core.bodySpans(body: body).map(\.text).joined().split(separator: "\n").first.map(String.init) ?? ""
     }
 
-    private func show(_ id: Int64?) {
+    private func load() {
+        snippets = (try? model.core.snippets()) ?? []
+        if selected == nil { pick(snippets.first?.id) }
+    }
+
+    private func pick(_ id: Int64?) {
+        if let old = selected, old != id { save(old) }
         saveTask?.cancel()
+        selected = id
         let s = snippets.first { $0.id == id }
         name = s?.name ?? ""
         text = s?.body ?? ""
     }
 
     private func add() {
-        guard let id = try? model?.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: "")) else { return }
-        snippets = (try? model?.core.snippets()) ?? []
-        selected = id
+        guard let id = try? model.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: "")) else { return }
+        if let old = selected { save(old) }
+        snippets = (try? model.core.snippets()) ?? []
+        pick(id)
     }
 
     private func remove() {
         guard let id = selected else { return }
         saveTask?.cancel()
-        try? model?.core.deleteSnippet(id: id)
-        snippets = (try? model?.core.snippets()) ?? []
-        selected = snippets.first?.id
+        try? model.core.deleteSnippet(id: id)
+        snippets = (try? model.core.snippets()) ?? []
+        selected = nil
+        pick(snippets.first?.id)
     }
 
     private func scheduleSave() {
@@ -147,108 +243,8 @@ struct SnippetsSettings: View {
         guard let index = snippets.firstIndex(where: { $0.id == id }),
               snippets[index].name != name || snippets[index].body != text else { return }
         let updated = SnippetInfo(id: id, name: name, body: text)
-        _ = try? model?.core.saveSnippet(snippet: updated)
+        _ = try? model.core.saveSnippet(snippet: updated)
         snippets[index] = updated
-    }
-}
-
-/// VIPs (a seal in the list, a VIP section, optionally the only mail that
-/// gets a banner) and where address suggestions come from.
-struct PeopleSettings: View {
-    let model: AppModel?
-    @State private var vips: [String] = []
-    @State private var address = ""
-    @State private var error: String?
-    @AppStorage("NewMailBanners") private var banners = NewMailBanners.all
-    @AppStorage(AddressBook.key) private var contacts = false
-    @State private var contactsRefused = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("VIPs").font(.system(size: 13, weight: .semibold))
-            Text("Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            List {
-                ForEach(vips, id: \.self) { vip in
-                    HStack {
-                        Image(systemName: "checkmark.seal.fill").foregroundStyle(.secondary)
-                        Text(vip)
-                        Spacer()
-                        Button("Remove") { set([vip], false) }
-                    }
-                }
-                if vips.isEmpty {
-                    Text("No VIPs yet").foregroundStyle(.secondary)
-                }
-            }
-            .frame(minHeight: 140)
-            HStack {
-                TextField("", text: $address, prompt: Text("name@example.com"))
-                    .frame(width: 280)
-                    .onSubmit(add)
-                Button("Add VIP", action: add).disabled(!address.contains("@"))
-                if let error { Text(error).foregroundStyle(.red).font(.system(size: 12)).lineLimit(2) }
-            }
-            Divider().padding(.vertical, 6)
-            Picker("New mail banners", selection: $banners) {
-                Text("Every new message in the Inbox").tag(NewMailBanners.all)
-                Text("Only mail from VIPs").tag(NewMailBanners.vips)
-                Text("None").tag(NewMailBanners.none)
-            }
-            .pickerStyle(.radioGroup)
-            Divider().padding(.vertical, 6)
-            Text("Address suggestions").font(.system(size: 13, weight: .semibold))
-            Text("As you type in To, Cc and Bcc, Kite suggests people you've written to or replied to, the most frequent and recent first. Hover over a suggestion and click × to stop suggesting it.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Toggle("Also suggest people from Contacts", isOn: $contacts)
-                .onChange(of: contacts) { _, on in toggleContacts(on) }
-            if contactsRefused {
-                Text("Kite can't read Contacts. Allow it in System Settings › Privacy & Security › Contacts.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.red)
-            }
-        }
-        .padding(20)
-        .onAppear(perform: load)
-    }
-
-    private func load() {
-        vips = (try? model?.core.vips()) ?? []
-    }
-
-    private func toggleContacts(_ on: Bool) {
-        guard let core = model?.core else { return }
-        guard on else { return AddressBook.load(into: core) }
-        contactsRefused = false
-        Task {
-            if await AddressBook.requestAccess() {
-                AddressBook.load(into: core)
-            } else {
-                contactsRefused = true
-                contacts = false
-            }
-        }
-    }
-
-    private func add() {
-        let typed = address.trimmingCharacters(in: .whitespaces)
-        guard typed.contains("@") else { return }
-        set([typed], true)
-        address = ""
-    }
-
-    private func set(_ addresses: [String], _ vip: Bool) {
-        do {
-            try model?.core.setVips(addresses: addresses, vip: vip)
-            error = nil
-        } catch {
-            self.error = "\(error)"
-        }
-        load()
     }
 }
 

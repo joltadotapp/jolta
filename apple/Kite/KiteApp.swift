@@ -28,6 +28,7 @@ struct KiteApp: App {
         .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
+            CommandGroup(replacing: .appSettings) { SettingsMenuButton() }
             CommandMenu("Format") {
                 Button("Bold") { RichTextView.focused?.toggle(.bold) }.keyboardShortcut("b")
                 Button("Italic") { RichTextView.focused?.toggle(.italic) }.keyboardShortcut("i")
@@ -51,9 +52,12 @@ struct KiteApp: App {
             }
         }
 
-        Settings {
+        Window("Settings", id: "settings") {
             SettingsView(model: model)
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1000, height: 720)
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra {
             MenuBarContent(model: model)
