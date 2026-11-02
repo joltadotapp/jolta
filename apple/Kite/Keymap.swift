@@ -7,7 +7,7 @@ enum Command: String, CaseIterable, Identifiable {
     case next, previous, open, search
     case archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
-    case toggleVIP, unsubscribe, nextSection, help
+    case toggleVIP, unsubscribe, summarize, nextSection, help
     case goInbox, goSnoozed, goSent, goDrafts, goArchive
 
     var id: String { rawValue }
@@ -33,6 +33,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .forward: "f"
         case .toggleVIP: "!"
         case .unsubscribe: "⌘U"
+        case .summarize: "⌘J"
         case .nextSection: "⇥"
         case .help: "?"
         case .goInbox: "g i"
@@ -63,6 +64,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .forward: "Forward"
         case .toggleVIP: "Mark sender as VIP or not"
         case .unsubscribe: "Unsubscribe and archive"
+        case .summarize: "Summarize conversation"
         case .nextSection: "Next inbox section"
         case .help: "Keyboard shortcuts"
         case .goInbox: "Go to Inbox"
@@ -93,6 +95,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .forward: "arrowshape.turn.up.right"
         case .toggleVIP: "checkmark.seal"
         case .unsubscribe: "envelope.badge.minus"
+        case .summarize: "sparkles"
         case .nextSection: "rectangle.split.3x1"
         case .help: "keyboard"
         case .goInbox: "tray"
@@ -106,7 +109,7 @@ enum Command: String, CaseIterable, Identifiable {
     /// Whether the command acts on the conversation under the cursor.
     var needsThread: Bool {
         switch self {
-        case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .open: true
+        case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .open: true
         default: false
         }
     }
@@ -139,6 +142,7 @@ extension AppModel {
         case .forward: reply(.forward, threadID: row?.threadId)
         case .toggleVIP: toggleVIP()
         case .unsubscribe: unsubscribe()
+        case .summarize: summarizeOpenThread()
         case .help: showsHelp.toggle()
         case .goInbox: source = .unifiedInbox
         case .goSnoozed: source = .role("snoozed")

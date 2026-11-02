@@ -44,6 +44,8 @@ crates/
   cli/                  bin `kite`: dev tool to add accounts, sync, search, show,
                         and generate a synthetic mailbox for timing
   mcp-bridge/           bin `kite-mcp`: copies stdio to the app's Unix socket, nothing else
+  ai-helper/            bin `kite-ai`: runs a local model with llama.cpp, one request at a time
+vendor/llama-cpp-2/     llama-cpp-2 0.1.160 with a lazy-mode setter (see vendor/README.md)
 apple/
   KiteFFI/              Swift package: binary XCFramework + generated Swift (Swift 5 mode)
   Kite.xcodeproj        hand-made project with buildable folders, no XcodeGen or Tuist
@@ -110,6 +112,13 @@ Keep the UniFFI surface small and coarse. Lists cross as pages, never whole mail
 - Message bodies cross the bridge as one string in a small Markdown subset (`rich.rs`: bold, italic, strikethrough, links, list and quote lines). The editor converts with `body_spans` and `body_markdown`; `compose::build` sends a plain-text part and an HTML part made from it. Each account's signature (`set_signature`) is in the same format, and `swap_signature` replaces it when the sender changes.
 - `send(compose, send_at, remind_at)`: `send_at` holds the message in the outbox until then (the engine already wakes for the next queued send; `scheduled()` lists them, `cancel_send` takes one back for editing). `remind_at` stores a reminder by the message's Message-ID. When it is due and nobody but the user's own accounts has written in the thread since, the reminder fires: `CoreEvent::NoReply`, and inbox lists include the thread (`search::reminder_queries` reruns the list's query for that thread) until it is archived, trashed, moved or snoozed. Nothing changes on the server. Both need Kite running at that time; otherwise they happen at the next launch.
 - `reply_compose(thread, Forward)` saves the original's attachments under `<data dir>/forwards/<message id>/` and lists them on the compose. Images the HTML shows inline stay behind.
+- AI (`core/src/ai`, bridge in `ffi/src/ai.rs`), off until the user picks a model in Settings › AI:
+  - `ai_settings()`, `set_ai_settings(...)`, `set_ai_key(provider, key)`: the provider (this Mac, OpenAI or Anthropic), the model, an optional API address per provider and whether long conversations get a summary as they open. Settings live in the `setting` table under `ai`; API keys in the Keychain as `ai:openai` and `ai:anthropic`, never back across the bridge.
+  - `ai_models(provider, url, key)` lists the provider's models and so checks the key and address. OpenAI-compatible servers use the Responses API (`POST {url}/responses`), Anthropic-compatible ones the Messages API (`POST {url}/v1/messages`), both streamed over server-sent events.
+  - `local_models()`, `download_model(id)`, `pause_download(id)`, `remove_model(id)`: the catalog in `ai/local.rs` (Gemma 4 E2B, the default, and E4B), downloaded from Hugging Face into `<data dir>/models`, resumable with an HTTP range, renamed into place only after its SHA-256 matches. Progress arrives as `CoreEvent::ModelChanged`.
+  - `summarize(thread, automatic, fresh, listener) -> AiTask` and `draft_message(compose, instruction, listener) -> AiTask` stream through `AiListener` (phase, all text so far, outcome); `AiTask.cancel()` stops them. `with_written(body, account, text)` puts a draft in front of the signature and quote.
+  - Summaries are made only when a conversation is opened (automatically for 3 or more messages or 2,500 characters of text), never for old mail in bulk, and kept in `ai_summary` with the newest message they cover. A summary that new messages made stale is updated from the old summary plus the new messages: 1.5 s instead of 5.2 s for the 21-message test thread on the mini.
+  - The local model runs in `kite-ai`, which the core starts on first use and stops after 5 idle minutes. It speaks one JSON object per line over stdin and stdout (`load`, `generate`, `cancel`; `loaded`, `reading`, `text`, `done`, `error`); the core formats Gemma 4's chat prompt with thinking off. It inherits the app's sandbox and is built only for Apple silicon; on Intel it answers every request with an error and the settings offer the cloud providers.
 - `CoreListener.on_event(CoreEvent)`: list changed (with query ids), sync status, new mail, agent approval request, errors
 
 The Swift side keeps a page cache per visible list and asks for rows by index as the table scrolls.

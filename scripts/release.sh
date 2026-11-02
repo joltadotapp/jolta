@@ -47,6 +47,7 @@ sign "$SPARKLE/Autoupdate"
 sign "$SPARKLE/Updater.app"
 sign "$APP/Contents/Frameworks/Sparkle.framework"
 sign --entitlements apple/kite-mcp.entitlements "$APP/Contents/MacOS/kite-mcp"
+sign --entitlements apple/kite-ai.entitlements "$APP/Contents/MacOS/kite-ai"
 sign --preserve-metadata=entitlements "$APP"
 codesign --verify --deep --strict "$APP"
 

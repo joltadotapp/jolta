@@ -40,6 +40,10 @@ struct KiteApp: App {
                 Button("Unsubscribe") { model?.run(.unsubscribe) }
                     .keyboardShortcut("u")
                     .disabled(model?.compose != nil)
+                // While writing, ⌘J belongs to Write with AI in the compose view.
+                Button("Summarize") { model?.run(.summarize) }
+                    .keyboardShortcut("j")
+                    .disabled(model?.compose != nil || model?.openThread == nil)
             }
             CommandMenu("Go") {
                 Button("Command Palette") { model?.palette = .commands }

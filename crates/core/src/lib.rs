@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod ai;
 pub mod blobs;
 pub mod compose;
 pub mod engine;

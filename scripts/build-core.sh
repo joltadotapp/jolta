@@ -61,4 +61,15 @@ done
 # shellcheck disable=SC2086
 lipo -create $MCP_BINS -output "$HELPERS/kite-mcp"
 
-echo "KiteFFI and kite-mcp ($PROFILE: $TARGETS) written to $PKG and $HELPERS"
+# kite-ai, the helper that runs local models. Always optimised: llama.cpp is
+# unusably slow in a debug build. Apple silicon only; on Intel the helper
+# answers every request with "needs Apple silicon".
+AI_BINS=""
+for t in $TARGETS; do
+    cargo build -p kite-ai --target "$t" --release
+    AI_BINS="$AI_BINS $ROOT/target/$t/release/kite-ai"
+done
+# shellcheck disable=SC2086
+lipo -create $AI_BINS -output "$HELPERS/kite-ai"
+
+echo "KiteFFI, kite-mcp and kite-ai ($PROFILE: $TARGETS) written to $PKG and $HELPERS"

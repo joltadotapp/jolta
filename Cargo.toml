@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/ffi", "crates/cli", "crates/mcp-bridge"]
+members = ["crates/core", "crates/ffi", "crates/cli", "crates/mcp-bridge", "crates/ai-helper"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,7 +13,7 @@ kite-core = { path = "crates/core" }
 uniffi = "=0.31.2"
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs", "io-std"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "fs", "io-std", "process"] }
 futures = "0.3"
 rusqlite = { version = "0.41", features = ["bundled"] }
 async-imap = { version = "=0.12.0", default-features = false, features = ["runtime-tokio"] }
@@ -39,3 +39,9 @@ rpassword = "7.5"
 [profile.release]
 lto = "thin"
 codegen-units = 4
+
+# llama-cpp-2 0.1.160 plus `with_lazy_mode`, so Gemma 4's per-layer embedding
+# table stays on disk (docs/research/patches/llama-cpp-2-lazy-mode.patch), and
+# without llama.cpp's `common` code.
+[patch.crates-io]
+llama-cpp-2 = { path = "vendor/llama-cpp-2" }

@@ -3,7 +3,7 @@ import SwiftUI
 
 /// One page of the settings window.
 enum SettingsPage: Hashable {
-    case general, account(Int64), sections, vips, snippets, agents, activity, about
+    case general, account(Int64), sections, vips, snippets, ai, agents, activity, about
 }
 
 /// The settings window: pages in a searchable sidebar on the left, the
@@ -42,6 +42,8 @@ struct SettingsView: View {
                 Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people"),
             ]),
             ("Writing", [Item(page: .snippets, title: "Snippets", icon: "text.badge.plus", keywords: "templates canned replies text")]),
+            ("Intelligence", [Item(page: .ai, title: "AI", icon: "sparkles",
+                                   keywords: "summary summaries write draft model gemma local openai anthropic claude gpt api key download")]),
             ("Agents", [
                 Item(page: .agents, title: "Agents", icon: "cpu", keywords: "mcp claude pause grants revoke connect"),
                 Item(page: .activity, title: "Activity", icon: "list.bullet.rectangle", keywords: "audit log history"),
@@ -90,6 +92,8 @@ struct SettingsView: View {
         .ignoresSafeArea()
         .frame(minWidth: 860, minHeight: 560)
         .background { Button("") { searching = true }.keyboardShortcut("f").hidden() }
+        .onAppear(perform: takeRequest)
+        .onChange(of: model?.settingsRequest) { takeRequest() }
         .sheet(isPresented: $addingIMAP) {
             AddIMAPAccount(model: model) { added in
                 addingIMAP = false
@@ -99,6 +103,13 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// Shows the page another window asked for.
+    private func takeRequest() {
+        guard let request = model?.settingsRequest else { return }
+        page = request
+        model?.settingsRequest = nil
     }
 
     @ViewBuilder private var content: some View {
@@ -114,6 +125,7 @@ struct SettingsView: View {
             case .sections: SectionsSettings(model: model)
             case .vips: VIPSettings(model: model)
             case .snippets: SnippetsSettings(model: model)
+            case .ai: AISettings(model: model)
             case .agents: AgentsSettings(model: model)
             case .activity: ActivitySettings(model: model)
             case .about: AboutSettings(model: model)

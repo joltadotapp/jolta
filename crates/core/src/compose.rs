@@ -105,6 +105,24 @@ pub fn opening(signature: &str, quoted: &str) -> String {
     }
 }
 
+/// Where the part the writer types ends: at the signature or the quote.
+fn written_end(body: &str, signature: &str) -> usize {
+    let signature = signature.trim_end();
+    let at_signature = if signature.is_empty() { None } else { body.find(&format!("\n\n{signature}")) };
+    at_signature.into_iter().chain(quote_start(body)).min().unwrap_or(body.len())
+}
+
+/// What the writer typed, without the signature and the quote below it.
+pub fn written(body: &str, signature: &str) -> String {
+    body[..written_end(body, signature)].trim().to_string()
+}
+
+/// The body with what the writer typed replaced by `text` (body format),
+/// keeping the signature and the quote.
+pub fn with_written(body: &str, signature: &str, text: &str) -> String {
+    format!("{}{}", text.trim_end(), &body[written_end(body, signature)..])
+}
+
 /// Swaps one account's signature for another's when the sender changes. A
 /// signature that was edited in the message is left alone.
 pub fn swap_signature(body: &str, old: &str, new: &str) -> String {

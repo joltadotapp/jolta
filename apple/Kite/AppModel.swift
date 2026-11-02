@@ -99,6 +99,14 @@ final class AppModel {
     private(set) var toast: Toast?
     /// The message being written, shown in place of the reader.
     var compose: ComposeData?
+    /// The AI settings, and the models that can run on this Mac.
+    private(set) var ai: AiSettingsInfo
+    private(set) var localModels: [LocalModelInfo] = []
+    /// The open conversation's summary.
+    private(set) var summary: ConversationSummary?
+    private var summaryTask: Task<Void, Never>?
+    /// A settings page something asked to show; the window opens on it.
+    var settingsRequest: SettingsPage?
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
 
@@ -147,6 +155,8 @@ final class AppModel {
     init() throws {
         let bridge = EventBridge()
         core = try Core.open(dataDir: Self.dataDirectory, listener: bridge)
+        ai = try core.aiSettings()
+        localModels = core.localModels()
         Task { [weak self] in
             for await event in bridge.events {
                 self?.handle(event)
@@ -180,6 +190,8 @@ final class AppModel {
                 }
             }
         }
+        // `-KiteSettings ai` opens the settings window on that page, for screenshots.
+        if defaults.string(forKey: "KiteSettings") == "ai" { settingsRequest = .ai }
         // `-KitePalette commands|snooze|move` opens the palette, for screenshots.
         switch defaults.string(forKey: "KitePalette") {
         case "commands": palette = .commands
@@ -465,6 +477,9 @@ final class AppModel {
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
         case .sendFailed(let message):
             show(Toast(text: "Not sent yet: \(message)", undo: nil))
+        case .modelChanged(let id, let state):
+            if let i = localModels.firstIndex(where: { $0.id == id }) { localModels[i].state = state }
+            if case .ready = state, ai.provider == .local, ai.localModel == id { reloadAI() }
         }
     }
 
@@ -699,6 +714,7 @@ final class AppModel {
             guard let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
                   selectedThreadID == threadID, view.html != openThread?.html else { return }
             openThread = view
+            summary?.refresh(label: ai.label)
         }
     }
 
@@ -708,6 +724,7 @@ final class AppModel {
         selectedThreadID = nil
         selectedThreads = []
         openThread = nil
+        showSummary(for: nil)
         cursorRow = nil
         cursor = (0, 0)
     }
@@ -715,6 +732,7 @@ final class AppModel {
     func open(threadID: Int64) {
         selectedThreadID = threadID
         selectedThreads = [threadID]
+        showSummary(for: threadID)
         let opening = ContinuousClock.now
         markReadTask?.cancel()
         markReadTask = Task {
@@ -774,5 +792,50 @@ extension CoreError: @retroactive CustomStringConvertible {
         switch self {
         case .Query(let message), .NotFound(let message), .SignIn(let message), .Failed(let message): message
         }
+    }
+}
+
+// MARK: - AI
+
+extension AppModel {
+    func reloadAI() {
+        if let settings = try? core.aiSettings() { ai = settings }
+        localModels = core.localModels()
+    }
+
+    func saveAI(_ change: (inout AiSettingsInfo) -> Void) {
+        var settings = ai
+        change(&settings)
+        try? core.setAiSettings(settings: settings)
+        reloadAI()
+    }
+
+    /// The open conversation's summary: a saved one at once, a new one for
+    /// long conversations once the cursor rests on it for a moment.
+    fileprivate func showSummary(for threadID: Int64?) {
+        guard summary?.threadID != threadID else { return }
+        summaryTask?.cancel()
+        summary?.cancel()
+        guard let threadID else { summary = nil; return }
+        let summary = ConversationSummary(threadID: threadID, core: core)
+        self.summary = summary
+        guard ai.provider != nil else { return }
+        summaryTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, self.summary === summary else { return }
+            summary.start(automatic: true, label: ai.label)
+        }
+    }
+
+    /// ⌘J in the reader: summarise the open conversation, or again.
+    func summarizeOpenThread() {
+        guard let threadID = openThread?.threadId else { return }
+        if summary?.threadID != threadID { showSummary(for: threadID) }
+        guard let summary else { return }
+        summary.start(automatic: false, fresh: summary.state == .done && !summary.outdated, label: ai.label)
+    }
+
+    func openSettings(_ page: SettingsPage) {
+        settingsRequest = page
     }
 }

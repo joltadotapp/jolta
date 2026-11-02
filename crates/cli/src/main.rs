@@ -66,6 +66,9 @@ enum Command {
     },
     /// Time opening a thread for the reader, phase by phase.
     Open { thread: i64 },
+    /// Choose the AI provider, or summarise and draft with it.
+    #[command(subcommand)]
+    Ai(AiCommand),
     /// Generate a synthetic account with this many messages.
     Gen {
         #[arg(long, default_value_t = 100_000)]
@@ -250,6 +253,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Show { id, raw } => show(&kite, MessageId(id), raw).await,
+        Command::Ai(cmd) => ai(&kite, cmd).await,
         Command::Open { thread } => {
             let t = Instant::now();
             let (_, messages) = kite.store.read(|c| kite_core::reader::thread_messages(c, kite_core::ThreadId(thread)))?;
@@ -782,4 +786,133 @@ fn bench(kite: &Kite, runs: usize) -> Result<()> {
 fn pct(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(|a, b| a.total_cmp(b));
     v[((v.len() as f64 - 1.0) * p).round() as usize]
+}
+
+#[derive(Subcommand)]
+enum AiCommand {
+    /// Set the provider: off, local, openai or anthropic. The key comes from
+    /// KITE_AI_KEY, so it stays out of the shell history.
+    Use {
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Another address, for a compatible server.
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// List the provider's models.
+    Models { provider: String },
+    /// Download a local model (gemma-4-e2b or gemma-4-e4b).
+    Download { model: String },
+    /// Summarise a conversation, streaming the text.
+    Summary {
+        thread: i64,
+        /// Ignore the saved summary.
+        #[arg(long)]
+        fresh: bool,
+        /// Stop after this many seconds, to try cancelling.
+        #[arg(long)]
+        cancel_after: Option<f64>,
+    },
+    /// Draft a reply to a message from an instruction.
+    Draft { message: i64, instruction: Vec<String> },
+}
+
+fn ai_provider(name: &str) -> Result<Option<kite_core::ai::Provider>> {
+    use kite_core::ai::Provider;
+    Ok(match name {
+        "off" => None,
+        "local" => Some(Provider::Local),
+        "openai" => Some(Provider::OpenAi),
+        "anthropic" => Some(Provider::Anthropic),
+        _ => anyhow::bail!("unknown provider {name}: use off, local, openai or anthropic"),
+    })
+}
+
+async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
+    use kite_core::ai::{self, Progress, tasks};
+    use std::io::Write as _;
+    let helper = std::env::var_os("KITE_AI_HELPER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("kite-ai"));
+    let engine = ai::Ai::new(&kite.data_dir, helper);
+    let start = Instant::now();
+    let mut printed = 0;
+    let mut on = |p: Progress| match p {
+        Progress::Phase(phase) => eprintln!("[{phase:?} after {:.2} s]", start.elapsed().as_secs_f64()),
+        Progress::Text(text) => {
+            print!("{}", &text[printed..]);
+            let _ = std::io::stdout().flush();
+            printed = text.len();
+        }
+    };
+    match cmd {
+        AiCommand::Use { provider, model, url } => {
+            let provider = ai_provider(&provider)?;
+            if let (Some(p), Ok(key)) = (provider, std::env::var("KITE_AI_KEY")) {
+                ai::set_key(p, &key)?;
+            }
+            kite.store.write(|tx| {
+                let mut s = ai::settings(tx)?;
+                s.provider = provider;
+                let remote = match provider {
+                    Some(ai::Provider::OpenAi) => Some(&mut s.openai),
+                    Some(ai::Provider::Anthropic) => Some(&mut s.anthropic),
+                    Some(ai::Provider::Local) => {
+                        if let Some(m) = &model {
+                            s.local_model = m.clone();
+                        }
+                        None
+                    }
+                    None => None,
+                };
+                if let Some(r) = remote {
+                    if let Some(m) = &model {
+                        r.model = m.clone();
+                    }
+                    if let Some(u) = &url {
+                        r.base_url = u.clone();
+                    }
+                }
+                ai::save_settings(tx, &s)
+            })?;
+            println!("{:?}", kite.store.read(ai::settings)?);
+        }
+        AiCommand::Models { provider } => {
+            let p = ai_provider(&provider)?.context("models of which provider?")?;
+            let s = kite.store.read(ai::settings)?;
+            let url = if p == ai::Provider::Anthropic { s.anthropic.base_url } else { s.openai.base_url };
+            for m in ai::models(p, &url, ai::key(p)).await? {
+                println!("{}  {}", m.id, m.name);
+            }
+        }
+        AiCommand::Download { model } => {
+            let m = ai::local::model(&model);
+            let done = ai::download::download(&kite.data_dir, m, &ai::Cancel::default(), &mut |step| eprint!("\r{step:?}          ")).await?;
+            eprintln!("\n{} {}", m.name, if done { "is ready" } else { "paused" });
+        }
+        AiCommand::Summary { thread, fresh, cancel_after } => {
+            let cancel = ai::Cancel::default();
+            if let Some(after) = cancel_after {
+                let c = cancel.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(after)).await;
+                    c.cancel();
+                });
+            }
+            let outcome = tasks::summarise(kite, &engine, kite_core::ThreadId(thread), false, fresh, &cancel, &mut on).await?;
+            println!();
+            eprintln!("[{:.2} s] {outcome:?}", start.elapsed().as_secs_f64());
+        }
+        AiCommand::Draft { message, instruction } => {
+            let raw = imap::message_source(kite, MessageId(message)).await?;
+            let compose = kite.store.read(|c| kite_core::compose::reply(c, MessageId(message), &raw, kite_core::compose::ReplyKind::Reply, 0))?;
+            let outcome = tasks::draft(kite, &engine, &compose, &instruction.join(" "), &ai::Cancel::default(), &mut on).await?;
+            println!();
+            if let Some(ai::Finish::Done(text)) = outcome {
+                println!("--- body ---\n{}", kite_core::compose::with_written(&compose.body, &kite.store.read(|c| store::account(c, compose.account.expect("reply account")))?.signature, &text));
+            }
+        }
+    }
+    Ok(())
 }

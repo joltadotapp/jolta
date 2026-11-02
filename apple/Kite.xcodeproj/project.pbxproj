@@ -10,6 +10,7 @@
 		A1000000000000000000F001 /* KiteFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D001 /* KiteFFI */; };
 		A1000000000000000000F003 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D002 /* Sparkle */; };
 		A1000000000000000000F002 /* kite-mcp in Embed kite-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A03 /* kite-mcp */; };
+		A1000000000000000000F003 /* kite-ai in Embed kite-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A05 /* kite-ai */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -17,6 +18,8 @@
 		A10000000000000000000A02 /* Kite.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Kite.entitlements; sourceTree = "<group>"; };
 		A10000000000000000000A03 /* kite-mcp */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "kite-mcp"; path = "Helpers/kite-mcp"; sourceTree = "<group>"; };
 		A10000000000000000000A04 /* kite-mcp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "kite-mcp.entitlements"; sourceTree = "<group>"; };
+		A10000000000000000000A05 /* kite-ai */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "kite-ai"; path = "Helpers/kite-ai"; sourceTree = "<group>"; };
+		A10000000000000000000A06 /* kite-ai.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "kite-ai.entitlements"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -27,6 +30,7 @@
 			dstSubfolderSpec = 6;
 			files = (
 				A1000000000000000000F002 /* kite-mcp in Embed kite-mcp */,
+				A1000000000000000000F003 /* kite-ai in Embed kite-mcp */,
 			);
 			name = "Embed kite-mcp";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -57,6 +61,8 @@
 				A10000000000000000000A02 /* Kite.entitlements */,
 				A10000000000000000000A04 /* kite-mcp.entitlements */,
 				A10000000000000000000A03 /* kite-mcp */,
+				A10000000000000000000A06 /* kite-ai.entitlements */,
+				A10000000000000000000A05 /* kite-ai */,
 				A10000000000000000000E02 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -160,7 +166,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The helper gets its own sandbox and the app group, so an agent can launch it.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/kite-mcp.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/kite-mcp\"\n";
+			shellScript = "# The helper gets its own sandbox and the app group, so an agent can launch it.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/kite-mcp.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/kite-mcp\"\n# kite-ai runs local models inside the app's own sandbox, which it inherits.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/kite-ai.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/kite-ai\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

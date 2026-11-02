@@ -9,8 +9,10 @@ struct ComposeView: View {
     @State private var showCc = false
     @FocusState private var focus: Field?
     @State private var saveTask: Task<Void, Never>?
+    /// Writing with AI (⌘J), while its bar is open.
+    @State private var writer: AIWriter?
 
-    enum Field { case to, cc, bcc, subject, body }
+    enum Field { case to, cc, bcc, subject, body, ai }
 
     private var draft: Binding<ComposeData> {
         // A field that commits as the view closes must not reopen a discarded or sent message.
@@ -32,8 +34,12 @@ struct ComposeView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
+                // The subject gives way first; the buttons keep their size.
+                HStack(spacing: 4) {
                 ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false) { attach() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                ActionButton(icon: "sparkles", title: "Write with AI", key: "⌘J", showsTitle: false) { writeWithAI() }
+                    .keyboardShortcut("j", modifiers: .command)
                 ActionButton(icon: "text.badge.plus", title: "Insert snippet", key: "⌘;", showsTitle: false) { model.palette = .snippets }
                     .keyboardShortcut(";", modifiers: .command)
                 ActionButton(icon: "bell", title: "Remind me if no reply", key: "⇧⌘H", showsTitle: false) { model.palette = .remind }
@@ -44,6 +50,8 @@ struct ComposeView: View {
                     .keyboardShortcut(.delete, modifiers: .command)
                 SendButton { model.sendCompose() }
                     .keyboardShortcut(.return, modifiers: .command)
+                }
+                .fixedSize()
             }
             .padding(.leading, 28)
             .padding(.trailing, 16)
@@ -100,6 +108,14 @@ struct ComposeView: View {
             // Suggestions hang over the subject and the body.
             .zIndex(1)
 
+            if let writer {
+                WriteBar(writer: writer, model: model, focused: $focus) { closeWriter() }
+                    .onChange(of: model.compose?.body) { _, body in
+                        // Editing a finished draft keeps it.
+                        if writer.state == .done, body != writer.lastBody { self.writer = nil }
+                    }
+            }
+
             // Replies and forwards start with the quote below; the cursor starts above it.
             RichTextEditor(text: draft.body, core: model.core,
                            focusOnAppear: !(model.compose?.to.isEmpty ?? true), isMessageBody: true)
@@ -139,8 +155,33 @@ struct ComposeView: View {
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
             if model.compose?.to.isEmpty ?? true { focus = .to }
         }
-        .onExitCommand { model.closeCompose() }
+        .onExitCommand {
+            // Esc stops, undoes or closes AI writing before it closes the message.
+            guard let writer else { return model.closeCompose() }
+            switch writer.state {
+            case .working: writer.stop()
+            case .done: writer.undo(model: model); closeWriter()
+            default: closeWriter()
+            }
+        }
         .onDisappear { saveTask?.cancel() }
+    }
+
+    /// ⌘J: opens the AI bar, or writes again from the same instruction.
+    private func writeWithAI() {
+        if let writer, writer.state != .asking {
+            writer.write(model: model)
+        } else if writer == nil {
+            writer = AIWriter()
+            focus = .ai
+        }
+    }
+
+    private func closeWriter() {
+        writer?.stop()
+        writer = nil
+        if let body = RichTextView.messageBody { body.window?.makeFirstResponder(body) }
+        scheduleSave()
     }
 
     /// The From account; changing it swaps the signature in the body.

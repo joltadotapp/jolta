@@ -15,6 +15,8 @@ use kite_core::{AccountId, Kite, MailboxId, MessageId, ThreadId, reader, search,
 
 uniffi::setup_scaffolding!();
 
+mod ai;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
     #[error("{message}")]
@@ -212,6 +214,8 @@ pub enum CoreEvent {
     SendFailed { message: String },
     /// The server refused an action for good; the change was rolled back.
     ActionFailed { message: String },
+    /// A local model's download moved on, finished, stopped or was removed.
+    ModelChanged { id: String, state: ai::ModelState },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -534,6 +538,8 @@ pub struct Core {
     /// the address book or forgotten addresses change.
     people: Arc<Mutex<Option<(Instant, Arc<People>)>>>,
     address_book: Arc<Mutex<Vec<(String, String)>>>,
+    ai: Arc<kite_core::ai::Ai>,
+    downloads: ai::Downloads,
 }
 
 const PEOPLE_FRESH: Duration = Duration::from_secs(120);
@@ -571,7 +577,6 @@ impl Core {
             .build()
             .map_err(|e| CoreError::Failed { message: e.to_string() })?;
         Ok(Arc::new(Core {
-            kite,
             runtime,
             listener,
             engine: Mutex::new(None),
@@ -579,6 +584,9 @@ impl Core {
             order: Arc::new(Mutex::new(None)),
             people: Arc::new(Mutex::new(None)),
             address_book: Arc::new(Mutex::new(Vec::new())),
+            ai: Arc::new(kite_core::ai::Ai::new(&kite.data_dir, ai::helper_path())),
+            downloads: Arc::default(),
+            kite,
         }))
     }
 

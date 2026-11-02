@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     let model: AppModel
     @AppStorage("ListWidth") private var listWidth = Double(Theme.listWidth)
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 0) {
@@ -34,6 +35,10 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.4), value: model.isInboxZero)
+        .onChange(of: model.settingsRequest, initial: true) { _, page in
+            // The settings window takes the request and switches to the page.
+            if page != nil { openWindow(id: "settings") }
+        }
         .background(Color(Theme.bg))
         .background(MainWindowReader())
         .alert("Empty Trash?", isPresented: Binding(get: { model.confirmEmpty != nil }, set: { if !$0 { model.confirmEmpty = nil } }),
@@ -734,6 +739,10 @@ struct ReaderColumn: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let thread = model.openThread {
+                if let summary = model.summary, summary.threadID == thread.threadId {
+                    SummaryCard(summary: summary, label: model.ai.label) { model.openSettings(.ai) }
+                        .animation(.easeInOut(duration: 0.2), value: summary.state)
+                }
                 ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment, onUnsubscribe: model.unsubscribe)
             } else {
                 Text(model.cursor.count == 0 ? "Nothing here" : "")
