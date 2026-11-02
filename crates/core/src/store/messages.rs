@@ -211,6 +211,21 @@ pub fn unlink_messages(conn: &Connection, mailbox: MailboxId, ids: &[MessageId])
     Ok(())
 }
 
+/// Deletes those of `ids` that no mailbox holds any more. Graph removes a
+/// moved message from one folder's delta before another folder's delta adds
+/// it, so rows are only deleted once every folder of a sync has been read.
+pub fn delete_unfiled(conn: &Connection, ids: &[MessageId]) -> Result<usize> {
+    let mut deleted = 0;
+    for id in ids {
+        let filed: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM message_mailbox WHERE message_id = ?1)", [id], |r| r.get(0))?;
+        if !filed {
+            delete_messages(conn, &[*id])?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 pub fn clear_mailbox(conn: &Connection, mailbox: MailboxId) -> Result<()> {
     let ids: Vec<MessageId> = conn
         .prepare("SELECT message_id FROM message_mailbox WHERE mailbox_id = ?1")?

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
 use crate::imap::{Scope, SyncEvent, SyncReport};
@@ -205,6 +206,7 @@ impl Graph {
         let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
         // Folders Kite created locally (a first Snoozed) have no Graph id yet.
         let mut queue: Vec<Mailbox> = mailboxes.into_iter().filter(|m| !m.remote_id.eq_ignore_ascii_case("Snoozed")).collect();
+        let mut unfiled = Vec::new();
         while let Some(m) = kite.next_mailbox(&mut queue) {
             let m = &m;
             if m.role == Some(MailboxRole::System) {
@@ -213,13 +215,21 @@ impl Graph {
                 kite.store.write_async(move |tx| store::clear_mailbox(tx, id)).await?;
                 continue;
             }
-            self.sync_folder(kite, m, &mut report, progress).await?;
+            self.sync_folder(kite, m, &mut report, &mut unfiled, progress).await?;
         }
+        kite.store.write_async(move |tx| store::delete_unfiled(tx, &unfiled)).await?;
         report.bodies = self.fetch_bodies(kite).await?;
         Ok(report)
     }
 
-    async fn sync_folder(&self, kite: &Kite, mailbox: &Mailbox, report: &mut SyncReport, progress: &mut impl FnMut(SyncEvent)) -> Result<()> {
+    async fn sync_folder(
+        &self,
+        kite: &Kite,
+        mailbox: &Mailbox,
+        report: &mut SyncReport,
+        unfiled: &mut Vec<MessageId>,
+        progress: &mut impl FnMut(SyncEvent),
+    ) -> Result<()> {
         let mailbox_id = mailbox.id;
         let cursor: Option<String> = kite
             .store
@@ -240,66 +250,13 @@ impl Graph {
             };
             let items = page["value"].as_array().cloned().unwrap_or_default();
             let account_id = self.account.id;
-            let (n, r, c, ids) = kite
-                .store
-                .write_async(move |tx| {
-                    let (mut n, mut r, mut c) = (0, 0, 0);
-                    let mut ids = Vec::new();
-                    for item in &items {
-                        let remote = item["id"].as_str().unwrap_or_default();
-                        if item.get("@removed").is_some() {
-                            let id: Option<MessageId> = tx
-                                .query_row("SELECT id FROM message WHERE account_id = ?1 AND remote_id = ?2", rusqlite::params![account_id, remote], |r| r.get(0))
-                                .ok();
-                            if let Some(id) = id {
-                                store::unlink_messages(tx, mailbox_id, &[id])?;
-                                r += 1;
-                            }
-                            continue;
-                        }
-                        let (from_name, from_addr) = address(&item["from"]);
-                        let flags = Flags::default()
-                            .with(Flags::SEEN, item["isRead"].as_bool().unwrap_or(false))
-                            .with(Flags::FLAGGED, item["flag"]["flagStatus"].as_str() == Some("flagged"))
-                            .with(Flags::DRAFT, item["isDraft"].as_bool().unwrap_or(false));
-                        let message = NewMessage {
-                            account_id,
-                            remote_id: remote.to_string(),
-                            mailbox_id,
-                            uid: None,
-                            date: item["receivedDateTime"].as_str().and_then(parse_time).unwrap_or(0),
-                            envelope: Envelope {
-                                message_id: item["internetMessageId"].as_str().map(|s| s.trim_matches(['<', '>']).to_string()),
-                                from_name,
-                                from_addr,
-                                to: recipients(&item["toRecipients"]),
-                                cc: recipients(&item["ccRecipients"]),
-                                subject: item["subject"].as_str().unwrap_or_default().to_string(),
-                                has_attachments: item["hasAttachments"].as_bool().unwrap_or(false),
-                                ..Default::default()
-                            },
-                            flags,
-                            size: 0,
-                            thread_hint: item["conversationId"].as_str().map(|c| format!("ms:{c}")),
-                            body: None,
-                        };
-                        match store::insert_message(tx, &message)? {
-                            store::Inserted::New(id) => {
-                                let preview = mime::snippet(item["bodyPreview"].as_str().unwrap_or_default());
-                                tx.execute("UPDATE message SET snippet = ?2 WHERE id = ?1", rusqlite::params![id, preview])?;
-                                ids.push(id);
-                                n += 1;
-                            }
-                            store::Inserted::Existing(_) => c += 1,
-                        }
-                    }
-                    Ok((n, r, c, ids))
-                })
-                .await?;
+            let delta = kite.store.write_async(move |tx| apply_delta(tx, account_id, mailbox_id, &items)).await?;
+            let n = delta.new;
             new += n;
-            removed += r;
-            changed += c;
-            report.new_messages.extend(ids);
+            removed += delta.removed;
+            changed += delta.changed;
+            report.new_messages.extend(delta.new_ids);
+            unfiled.extend(delta.unfiled);
             if n > 0 {
                 progress(SyncEvent::Headers { mailbox: mailbox.name.clone(), done: new, total: new });
             }
@@ -365,10 +322,15 @@ impl Graph {
             return Ok(vec![mailbox]);
         }
         let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
+        // A message deleted here since the change was queued has nothing left to change.
         let remotes: Vec<String> = kite
             .store
             .read_async(move |c| {
-                ids.iter().map(|id| Ok(c.query_row("SELECT remote_id FROM message WHERE id = ?1", [id], |r| r.get(0))?)).collect()
+                let mut out = Vec::new();
+                for id in &ids {
+                    out.extend(c.query_row("SELECT remote_id FROM message WHERE id = ?1", [id], |r| r.get(0)).optional()?);
+                }
+                Ok(out)
             })
             .await?;
         match op.kind {
@@ -469,6 +431,79 @@ pub fn explain_sign_in_error(message: &str) -> String {
     message.to_string()
 }
 
+/// Applies one page of a folder's delta to the store. Returns the new,
+/// removed and changed counts, the ids of the new messages, and the ids taken
+/// out of this folder, which `sync` deletes if no other folder adds them.
+fn apply_delta(tx: &rusqlite::Connection, account_id: AccountId, mailbox_id: MailboxId, items: &[Value]) -> Result<Delta> {
+    let pending = store::pending_messages(tx, account_id)?;
+    let (mut n, mut r, mut c) = (0, 0, 0);
+    let (mut ids, mut unfiled) = (Vec::new(), Vec::new());
+    for item in items {
+        let remote = item["id"].as_str().unwrap_or_default();
+        let known: Option<MessageId> = tx
+            .query_row("SELECT id FROM message WHERE account_id = ?1 AND remote_id = ?2", rusqlite::params![account_id, remote], |r| r.get(0))
+            .optional()?;
+        // The page may predate a change still queued for this message, such as
+        // an undo made while the sync ran: applying it would put the old state
+        // back, or delete the row the queued change points at.
+        if known.is_some_and(|id| pending.contains(&id)) {
+            continue;
+        }
+        if item.get("@removed").is_some() {
+            if let Some(id) = known {
+                tx.execute("DELETE FROM message_mailbox WHERE mailbox_id = ?1 AND message_id = ?2", rusqlite::params![mailbox_id, id])?;
+                unfiled.push(id);
+                r += 1;
+            }
+            continue;
+        }
+        let (from_name, from_addr) = address(&item["from"]);
+        let flags = Flags::default()
+            .with(Flags::SEEN, item["isRead"].as_bool().unwrap_or(false))
+            .with(Flags::FLAGGED, item["flag"]["flagStatus"].as_str() == Some("flagged"))
+            .with(Flags::DRAFT, item["isDraft"].as_bool().unwrap_or(false));
+        let message = NewMessage {
+            account_id,
+            remote_id: remote.to_string(),
+            mailbox_id,
+            uid: None,
+            date: item["receivedDateTime"].as_str().and_then(parse_time).unwrap_or(0),
+            envelope: Envelope {
+                message_id: item["internetMessageId"].as_str().map(|s| s.trim_matches(['<', '>']).to_string()),
+                from_name,
+                from_addr,
+                to: recipients(&item["toRecipients"]),
+                cc: recipients(&item["ccRecipients"]),
+                subject: item["subject"].as_str().unwrap_or_default().to_string(),
+                has_attachments: item["hasAttachments"].as_bool().unwrap_or(false),
+                ..Default::default()
+            },
+            flags,
+            size: 0,
+            thread_hint: item["conversationId"].as_str().map(|c| format!("ms:{c}")),
+            body: None,
+        };
+        match store::insert_message(tx, &message)? {
+            store::Inserted::New(id) => {
+                let preview = mime::snippet(item["bodyPreview"].as_str().unwrap_or_default());
+                tx.execute("UPDATE message SET snippet = ?2 WHERE id = ?1", rusqlite::params![id, preview])?;
+                ids.push(id);
+                n += 1;
+            }
+            store::Inserted::Existing(_) => c += 1,
+        }
+    }
+    Ok(Delta { new: n, removed: r, changed: c, new_ids: ids, unfiled })
+}
+
+struct Delta {
+    new: usize,
+    removed: usize,
+    changed: usize,
+    new_ids: Vec<MessageId>,
+    unfiled: Vec<MessageId>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +513,50 @@ mod tests {
         assert_eq!(parse_time("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_time("2026-10-30T12:27:04Z"), Some(1_793_363_224));
         assert_eq!(parse_time("2026-10-30T13:27:04.1234567+01:00"), Some(1_793_363_224));
+    }
+
+    /// A delta page fetched before an undo, applied after it, must not put
+    /// the old state back or delete the row the undo points at. Found by
+    /// scripts/live-check.sh on 2026-11-02: the undo then failed forever.
+    #[test]
+    fn delta_pages_leave_queued_changes_alone() {
+        let dir = std::env::temp_dir().join(format!("kite-graph-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store::Store::open(&dir.join("kite.sqlite")).unwrap();
+        let (inbox, archive) = (MailboxId(1), MailboxId(2));
+        let row = |c: &rusqlite::Connection| -> rusqlite::Result<Vec<i64>> {
+            c.prepare("SELECT mailbox_id FROM message_mailbox WHERE message_id = 7 ORDER BY 1")?.query_map([], |r| r.get(0))?.collect()
+        };
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'graph', 'a@x', 'a@x', 'r', 0);
+                     INSERT INTO mailbox (id, account_id, remote_id, name, role) VALUES (1, 1, 'in', 'Inbox', 'inbox'), (2, 1, 'ar', 'Archive', 'archive');
+                     INSERT INTO thread (id, account_id) VALUES (1, 1);
+                     INSERT INTO message (id, account_id, remote_id, thread_id, date, flags) VALUES (7, 1, 'msg', 1, 0, 0);
+                     INSERT INTO message_mailbox (mailbox_id, message_id) VALUES (1, 7);",
+                )?;
+                // The user undid an archive: the move back to the inbox is queued.
+                let changed = store::apply_local(tx, &OpKind::Move { from: archive, to: inbox }, &[MessageId(7)])?;
+                assert!(changed.is_empty(), "already in the inbox locally");
+                store::insert_op(tx, AccountId(1), &OpKind::Move { from: archive, to: inbox }, &[(MessageId(7), None)])?;
+                Ok(())
+            })
+            .unwrap();
+
+        // Pages from the sync that followed the archive: gone from the inbox, added to the archive.
+        let removed = vec![json!({"id": "msg", "@removed": {"reason": "deleted"}})];
+        let added = vec![json!({"id": "msg", "subject": "Hi", "receivedDateTime": "2026-11-02T21:00:00Z", "isRead": true})];
+        store.write(|tx| apply_delta(tx, AccountId(1), inbox, &removed)).unwrap();
+        store.write(|tx| apply_delta(tx, AccountId(1), archive, &added)).unwrap();
+        assert_eq!(store.read(|c| Ok(row(c)?)).unwrap(), [1], "the message stays in the inbox, with its row");
+
+        // Once the change has reached the server, the next pages apply as usual.
+        store.write(|tx| Ok(tx.execute("UPDATE op SET state = 'done'", [])?)).unwrap();
+        store.write(|tx| apply_delta(tx, AccountId(1), inbox, &removed)).unwrap();
+        store.write(|tx| apply_delta(tx, AccountId(1), archive, &added)).unwrap();
+        assert_eq!(store.read(|c| Ok(row(c)?)).unwrap(), [2]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
