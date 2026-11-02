@@ -457,7 +457,7 @@ async fn send(
     });
     let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
     let t0 = Instant::now();
-    let id = engine.send(&c)?;
+    let id = engine.send(&c, None, None)?;
     println!("queued as outbox {id}: to {} cc {} subject {:?}", c.to, c.cc, c.subject);
     while let Some(e) = rx.recv().await {
         match e {

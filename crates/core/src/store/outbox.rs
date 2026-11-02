@@ -188,6 +188,25 @@ pub fn due_outbox(conn: &Connection, account: AccountId) -> Result<Vec<OutboxIte
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// A message waiting in the outbox past the undo window: sent later.
+#[derive(Clone, Debug)]
+pub struct Scheduled {
+    pub outbox: i64,
+    pub account: AccountId,
+    pub subject: String,
+    pub send_at: i64,
+}
+
+/// Messages set to go out later than `after`, soonest first.
+pub fn scheduled(conn: &Connection, after: i64) -> Result<Vec<Scheduled>> {
+    let mut stmt = conn.prepare(
+        "SELECT o.id, o.account_id, coalesce(d.subject, ''), o.send_after FROM outbox o LEFT JOIN draft d ON d.id = o.draft_id
+         WHERE o.state = 'queued' AND o.send_after > ?1 ORDER BY o.send_after",
+    )?;
+    let rows = stmt.query_map([after], |r| Ok(Scheduled { outbox: r.get(0)?, account: r.get(1)?, subject: r.get(2)?, send_at: r.get(3)? }))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Seconds until the next queued message is due, if any.
 pub fn next_send_in(conn: &Connection, account: AccountId) -> Result<Option<i64>> {
     let at: Option<i64> = conn.query_row(

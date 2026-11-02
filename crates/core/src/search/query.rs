@@ -52,6 +52,9 @@ pub enum TermKind {
     /// Unix seconds at the start of the given UTC day.
     Before(i64),
     After(i64),
+    /// One thread by its store id. Not typed by users; inbox lists use it
+    /// to add threads a "remind me" reminder brought back.
+    Thread(i64),
 }
 
 impl Query {

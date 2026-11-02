@@ -159,6 +159,7 @@ fn plan(q: &Query) -> Sql {
                 let p = sql.param(v.clone());
                 format!("m.account_id IN (SELECT id FROM account WHERE id = ?{p} OR address = ?{p} COLLATE NOCASE)")
             }
+            TermKind::Thread(id) => format!("m.thread_id = {id}"),
             TermKind::Before(t) => format!("m.id < {}", date_to_id_floor(*t)),
             TermKind::After(t) => format!("m.id >= {}", date_to_id_floor(*t)),
         };
@@ -212,21 +213,28 @@ pub fn query_order(conn: &Connection, q: &Query, sort: Sort) -> Result<Vec<(Thre
         return Ok(hits);
     }
     let mut keyed = Vec::new();
-    for_each_thread(conn, q, ", m.from_name, m.from_addr, m.subject", |thread, message, row| {
-        let key = match sort.key {
-            SortKey::Sender => {
-                let name: Option<String> = row.get(2)?;
-                let shown = match name.filter(|n| !n.trim().is_empty()) {
-                    Some(name) => name,
-                    None => row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                };
-                sort_text(&shown)
+    let mut seen = HashSet::new();
+    let queries: Vec<Query> = std::iter::once(q.clone()).chain(reminder_queries(conn, q)?).collect();
+    for q in &queries {
+        for_each_thread(conn, q, ", m.from_name, m.from_addr, m.subject", |thread, message, row| {
+            if !seen.insert(thread) {
+                return Ok(true);
             }
-            _ => sort_text(&base_subject(&row.get::<_, Option<String>>(4)?.unwrap_or_default()).0),
-        };
-        keyed.push((key, (thread, message)));
-        Ok(true)
-    })?;
+            let key = match sort.key {
+                SortKey::Sender => {
+                    let name: Option<String> = row.get(2)?;
+                    let shown = match name.filter(|n| !n.trim().is_empty()) {
+                        Some(name) => name,
+                        None => row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    };
+                    sort_text(&shown)
+                }
+                _ => sort_text(&base_subject(&row.get::<_, Option<String>>(4)?.unwrap_or_default()).0),
+            };
+            keyed.push((key, (thread, message)));
+            Ok(true)
+        })?;
+    }
     // Empty names and subjects go last in either direction.
     keyed.sort_by(|(a, _), (b, _)| {
         a.is_empty().cmp(&b.is_empty()).then_with(|| if sort.reversed { b.cmp(a) } else { a.cmp(b) })
@@ -240,7 +248,64 @@ fn scan(conn: &Connection, q: &Query, stop_after: Option<usize>) -> Result<Vec<(
         hits.push((thread, message));
         Ok(Some(hits.len()) != stop_after)
     })?;
+    let reminded = reminder_queries(conn, q)?;
+    if !reminded.is_empty() {
+        let mut seen: HashSet<ThreadId> = hits.iter().map(|h| h.0).collect();
+        for q in &reminded {
+            for_each_thread(conn, q, "", |thread, message, _| {
+                if seen.insert(thread) {
+                    hits.push((thread, message));
+                }
+                Ok(false)
+            })?;
+        }
+        // Message ids grow with the date, so this is newest first again.
+        hits.sort_by(|a, b| b.1.cmp(&a.1));
+        if let Some(n) = stop_after {
+            hits.truncate(n);
+        }
+    }
     Ok(hits)
+}
+
+/// Inbox lists also show threads a fired "remind me if no reply" brought
+/// back (`store::reminders`). For each such thread this is the list's query
+/// with its inbox term swapped for that thread, so the other terms (a
+/// section, a search) still apply.
+fn reminder_queries(conn: &Connection, q: &Query) -> Result<Vec<Query>> {
+    let inbox = q.terms.iter().position(|t| {
+        !t.negated
+            && match &t.kind {
+                TermKind::In(v) => v.eq_ignore_ascii_case("inbox"),
+                TermKind::Mailbox(id) => conn
+                    .query_row("SELECT role = 'inbox' FROM mailbox WHERE id = ?1", [id], |r| r.get::<_, Option<bool>>(0))
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false),
+                _ => false,
+            }
+    });
+    let Some(i) = inbox else { return Ok(Vec::new()) };
+    // One account's inbox shows only that account's reminders.
+    let account: Option<AccountId> = match q.terms[i].kind {
+        TermKind::Mailbox(id) => Some(conn.query_row("SELECT account_id FROM mailbox WHERE id = ?1", [id], |r| r.get(0))?),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    for thread in crate::store::reminded_threads(conn)? {
+        if let Some(account) = account {
+            let owner: Option<AccountId> = conn
+                .query_row("SELECT account_id FROM message WHERE thread_id = ?1 LIMIT 1", [thread], |r| r.get(0))
+                .ok();
+            if owner != Some(account) {
+                continue;
+            }
+        }
+        let mut swapped = q.clone();
+        swapped.terms[i].kind = TermKind::Thread(thread.0);
+        out.push(swapped);
+    }
+    Ok(out)
 }
 
 /// Walks matching messages newest first and calls `each` once per thread,

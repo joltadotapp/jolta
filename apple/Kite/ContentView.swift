@@ -133,6 +133,26 @@ struct Sidebar: View {
                                 .contextMenu { ListActions(model: model, list: .role(role)) }
                         }
                     }
+                    if !model.scheduled.isEmpty {
+                        GroupLabel("Scheduled")
+                        ForEach(model.scheduled, id: \.token) { s in
+                            Button { model.editScheduled(s) } label: {
+                                HStack(spacing: 10) {
+                                    Text(Self.wake(s.sendAt))
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(Color(Theme.text3))
+                                        .frame(width: 74, alignment: .leading)
+                                    Text(s.subject.isEmpty ? "(no subject)" : s.subject).lineLimit(1).foregroundStyle(Color(Theme.text2))
+                                }
+                                .font(.system(size: 12))
+                                .padding(.horizontal, 10)
+                                .frame(height: 24)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Kite sends it then if it's running, otherwise as soon as it opens. Click to edit it.")
+                        }
+                    }
                     if !model.snoozed.isEmpty {
                         GroupLabel("Next to wake")
                         ForEach(model.snoozed.prefix(5), id: \.threadId) { s in

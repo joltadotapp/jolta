@@ -8,6 +8,7 @@ mod agents;
 mod messages;
 mod ops;
 mod outbox;
+mod reminders;
 mod sections;
 
 use std::path::Path;
@@ -23,9 +24,10 @@ pub use agents::*;
 pub use messages::*;
 pub use ops::*;
 pub use outbox::*;
+pub use reminders::*;
 pub use sections::*;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql")];
 const READERS: usize = 4;
 
 #[derive(Clone)]

@@ -48,6 +48,8 @@ pub enum Event {
     ActionFailed(String),
     Sent { account: AccountId, subject: String },
     Woke { account: AccountId, thread: ThreadId, subject: String },
+    /// A "remind me" reminder found no reply; the thread is back in the inbox.
+    NoReply { account: AccountId, thread: ThreadId, subject: String },
     /// An MCP client connected for the first time and waits for approval.
     AgentRequest { agent: i64, name: String },
     /// An agent wrote a draft for review.
@@ -161,10 +163,19 @@ impl Engine {
     /// changes once. Returns the queued ops; threads with nothing to change
     /// queue none.
     pub fn perform(&self, threads: &[ThreadId], action: Action, context: Context) -> Result<Vec<OpId>> {
-        let queued = self.kite.store.write(|tx| {
-            threads.iter().filter_map(|&t| actions::perform(tx, t, action, context).transpose()).collect::<Result<Vec<_>>>()
+        let triage = matches!(action, Action::Archive | Action::Trash | Action::MoveTo(_) | Action::Snooze(_));
+        let (queued, cleared) = self.kite.store.write(|tx| {
+            let queued = threads.iter().filter_map(|&t| actions::perform(tx, t, action, context).transpose()).collect::<Result<Vec<_>>>()?;
+            // Triage also takes a thread out of the inbox that a reminder put there.
+            let mut cleared = 0;
+            if triage {
+                for &t in threads {
+                    cleared += store::clear_fired_reminders(tx, t)?;
+                }
+            }
+            Ok((queued, cleared))
         })?;
-        if !queued.is_empty() {
+        if !queued.is_empty() || cleared > 0 {
             (self.sink)(Event::ListsChanged);
         }
         self.wake_all(&queued);
@@ -208,19 +219,25 @@ impl Engine {
         }
     }
 
-    /// Queues a message for sending after the undo window. Returns a token
-    /// for `cancel_send`.
-    pub fn send(&self, compose: &Compose) -> Result<i64> {
+    /// Queues a message for sending after the undo window, or at `send_at`
+    /// when that is later. With `remind_at`, the thread comes back to the
+    /// inbox then unless someone replies. Returns a token for `cancel_send`.
+    pub fn send(&self, compose: &Compose, send_at: Option<i64>, remind_at: Option<i64>) -> Result<i64> {
         let account_id = compose.account.ok_or_else(|| crate::Error::Other("Choose an account to send from.".into()))?;
         let account = self.kite.store.read(|c| store::account(c, account_id))?;
         let built = compose::build(&account, compose, true)?;
         let blob = self.kite.blobs.put(&built.raw)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let delay = send_at.map_or(UNDO_SEND_SECONDS, |at| (at - now).max(UNDO_SEND_SECONDS));
         let id = self.kite.store.write(|tx| {
             let draft = store::save_draft(tx, compose)?;
             tx.execute("UPDATE draft SET dirty = 0 WHERE id = ?1", [draft])?;
+            if let Some(remind_at) = remind_at {
+                store::add_reminder(tx, account_id, &built.message_id, now + delay, remind_at)?;
+            }
             store::queue_outbox(
                 tx, account_id, Some(draft), &blob, &built.message_id, &built.from, &built.recipients,
-                compose.replying_to, UNDO_SEND_SECONDS,
+                compose.replying_to, delay,
             )
         })?;
         self.wake(account_id);
@@ -370,6 +387,7 @@ impl Engine {
         let mut touched: HashSet<MailboxId> = HashSet::new();
         let account_id = account.id;
         self.wake_snoozed(account_id).await?;
+        self.fire_reminders(account_id).await?;
         for op in self.kite.store.read_async(move |c| store::pending_ops(c, account_id)).await? {
             let applied = match link {
                 Link::Imap(session, caps) => imap::apply_op(&self.kite, session, *caps, &op).await,
@@ -457,6 +475,20 @@ impl Engine {
             self.file_sent_copies(account, session, *caps, &sent).await?;
         }
         self.announce(account.id, report.new_messages, started).await
+    }
+
+    /// Settles due "remind me" reminders: answered threads drop theirs,
+    /// the rest come back to the inbox.
+    async fn fire_reminders(&self, account: AccountId) -> Result<()> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let fired = self.kite.store.write_async(move |tx| store::fire_due_reminders(tx, account, now)).await?;
+        for (thread, subject) in &fired {
+            (self.sink)(Event::NoReply { account, thread: *thread, subject: subject.clone() });
+        }
+        if !fired.is_empty() {
+            (self.sink)(Event::ListsChanged);
+        }
+        Ok(())
     }
 
     /// Moves snoozed threads whose time has come back to the inbox.

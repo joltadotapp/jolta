@@ -4,6 +4,10 @@ import SwiftUI
 enum PaletteMode: Equatable {
     case commands
     case snooze
+    /// When the message being written should go out.
+    case sendLater
+    /// When to bring the message being written back if nobody answers.
+    case remind
     case move
 }
 
@@ -29,7 +33,18 @@ struct PaletteView: View {
         switch mode {
         case .commands: "Type a command, mailbox or section"
         case .snooze: "Snooze until… tomorrow 9am, mon, in 2h"
+        case .sendLater: "Send at… tomorrow 9am, mon 8:30, in 2h"
+        case .remind: "Remind me if no reply… in 3 days, fri, next week"
         case .move: "Move to folder"
+        }
+    }
+
+    private var icon: String {
+        switch mode {
+        case .snooze: "clock"
+        case .sendLater: "paperplane"
+        case .remind: "bell"
+        case .commands, .move: "magnifyingglass"
         }
     }
 
@@ -37,7 +52,7 @@ struct PaletteView: View {
         let all: [PaletteItem]
         switch mode {
         case .commands: all = commandItems
-        case .snooze: return snoozeItems
+        case .snooze, .sendLater, .remind: return timeItems
         case .move: all = moveItems
         }
         let needle = text.lowercased().trimmingCharacters(in: .whitespaces)
@@ -89,18 +104,30 @@ struct PaletteView: View {
         return out
     }
 
-    private var snoozeItems: [PaletteItem] {
+    /// Times for snoozing, sending later or a reminder: what was typed,
+    /// read as a time, then the presets.
+    private var timeItems: [PaletteItem] {
         var out: [PaletteItem] = []
         let typed = text.trimmingCharacters(in: .whitespaces)
+        let (verb, icon) = switch mode {
+        case .sendLater: ("Send", "paperplane")
+        case .remind: ("Remind me if no reply by", "bell")
+        default: ("Snooze until", "clock")
+        }
+        let choose = { [model, mode] (at: Int64, label: String) in
+            switch mode {
+            case .sendLater: model.sendCompose(at: at, label: label)
+            case .remind: model.composeReminder = AppModel.Reminder(at: at, label: label)
+            default: model.snooze(until: at, label: label)
+            }
+        }
         if !typed.isEmpty, let at = model.core.parseTime(text: typed, utcOffset: model.utcOffset) {
             let label = Self.when(at)
-            out.append(PaletteItem(id: "typed", title: "Snooze until \(label)", icon: "clock") { [model] in model.snooze(until: at, label: label) })
+            out.append(PaletteItem(id: "typed", title: "\(verb) \(label)", icon: icon) { choose(at, label) })
         }
         for p in model.core.snoozePresets(utcOffset: model.utcOffset) where typed.isEmpty || p.label.lowercased().contains(typed.lowercased()) {
             let label = Self.when(p.at)
-            out.append(PaletteItem(id: "preset-\(p.label)", title: p.label, detail: label, icon: "clock") { [model] in
-                model.snooze(until: p.at, label: label)
-            })
+            out.append(PaletteItem(id: "preset-\(p.label)", title: p.label, detail: label, icon: icon) { choose(p.at, label) })
         }
         return out
     }
@@ -144,7 +171,7 @@ struct PaletteView: View {
         let list = items
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Image(systemName: mode == .snooze ? "clock" : "magnifyingglass")
+                Image(systemName: icon)
                     .font(.system(size: 15))
                     .foregroundStyle(Color(Theme.text3))
                 TextField(placeholder, text: $text)
@@ -155,7 +182,7 @@ struct PaletteView: View {
                     .onKeyPress(.downArrow) { selected = min(selected + 1, max(list.count - 1, 0)); return .handled }
                     .onKeyPress(.upArrow) { selected = max(selected - 1, 0); return .handled }
                     .onChange(of: text) { selected = 0 }
-                if let row = model.cursorRow, mode != .commands {
+                if let row = model.cursorRow, mode == .snooze || mode == .move {
                     Text(row.subject).lineLimit(1).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
                 }
             }
@@ -171,7 +198,7 @@ struct PaletteView: View {
                                 .onTapGesture { selected = i; choose(list) }
                         }
                         if list.isEmpty {
-                            Text(mode == .snooze ? "Try “tomorrow”, “mon 9am” or “in 3 days”" : "Nothing matches")
+                            Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”" : "Nothing matches")
                                 .foregroundStyle(Color(Theme.text3))
                                 .padding(20)
                         }

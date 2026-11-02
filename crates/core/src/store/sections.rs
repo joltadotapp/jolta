@@ -87,9 +87,15 @@ pub fn due_snoozes(conn: &Connection, account: AccountId, now: i64) -> Result<Ve
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The next snooze wake-up or "remind me" check for this account. Overdue
+/// reminders whose message hasn't synced yet are retried with each sync,
+/// not counted here, so they can't make the engine spin.
 pub fn next_wake(conn: &Connection, account: AccountId) -> Result<Option<i64>> {
     Ok(conn.query_row(
-        "SELECT min(wake_at) FROM snooze WHERE account_id = ?1 AND state = 'sleeping'",
+        "SELECT min(t) FROM (
+             SELECT min(wake_at) AS t FROM snooze WHERE account_id = ?1 AND state = 'sleeping'
+             UNION ALL
+             SELECT min(remind_at) FROM reminder WHERE account_id = ?1 AND fired = 0 AND remind_at > strftime('%s', 'now'))",
         [account],
         |r| r.get(0),
     )?)

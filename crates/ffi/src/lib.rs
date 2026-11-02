@@ -201,6 +201,8 @@ pub enum CoreEvent {
     Sent { account_id: i64, subject: String },
     /// A snoozed thread came back to the inbox.
     Woke { account_id: i64, thread_id: i64, subject: String },
+    /// Nobody answered in time; the thread is back in the inbox.
+    NoReply { account_id: i64, thread_id: i64, subject: String },
     /// An agent connected for the first time; ask the user to approve it.
     AgentRequest { agent_id: i64, name: String },
     /// An agent wrote a draft for the user to review.
@@ -373,6 +375,16 @@ pub struct SnoozeInfo {
     pub account_id: i64,
     pub wake_at: i64,
     pub subject: String,
+}
+
+/// A message set to go out later.
+#[derive(uniffi::Record)]
+pub struct ScheduledInfo {
+    /// For `cancel_send`, which takes it back for editing.
+    pub token: i64,
+    pub account_id: i64,
+    pub subject: String,
+    pub send_at: i64,
 }
 
 #[derive(uniffi::Record)]
@@ -712,7 +724,7 @@ impl Core {
                         UnsubscribeResult::Unsubscribed { list }
                     }
                     Some(kite_core::unsubscribe::Method::Mail { to, subject, body }) => {
-                        engine.send(&Compose { account: Some(account), to: to.clone(), subject, body, ..Default::default() })?;
+                        engine.send(&Compose { account: Some(account), to: to.clone(), subject, body, ..Default::default() }, None, None)?;
                         UnsubscribeResult::Emailed { list, to }
                     }
                     Some(kite_core::unsubscribe::Method::Page(url)) => UnsubscribeResult::OpenPage { list, url },
@@ -745,6 +757,9 @@ impl Core {
                 }
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
                 Event::Sent { account, subject } => CoreEvent::Sent { account_id: account.0, subject },
+                Event::NoReply { account, thread, subject } => {
+                    CoreEvent::NoReply { account_id: account.0, thread_id: thread.0, subject }
+                }
                 Event::Woke { account, thread, subject } => {
                     CoreEvent::Woke { account_id: account.0, thread_id: thread.0, subject }
                 }
@@ -857,10 +872,14 @@ impl Core {
             .map_err(Into::into)
     }
 
-    /// Queues a message; it leaves after the undo window. Returns a token
-    /// for `cancel_send`.
-    pub fn send(&self, compose: ComposeData) -> Result<i64> {
-        let token = self.running_engine()?.send(&compose.into())?;
+    /// Queues a message; it leaves after the undo window, or at `send_at`.
+    /// With `remind_at`, the thread comes back to the inbox then unless
+    /// someone replies. Returns a token for `cancel_send`.
+    pub fn send(&self, compose: ComposeData, send_at: Option<i64>, remind_at: Option<i64>) -> Result<i64> {
+        let token = self.running_engine()?.send(&compose.into(), send_at, remind_at)?;
+        if send_at.is_some() {
+            self.listener.on_event(CoreEvent::ListsChanged);
+        }
         // The people just written to rank higher once Sent has synced.
         self.people_stale();
         Ok(token)
@@ -1039,6 +1058,19 @@ impl Core {
     pub fn set_address_book(&self, people: Vec<PersonInfo>) {
         *self.address_book.lock().unwrap_or_else(|e| e.into_inner()) = people.into_iter().map(|p| (p.name, p.address)).collect();
         self.people_stale();
+    }
+
+    /// Messages set to go out later, soonest first. Messages still in their
+    /// undo window aren't listed.
+    pub fn scheduled(&self) -> Result<Vec<ScheduledInfo>> {
+        let after = now() + kite_core::engine::UNDO_SEND_SECONDS;
+        Ok(self
+            .kite
+            .store
+            .read(|c| store::scheduled(c, after))?
+            .into_iter()
+            .map(|s| ScheduledInfo { token: s.outbox, account_id: s.account.0, subject: s.subject, send_at: s.send_at })
+            .collect())
     }
 
     /// Sleeping threads, soonest first.

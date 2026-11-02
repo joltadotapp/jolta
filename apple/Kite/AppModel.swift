@@ -56,6 +56,15 @@ final class AppModel {
     var section: SectionInfo? { didSet { listChanged() } }
     private(set) var sections: [SectionInfo] = []
     private(set) var snoozed: [SnoozeInfo] = []
+    /// Messages set to go out later, soonest first.
+    private(set) var scheduled: [ScheduledInfo] = []
+    /// A reminder chosen for the message being written.
+    var composeReminder: Reminder?
+
+    struct Reminder: Equatable {
+        let at: Int64
+        let label: String
+    }
     /// The thread under the list cursor.
     var cursorRow: ThreadRow?
     /// The ⌘K palette, when open.
@@ -212,7 +221,11 @@ final class AppModel {
                 let accounts = try core.accounts().map { AccountSection(account: $0, mailboxes: try core.mailboxes(accountId: $0.id)) }
                 let sections = try core.sections()
                 let snoozed = try core.snoozed()
-                await MainActor.run { self.apply(accounts: accounts, sections: sections, snoozed: snoozed) }
+                let scheduled = try core.scheduled()
+                await MainActor.run {
+                    self.apply(accounts: accounts, sections: sections, snoozed: snoozed)
+                    self.scheduled = scheduled
+                }
             } catch {
                 await MainActor.run { self.lastError = "\(error)" }
             }
@@ -432,6 +445,11 @@ final class AppModel {
             agentRevision += 1
         case .woke(_, _, let subject):
             show(Toast(text: "Back from snooze: \(subject)", undo: nil))
+        case .noReply(_, let threadID, let subject):
+            show(Toast(text: "No reply yet: \(subject)", undo: nil))
+            if NewMailBanners.current != .none {
+                notifier.post(threadID: threadID, from: "No reply yet", subject: subject)
+            }
         case .sent(_, let subject):
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
         case .sendFailed(let message):
@@ -540,6 +558,7 @@ final class AppModel {
     // MARK: Compose
 
     func startCompose() {
+        composeReminder = nil
         compose = (try? core.newCompose()) ?? .blank
     }
 
@@ -548,6 +567,7 @@ final class AppModel {
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
             do {
+                composeReminder = nil
                 compose = try await core.replyCompose(threadId: thread, mode: mode, utcOffset: offset)
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
@@ -555,16 +575,31 @@ final class AppModel {
         }
     }
 
-    func sendCompose() {
+    /// Sends the message being written now (after the undo window) or at
+    /// `at`, with the reminder chosen for it, if any.
+    func sendCompose(at: Int64? = nil, label: String? = nil) {
         guard let draft = compose else { return }
         do {
-            let token = try core.send(compose: draft)
+            let token = try core.send(compose: draft, sendAt: at, remindAt: composeReminder?.at)
+            var text = label.map { "Scheduled for \($0)" } ?? "Sending in 10 seconds"
+            if let reminder = composeReminder { text += ", reminder \(reminder.label)" }
             compose = nil
+            composeReminder = nil
             requestListFocus()
-            show(Toast(text: "Sending in 10 seconds", undo: .send(token)))
+            show(Toast(text: text, undo: .send(token)))
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
+    }
+
+    /// Takes a scheduled message back for editing.
+    func editScheduled(_ message: ScheduledInfo) {
+        guard let back = try? core.cancelSend(token: message.token) else {
+            return show(Toast(text: "Already sent", undo: nil))
+        }
+        compose = back
+        reloadAccounts()
+        show(Toast(text: "Unscheduled. Send it again when it's ready.", undo: nil))
     }
 
     func saveDraft() {

@@ -32,9 +32,13 @@ struct ComposeView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
-                ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A") { attach() }
+                ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false) { attach() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
-                ActionButton(icon: "trash", title: "Discard", key: "⌘⌫") { model.discardCompose() }
+                ActionButton(icon: "bell", title: "Remind me if no reply", key: "⇧⌘H", showsTitle: false) { model.palette = .remind }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                ActionButton(icon: "clock", title: "Send later", key: "⇧⌘L", showsTitle: false) { model.palette = .sendLater }
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
+                ActionButton(icon: "trash", title: "Discard", key: "⌘⌫", showsTitle: false) { model.discardCompose() }
                     .keyboardShortcut(.delete, modifiers: .command)
                 SendButton { model.sendCompose() }
                     .keyboardShortcut(.return, modifiers: .command)
@@ -72,6 +76,22 @@ struct ComposeView: View {
                         .zIndex(focus == .bcc ? 1 : 0)
                 }
                 FieldRow(label: "Subject") { TextField("", text: draft.subject).focused($focus, equals: .subject) }
+                if let reminder = model.composeReminder {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bell").foregroundStyle(Color(Theme.text3))
+                        Text("Back in your inbox on \(reminder.label) if nobody replies").foregroundStyle(Color(Theme.text2))
+                        Button { model.composeReminder = nil } label: {
+                            Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color(Theme.text3))
+                        .help("No reminder")
+                        Spacer()
+                    }
+                    .font(.system(size: 12.5))
+                    .frame(height: 34)
+                    .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+                }
             }
             .padding(.horizontal, 28)
             .textFieldStyle(.plain)
