@@ -231,6 +231,18 @@ fn file_name(name: &str) -> String {
     if clean.is_empty() { "attachment".into() } else { clean }
 }
 
+/// A snippet's body with `{first name}`, `{name}` and `{email}` filled in
+/// from the first recipient in `to` (as typed). Unknown values become empty.
+pub fn expand_snippet(body: &str, to: &str) -> String {
+    let (name, address) = parse_addresses(to).into_iter().next().unwrap_or_default();
+    let first = name.split_whitespace().next().unwrap_or_default().to_string();
+    let mut out = body.to_string();
+    for (key, value) in [("{first name}", &first), ("{first_name}", &first), ("{name}", &name), ("{email}", &address)] {
+        out = out.replace(key, &rich::escape(value));
+    }
+    out
+}
+
 /// A built message, ready for the outbox.
 pub struct Built {
     pub raw: Vec<u8>,
@@ -314,6 +326,14 @@ mod tests {
         assert!(files[1].path.ends_with("_inv 2.pdf"), "same names get their own files: {}", files[1].path);
         assert!(files.iter().all(|f| Path::new(&f.path).starts_with(&dir)));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snippets_fill_in_the_first_recipient() {
+        let body = "Hi {first name},\n\nThanks, **{name}** ({email}).";
+        assert_eq!(expand_snippet(body, "Ann Smith <ann@x.test>, bob@x.test"), "Hi Ann,\n\nThanks, **Ann Smith** (ann@x.test).");
+        assert_eq!(expand_snippet(body, "bob@x.test"), "Hi ,\n\nThanks, **** (bob@x.test).");
+        assert_eq!(expand_snippet("Hi {first_name}", "\"Star*\" <s@x.test>"), "Hi Star\\*", "names are escaped");
     }
 
     #[test]

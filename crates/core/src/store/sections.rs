@@ -25,6 +25,35 @@ pub fn set_sections(conn: &Connection, list: &[(String, String)]) -> Result<()> 
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snippet {
+    pub id: i64,
+    pub name: String,
+    pub body: String,
+}
+
+pub fn snippets(conn: &Connection) -> Result<Vec<Snippet>> {
+    let mut stmt = conn.prepare("SELECT id, name, body FROM snippet ORDER BY name COLLATE NOCASE, id")?;
+    let rows = stmt.query_map([], |r| Ok(Snippet { id: r.get(0)?, name: r.get(1)?, body: r.get(2)? }))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Saves a snippet; id 0 adds one. Returns its id.
+pub fn save_snippet(conn: &Connection, s: &Snippet) -> Result<i64> {
+    if s.id == 0 {
+        conn.execute("INSERT INTO snippet (name, body) VALUES (?1, ?2)", params![s.name.trim(), s.body])?;
+        Ok(conn.last_insert_rowid())
+    } else {
+        conn.execute("UPDATE snippet SET name = ?2, body = ?3 WHERE id = ?1", params![s.id, s.name.trim(), s.body])?;
+        Ok(s.id)
+    }
+}
+
+pub fn delete_snippet(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM snippet WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 pub fn set_vip(conn: &Connection, address: &str, vip: bool) -> Result<()> {
     if vip {
         conn.execute("INSERT OR IGNORE INTO vip (address) VALUES (?1)", [address.trim()])?;

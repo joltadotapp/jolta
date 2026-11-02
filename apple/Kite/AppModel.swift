@@ -124,6 +124,17 @@ final class AppModel {
         }
     }
 
+    /// An inbox, fully downloaded, with nothing in it: the calm screen
+    /// takes the list and the reader. Not for searches or sections.
+    var isInboxZero: Bool {
+        guard listCount == 0, search.isEmpty, section == nil, compose == nil, unsyncedSource.isEmpty else { return false }
+        switch source {
+        case .unifiedInbox: return !accounts.isEmpty
+        case .mailbox(let id, _): return accounts.flatMap(\.mailboxes).first { $0.id == id }?.role == "inbox"
+        default: return false
+        }
+    }
+
     var showsSections: Bool { source == .unifiedInbox && search.isEmpty && !sections.isEmpty }
 
     var query: String {
@@ -590,6 +601,13 @@ final class AppModel {
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
+    }
+
+    /// Puts a snippet, filled in for the first recipient, at the cursor of
+    /// the message being written.
+    func insertSnippet(_ snippet: SnippetInfo) {
+        guard let compose, let editor = RichTextView.messageBody else { return }
+        editor.insert(body: core.expandSnippet(body: snippet.body, to: compose.to), core: core)
     }
 
     /// Takes a scheduled message back for editing.

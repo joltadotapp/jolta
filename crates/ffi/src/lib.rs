@@ -334,6 +334,13 @@ pub enum ThreadAction {
     Snooze { until: i64 },
 }
 
+#[derive(uniffi::Record, Clone)]
+pub struct SnippetInfo {
+    pub id: i64,
+    pub name: String,
+    pub body: String,
+}
+
 /// A run of message text with one set of styles.
 #[derive(uniffi::Record)]
 pub struct TextSpan {
@@ -830,6 +837,25 @@ impl Core {
 
     pub fn set_signature(&self, account_id: i64, signature: String) -> Result<()> {
         Ok(self.kite.store.write(|tx| store::set_signature(tx, AccountId(account_id), &signature))?)
+    }
+
+    pub fn snippets(&self) -> Result<Vec<SnippetInfo>> {
+        Ok(self.kite.store.read(store::snippets)?.into_iter().map(|s| SnippetInfo { id: s.id, name: s.name, body: s.body }).collect())
+    }
+
+    /// Saves a snippet; id 0 adds one. Returns its id.
+    pub fn save_snippet(&self, snippet: SnippetInfo) -> Result<i64> {
+        let s = store::Snippet { id: snippet.id, name: snippet.name, body: snippet.body };
+        Ok(self.kite.store.write(|tx| store::save_snippet(tx, &s))?)
+    }
+
+    pub fn delete_snippet(&self, id: i64) -> Result<()> {
+        Ok(self.kite.store.write(|tx| store::delete_snippet(tx, id))?)
+    }
+
+    /// A snippet's body filled in for the message's first recipient.
+    pub fn expand_snippet(&self, body: String, to: String) -> String {
+        compose::expand_snippet(&body, &to)
     }
 
     /// A body as styled runs, for the editor.

@@ -10,6 +10,7 @@ struct SettingsView: View {
             AccountsSettings(model: model).tabItem { Label("Accounts", systemImage: "person.crop.circle") }
             SectionsSettings(model: model).tabItem { Label("Sections", systemImage: "rectangle.split.3x1") }
             PeopleSettings(model: model).tabItem { Label("People", systemImage: "person.2") }
+            SnippetsSettings(model: model).tabItem { Label("Snippets", systemImage: "text.badge.plus") }
             AgentsSettings(model: model).tabItem { Label("Agents", systemImage: "cpu") }
         }
         .frame(width: 860, height: 620)
@@ -55,6 +56,101 @@ struct SectionsSettings: View {
 }
 
 extension SectionInfo: @retroactive Identifiable {}
+
+/// Reusable text for the compose window (⌘;), saved as you type.
+struct SnippetsSettings: View {
+    let model: AppModel?
+    @State private var snippets: [SnippetInfo] = []
+    @State private var selected: Int64?
+    @State private var name = ""
+    @State private var text = ""
+    @State private var saveTask: Task<Void, Never>?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                List(snippets, id: \.id, selection: $selected) { s in
+                    Text(s.name.isEmpty ? "Untitled" : s.name).tag(Optional(s.id))
+                }
+                .frame(width: 200)
+                HStack(spacing: 6) {
+                    Button { add() } label: { Image(systemName: "plus") }
+                    Button { remove() } label: { Image(systemName: "minus") }.disabled(selected == nil)
+                }
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                if let core = model?.core, selected != nil {
+                    TextField("Name", text: $name, prompt: Text("Name, as you search for it"))
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: name) { scheduleSave() }
+                    RichTextEditor(text: $text, core: core, fontSize: 13)
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+                        .onChange(of: text) { scheduleSave() }
+                } else {
+                    Text("Snippets are text you reuse while writing. Press ⌘; in a message to insert one.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                Text("{first name}, {name} and {email} fill in from the message's first recipient. ⌘B, ⌘I and ⇧⌘K format the text.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .onAppear(perform: load)
+        .onChange(of: selected) { old, new in
+            if let old { save(old) }
+            show(new)
+        }
+        .onDisappear { if let selected { save(selected) } }
+    }
+
+    private func load() {
+        snippets = (try? model?.core.snippets()) ?? []
+        if selected == nil { selected = snippets.first?.id }
+        show(selected)
+    }
+
+    private func show(_ id: Int64?) {
+        saveTask?.cancel()
+        let s = snippets.first { $0.id == id }
+        name = s?.name ?? ""
+        text = s?.body ?? ""
+    }
+
+    private func add() {
+        guard let id = try? model?.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: "")) else { return }
+        snippets = (try? model?.core.snippets()) ?? []
+        selected = id
+    }
+
+    private func remove() {
+        guard let id = selected else { return }
+        saveTask?.cancel()
+        try? model?.core.deleteSnippet(id: id)
+        snippets = (try? model?.core.snippets()) ?? []
+        selected = snippets.first?.id
+    }
+
+    private func scheduleSave() {
+        guard let id = selected else { return }
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            save(id)
+        }
+    }
+
+    private func save(_ id: Int64) {
+        guard let index = snippets.firstIndex(where: { $0.id == id }),
+              snippets[index].name != name || snippets[index].body != text else { return }
+        let updated = SnippetInfo(id: id, name: name, body: text)
+        _ = try? model?.core.saveSnippet(snippet: updated)
+        snippets[index] = updated
+    }
+}
 
 /// VIPs (a seal in the list, a VIP section, optionally the only mail that
 /// gets a banner) and where address suggestions come from.

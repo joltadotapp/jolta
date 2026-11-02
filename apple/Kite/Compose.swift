@@ -34,6 +34,8 @@ struct ComposeView: View {
                 Spacer()
                 ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false) { attach() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
+                ActionButton(icon: "text.badge.plus", title: "Insert snippet", key: "⌘;", showsTitle: false) { model.palette = .snippets }
+                    .keyboardShortcut(";", modifiers: .command)
                 ActionButton(icon: "bell", title: "Remind me if no reply", key: "⇧⌘H", showsTitle: false) { model.palette = .remind }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
                 ActionButton(icon: "clock", title: "Send later", key: "⇧⌘L", showsTitle: false) { model.palette = .sendLater }
@@ -100,7 +102,7 @@ struct ComposeView: View {
 
             // Replies and forwards start with the quote below; the cursor starts above it.
             RichTextEditor(text: draft.body, core: model.core,
-                           focusOnAppear: !(model.compose?.to.isEmpty ?? true))
+                           focusOnAppear: !(model.compose?.to.isEmpty ?? true), isMessageBody: true)
                 .padding(.horizontal, 28)
                 .padding(.top, 14)
 

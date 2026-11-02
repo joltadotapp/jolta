@@ -8,6 +8,8 @@ enum PaletteMode: Equatable {
     case sendLater
     /// When to bring the message being written back if nobody answers.
     case remind
+    /// A snippet to insert at the cursor of the message being written.
+    case snippets
     case move
 }
 
@@ -35,6 +37,7 @@ struct PaletteView: View {
         case .snooze: "Snooze until… tomorrow 9am, mon, in 2h"
         case .sendLater: "Send at… tomorrow 9am, mon 8:30, in 2h"
         case .remind: "Remind me if no reply… in 3 days, fri, next week"
+        case .snippets: "Insert a snippet"
         case .move: "Move to folder"
         }
     }
@@ -44,6 +47,7 @@ struct PaletteView: View {
         case .snooze: "clock"
         case .sendLater: "paperplane"
         case .remind: "bell"
+        case .snippets: "text.badge.plus"
         case .commands, .move: "magnifyingglass"
         }
     }
@@ -54,6 +58,7 @@ struct PaletteView: View {
         case .commands: all = commandItems
         case .snooze, .sendLater, .remind: return timeItems
         case .move: all = moveItems
+        case .snippets: all = snippetItems
         }
         let needle = text.lowercased().trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return all }
@@ -132,6 +137,15 @@ struct PaletteView: View {
         return out
     }
 
+    private var snippetItems: [PaletteItem] {
+        ((try? model.core.snippets()) ?? []).map { s in
+            let preview = model.core.bodySpans(body: s.body).map(\.text).joined().split(separator: "\n").first.map(String.init) ?? ""
+            return PaletteItem(id: "snippet-\(s.id)", title: s.name, detail: preview, icon: "text.badge.plus") { [model] in
+                model.insertSnippet(s)
+            }
+        }
+    }
+
     private var moveItems: [PaletteItem] {
         guard let account = model.accounts.first(where: { $0.id == model.cursorRow?.accountId }) else { return [] }
         return account.mailboxes.filter { $0.role != "snoozed" && $0.role != "drafts" }.map { box in
@@ -198,7 +212,8 @@ struct PaletteView: View {
                                 .onTapGesture { selected = i; choose(list) }
                         }
                         if list.isEmpty {
-                            Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”" : "Nothing matches")
+                            Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”"
+                                 : mode == .snippets && text.isEmpty ? "No snippets yet. Add them in Settings › Snippets." : "Nothing matches")
                                 .foregroundStyle(Color(Theme.text3))
                                 .padding(20)
                         }

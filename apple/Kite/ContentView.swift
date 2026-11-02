@@ -22,6 +22,18 @@ struct ContentView: View {
                 .frame(minWidth: 480, maxWidth: .infinity)
                 .background(Color(Theme.reader))
         }
+        .overlay(alignment: .trailing) {
+            // Over the list and reader; the list stays underneath for the keys.
+            if model.isInboxZero {
+                GeometryReader { geo in
+                    InboxZero(compose: model.startCompose)
+                        .frame(width: geo.size.width - Theme.sidebarWidth)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.4), value: model.isInboxZero)
         .background(Color(Theme.bg))
         .background(MainWindowReader())
         .alert("Empty Trash?", isPresented: Binding(get: { model.confirmEmpty != nil }, set: { if !$0 { model.confirmEmpty = nil } }),

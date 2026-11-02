@@ -11,6 +11,8 @@ struct RichTextEditor: NSViewRepresentable {
     var fontSize: CGFloat = 14
     /// Takes the keyboard when it appears, with the cursor at the start.
     var focusOnAppear = false
+    /// The message being written, where snippets go (not a signature).
+    var isMessageBody = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -27,6 +29,7 @@ struct RichTextEditor: NSViewRepresentable {
         view.autoresizingMask = .width
         view.textContainer?.widthTracksTextView = true
         view.base = RichTextView.baseAttributes(size: fontSize)
+        if isMessageBody { RichTextView.messageBody = view }
         view.typingAttributes = view.base
         view.delegate = context.coordinator
         let scroll = NSScrollView()
@@ -82,6 +85,16 @@ final class RichTextView: NSTextView {
 
     /// The editor that has the keyboard, for the Format menu.
     static var focused: RichTextView? { NSApp.keyWindow?.firstResponder as? RichTextView }
+    /// The open message's body editor, which keeps its cursor while the
+    /// snippet palette has the keyboard.
+    static weak var messageBody: RichTextView?
+
+    /// Puts a body (in the core's format) at the cursor, as one undoable edit.
+    func insert(body: String, core: Core) {
+        let text = Self.attributed(core.bodySpans(body: body), base: base)
+        window?.makeFirstResponder(self)
+        insertText(text, replacementRange: selectedRange())
+    }
 
     static func baseAttributes(size: CGFloat) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
