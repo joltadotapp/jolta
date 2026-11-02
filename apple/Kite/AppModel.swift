@@ -238,10 +238,20 @@ final class AppModel {
     static var dataDirectory: String {
         let home = getpwuid(getuid()).flatMap { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
         // `-KiteTestData YES` runs on a separate store of test mail, so checks never open real mail.
-        return home + "/Library/Application Support/Kite" + (isTestData ? "/Test" : "")
+        return home + "/Library/Application Support/Kite" + (testFolder.map { "/" + $0 } ?? "")
     }
 
-    static var isTestData: Bool { UserDefaults.standard.bool(forKey: "KiteTestData") }
+    static var isTestData: Bool { testFolder != nil }
+
+    /// The test store's folder: `Test` for `-KiteTestData YES`, or the name
+    /// given, so each UI test can start from its own fresh folder.
+    private static var testFolder: String? {
+        guard let value = UserDefaults.standard.string(forKey: "KiteTestData"), !value.isEmpty else { return nil }
+        if ["YES", "1", "true"].contains(value) { return "Test" }
+        if ["NO", "0", "false"].contains(value) { return nil }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+        return value.unicodeScalars.allSatisfy(allowed.contains) ? value : "Test"
+    }
 
     /// Reloads the sidebar's data. The counts read the whole store, so they
     /// run off the main thread and only the result lands here.

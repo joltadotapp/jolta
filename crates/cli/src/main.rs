@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kite_core::imap::{self, SyncEvent, SyncOptions};
 use kite_core::search::{self, ThreadRow};
 use kite_core::store;
-use kite_core::{AccountKind, Kite, MessageId, secrets, synth};
+use kite_core::{AccountKind, Kite, MailboxRole, MessageId, secrets, synth};
 
 #[derive(Parser)]
 #[command(name = "kite", version, about = "Kite mail core, from the command line")]
@@ -202,6 +202,9 @@ enum DevCommand {
     Expunge { account: String, mailbox: String, uids: String },
     /// GET a Microsoft Graph path (such as /me/mailFolders/inbox/messages) and print the JSON.
     Graph { account: String, path: String },
+    /// Add an account with no server and the usual folders, for test data
+    /// filled with `kite import`. The UI tests use it.
+    LocalAccount { address: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -577,12 +580,50 @@ async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
+    if let DevCommand::LocalAccount { address } = &cmd {
+        let folders = [
+            ("INBOX", Some(MailboxRole::Inbox)),
+            ("Archive", Some(MailboxRole::Archive)),
+            ("Sent", Some(MailboxRole::Sent)),
+            ("Drafts", Some(MailboxRole::Drafts)),
+            ("Trash", Some(MailboxRole::Trash)),
+            ("Junk", Some(MailboxRole::Spam)),
+        ];
+        let remote: Vec<store::RemoteMailbox> = folders
+            .iter()
+            .map(|(name, role)| store::RemoteMailbox {
+                important: false,
+                remote_id: name.to_string(),
+                name: name.to_string(),
+                role: *role,
+                delimiter: Some("/".into()),
+                selectable: true,
+            })
+            .collect();
+        let account = kite.store.write(|tx| {
+            let new = store::NewAccount {
+                kind: AccountKind::Imap,
+                address: address.clone(),
+                display_name: address.split('@').next().unwrap_or_default().to_string(),
+                username: address.clone(),
+                imap_host: String::new(),
+                imap_port: 993,
+                smtp_host: String::new(),
+                smtp_port: 465,
+            };
+            let account = store::insert_account(tx, &new)?;
+            store::sync_mailbox_list(tx, account.id, &remote)?;
+            Ok(account)
+        })?;
+        println!("{}  {}", account.id, account.address);
+        return Ok(());
+    }
     let (account, mailbox) = match &cmd {
         DevCommand::Append { account, mailbox, .. }
         | DevCommand::Search { account, mailbox, .. }
         | DevCommand::Store { account, mailbox, .. }
         | DevCommand::Expunge { account, mailbox, .. } => (account.clone(), mailbox.clone()),
-        DevCommand::Graph { .. } => unreachable!("handled above"),
+        DevCommand::Graph { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
     };
     let a = kite.store.read(|c| store::find_account(c, &account))?;
     let mut session = imap::connect_account(&a).await?;
@@ -605,7 +646,7 @@ async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
             let n = session.uid_store(&uids, &change).await?.try_collect::<Vec<_>>().await?.len();
             println!("changed {n} message(s)");
         }
-        DevCommand::Graph { .. } => unreachable!("handled above"),
+        DevCommand::Graph { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
         DevCommand::Expunge { uids, .. } => {
             session.select(&mailbox).await?;
             session.uid_store(&uids, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;

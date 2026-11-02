@@ -1,0 +1,18 @@
+From: Carl Smet <carl@test.invalid>
+To: me@test.invalid
+Subject: Invoice October
+Date: Thu, 29 Oct 2026 08:30:00 +0100
+Message-ID: <ui-6@test.invalid>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Here is the invoice for October.
+--b1
+Content-Type: text/plain; name="invoice.txt"
+Content-Disposition: attachment; filename="invoice.txt"
+
+Total: 120 EUR
+--b1--
