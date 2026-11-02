@@ -92,6 +92,47 @@ struct AccountsSettings: View {
 }
 
 /// One account: its name, its servers (IMAP only), its folders.
+/// One account's signature, saved a moment after each edit.
+private struct SignatureEditor: View {
+    let core: Core
+    let accountID: Int64
+    @State private var text = ""
+    @State private var loaded = false
+    @State private var saveTask: Task<Void, Never>?
+
+    var body: some View {
+        Group {
+            if loaded {
+                RichTextEditor(text: $text, core: core, fontSize: 13)
+                    .frame(height: 90)
+                    .onChange(of: text) { scheduleSave() }
+            } else {
+                Color.clear.frame(height: 90)
+            }
+        }
+        .task(id: accountID) {
+            saveTask?.cancel()
+            text = (try? core.signature(accountId: accountID)) ?? ""
+            loaded = true
+        }
+        .onDisappear { save() }
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            save()
+        }
+    }
+
+    private func save() {
+        guard loaded else { return }
+        try? core.setSignature(accountId: accountID, signature: text)
+    }
+}
+
 private struct AccountDetail: View {
     let model: AppModel
     let section: AccountSection
@@ -129,6 +170,15 @@ private struct AccountDetail: View {
                 } else {
                     LabeledContent("Email address", value: section.account.address)
                 }
+            }
+            Section {
+                SignatureEditor(core: model.core, accountID: section.account.id)
+            } header: {
+                Text("Signature")
+            } footer: {
+                Text("Added below new messages, replies and forwards from this account. ⌘B, ⌘I and ⇧⌘K format it. Saved as you type.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             if isIMAP {
                 Section("Incoming mail (IMAP)") {

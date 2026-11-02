@@ -17,7 +17,7 @@ pub struct NewAccount {
 
 const ACCOUNT_COLS: &str =
     "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port, secret_ref,
-     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs";
+     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs, signature";
 
 fn account_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -36,7 +36,13 @@ fn account_row(r: &Row) -> rusqlite::Result<Account> {
         smtp_auth: r.get(12)?,
         smtp_username: r.get(13)?,
         verify_certs: r.get(14)?,
+        signature: r.get(15)?,
     })
+}
+
+pub fn set_signature(conn: &Connection, id: AccountId, signature: &str) -> Result<()> {
+    conn.execute("UPDATE account SET signature = ?2 WHERE id = ?1", params![id, signature.trim_end()])?;
+    Ok(())
 }
 
 pub fn update_account(conn: &Connection, id: AccountId, s: &AccountSettings) -> Result<Account> {

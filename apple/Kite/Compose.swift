@@ -9,7 +9,6 @@ struct ComposeView: View {
     @State private var showCc = false
     @FocusState private var focus: Field?
     @State private var saveTask: Task<Void, Never>?
-    @State private var selection: TextSelection?
 
     enum Field { case to, cc, bcc, subject, body }
 
@@ -48,7 +47,7 @@ struct ComposeView: View {
             VStack(spacing: 0) {
                 if senders.count > 1 {
                     FieldRow(label: "From") {
-                        Picker("", selection: draft.accountId) {
+                        Picker("", selection: sender) {
                             ForEach(senders, id: \.id) { Text($0.address).tag(Optional($0.id)) }
                         }
                         .labelsHidden()
@@ -79,12 +78,10 @@ struct ComposeView: View {
             // Suggestions hang over the subject and the body.
             .zIndex(1)
 
-            TextEditor(text: draft.body, selection: $selection)
-                .font(.system(size: 14))
-                .lineSpacing(5)
-                .scrollContentBackground(.hidden)
-                .focused($focus, equals: .body)
-                .padding(.horizontal, 23)
+            // Replies and forwards start with the quote below; the cursor starts above it.
+            RichTextEditor(text: draft.body, core: model.core,
+                           focusOnAppear: !(model.compose?.to.isEmpty ?? true))
+                .padding(.horizontal, 28)
                 .padding(.top, 14)
 
             if !draft.wrappedValue.attachments.isEmpty {
@@ -118,14 +115,21 @@ struct ComposeView: View {
             let core = model.core
             Task.detached(priority: .utility) { _ = try? core.suggestAddresses(typed: "", accountId: nil, recipients: "") }
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
-            focus = (model.compose?.to.isEmpty ?? true) ? .to : .body
-            // Replies and forwards start with the quote below; write above it.
-            if let body = model.compose?.body {
-                selection = TextSelection(insertionPoint: body.startIndex)
-            }
+            if model.compose?.to.isEmpty ?? true { focus = .to }
         }
         .onExitCommand { model.closeCompose() }
         .onDisappear { saveTask?.cancel() }
+    }
+
+    /// The From account; changing it swaps the signature in the body.
+    private var sender: Binding<Int64?> {
+        Binding(get: { model.compose?.accountId }, set: { account in
+            guard let compose = model.compose, compose.accountId != account else { return }
+            let body = (try? model.core.swapSignature(body: compose.body, fromAccount: compose.accountId, toAccount: account)) ?? compose.body
+            model.compose?.accountId = account
+            model.compose?.body = body
+            scheduleSave()
+        })
     }
 
     private func recipientField(_ text: Binding<String>, _ field: Field) -> some View {

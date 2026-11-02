@@ -10,6 +10,7 @@ use kite_core::compose::{self, AttachmentFile, Compose, ReplyKind};
 use kite_core::engine::{Engine, Event};
 use kite_core::store::OpId;
 use kite_core::people::{self, People};
+use kite_core::rich;
 use kite_core::{AccountId, Kite, MailboxId, MessageId, ThreadId, reader, search, store};
 
 uniffi::setup_scaffolding!();
@@ -329,6 +330,28 @@ pub enum ThreadAction {
     MoveTo { mailbox_id: i64 },
     /// Hide the thread until this unix time.
     Snooze { until: i64 },
+}
+
+/// A run of message text with one set of styles.
+#[derive(uniffi::Record)]
+pub struct TextSpan {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub link: Option<String>,
+}
+
+impl From<rich::Span> for TextSpan {
+    fn from(s: rich::Span) -> Self {
+        TextSpan { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link }
+    }
+}
+
+impl From<TextSpan> for rich::Span {
+    fn from(s: TextSpan) -> Self {
+        rich::Span { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -771,7 +794,37 @@ impl Core {
             .read(store::accounts)?
             .into_iter()
             .find(|a| !a.smtp_host.is_empty() && a.provider_label() != "Synthetic");
-        Ok(Compose { account: account.map(|a| a.id), ..Default::default() }.into())
+        let body = account.as_ref().map(|a| compose::opening(&a.signature, "")).unwrap_or_default();
+        Ok(Compose { account: account.map(|a| a.id), body, ..Default::default() }.into())
+    }
+
+    /// The body with the old sender's signature swapped for the new one's.
+    pub fn swap_signature(&self, body: String, from_account: Option<i64>, to_account: Option<i64>) -> Result<String> {
+        let signature = |id: Option<i64>| -> Result<String> {
+            Ok(match id {
+                Some(id) => self.kite.store.read(|c| store::account(c, AccountId(id)))?.signature,
+                None => String::new(),
+            })
+        };
+        Ok(compose::swap_signature(&body, &signature(from_account)?, &signature(to_account)?))
+    }
+
+    pub fn signature(&self, account_id: i64) -> Result<String> {
+        Ok(self.kite.store.read(|c| store::account(c, AccountId(account_id)))?.signature)
+    }
+
+    pub fn set_signature(&self, account_id: i64, signature: String) -> Result<()> {
+        Ok(self.kite.store.write(|tx| store::set_signature(tx, AccountId(account_id), &signature))?)
+    }
+
+    /// A body as styled runs, for the editor.
+    pub fn body_spans(&self, body: String) -> Vec<TextSpan> {
+        rich::spans(&body).into_iter().map(Into::into).collect()
+    }
+
+    /// The editor's styled runs as a body.
+    pub fn body_markdown(&self, spans: Vec<TextSpan>) -> String {
+        rich::markdown(&spans.into_iter().map(Into::into).collect::<Vec<_>>())
     }
 
     /// A reply, reply-all or forward of the newest message in a thread.

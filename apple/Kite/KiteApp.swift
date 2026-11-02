@@ -28,9 +28,17 @@ struct KiteApp: App {
         .defaultSize(width: 1440, height: 900)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
+            CommandMenu("Format") {
+                Button("Bold") { RichTextView.focused?.toggle(.bold) }.keyboardShortcut("b")
+                Button("Italic") { RichTextView.focused?.toggle(.italic) }.keyboardShortcut("i")
+                Button("Strikethrough") { RichTextView.focused?.toggle(.strike) }.keyboardShortcut("x", modifiers: [.command, .shift])
+                Divider()
+                Button("Add Link…") { RichTextView.focused?.addLink() }.keyboardShortcut("k", modifiers: [.command, .shift])
+            }
             CommandMenu("Conversation") {
                 Button("Unsubscribe") { model?.run(.unsubscribe) }
                     .keyboardShortcut("u")
+                    .disabled(model?.compose != nil)
             }
             CommandMenu("Go") {
                 Button("Command Palette") { model?.palette = .commands }

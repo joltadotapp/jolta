@@ -11,6 +11,7 @@ pub mod model;
 pub mod oauth;
 pub mod people;
 pub mod reader;
+pub mod rich;
 pub mod render;
 pub mod search;
 pub mod secrets;

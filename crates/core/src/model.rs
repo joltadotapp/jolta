@@ -148,6 +148,8 @@ pub struct Account {
     pub smtp_username: String,
     /// Off accepts any certificate, for self-signed servers.
     pub verify_certs: bool,
+    /// Added below new messages, replies and forwards; empty for none.
+    pub signature: String,
 }
 
 /// What the account settings screen can change.

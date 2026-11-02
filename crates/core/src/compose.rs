@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::model::*;
-use crate::{Error, Result, mime, reader, store};
+use crate::{Error, Result, mime, reader, rich, store};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplyKind {
@@ -83,7 +83,47 @@ fn prefixed(subject: &str, prefix: &str) -> String {
 }
 
 fn quote(text: &str) -> String {
-    text.lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") }).collect::<Vec<_>>().join("\n")
+    text.lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {}", rich::escape(l)) }).collect::<Vec<_>>().join("\n")
+}
+
+/// Where a reply's quote or a forward's copy starts in a body Kite wrote.
+fn quote_start(body: &str) -> Option<usize> {
+    let forward = body.find("\n\n---------- Forwarded message ----------");
+    let reply = body.match_indices("\n\nOn ").map(|(i, _)| i).find(|&i| body[i..].lines().nth(2).is_some_and(|l| l.ends_with(" wrote:")));
+    forward.into_iter().chain(reply).min()
+}
+
+/// What a message starts with: room to write, the signature, then the
+/// quote or forwarded copy, if any.
+pub fn opening(signature: &str, quoted: &str) -> String {
+    let signature = signature.trim_end();
+    match (signature.is_empty(), quoted.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => format!("\n\n{quoted}"),
+        (false, true) => format!("\n\n{signature}"),
+        (false, false) => format!("\n\n{signature}\n\n{quoted}"),
+    }
+}
+
+/// Swaps one account's signature for another's when the sender changes. A
+/// signature that was edited in the message is left alone.
+pub fn swap_signature(body: &str, old: &str, new: &str) -> String {
+    let (old, new) = (old.trim_end(), new.trim_end());
+    if old == new {
+        return body.to_string();
+    }
+    if !old.is_empty() {
+        let Some(at) = body.find(&format!("\n\n{old}")) else { return body.to_string() };
+        let replacement = if new.is_empty() { String::new() } else { format!("\n\n{new}") };
+        return format!("{}{replacement}{}", &body[..at], &body[at + 2 + old.len()..]);
+    }
+    if new.is_empty() {
+        return body.to_string();
+    }
+    match quote_start(body) {
+        Some(at) => format!("{}\n\n{new}{}", &body[..at], &body[at..]),
+        None => format!("{}\n\n{new}", body.trim_end()),
+    }
 }
 
 /// Prefills a reply, reply-all or forward of `message` from its raw source.
@@ -129,20 +169,22 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
             c.references = envelope.references.clone();
             c.references.extend(envelope.message_id.clone());
             c.replying_to = Some(message);
-            c.body = format!("\n\nOn {when}, {sender_name} wrote:\n{}", quote(body.text.trim_end()));
+            c.body = format!("On {when}, {} wrote:\n{}", rich::escape(&sender_name), quote(body.text.trim_end()));
         }
         ReplyKind::Forward => {
             c.subject = prefixed(&envelope.subject, "Fwd");
-            c.body = format!(
-                "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {when}\nSubject: {}\nTo: {}\n\n{}",
+            c.body = rich::escape(&format!(
+                "---------- Forwarded message ----------\nFrom: {}\nDate: {when}\nSubject: {}\nTo: {}\n\n{}",
                 format_addresses(&from),
                 envelope.subject,
                 envelope.to,
                 body.text.trim_end()
-            );
+            ));
             c.references = envelope.message_id.iter().cloned().collect();
         }
     }
+    let signature = store::account(conn, account)?.signature;
+    c.body = opening(&signature, &c.body);
     Ok(c)
 }
 
@@ -217,7 +259,8 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
         .from(BuilderAddress::new_address(from_name, account.address.clone()))
         .subject(c.subject.clone())
         .message_id(message_id.clone())
-        .text_body(c.body.clone());
+        .text_body(rich::to_text(&c.body))
+        .html_body(rich::to_html(&c.body));
     if !to.is_empty() {
         builder = builder.to(list(&to));
     }
@@ -271,6 +314,20 @@ mod tests {
         assert!(files[1].path.ends_with("_inv 2.pdf"), "same names get their own files: {}", files[1].path);
         assert!(files.iter().all(|f| Path::new(&f.path).starts_with(&dir)));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn signatures_follow_the_sender() {
+        let quoted = "On 1 Nov 2026, 10:00, Ann wrote:\n> hi";
+        let reply = opening("Koen\n**example**", quoted);
+        assert_eq!(reply, "\n\nKoen\n**example**\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
+        let swapped = swap_signature(&format!("Thanks!{reply}"), "Koen\n**example**", "K.");
+        assert_eq!(swapped, "Thanks!\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
+        assert_eq!(swap_signature(&swapped, "K.", ""), "Thanks!\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
+        let no_signature = format!("Thanks!{}", opening("", quoted));
+        assert_eq!(swap_signature(&no_signature, "", "K."), "Thanks!\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
+        assert_eq!(swap_signature("Hello", "", "K."), "Hello\n\nK.");
+        assert_eq!(swap_signature("Hello\n\nK. (edited)", "K. (gone)", "X"), "Hello\n\nK. (edited)", "an edited signature stays");
     }
 
     #[test]
