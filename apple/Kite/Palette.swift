@@ -241,7 +241,12 @@ struct PaletteView: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
-        .onAppear { focused = true }
+        // The editor of a message being written takes the keyboard back on
+        // the next turn of the run loop; take it again after that.
+        .onAppear {
+            focused = true
+            DispatchQueue.main.async { focused = true }
+        }
         .onExitCommand { close() }
     }
 

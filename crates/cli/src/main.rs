@@ -837,6 +837,8 @@ enum AiCommand {
     },
     /// Draft a reply to a message from an instruction.
     Draft { message: i64, instruction: Vec<String> },
+    /// Turn a plain-language request into a search query and run it.
+    Search { request: Vec<String> },
     /// Sort the unsorted inbox mail of the last two weeks, printing each answer.
     Sort {
         /// Sort again what was sorted before.
@@ -933,6 +935,16 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
             let outcome = tasks::summarise(kite, &engine, kite_core::ThreadId(thread), false, fresh, &cancel, &mut on).await?;
             println!();
             eprintln!("[{:.2} s] {outcome:?}", start.elapsed().as_secs_f64());
+        }
+        AiCommand::Search { request } => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+            let t = Instant::now();
+            let query = ai::search::query(kite, &engine, &request.join(" "), now, 3600, &ai::Cancel::default())
+                .await?
+                .context("AI is off")?;
+            println!("{query}   ({:.2} s)", t.elapsed().as_secs_f64());
+            let q = search::parse(&query)?;
+            print_rows(&kite.store.read(|c| search::query_page(c, &q, 0, 10))?);
         }
         AiCommand::Sort { again, check } => {
             let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64

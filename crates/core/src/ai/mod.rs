@@ -7,6 +7,7 @@ pub mod background;
 pub mod download;
 pub mod local;
 mod remote;
+pub mod search;
 pub mod tasks;
 pub mod triage;
 

@@ -107,6 +107,9 @@ final class AppModel {
     private var summaryTask: Task<Void, Never>?
     /// A settings page something asked to show; the window opens on it.
     var settingsRequest: SettingsPage?
+    /// The search field has the keyboard, so ⌘J searches with AI.
+    var searchFocused = false
+    private(set) var aiSearching = false
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
     private let power = PowerWatch()
@@ -842,5 +845,37 @@ extension AppModel {
 
     func openSettings(_ page: SettingsPage) {
         settingsRequest = page
+    }
+
+    /// The search text reads like a request ("invoices from Els last month")
+    /// rather than a query, so ⌘J would help.
+    var searchLooksLikeRequest: Bool {
+        let text = search.trimmingCharacters(in: .whitespaces)
+        return ai.provider != nil && !text.contains(":") && text.split(separator: " ").count >= 2
+    }
+
+    /// ⌘J in the search field: the model turns the request into a query,
+    /// which replaces the text, so it can be read and edited, and searches
+    /// all mail.
+    func searchWithAI() {
+        let request = search.trimmingCharacters(in: .whitespaces)
+        guard !request.isEmpty, !aiSearching else { return }
+        guard ai.provider != nil else {
+            show(Toast(text: "Searching with AI needs a model. Choose one in Settings › AI.", undo: nil))
+            return openSettings(.ai)
+        }
+        aiSearching = true
+        let offset = Int32(TimeZone.current.secondsFromGMT())
+        Task {
+            defer { aiSearching = false }
+            do {
+                guard let query = try await core.aiSearchQuery(request: request, utcOffset: offset),
+                      search.trimmingCharacters(in: .whitespaces) == request else { return }
+                source = .allMail
+                search = query
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+        }
     }
 }

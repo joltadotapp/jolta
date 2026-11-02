@@ -41,9 +41,9 @@ struct KiteApp: App {
                     .keyboardShortcut("u")
                     .disabled(model?.compose != nil)
                 // While writing, ⌘J belongs to Write with AI in the compose view.
-                Button("Summarize") { model?.run(.summarize) }
+                Button(model?.searchFocused == true ? "Search with AI" : "Summarize") { model?.run(.summarize) }
                     .keyboardShortcut("j")
-                    .disabled(model?.compose != nil || model?.openThread == nil)
+                    .disabled(model?.compose != nil || (model?.openThread == nil && model?.searchFocused != true))
             }
             CommandMenu("Go") {
                 Button("Command Palette") { model?.palette = .commands }

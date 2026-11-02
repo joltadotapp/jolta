@@ -215,6 +215,11 @@ struct MessageList: NSViewRepresentable {
         func handle(_ event: NSEvent) -> Bool {
             // ⌘ shortcuts belong to the menus (⌘U is Unsubscribe, not U).
             if event.modifierFlags.contains(.command) { return false }
+            // While a panel is up, keys that reach the list close it rather than act on mail.
+            if model.palette != nil || model.showsHelp {
+                if event.keyCode == 53 { model.palette = nil; model.showsHelp = false }
+                return true
+            }
             switch event.keyCode {
             case 36, 76: openSelected(); return true
             case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true

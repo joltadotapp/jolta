@@ -142,7 +142,7 @@ extension AppModel {
         case .forward: reply(.forward, threadID: row?.threadId)
         case .toggleVIP: toggleVIP()
         case .unsubscribe: unsubscribe()
-        case .summarize: summarizeOpenThread()
+        case .summarize: if searchFocused { searchWithAI() } else { summarizeOpenThread() }
         case .help: showsHelp.toggle()
         case .goInbox: source = .unifiedInbox
         case .goSnoozed: source = .role("snoozed")

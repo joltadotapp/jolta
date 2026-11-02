@@ -156,7 +156,9 @@ struct ComposeView: View {
             if model.compose?.to.isEmpty ?? true { focus = .to }
         }
         .onExitCommand {
-            // Esc stops, undoes or closes AI writing before it closes the message.
+            // Esc closes an open panel, then stops, undoes or closes AI
+            // writing, and only then closes the message.
+            if model.palette != nil { model.palette = nil; return }
             guard let writer else { return model.closeCompose() }
             switch writer.state {
             case .working: writer.stop()

@@ -505,6 +505,11 @@ struct EmptyList: View {
             } else {
                 Text(model.search.isEmpty ? "No conversations" : "Nothing matches “\(model.search)”")
                     .foregroundStyle(Color(Theme.text3))
+                if model.searchLooksLikeRequest {
+                    Text("Press ⌘J in the search field to search with AI.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text3))
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -571,7 +576,13 @@ struct SearchField: View {
                     model.search = ""
                     model.requestListFocus()
                 }
-            if !focused { KeyCap(key: "/") }
+            if model.aiSearching {
+                ProgressView().controlSize(.mini).help("Searching with AI…")
+            } else if focused && model.searchLooksLikeRequest {
+                KeyCap(key: "⌘J").help("Search with AI")
+            } else if !focused {
+                KeyCap(key: "/")
+            }
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
@@ -579,6 +590,7 @@ struct SearchField: View {
         .frame(height: 28)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
         .onChange(of: model.focusSearchRequest) { focused = true }
+        .onChange(of: focused) { _, now in model.searchFocused = now }
     }
 }
 

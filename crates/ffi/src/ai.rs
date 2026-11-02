@@ -199,6 +199,18 @@ impl Core {
         self.background.set_allowed(allowed);
     }
 
+    /// A search query in Kite's language for a plain-language request,
+    /// already checked by the parser. None when AI is off.
+    pub async fn ai_search_query(&self, request: String, utc_offset: i32) -> Result<Option<String>> {
+        let (kite, ai) = (self.kite.clone(), self.ai.clone());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        Ok(self
+            .runtime
+            .spawn(async move { kite_core::ai::search::query(&kite, &ai, &request, now, utc_offset, &Cancel::default()).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??)
+    }
+
     /// Background jobs waiting: messages to sort and summaries to make.
     pub fn ai_background_pending(&self) -> u32 {
         self.background.pending() as u32
