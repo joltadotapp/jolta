@@ -195,6 +195,28 @@ pub async fn sync(
     if !gone.is_empty() {
         kite.store.write_async(move |tx| store::delete_messages(tx, &gone)).await?;
     }
+    // A message in no All Mail, Trash or Spam mailbox left Gmail (trashed
+    // from All Mail, deleted elsewhere) and only its label links remain.
+    // Skipped while changes wait to be sent, which may still place it.
+    let orphans = kite
+        .store
+        .write_async(move |tx| {
+            if store::has_pending_ops(tx, account_id)? {
+                return Ok(0);
+            }
+            let ids: Vec<MessageId> = tx
+                .prepare(
+                    "SELECT m.id FROM message m WHERE m.account_id = ?1 AND NOT EXISTS (
+                         SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id
+                         WHERE mm.message_id = m.id AND b.role IN ('all', 'trash', 'spam'))",
+                )?
+                .query_map([account_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            store::delete_messages(tx, &ids)?;
+            Ok(ids.len())
+        })
+        .await?;
+    report.removed += orphans;
 
     let mut new: Vec<u32> = server.iter().copied().filter(|u| !local.contains_key(u)).collect();
     new.sort_unstable_by(|a, b| b.cmp(a));
@@ -289,10 +311,18 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, op: &store::Op) -> Res
         .ok_or_else(|| Error::Other("no All Mail folder".into()))?;
     let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
     let all_id = all.id;
-    let uids: Vec<u32> = kite
-        .store
-        .read_async(move |c| Ok(store::server_locations(c, &ids)?.into_iter().filter(|(m, _)| *m == all_id).map(|(_, u)| u).collect()))
-        .await?;
+    // A move out of All Mail already dropped the local All Mail entry; the
+    // op kept its UID there.
+    let uids: Vec<u32> = match op.kind {
+        OpKind::Move { from, .. } if from == all_id => op.messages.iter().filter_map(|(_, u)| *u).collect(),
+        _ => {
+            kite.store
+                .read_async(move |c| {
+                    Ok(store::server_locations(c, &ids)?.into_iter().filter(|(m, _)| *m == all_id).map(|(_, u)| u).collect())
+                })
+                .await?
+        }
+    };
     if uids.is_empty() {
         return Ok(vec![]);
     }

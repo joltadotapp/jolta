@@ -121,11 +121,20 @@ enum Command {
         /// For snooze: when to wake, in plain words ("tomorrow 9am", "in 2h"), in UTC.
         #[arg(long)]
         until: Option<String>,
+        /// Only record the change; Kite.app sends it at its next sync. Needs
+        /// no Keychain access, so it works for accounts the app signed in.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Mark every unread message matching a query read, and wait until the server has it.
     MarkAllRead { query: String },
     /// Delete everything in a mailbox for good (Empty Trash), here and on the server.
-    Empty { mailbox: i64 },
+    Empty {
+        mailbox: i64,
+        /// Only record it; Kite.app deletes on the server at its next sync.
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// Change a mailbox on the server directly, as another mail client would.
     #[command(subcommand)]
     Dev(DevCommand),
@@ -325,12 +334,19 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Command::Act { action, thread, from, undo, until } => act(&kite, action, thread, from, undo, until).await,
+        Command::Act { action, thread, from, undo, until, no_wait } => act(&kite, action, thread, from, undo, until, no_wait).await,
         Command::MarkAllRead { query } => {
             let q = kite_core::search::parse(&format!("{query} is:unread"))?;
             list_action(&kite, |engine| Ok(engine.mark_all_read(&q)?.len())).await
         }
-        Command::Empty { mailbox } => list_action(&kite, |engine| Ok(engine.empty(&[kite_core::MailboxId(mailbox)]).map(|_| 1)?)).await,
+        Command::Empty { mailbox, no_wait: true } => {
+            kite.store.write(|tx| kite_core::actions::empty(tx, kite_core::MailboxId(mailbox)))?;
+            println!("recorded; Kite.app empties it on the server at its next sync");
+            Ok(())
+        }
+        Command::Empty { mailbox, no_wait: false } => {
+            list_action(&kite, |engine| Ok(engine.empty(&[kite_core::MailboxId(mailbox)]).map(|_| 1)?)).await
+        }
         Command::Send { account, to, subject, body, reply, all, attach } => {
             send(&kite, &account, to, subject, body, reply, all, attach).await
         }
@@ -478,7 +494,7 @@ async fn send(
     Ok(())
 }
 
-async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>) -> Result<()> {
+async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>, no_wait: bool) -> Result<()> {
     use kite_core::actions::Action;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
     let wake_at = match &until {
@@ -494,6 +510,12 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
         ActionArg::Unflag => Action::Unflag,
         ActionArg::Snooze => Action::Snooze(wake_at.context("snooze needs --until")?),
     };
+    let context = from.map_or(kite_core::actions::Context::Inbox, |m| kite_core::actions::Context::Mailbox(kite_core::MailboxId(m)));
+    if no_wait {
+        let op = kite.store.write(|tx| kite_core::actions::perform(tx, kite_core::ThreadId(thread), action, context))?;
+        println!("{}", if op.is_some() { "recorded; Kite.app sends it at its next sync" } else { "nothing to change" });
+        return Ok(());
+    }
     let sink: kite_core::engine::Sink = Arc::new(|_| {});
     let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
     let t0 = Instant::now();
@@ -508,7 +530,6 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
             }
         }
     };
-    let context = from.map_or(kite_core::actions::Context::Inbox, |m| kite_core::actions::Context::Mailbox(kite_core::MailboxId(m)));
     let op = engine.perform(&[kite_core::ThreadId(thread)], action, context)?.pop();
     println!("applied locally in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
     let Some(op) = op else {
