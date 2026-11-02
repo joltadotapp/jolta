@@ -339,12 +339,12 @@ private struct RemoteAccount: View {
         if models.isEmpty && (saved || !url.isEmpty) { return checking ? "Loading the list…" : "Type a model name, or save a key to choose from a list." }
         if models.isEmpty { return "Save a key first." }
         if !url.isEmpty { return "The models this server offers." }
-        return provider == .anthropic ? "Haiku is fast and cheap, and plenty for summaries." : "A mini model is fast and cheap, and plenty for summaries."
+        return provider == .anthropic ? "Haiku is fast and cheap, and plenty for summaries." : "Luna is OpenAI's fastest and cheapest, and plenty for summaries."
     }
 
     @ViewBuilder private var modelControl: some View {
         if models.isEmpty {
-            TextField(provider == .openAi ? "gpt-5-mini" : "claude-haiku-5-5", text: Binding(get: { chosen }, set: setModel))
+            TextField(provider == .openAi ? "gpt-6.1-luna" : "claude-haiku-5-5", text: Binding(get: { chosen }, set: setModel))
                 .settingsField(width: 210, mono: true)
                 .disabled(!saved && url.isEmpty)
         } else {
@@ -397,13 +397,14 @@ private struct RemoteAccount: View {
         }
     }
 
-    /// The fast, cheap model of the family: Haiku for Anthropic, the newest
-    /// GPT mini for OpenAI; else the first listed.
+    /// The fast, cheap model of the family: Haiku for Anthropic, Luna for
+    /// OpenAI (the tiers are Luna, Terra, Sol, Astra), newest first; else
+    /// the first listed.
     private func defaultModel() -> String? {
         let ids = models.map(\.id)
         let preferred = provider == .anthropic
             ? ids.first { $0.contains("haiku") }
-            : ids.first { $0.hasPrefix("gpt-") && $0.hasSuffix("-mini") }
+            : ids.first { $0.hasPrefix("gpt-") && $0.hasSuffix("-luna") } ?? ids.first { $0.hasPrefix("gpt-") && $0.hasSuffix("-mini") }
         return preferred ?? ids.first
     }
 }

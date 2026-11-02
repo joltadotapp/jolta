@@ -117,9 +117,11 @@ fn openai_text_model(id: &str) -> bool {
     chat && !OTHER.iter().any(|o| id.contains(o))
 }
 
-/// OpenAI's reasoning models think before writing unless told not to bother.
+/// OpenAI's reasoning models (GPT-5 and later: Luna, Terra, Sol, Astra; the
+/// o series) think before writing unless told not to bother.
 fn reasons(model: &str) -> bool {
-    model.starts_with("gpt-5") || (model.starts_with('o') && model[1..].starts_with(|c: char| c.is_ascii_digit()))
+    let gpt = model.strip_prefix("gpt-").and_then(|v| v.split(['.', '-']).next()).and_then(|v| v.parse::<u32>().ok());
+    gpt.is_some_and(|major| major >= 5) || (model.starts_with('o') && model[1..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 pub async fn generate(
@@ -163,19 +165,28 @@ pub async fn generate(
         }
     };
     on(Progress::Phase(Phase::Reading));
-    let send = authorise(provider, client(None)?.post(&url), key.as_deref())
-        .header("Content-Type", "application/json")
-        .body(body.to_string())
-        .send();
-    let mut response = tokio::select! {
-        r = send => r.map_err(|e| unreachable(provider, e))?,
-        _ = cancel.cancelled() => return Ok(Finish::Cancelled),
+    let mut body = body;
+    let mut response = loop {
+        let send = authorise(provider, client(None)?.post(&url), key.as_deref())
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send();
+        let response = tokio::select! {
+            r = send => r.map_err(|e| unreachable(provider, e))?,
+            _ = cancel.cancelled() => return Ok(Finish::Cancelled),
+        };
+        let status = response.status();
+        if status.is_success() {
+            break response;
+        }
+        let text = response.text().await.unwrap_or_default();
+        // A model that takes no reasoning setting gets the request again without it.
+        if status == reqwest::StatusCode::BAD_REQUEST && text.contains("reasoning") && body.get("reasoning").is_some() {
+            body.as_object_mut().expect("a JSON object").remove("reasoning");
+            continue;
+        }
+        return Err(refusal(provider, status, &text));
     };
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(refusal(provider, status, &body));
-    }
     let mut events = Sse::default();
     let mut text = String::new();
     loop {
@@ -262,8 +273,11 @@ mod tests {
 
     #[test]
     fn openai_listing_keeps_text_models() {
-        for id in ["gpt-5-mini", "gpt-4.1", "o3", "o4-mini"] {
+        for id in ["gpt-6.1-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-5-mini", "gpt-4.1", "o3", "o4-mini"] {
             assert!(openai_text_model(id), "{id}");
+        }
+        for (id, thinks) in [("gpt-6.1-luna", true), ("gpt-6-astra", true), ("gpt-5-mini", true), ("o3", true), ("gpt-4.1", false), ("gemma", false)] {
+            assert_eq!(reasons(id), thinks, "{id}");
         }
         for id in ["gpt-image-1", "text-embedding-3-small", "gpt-4o-realtime-preview", "omni-moderation-latest", "dall-e-3", "whisper-1"] {
             assert!(!openai_text_model(id), "{id}");
