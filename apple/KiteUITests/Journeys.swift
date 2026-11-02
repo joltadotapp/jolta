@@ -1,69 +1,55 @@
 import XCTest
 
-/// Journeys through the real app. Each test gets its own data folder under
-/// `~/Library/Application Support/Kite`, filled from `Fixtures/` with the
-/// signed `kite` CLI (`scripts/build-cli.sh`), and launches Kite on it with
-/// `-KiteTestData <folder>`, so no test sees real mail.
+/// Journeys through the real app. Run them with `scripts/ui-tests.sh`, which
+/// fills one data folder per test under `~/Library/Application Support/Kite`
+/// from `Fixtures/` and removes them afterwards: the test runner is
+/// sandboxed and can't write there itself. Each test launches Kite on its own
+/// folder with `-KiteTestData UITest-<test name>`, so no test sees real mail.
 @MainActor
 final class Journeys: XCTestCase {
-    private static let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    private static let fixtures = repo.appending(path: "apple/KiteUITests/Fixtures")
-
-    private func launch() throws -> XCUIApplication {
+    private func launch(_ test: String = #function) throws -> XCUIApplication {
+        let name = "UITest-" + test.replacingOccurrences(of: "()", with: "")
         let home = getpwuid(getuid()).map { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
-        let name = "UITest-" + UUID().uuidString.prefix(8)
         let folder = home + "/Library/Application Support/Kite/" + name
-        try kite(folder, "dev", "local-account", "me@test.invalid")
-        let inbox = ["01-numbers.eml", "03-numbers-thanks.eml", "04-lunch.eml", "05-deals.eml", "06-invoice.eml"]
-        try kite(folder, ["import", "me@test.invalid", "inbox"] + inbox.map { Self.fixtures.appending(path: $0).path })
-        try kite(folder, "import", "me@test.invalid", "sent", Self.fixtures.appending(path: "02-numbers-reply.eml").path)
-
+        guard FileManager.default.fileExists(atPath: folder + "/kite.sqlite") else {
+            throw XCTSkip("No test data in \(folder); run the UI tests with scripts/ui-tests.sh")
+        }
         let app = XCUIApplication()
         app.launchArguments = ["-KiteTestData", name]
         app.launch()
-        addTeardownBlock { @MainActor in
-            app.terminate()
-            try? FileManager.default.removeItem(atPath: folder)
-        }
-        XCTAssertTrue(app.staticTexts["Lunch on Friday"].waitForExistence(timeout: 15), "the inbox shows the seeded mail")
+        addTeardownBlock { @MainActor in app.terminate() }
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 15), "the inbox shows the seeded mail")
         return app
     }
 
-    private func kite(_ folder: String, _ arguments: String...) throws {
-        try kite(folder, arguments)
-    }
-
-    private func kite(_ folder: String, _ arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = Self.repo.appending(path: "target/release/kite")
-        process.arguments = ["--data-dir", folder] + arguments
-        process.standardOutput = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 0, "kite \(arguments.joined(separator: " ")) failed; run scripts/build-cli.sh")
+    /// A label in the app by the text it starts with. A list row's subject
+    /// and preview share one value ("Lunch on Friday  Shall we…").
+    private func text(_ app: XCUIApplication, _ string: String) -> XCUIElement {
+        app.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", string, string)).firstMatch
     }
 
     private func visible(_ app: XCUIApplication, _ subject: String) -> Bool {
-        app.staticTexts[subject].exists
+        text(app, subject).exists
     }
 
     func testArchiveAndUndoWithKeys() throws {
         let app = try launch()
-        app.staticTexts["Lunch on Friday"].click()
+        text(app, "Lunch on Friday").click()
         app.typeKey("e", modifierFlags: [])
-        XCTAssertTrue(app.staticTexts["Lunch on Friday"].waitForNonExistence(timeout: 5), "e archives the selected conversation")
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "e archives the selected conversation")
         app.typeKey("z", modifierFlags: [])
-        XCTAssertTrue(app.staticTexts["Lunch on Friday"].waitForExistence(timeout: 5), "z brings it back")
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
     }
 
     func testOpenConversation() throws {
         let app = try launch()
-        app.staticTexts["Re: Quarterly numbers"].click()
+        text(app, "Re: Quarterly numbers").click()
         app.typeKey(.return, modifierFlags: [])
         let reader = app.webViews.firstMatch
         XCTAssertTrue(reader.waitForExistence(timeout: 5))
         for text in ["Can you send me the Q3 numbers before Thursday?", "Got them, thanks a lot!"] {
-            XCTAssertTrue(reader.staticTexts[text].waitForExistence(timeout: 5), "the reader shows \(text)")
+            let shown = reader.staticTexts.matching(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@", text, text)).firstMatch
+            XCTAssertTrue(shown.waitForExistence(timeout: 5), "the reader shows \(text)")
         }
     }
 
@@ -71,7 +57,7 @@ final class Journeys: XCTestCase {
     /// list: an `e` there used to archive mail (fixed 2026-11-02).
     func testPaletteKeepsTheKeyboard() throws {
         let app = try launch()
-        app.staticTexts["Lunch on Friday"].click()
+        text(app, "Lunch on Friday").click()
         app.typeKey("k", modifierFlags: .command)
         let field = app.textFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5), "⌘K opens the palette")
@@ -79,7 +65,7 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(visible(app, "Lunch on Friday"), "typing in the palette didn't archive")
         app.typeKey(.escape, modifierFlags: [])
         app.typeKey("e", modifierFlags: [])
-        XCTAssertTrue(app.staticTexts["Lunch on Friday"].waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
     }
 
     func testSearchFiltersTheList() throws {
@@ -87,7 +73,7 @@ final class Journeys: XCTestCase {
         let search = app.searchFields.firstMatch.exists ? app.searchFields.firstMatch : app.textFields.firstMatch
         search.click()
         search.typeText("from:bob\n")
-        XCTAssertTrue(app.staticTexts["Weekly deals"].waitForNonExistence(timeout: 5), "other senders leave the list")
+        XCTAssertTrue(text(app, "Weekly deals").waitForNonExistence(timeout: 5), "other senders leave the list")
         XCTAssertTrue(visible(app, "Lunch on Friday"))
     }
 }
