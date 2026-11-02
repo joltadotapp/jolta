@@ -162,18 +162,34 @@ fn transcript(messages: &[Message], budget: usize) -> String {
     blocks.join("\n---\n\n")
 }
 
-const SUMMARY_SYSTEM: &str = "You summarise email conversations for a busy reader. \
-Write 2 to 5 bullet points, each on its own line starting with \"- \", in the language most of the conversation is written in. \
+/// The language summaries are written in, whatever the mail's language:
+/// the app's. Kite's interface is English only for now.
+pub const APP_LANGUAGE: &str = "English";
+
+fn summary_system(language: &str) -> String {
+    format!(
+        "You summarise email conversations for a busy reader. \
+Write 2 to 5 bullet points in {language}, each on its own line starting with \"- \". \
+Always write in {language}, also when the emails are in another language; keep names, places and quoted terms as they are. \
 Cover what was decided, the current dates, times, amounts and places, and what is still open and who has to act. \
 When something changed during the conversation, give only the latest value. \
-Each bullet is one short sentence. No title, no introduction, no closing remark, no bold.";
+Each bullet is one short sentence. Never write a bullet about what the email doesn't say. \
+No title, no introduction, no closing remark, no bold."
+    )
+}
 
-const UPDATE_SYSTEM: &str = "You keep a summary of an email conversation up to date for a busy reader. \
+fn update_system(language: &str) -> String {
+    format!(
+        "You keep a summary of an email conversation up to date for a busy reader. \
 You get the summary so far and the messages that arrived since. Write the summary of the whole conversation now: \
-2 to 5 bullet points, each on its own line starting with \"- \", in the language of the summary so far. \
+2 to 5 bullet points in {language}, each on its own line starting with \"- \". \
+Always write in {language}, also when the emails are in another language; keep names, places and quoted terms as they are. \
 Cover what was decided, the current dates, times, amounts and places, and what is still open and who has to act. \
 When a new message changes something, give only the latest value. \
-Each bullet is one short sentence. No title, no introduction, no closing remark, no bold.";
+Each bullet is one short sentence. Never write a bullet about what the email doesn't say. \
+No title, no introduction, no closing remark, no bold."
+    )
+}
 
 /// How a summary request ended.
 #[derive(Debug, PartialEq)]
@@ -219,19 +235,19 @@ pub async fn summarise(
     let earlier = cached.as_ref().and_then(|c| messages.iter().position(|m| m.meta.id == c.last_message).map(|i| (c, i)));
     let request = match earlier {
         Some((c, i)) => Request {
-            system: UPDATE_SYSTEM.into(),
+            system: update_system(APP_LANGUAGE),
             user: format!(
                 "Conversation: {subject}\n\nSummary so far:\n{}\n\nNew messages:\n\n{}",
                 c.text,
                 transcript(&messages[i + 1..], budget)
-            ),
+            ) + &format!("\n\nWrite the summary in {APP_LANGUAGE}."),
             max_tokens: 500,
             temperature: 0.0,
             grammar: None,
         },
         None => Request {
-            system: SUMMARY_SYSTEM.into(),
-            user: format!("Conversation: {subject}\n\n{}", transcript(&messages, budget)),
+            system: summary_system(APP_LANGUAGE),
+            user: format!("Conversation: {subject}\n\n{}\n\nWrite the summary in {APP_LANGUAGE}.", transcript(&messages, budget)),
             max_tokens: 500,
             temperature: 0.0,
             grammar: None,
