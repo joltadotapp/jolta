@@ -11,13 +11,32 @@ use crate::Result;
 
 const SERVICE: &str = "be.example.kite";
 
+static ONCE: Once = Once::new();
+
 fn init() {
-    static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let store = apple_native_keyring_store::keychain::Store::new()
             .expect("the login keychain store can always be created");
         keyring_core::set_default_store(store as Arc<keyring_core::CredentialStore>);
     });
+}
+
+/// Keeps secrets in memory for this process instead of the Keychain, for
+/// tests: the Mac mini is headless, and a Keychain dialog there never closes.
+/// Must run before the first secret is read or written.
+pub fn use_memory_store() {
+    ONCE.call_once(|| {
+        let store = keyring_core::mock::Store::new().expect("the mock store can always be created");
+        keyring_core::set_default_store(store as Arc<keyring_core::CredentialStore>);
+    });
+}
+
+pub fn exists(secret_ref: &str) -> Result<bool> {
+    match entry(secret_ref)?.get_password() {
+        Ok(_) => Ok(true),
+        Err(keyring_core::Error::NoEntry) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// A fresh Keychain account name: the address plus a random-enough suffix.

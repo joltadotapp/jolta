@@ -1348,6 +1348,7 @@ name = "kite-ffi"
 version = "0.1.0"
 dependencies = [
  "kite-core",
+ "rusqlite",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

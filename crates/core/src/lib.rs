@@ -96,6 +96,17 @@ impl Kite {
         })
     }
 
+    /// Deletes message files no message or outbox row names any more: left by
+    /// removed accounts and by mail deleted on the server.
+    pub fn collect_blobs(&self, min_age: std::time::Duration) -> Result<blobs::Collected> {
+        let keep: std::collections::HashSet<String> = self.store.read(|c| {
+            let mut stmt = c.prepare("SELECT blob FROM message WHERE blob IS NOT NULL UNION SELECT blob FROM outbox")?;
+            let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })?;
+        self.blobs.collect(|hash| keep.contains(hash), min_age)
+    }
+
     /// Takes the next mailbox to sync from `queue`: the one on screen if it
     /// is still waiting, else the first.
     pub fn next_mailbox(&self, queue: &mut Vec<Mailbox>) -> Option<Mailbox> {

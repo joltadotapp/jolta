@@ -61,6 +61,9 @@ pub enum Event {
 
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// Message files younger than this are never cleaned up; see `Blobs::collect`.
+const BLOB_MIN_AGE: Duration = Duration::from_secs(3600);
+
 #[derive(Default)]
 struct Wake {
     notify: Notify,
@@ -95,6 +98,15 @@ impl Engine {
             Ok(0) => {}
             Ok(_) => sink(Event::ListsChanged),
             Err(e) => tracing::warn!("list header scan stopped: {e}"),
+        });
+        let kite = engine.kite.clone();
+        engine.runtime.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            match tokio::task::spawn_blocking(move || kite.collect_blobs(BLOB_MIN_AGE)).await {
+                Ok(Ok(c)) if c.files > 0 => tracing::info!("deleted {} unused message files ({} bytes)", c.files, c.bytes),
+                Ok(Err(e)) => tracing::warn!("message file clean-up stopped: {e}"),
+                _ => {}
+            }
         });
         Ok(engine)
     }
@@ -293,11 +305,14 @@ impl Engine {
     pub fn remove_account(&self, account: AccountId) -> Result<()> {
         let a = self.kite.store.read(|c| store::account(c, account))?;
         self.kite.store.write(|tx| store::delete_account(tx, account))?;
-        crate::secrets::delete(&a.secret_ref)?;
-        crate::secrets::delete(&crate::secrets::smtp_ref(&a.secret_ref))?;
         self.wake(account);
         (self.sink)(Event::ListsChanged);
-        Ok(())
+        let kite = self.kite.clone();
+        self.runtime.spawn_blocking(move || kite.collect_blobs(BLOB_MIN_AGE));
+        // Both secrets get a delete attempt even when the first one fails.
+        let password = crate::secrets::delete(&a.secret_ref);
+        let smtp = crate::secrets::delete(&crate::secrets::smtp_ref(&a.secret_ref));
+        password.and(smtp)
     }
 
     /// Syncs every account now, all mailboxes.

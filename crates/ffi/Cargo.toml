@@ -19,3 +19,6 @@ uniffi = { workspace = true, features = ["cli"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true

@@ -178,8 +178,13 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
             if kind == ReplyKind::ReplyAll {
                 let mut cc = not_me(others(root.to()));
                 cc.extend(not_me(others(root.cc())));
-                cc.retain(|(_, a)| !to.iter().any(|(_, t)| t.eq_ignore_ascii_case(a)));
-                cc.dedup_by(|x, y| x.1.eq_ignore_ascii_case(&y.1));
+                let mut seen: Vec<String> = to.iter().map(|(_, a)| a.to_lowercase()).collect();
+                cc.retain(|(_, a)| {
+                    let a = a.to_lowercase();
+                    let new = !seen.contains(&a);
+                    seen.push(a);
+                    new
+                });
                 c.cc = format_addresses(&cc);
             }
             c.subject = prefixed(&envelope.subject, "Re");

@@ -138,6 +138,13 @@ The Swift side keeps a page cache per visible list and asks for rows by index as
 
 The core runs the MCP server and listens on `kite.sock` in the app group container while the app runs. It speaks MCP's JSON-RPC directly (one message per line; `initialize`, `tools/list`, `tools/call`, `ping`) instead of using rmcp: tools are all Kite needs, and the hand-written server avoids rmcp's fast-moving 3.x API. An agent's config points at `Kite.app/Contents/MacOS/kite-mcp`, which only copies bytes between stdio and the socket. Tools in the MVP are `search`, `read_thread`, `list_mailboxes`, `create_draft`, `label`, `archive` and `snooze`. Every tool result wraps email content in a block marked as untrusted data. Each agent has grants per account and per tool, and every call is written to `audit`. Sending is not an agent tool; an agent can only create a draft that the user sends.
 
+## Tests
+
+- **Unit tests** sit next to the code they check (`cargo test -p kite-core`): the query parser, the sanitiser, MIME, AI answer parsing.
+- **Regression and journey tests** live in `crates/ffi/tests/regression/` and run with `cargo test -p kite-ffi --test regression`. Each test opens a fresh data folder in a temporary directory through the same `Core` the Mac app calls, adds accounts without a server (the engine starts no sync for them), imports messages written by the `Mail` builder in `fixture.rs`, and acts as the app would: list, open, archive, undo, reply, send, search. Secrets go to an in-memory store (`secrets::use_memory_store`), so no test touches the Keychain. The whole suite runs offline in well under a second.
+- A test that needs state the app has no call for, such as an AI sorting result, writes it through a second `Kite` handle on the same folder. The app's cached list order doesn't see those writes, so `App::list` pushes the cache out first.
+- Schema checks read the schema files themselves: a new `schemaN.sql` missing from `MIGRATIONS` fails `store::old_data_folders_upgrade`, and a new table with an `account_id` column is checked by `accounts::removing_an_account_leaves_nothing_behind` without editing the test.
+
 ## Performance budgets
 
 Measured on Apple Silicon with the `kite` CLI's synthetic mailbox until real mail is available.
