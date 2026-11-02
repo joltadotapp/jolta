@@ -195,7 +195,8 @@ impl Local {
             h.model = Some(path.to_path_buf());
         }
         let h = slot.as_mut().expect("loaded above");
-        h.send(json!({"op": "generate", "prompt": prompt(request), "max_tokens": request.max_tokens, "temperature": request.temperature}))
+        h.send(json!({"op": "generate", "prompt": prompt(request), "max_tokens": request.max_tokens,
+                      "temperature": request.temperature, "grammar": request.grammar}))
             .await?;
         let mut text = String::new();
         let mut cancel_sent = false;

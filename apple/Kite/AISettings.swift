@@ -18,6 +18,7 @@ struct AISettings: View {
             case nil: EmptyView()
             }
             SettingsSection("Features") {
+                SortMailRow(model: model)
                 SettingsRow(title: "Summarize long conversations as they open",
                             detail: "Three or more messages, or one long one. Summaries are kept and catch up when replies arrive. ⌘J summarizes any conversation.") {
                     Toggle("Summarize long conversations", isOn: Binding(get: { model.ai.autoSummary },
@@ -67,7 +68,7 @@ private struct ProviderPicker: View {
         HStack(spacing: 8) {
             ForEach(choices) { choice in
                 let selected = model.ai.provider == choice.provider
-                Button { model.saveAI { $0.provider = choice.provider } } label: {
+                Button { model.saveAI { $0.provider = choice.provider; $0.sortMail = nil } } label: {
                     VStack(alignment: .leading, spacing: 6) {
                         Image(systemName: choice.icon).font(.system(size: 14))
                         Text(choice.title).font(.system(size: 12.5, weight: .semibold))
@@ -82,6 +83,51 @@ private struct ProviderPicker: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+}
+
+/// Sorting new mail: needs reply and categories, with the Needs reply
+/// section one click away.
+private struct SortMailRow: View {
+    let model: AppModel
+    @State private var pending: UInt32 = 0
+
+    private var hasSection: Bool { model.sections.contains { $0.query.contains("is:needs-reply") } }
+
+    private var detail: String {
+        let what = "Marks conversations that wait for your reply (↩ in the list) and files new mail by category, for search and sections: is:needs-reply, category:work, category:finance."
+        let catchUp = "Turning it on also sorts the last two weeks of your inbox."
+        switch model.ai.provider {
+        case .local: return "\(what) Runs on this Mac, about half a second per message. \(catchUp)"
+        case .openAi: return "\(what) Each new message goes to OpenAI once to be sorted. \(catchUp)"
+        case .anthropic: return "\(what) Each new message goes to Anthropic once to be sorted. \(catchUp)"
+        case nil: return what
+        }
+    }
+
+    var body: some View {
+        SettingsRow(title: "Sort new mail", detail: detail) {
+            Toggle("Sort new mail", isOn: Binding(get: { model.ai.sortsMail }, set: { on in model.saveAI { $0.sortMail = on } }))
+                .settingsSwitch()
+                .disabled(model.ai.provider == nil)
+        }
+        if model.ai.sortsMail {
+            SettingsRow(title: pending > 0 ? "Sorting \(pending) message\(pending == 1 ? "" : "s")…" : "Needs reply section",
+                        detail: hasSection ? "Your inbox has a Needs reply section." : "A section above the inbox with only the conversations that wait for you.") {
+                if !hasSection {
+                    Button("Add Section") {
+                        let list = model.sections + [SectionInfo(id: 0, name: "Needs reply", query: "is:needs-reply")]
+                        try? model.saveSections(list)
+                    }
+                }
+            }
+            .task {
+                while !Task.isCancelled {
+                    pending = model.core.aiBackgroundPending()
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
         }
     }

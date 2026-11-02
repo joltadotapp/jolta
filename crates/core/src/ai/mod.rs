@@ -3,10 +3,12 @@
 //! Requests go straight from the Mac to the chosen provider; none of ours
 //! sits in between.
 
+pub mod background;
 pub mod download;
 pub mod local;
 mod remote;
 pub mod tasks;
+pub mod triage;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,6 +63,10 @@ pub struct Settings {
     pub anthropic: Remote,
     /// Summarise long conversations as they open.
     pub auto_summary: bool,
+    /// Sort new mail (needs reply, category). None means the default: on
+    /// for the model on this Mac, off for a cloud provider, which would get
+    /// every new message.
+    pub sort_mail: Option<bool>,
 }
 
 impl Default for Settings {
@@ -71,11 +77,16 @@ impl Default for Settings {
             openai: Remote::default(),
             anthropic: Remote::default(),
             auto_summary: true,
+            sort_mail: None,
         }
     }
 }
 
 impl Settings {
+    pub fn sorts_new_mail(&self) -> bool {
+        self.provider.is_some() && self.sort_mail.unwrap_or(self.provider == Some(Provider::Local))
+    }
+
     /// What the summary card names as its author.
     pub fn label(&self) -> String {
         match self.provider {
@@ -106,6 +117,7 @@ pub fn settings(conn: &Connection) -> Result<Settings> {
         openai: remote(&v["openai"]),
         anthropic: remote(&v["anthropic"]),
         auto_summary: v["auto_summary"].as_bool().unwrap_or(defaults.auto_summary),
+        sort_mail: v["sort_mail"].as_bool(),
     })
 }
 
@@ -117,6 +129,7 @@ pub fn save_settings(conn: &Connection, s: &Settings) -> Result<()> {
         "openai": remote(&s.openai),
         "anthropic": remote(&s.anthropic),
         "auto_summary": s.auto_summary,
+        "sort_mail": s.sort_mail,
     });
     conn.execute(
         "INSERT INTO setting (key, value) VALUES ('ai', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -145,6 +158,8 @@ pub struct Request {
     pub max_tokens: u32,
     /// 0 for the same answer every time; only the local model uses it.
     pub temperature: f32,
+    /// A GBNF grammar the local model's answer must follow.
+    pub grammar: Option<String>,
 }
 
 /// Where a request is, for the "Reading 12 messages…" line.

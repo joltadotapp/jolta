@@ -837,6 +837,15 @@ enum AiCommand {
     },
     /// Draft a reply to a message from an instruction.
     Draft { message: i64, instruction: Vec<String> },
+    /// Sort the unsorted inbox mail of the last two weeks, printing each answer.
+    Sort {
+        /// Sort again what was sorted before.
+        #[arg(long)]
+        again: bool,
+        /// Compare with the X-Kite-Expect header of scripts/ai-fixtures.py mail.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn ai_provider(name: &str) -> Result<Option<kite_core::ai::Provider>> {
@@ -924,6 +933,39 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
             let outcome = tasks::summarise(kite, &engine, kite_core::ThreadId(thread), false, fresh, &cancel, &mut on).await?;
             println!();
             eprintln!("[{:.2} s] {outcome:?}", start.elapsed().as_secs_f64());
+        }
+        AiCommand::Sort { again, check } => {
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64
+                - ai::background::CATCH_UP_DAYS * 86_400;
+            if again {
+                kite.store.write(|tx| Ok(tx.execute("DELETE FROM ai_triage", [])?))?;
+            }
+            let ids = kite.store.read(|c| ai::triage::unsorted_inbox(c, since))?;
+            let (mut right, mut checked) = ((0, 0), 0);
+            for id in ids {
+                let t = Instant::now();
+                let Some(got) = ai::triage::sort(kite, &engine, id, &ai::Cancel::default()).await? else { continue };
+                let raw = imap::message_source(kite, id).await?;
+                let subject = kite.store.read(|c| Ok(c.query_row("SELECT subject FROM message WHERE id = ?1", [id], |r| r.get::<_, String>(0))?))?;
+                let answer = format!("{} {}", got.category, if got.needs_reply { "yes" } else { "no" });
+                let expect = check
+                    .then(|| String::from_utf8_lossy(&raw).lines().find_map(|l| l.strip_prefix("X-Kite-Expect:").map(|v| v.trim().to_string())))
+                    .flatten();
+                let mark = match &expect {
+                    Some(e) => {
+                        checked += 1;
+                        let (ec, er) = e.split_once(' ').unwrap_or((e, ""));
+                        right.0 += usize::from(ec == got.category);
+                        right.1 += usize::from(er == if got.needs_reply { "yes" } else { "no" });
+                        if *e == answer { "ok ".to_string() } else { format!("WANT {e}") }
+                    }
+                    None => String::new(),
+                };
+                println!("{:>5.2} s  {:<18} {:<14} {}", t.elapsed().as_secs_f64(), answer, mark, subject);
+            }
+            if checked > 0 {
+                println!("categories {}/{checked}, needs reply {}/{checked}", right.0, right.1);
+            }
         }
         AiCommand::Draft { message, instruction } => {
             let raw = imap::message_source(kite, MessageId(message)).await?;

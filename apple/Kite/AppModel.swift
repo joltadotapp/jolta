@@ -109,6 +109,7 @@ final class AppModel {
     var settingsRequest: SettingsPage?
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
+    private let power = PowerWatch()
 
     var sort: ListSort {
         get {
@@ -164,7 +165,8 @@ final class AppModel {
         }
         reloadAccounts()
         try core.start()
-        startMCP()
+        if !Self.isTestData { startMCP() }
+        power.start(core: core)
         AddressBook.load(into: core)
         notifier.onOpen = { [weak self] threadID in
             self?.source = .unifiedInbox
@@ -232,8 +234,11 @@ final class AppModel {
     /// sandbox `NSHomeDirectory()` points at the container, so ask the user database.
     static var dataDirectory: String {
         let home = getpwuid(getuid()).flatMap { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
-        return home + "/Library/Application Support/Kite"
+        // `-KiteTestData YES` runs on a separate store of test mail, so checks never open real mail.
+        return home + "/Library/Application Support/Kite" + (isTestData ? "/Test" : "")
     }
+
+    static var isTestData: Bool { UserDefaults.standard.bool(forKey: "KiteTestData") }
 
     /// Reloads the sidebar's data. The counts read the whole store, so they
     /// run off the main thread and only the result lands here.

@@ -79,6 +79,7 @@ pub struct ThreadRow {
     pub flagged: bool,
     pub has_attachments: bool,
     pub vip: bool,
+    pub needs_reply: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -540,6 +541,8 @@ pub struct Core {
     address_book: Arc<Mutex<Vec<(String, String)>>>,
     ai: Arc<kite_core::ai::Ai>,
     downloads: ai::Downloads,
+    /// Sorting new mail and summaries made ahead, one job at a time.
+    background: Arc<kite_core::ai::background::Background>,
 }
 
 const PEOPLE_FRESH: Duration = Duration::from_secs(120);
@@ -576,16 +579,27 @@ impl Core {
             .enable_all()
             .build()
             .map_err(|e| CoreError::Failed { message: e.to_string() })?;
+        let ai = Arc::new(kite_core::ai::Ai::new(&kite.data_dir, ai::helper_path()));
+        let order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>> = Arc::new(Mutex::new(None));
+        let changed: kite_core::ai::background::Changed = {
+            let (order, listener) = (order.clone(), listener.clone());
+            Arc::new(move || {
+                *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                listener.on_event(CoreEvent::ListsChanged);
+            })
+        };
+        let background = kite_core::ai::background::Background::start(kite.clone(), ai.clone(), changed, runtime.handle());
         Ok(Arc::new(Core {
             runtime,
             listener,
             engine: Mutex::new(None),
             engine_sink: Mutex::new(None),
-            order: Arc::new(Mutex::new(None)),
+            order,
             people: Arc::new(Mutex::new(None)),
             address_book: Arc::new(Mutex::new(Vec::new())),
-            ai: Arc::new(kite_core::ai::Ai::new(&kite.data_dir, ai::helper_path())),
+            ai,
             downloads: Arc::default(),
+            background,
             kite,
         }))
     }
@@ -667,6 +681,7 @@ impl Core {
                 flagged: r.flagged,
                 has_attachments: r.has_attachments,
                 vip: r.vip,
+                needs_reply: r.needs_reply,
             })
             .collect())
     }
@@ -758,6 +773,7 @@ impl Core {
             return Ok(());
         }
         let (order, listener) = (self.order.clone(), self.listener.clone());
+        let (background, kite) = (self.background.clone(), self.kite.clone());
         let sink: kite_core::engine::Sink = Arc::new(move |event| {
             let event = match event {
                 Event::ListsChanged => {
@@ -768,6 +784,7 @@ impl Core {
                 Event::SyncFinished(a) => CoreEvent::SyncFinished { account_id: a.0 },
                 Event::SyncFailed(a, message) => CoreEvent::SyncFailed { account_id: a.0, message },
                 Event::NewMail { account, thread, from, subject, vip } => {
+                    background.new_mail(&kite, thread);
                     CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject, vip }
                 }
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
@@ -787,6 +804,7 @@ impl Core {
         });
         *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
         *engine = Some(Engine::start(self.kite.clone(), sink, self.runtime.handle().clone())?);
+        self.background.catch_up(&self.kite);
         Ok(())
     }
 

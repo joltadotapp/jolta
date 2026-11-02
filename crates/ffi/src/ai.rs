@@ -48,6 +48,10 @@ pub struct AiSettingsInfo {
     pub anthropic_model: String,
     pub anthropic_key_saved: bool,
     pub auto_summary: bool,
+    /// Sort new mail: None follows the default (on for this Mac, off for a
+    /// cloud provider). `sorts_mail` is the result.
+    pub sort_mail: Option<bool>,
+    pub sorts_mail: bool,
     /// What summaries name as their author, such as "Gemma 4 E2B".
     pub label: String,
 }
@@ -168,6 +172,8 @@ impl Core {
             anthropic_model: s.anthropic.model.clone(),
             anthropic_key_saved: ai::key(Provider::Anthropic).is_some(),
             auto_summary: s.auto_summary,
+            sort_mail: s.sort_mail,
+            sorts_mail: s.sorts_new_mail(),
             label: s.label(),
         })
     }
@@ -179,9 +185,23 @@ impl Core {
             openai: ai::Remote { base_url: settings.openai_url, model: settings.openai_model },
             anthropic: ai::Remote { base_url: settings.anthropic_url, model: settings.anthropic_model },
             auto_summary: settings.auto_summary,
+            sort_mail: settings.sort_mail,
         };
         self.kite.store.write(|tx| ai::save_settings(tx, &s))?;
+        // Switching sorting on (or to a model that sorts) catches up on two weeks of inbox.
+        self.background.catch_up(&self.kite);
         Ok(())
+    }
+
+    /// Whether background AI may use the local model now. The app says no
+    /// on battery, in Low Power Mode or when the Mac runs hot.
+    pub fn set_ai_background_allowed(&self, allowed: bool) {
+        self.background.set_allowed(allowed);
+    }
+
+    /// Background jobs waiting: messages to sort and summaries to make.
+    pub fn ai_background_pending(&self) -> u32 {
+        self.background.pending() as u32
     }
 
     /// Saves an API key in the Keychain; an empty one removes it.

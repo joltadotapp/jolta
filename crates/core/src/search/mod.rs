@@ -31,6 +31,8 @@ pub struct ThreadRow {
     pub has_attachments: bool,
     /// The shown message's sender is a VIP.
     pub vip: bool,
+    /// AI sorting says the conversation waits for the user's reply.
+    pub needs_reply: bool,
 }
 
 fn fts_string(text: &str, phrase: bool, prefix: bool) -> String {
@@ -152,6 +154,11 @@ fn plan(q: &Query) -> Sql {
             TermKind::Is(Status::Flagged) => format!("(m.flags & {}) != 0", Flags::FLAGGED),
             TermKind::Is(Status::Vip) => "EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)".into(),
             TermKind::Is(Status::Notification) => NOTIFICATION.into(),
+            TermKind::Is(Status::NeedsReply) => crate::ai::triage::NEEDS_REPLY.into(),
+            TermKind::Category(c) => {
+                let p = sql.param(c.clone());
+                format!("EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id AND t.category = ?{p})")
+            }
             TermKind::Is(Status::Newsletter) => {
                 format!("((m.list_id IS NOT NULL OR m.list_unsubscribe IS NOT NULL) AND NOT {NOTIFICATION})")
             }
@@ -392,8 +399,16 @@ fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result
             flagged: false,
             has_attachments: false,
             vip: r.get(6)?,
+            needs_reply: false,
         })
     })?;
+    // The conversation's newest message decides, as for `is:needs-reply`.
+    row.needs_reply = conn
+        .prepare_cached(&format!(
+            "SELECT EXISTS (SELECT 1 FROM message m WHERE m.thread_id = ?1 AND {})",
+            crate::ai::triage::NEEDS_REPLY
+        ))?
+        .query_row([thread], |r| r.get(0))?;
     conn.prepare_cached(
         "SELECT count(DISTINCT coalesce(message_id, id)), coalesce(sum((flags & ?2) = 0), 0),
                 coalesce(max((flags & ?3) != 0), 0), coalesce(max(has_attachments), 0)

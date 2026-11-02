@@ -367,23 +367,27 @@ final class ThreadCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     /// The seal in front of a VIP's name. It leads the name so truncation never hides it.
-    private static let vipMark: NSTextAttachment = {
+    private static let vipMark = mark("checkmark.seal.fill", label: "VIP")
+    /// In front of the subject when AI sorting says the conversation waits for a reply.
+    private static let replyMark = mark("arrowshape.turn.up.left.fill", label: "Needs your reply")
+
+    private static func mark(_ symbolName: String, label: String) -> NSTextAttachment {
         let mark = NSTextAttachment()
         let config = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
-        guard let symbol = NSImage(systemSymbolName: "checkmark.seal.fill", accessibilityDescription: "VIP")?
+        guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: label)?
             .withSymbolConfiguration(config) else { return mark }
-        // Tinted as it draws, so the check stays cut out and the colour follows the appearance.
+        // Tinted as it draws, so cut-outs stay cut out and the colour follows the appearance.
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
             Theme.text2.set()
             rect.fill(using: .sourceAtop)
             return true
         }
-        image.accessibilityDescription = "VIP"
+        image.accessibilityDescription = label
         mark.image = image
         mark.bounds = NSRect(x: 0, y: -1.5, width: symbol.size.width, height: symbol.size.height)
         return mark
-    }()
+    }
 
     func show(_ r: ThreadRow) {
         row = r
@@ -403,10 +407,15 @@ final class ThreadCell: NSTableCellView {
             ]))
         }
         sender.attributedStringValue = name
-        let line = NSMutableAttributedString(string: r.subject.isEmpty ? "(no subject)" : r.subject, attributes: [
+        let line = NSMutableAttributedString()
+        if r.needsReply {
+            line.append(NSAttributedString(attachment: Self.replyMark))
+            line.append(NSAttributedString(string: " "))
+        }
+        line.append(NSAttributedString(string: r.subject.isEmpty ? "(no subject)" : r.subject, attributes: [
             .font: Theme.font(weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
-        ])
+        ]))
         if !r.snippet.isEmpty {
             line.append(NSAttributedString(string: "  " + r.snippet, attributes: [
                 .font: Theme.font(), .foregroundColor: Theme.text3,

@@ -1,0 +1,182 @@
+//! AI work nobody waits for: sorting new mail, and summaries of long new
+//! conversations, so they are ready when opened. One job at a time, sorting
+//! before summaries. With the local model it pauses while the app says the
+//! Mac is on battery, in Low Power Mode or hot; cloud providers run anyway.
+
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::sync::Notify;
+
+use super::{Ai, Cancel, Provider, tasks, triage};
+use crate::model::*;
+use crate::{Kite, Result};
+
+/// How far back sorting reaches when it is switched on or Kite starts.
+pub const CATCH_UP_DAYS: i64 = 14;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Job {
+    Sort(MessageId),
+    Summary(ThreadId),
+}
+
+#[derive(Default)]
+struct Queue {
+    sort: VecDeque<MessageId>,
+    summaries: VecDeque<ThreadId>,
+    queued: BTreeSet<Job>,
+}
+
+impl Queue {
+    fn push(&mut self, job: Job) {
+        if self.queued.insert(job) {
+            match job {
+                Job::Sort(m) => self.sort.push_back(m),
+                Job::Summary(t) => self.summaries.push_back(t),
+            }
+        }
+    }
+
+    fn pop(&mut self) -> Option<Job> {
+        let job = self.sort.pop_front().map(Job::Sort).or_else(|| self.summaries.pop_front().map(Job::Summary))?;
+        self.queued.remove(&job);
+        Some(job)
+    }
+
+    fn len(&self) -> usize {
+        self.queued.len()
+    }
+}
+
+/// Called after a batch of results lands, so lists can show them.
+pub type Changed = Arc<dyn Fn() + Send + Sync>;
+
+pub struct Background {
+    queue: Mutex<Queue>,
+    wake: Notify,
+    /// False while the Mac should be left alone (battery, Low Power Mode, heat).
+    allowed: AtomicBool,
+}
+
+impl Background {
+    pub fn start(kite: Kite, ai: Arc<Ai>, changed: Changed, runtime: &tokio::runtime::Handle) -> Arc<Background> {
+        let bg = Arc::new(Background { queue: Mutex::default(), wake: Notify::new(), allowed: AtomicBool::new(true) });
+        let worker = bg.clone();
+        runtime.spawn(async move { worker.run(kite, ai, changed).await });
+        bg
+    }
+
+    pub fn set_allowed(&self, allowed: bool) {
+        self.allowed.store(allowed, Ordering::SeqCst);
+        if allowed {
+            self.wake.notify_one();
+        }
+    }
+
+    /// Jobs waiting, for "Sorting 12 messages…".
+    pub fn pending(&self) -> usize {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    fn push(&self, jobs: impl IntoIterator<Item = Job>) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        for job in jobs {
+            queue.push(job);
+        }
+        drop(queue);
+        self.wake.notify_one();
+    }
+
+    /// New mail arrived in a thread: sort its unsorted messages and, when
+    /// it is long enough, summarise it.
+    pub fn new_mail(&self, kite: &Kite, thread: ThreadId) {
+        let Ok((settings, messages)) = kite.store.read(|c| {
+            let settings = super::settings(c)?;
+            let mut stmt = c.prepare(
+                "SELECT m.id FROM message m WHERE m.thread_id = ?1
+                   AND NOT EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id)
+                   AND NOT EXISTS (SELECT 1 FROM account a WHERE a.address = m.from_addr COLLATE NOCASE)
+                 ORDER BY m.date DESC LIMIT 3",
+            )?;
+            let ids: Vec<MessageId> = stmt.query_map([thread], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok((settings, ids))
+        }) else {
+            return;
+        };
+        let mut jobs = Vec::new();
+        if settings.sorts_new_mail() {
+            jobs.extend(messages.into_iter().map(Job::Sort));
+        }
+        if settings.auto_summary && settings.provider == Some(Provider::Local) {
+            jobs.push(Job::Summary(thread));
+        }
+        self.push(jobs);
+    }
+
+    /// Sorts the inbox mail of the last two weeks that isn't sorted yet:
+    /// at start, and when sorting is switched on.
+    pub fn catch_up(&self, kite: &Kite) {
+        let since = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) - CATCH_UP_DAYS * 86_400;
+        let Ok(Some(ids)) = kite.store.read(|c| {
+            if !super::settings(c)?.sorts_new_mail() {
+                return Ok(None);
+            }
+            Ok(Some(triage::unsorted_inbox(c, since)?))
+        }) else {
+            return;
+        };
+        self.push(ids.into_iter().map(Job::Sort));
+    }
+
+    async fn run(self: Arc<Self>, kite: Kite, ai: Arc<Ai>, changed: Changed) {
+        let mut done_since_report = 0;
+        loop {
+            let job = self.queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            let Some(job) = job else {
+                if done_since_report > 0 {
+                    changed();
+                    done_since_report = 0;
+                }
+                self.wake.notified().await;
+                continue;
+            };
+            let local = kite.store.read(super::settings).map(|s| s.provider == Some(Provider::Local)).unwrap_or(false);
+            while local && !self.allowed.load(Ordering::SeqCst) {
+                if done_since_report > 0 {
+                    changed();
+                    done_since_report = 0;
+                }
+                tokio::select! {
+                    _ = self.wake.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                }
+            }
+            if let Err(e) = Self::work(&kite, &ai, job).await {
+                tracing::warn!("background AI job {job:?} failed: {e}");
+                // A provider that is down or refusing would fail every job; slow down.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            done_since_report += 1;
+            if done_since_report >= 10 {
+                changed();
+                done_since_report = 0;
+            }
+        }
+    }
+
+    async fn work(kite: &Kite, ai: &Ai, job: Job) -> Result<()> {
+        let cancel = Cancel::default();
+        match job {
+            Job::Sort(message) => {
+                triage::sort(kite, ai, message, &cancel).await?;
+            }
+            Job::Summary(thread) => {
+                tasks::summarise(kite, ai, thread, true, false, &cancel, &mut |_| {}).await?;
+            }
+        }
+        Ok(())
+    }
+}

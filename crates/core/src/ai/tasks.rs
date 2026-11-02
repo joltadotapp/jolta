@@ -227,12 +227,14 @@ pub async fn summarise(
             ),
             max_tokens: 500,
             temperature: 0.0,
+            grammar: None,
         },
         None => Request {
             system: SUMMARY_SYSTEM.into(),
             user: format!("Conversation: {subject}\n\n{}", transcript(&messages, budget)),
             max_tokens: 500,
             temperature: 0.0,
+            grammar: None,
         },
     };
     let text = match ai.generate(&settings, &request, cancel, on).await? {
@@ -354,7 +356,7 @@ pub async fn draft(
         (true, false) => "Write the email.".to_string(),
     });
     user.push_str(&reminder);
-    let request = Request { system, user, max_tokens: 700, temperature: 0.3 };
+    let request = Request { system, user, max_tokens: 700, temperature: 0.3, grammar: None };
     Ok(Some(match ai.generate(&settings, &request, cancel, on).await? {
         Finish::Done(text) => Finish::Done(rich::escape(text.trim())),
         f => f,

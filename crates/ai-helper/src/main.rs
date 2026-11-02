@@ -4,7 +4,7 @@
 //!
 //! One JSON object per line on stdin:
 //!   {"op":"load","model":"/path/model.gguf","ctx":16384}
-//!   {"op":"generate","prompt":"…","max_tokens":600,"temperature":0}
+//!   {"op":"generate","prompt":"…","max_tokens":600,"temperature":0,"grammar":null}
 //!   {"op":"cancel"}
 //! and one per line on stdout:
 //!   {"event":"loaded","seconds":0.5}
@@ -150,7 +150,13 @@ mod engine {
             ctx.decode(&mut batch).map_err(|e| format!("reading the prompt failed: {e}"))?;
             pos += chunk.len() as i32;
         }
-        let mut sampler = if temperature <= 0.0 {
+        let grammar = match request["grammar"].as_str() {
+            Some(g) => Some(LlamaSampler::grammar(&l.model, g, "root").map_err(|e| format!("bad grammar: {e}"))?),
+            None => None,
+        };
+        let mut sampler = if let Some(grammar) = grammar {
+            LlamaSampler::chain_simple([grammar, LlamaSampler::greedy()])
+        } else if temperature <= 0.0 {
             LlamaSampler::greedy()
         } else {
             let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());

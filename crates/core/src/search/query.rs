@@ -1,6 +1,7 @@
 //! The search language: `from:`, `to:`, `subject:`, `has:attachment`,
-//! `is:unread`, `in:`, `label:`, `account:`, `before:`, `after:`, quoted
-//! phrases, bare words, and `-` to negate any of them.
+//! `is:unread`, `is:needs-reply`, `category:`, `in:`, `label:`, `account:`,
+//! `before:`, `after:`, quoted phrases, bare words, and `-` to negate any of
+//! them.
 
 use crate::{Error, Result};
 
@@ -33,6 +34,8 @@ pub enum Status {
     Newsletter,
     /// Automated mail: no-reply senders, alerts, notifications.
     Notification,
+    /// AI sorting says the newest message waits for the user's reply.
+    NeedsReply,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +51,8 @@ pub enum TermKind {
     Label(String),
     /// One mailbox by its store id; how the sidebar lists a mailbox.
     Mailbox(i64),
+    /// An AI sorting category, such as `work` or `finance`.
+    Category(String),
     Account(String),
     /// Unix seconds at the start of the given UTC day.
     Before(i64),
@@ -164,10 +169,21 @@ pub fn parse(input: &str) -> Result<Query> {
                 "vip" => Status::Vip,
                 "newsletter" | "newsletters" => Status::Newsletter,
                 "notification" | "notifications" => Status::Notification,
+                "needs-reply" | "needsreply" | "needs_reply" => Status::NeedsReply,
                 v => return Err(Error::Query(format!(
-                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter or is:notification"
+                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter, is:notification or is:needs-reply"
                 ))),
             }),
+            Some("category") => {
+                let c = t.value.to_lowercase();
+                if !crate::ai::triage::CATEGORIES.contains(&c.as_str()) {
+                    return Err(Error::Query(format!(
+                        "category:{c} is not a category; try {}",
+                        crate::ai::triage::CATEGORIES.map(|c| format!("category:{c}")).join(", ")
+                    )));
+                }
+                TermKind::Category(c)
+            }
             Some("in") => TermKind::In(t.value.clone()),
             Some("mailbox") => TermKind::Mailbox(
                 t.value.parse().map_err(|_| Error::Query(format!("mailbox:{} needs a mailbox id", t.value)))?,
