@@ -1347,6 +1347,7 @@ dependencies = [
 name = "kite-ffi"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "kite-core",
  "rusqlite",
  "thiserror 2.0.21",

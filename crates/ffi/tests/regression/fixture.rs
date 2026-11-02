@@ -15,6 +15,10 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 const BY_DATE: ListSort = ListSort { key: SortKey::Date, reversed: false };
 
+pub fn unique() -> u64 {
+    NEXT.fetch_add(1, Ordering::SeqCst)
+}
+
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
@@ -22,10 +26,19 @@ pub fn now() -> i64 {
 #[derive(Default)]
 pub struct Events(pub Mutex<Vec<&'static str>>);
 
+impl Events {
+    pub fn seen(&self, name: &str) -> bool {
+        self.0.lock().unwrap().contains(&name)
+    }
+}
+
 impl CoreListener for Events {
     fn on_event(&self, event: CoreEvent) {
         let name = match event {
             CoreEvent::ListsChanged => "lists",
+            CoreEvent::NewMail { .. } => "new mail",
+            CoreEvent::Sent { .. } => "sent",
+            CoreEvent::SyncFinished { .. } => "synced",
             CoreEvent::ActionFailed { .. } => "action failed",
             CoreEvent::SendFailed { .. } => "send failed",
             _ => "other",
@@ -45,13 +58,19 @@ pub struct App {
 
 impl App {
     pub fn new() -> App {
+        let app = App::unstarted();
+        app.core.start().expect("the engine starts");
+        app
+    }
+
+    /// The app before `start`: accounts added now are synced from the start.
+    pub fn unstarted() -> App {
         kite_core::secrets::use_memory_store();
-        let dir = std::env::temp_dir().join(format!("kite-regression-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
+        let dir = std::env::temp_dir().join(format!("kite-regression-{}-{}", std::process::id(), unique()));
         let _ = std::fs::remove_dir_all(&dir);
         let events = Arc::new(Events::default());
         let core = Core::open(dir.to_string_lossy().into(), events.clone()).expect("the data folder opens");
         let kite = Kite::open(&dir).expect("a second handle opens");
-        core.start().expect("the engine starts");
         App { core, kite, dir, events }
     }
 
@@ -172,7 +191,7 @@ impl Mail {
             subject: subject.into(),
             body: body.into(),
             date: now() - 3600,
-            id: format!("<{}.{}@test.invalid>", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)),
+            id: format!("<{}.{}.{}@test.invalid>", std::process::id(), now(), unique()),
             in_reply_to: None,
             references: Vec::new(),
             attachment: None,

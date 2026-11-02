@@ -2,9 +2,11 @@
 //! Mac app calls. `cargo test -p kite-ffi --test regression`.
 
 mod fixture;
+mod server;
 
 mod accounts;
 mod compose;
 mod mail;
 mod search;
 mod store;
+mod sync;

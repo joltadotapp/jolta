@@ -37,7 +37,7 @@ fn triage_an_inbox() {
 
     app.events.0.lock().unwrap().clear();
     let archived = app.core.perform(ThreadAction::Archive, vec![lunch.0], ListContext::Inbox).unwrap();
-    assert!(app.events.0.lock().unwrap().contains(&"lists"), "the app is told to reload its lists");
+    assert!(app.events.seen("lists"), "the app is told to reload its lists");
     assert_eq!(app.subjects("in:inbox"), ["Re: Quarterly numbers"]);
     assert_eq!(app.subjects("in:archive"), ["Lunch?"]);
     assert_eq!(app.count(PENDING), 1);
@@ -53,7 +53,7 @@ fn triage_an_inbox() {
     app.core.empty_mailboxes(vec![trash.0]).unwrap();
     assert!(app.subjects("in:trash").is_empty());
     assert_eq!(app.subjects("in:sent"), ["Re: Quarterly numbers"], "emptying Trash leaves the sent copy alone");
-    assert!(!app.events.0.lock().unwrap().contains(&"action failed"));
+    assert!(!app.events.seen("action failed"));
 }
 
 /// Flags and "mark all as read" act on what the list shows, and undo
