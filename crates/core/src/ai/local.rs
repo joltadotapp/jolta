@@ -33,7 +33,7 @@ pub const MODELS: &[LocalModel] = &[
     LocalModel {
         id: "gemma-4-e2b",
         name: "Gemma 4 E2B",
-        detail: "Fast, and writes good Dutch and French.",
+        detail: "Fast, and good at multiple languages.",
         file: "gemma-4-E2B-it-Q4_0.gguf",
         url: "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
         size: 2_841_481_184,
