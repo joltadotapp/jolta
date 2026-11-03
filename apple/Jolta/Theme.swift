@@ -1,27 +1,26 @@
 import AppKit
 import SwiftUI
 
-/// Graphite design tokens (docs/design/direction-a.html). One accent, and it
+/// Design tokens of the theme on screen (ThemeStore). One accent, and it
 /// only marks where the keyboard is.
 @MainActor
 enum Theme {
-    static let bg = dynamic(dark: 0x121214, light: 0xFBFBFA)
-    static let side = dynamic(dark: 0x0C0C0E, light: 0xF3F3F1)
-    static let reader = dynamic(dark: 0x161619, light: 0xFFFFFF)
-    static let raise = dynamic(dark: 0x1D1D21, light: 0xFFFFFF)
-    static let line = dynamic(dark: 0x26262B, light: 0xE5E5E2)
-    static let line2 = dynamic(dark: 0x1C1C20, light: 0xEFEFEC)
-    static let text = dynamic(dark: 0xECECEE, light: 0x17171A)
-    static let text2 = dynamic(dark: 0xA6A6AE, light: 0x55555D)
-    static let text3 = dynamic(dark: 0x8D8D97, light: 0x66666E)
-    static let fill = dynamic(dark: 0x202025, light: 0xEEEEEB)
-    static let hover = dynamic(dark: 0x18181C, light: 0xF5F5F3)
-    static let accent = dynamic(dark: 0xFF6B2C, light: 0xE5521A)
-    /// A starred conversation's star: the app icon's amber, not a second accent.
-    static let star = dynamic(dark: 0xFFC233, light: 0xD99A00)
-    static let accentText = dynamic(dark: 0xFF8A55, light: 0xB23A0A)
-    static let kbd = dynamic(dark: 0x2A2A30, light: 0xECECEA)
-    static let kbdText = dynamic(dark: 0xB4B4BC, light: 0x4A4A52)
+    static var bg: NSColor { ThemeStore.shared.color(\.bg) }
+    static var side: NSColor { ThemeStore.shared.color(\.side) }
+    static var reader: NSColor { ThemeStore.shared.color(\.reader) }
+    static var raise: NSColor { ThemeStore.shared.color(\.raise) }
+    static var line: NSColor { ThemeStore.shared.color(\.line) }
+    static var line2: NSColor { ThemeStore.shared.color(\.line2) }
+    static var text: NSColor { ThemeStore.shared.color(\.text) }
+    static var text2: NSColor { ThemeStore.shared.color(\.text2) }
+    static var text3: NSColor { ThemeStore.shared.color(\.text3) }
+    static var fill: NSColor { ThemeStore.shared.color(\.fill) }
+    static var hover: NSColor { ThemeStore.shared.color(\.hover) }
+    static var accent: NSColor { ThemeStore.shared.color(\.accent) }
+    static var star: NSColor { ThemeStore.shared.color(\.star) }
+    static var accentText: NSColor { ThemeStore.shared.color(\.accentText) }
+    static var kbd: NSColor { ThemeStore.shared.color(\.kbd) }
+    static var kbdText: NSColor { ThemeStore.shared.color(\.kbdText) }
 
     static let rowHeight: CGFloat = 40
     static let senderWidth: CGFloat = 136
@@ -35,12 +34,6 @@ enum Theme {
 
     /// Digits line up; letters stay proportional so `26/10/24` fits the 52 pt date column.
     static let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
-
-    static func dynamic(dark: UInt32, light: UInt32) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(hex: dark) : NSColor(hex: light)
-        }
-    }
 
     private static let time: DateFormatter = {
         let f = DateFormatter()
@@ -80,7 +73,7 @@ enum Theme {
 }
 
 extension NSColor {
-    convenience init(hex: UInt32, alpha: CGFloat = 1) {
+    nonisolated convenience init(hex: UInt32, alpha: CGFloat = 1) {
         self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
                   blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
     }
