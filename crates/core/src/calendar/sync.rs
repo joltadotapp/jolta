@@ -66,6 +66,8 @@ pub async fn subscribe(jolta: &Jolta, url: &str) -> Result<Calendar> {
     jolta.store.write_async(move |tx| store::add_calendar(tx, CalendarSource::Webcal, &feed)).await
 }
 
+/// What a sync changed in the store. Objects the source sent again
+/// unchanged don't count.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyncReport {
     pub upserted: usize,
@@ -101,13 +103,17 @@ pub async fn sync_calendar(jolta: &Jolta, id: CalendarId) -> Result<SyncReport> 
             for (remote_id, change) in &changes {
                 match change {
                     Some((etag, events, blob)) => {
-                        store::apply_item(tx, id, remote_id, etag.as_deref(), events, blob.as_deref(), &horizon)?;
-                        report.upserted += 1;
+                        report.upserted += usize::from(store::apply_item(
+                            tx,
+                            id,
+                            remote_id,
+                            etag.as_deref(),
+                            events,
+                            blob.as_deref(),
+                            &horizon,
+                        )?);
                     }
-                    None => {
-                        store::remove_item(tx, id, remote_id, &horizon)?;
-                        report.removed += 1;
-                    }
+                    None => report.removed += usize::from(store::remove_item(tx, id, remote_id, &horizon)?),
                 }
             }
             store::set_calendar_cursor(tx, id, batch.cursor.as_deref(), batch.refresh)?;

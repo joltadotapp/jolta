@@ -60,7 +60,7 @@ fn removing_an_account_leaves_nothing_behind() {
             let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
             let event = EventData::new("holiday", Span::AllDay { start: day, end: day.succ_opt().unwrap() });
             let horizon = Horizon::around(chrono::DateTime::from_timestamp(now(), 0).unwrap(), jolta_core::calendar::tz::zone("UTC").unwrap());
-            store::apply_item(tx, calendar, "holiday.ics", Some("1"), &[event], Some(&event_blob), &horizon)
+            store::apply_item(tx, calendar, "holiday.ics", Some("1"), &[event], Some(&event_blob), &horizon).map(drop)
         })
         .unwrap();
     assert_eq!(app.count("SELECT count(*) FROM occurrence"), 1);

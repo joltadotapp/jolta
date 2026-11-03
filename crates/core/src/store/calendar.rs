@@ -195,7 +195,7 @@ fn moment_text(m: &Moment) -> String {
 
 /// Replaces the events of one remote object and rebuilds the occurrences of
 /// every series it touched. An unchanged ETag skips the work, so applying the
-/// same batch twice is harmless.
+/// same batch twice is harmless. False when nothing changed.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_item(
     conn: &Connection,
@@ -205,7 +205,7 @@ pub fn apply_item(
     events: &[EventData],
     blob: Option<&str>,
     horizon: &Horizon,
-) -> Result<()> {
+) -> Result<bool> {
     if let Some(etag) = etag {
         let (rows, same): (i64, i64) = conn.query_row(
             "SELECT count(*), count(*) FILTER (WHERE etag = ?3) FROM event WHERE calendar_id = ?1 AND remote_id = ?2",
@@ -213,7 +213,7 @@ pub fn apply_item(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if rows > 0 && rows == same {
-            return Ok(());
+            return Ok(false);
         }
     }
     let mut uids = item_uids(conn, calendar, remote_id)?;
@@ -248,18 +248,19 @@ pub fn apply_item(
     for uid in &uids {
         rebuild_series(conn, calendar, uid, horizon)?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Deletes the events of one remote object. Series they belonged to keep
-/// their other events, rebuilt without them.
-pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, horizon: &Horizon) -> Result<()> {
+/// their other events, rebuilt without them. False when there were none.
+pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, horizon: &Horizon) -> Result<bool> {
     let uids = item_uids(conn, calendar, remote_id)?;
-    conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
+    let deleted =
+        conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
     for uid in &uids {
         rebuild_series(conn, calendar, uid, horizon)?;
     }
-    Ok(())
+    Ok(deleted > 0)
 }
 
 fn item_uids(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result<BTreeSet<String>> {
@@ -515,12 +516,12 @@ mod tests {
         }
     }
 
-    fn apply(s: &Store, cal: CalendarId, remote_id: &str, etag: Option<&str>, events: &[EventData]) {
-        s.write(|tx| apply_item(tx, cal, remote_id, etag, events, None, &horizon())).unwrap();
+    fn apply(s: &Store, cal: CalendarId, remote_id: &str, etag: Option<&str>, events: &[EventData]) -> bool {
+        s.write(|tx| apply_item(tx, cal, remote_id, etag, events, None, &horizon())).unwrap()
     }
 
-    fn remove(s: &Store, cal: CalendarId, remote_id: &str) {
-        s.write(|tx| remove_item(tx, cal, remote_id, &horizon())).unwrap();
+    fn remove(s: &Store, cal: CalendarId, remote_id: &str) -> bool {
+        s.write(|tx| remove_item(tx, cal, remote_id, &horizon())).unwrap()
     }
 
     /// (start, title) of every occurrence in November 2026, in order.
@@ -613,13 +614,14 @@ mod tests {
         let s = store("idempotent");
         let cal = work_calendar(&s);
         let batch = |s: &Store, etag: Option<&str>| {
-            apply(s, cal, "master.ics", etag, &[weekly("u1", "2026-11-03 09:00", 3), moved("u1", "2026-11-10 09:00", "2026-11-10 14:00")]);
-            apply(s, cal, "single.ics", etag, &[EventData { title: "Lunch".into(), ..EventData::new("u2", timed("2026-11-05 12:00", 60)) }]);
+            apply(s, cal, "master.ics", etag, &[weekly("u1", "2026-11-03 09:00", 3), moved("u1", "2026-11-10 09:00", "2026-11-10 14:00")])
+                | apply(s, cal, "single.ics", etag, &[EventData { title: "Lunch".into(), ..EventData::new("u2", timed("2026-11-05 12:00", 60)) }])
         };
-        batch(&s, Some("e1"));
+        assert!(batch(&s, Some("e1")));
         let first = snapshot(&s);
-        batch(&s, Some("e1"));
+        assert!(!batch(&s, Some("e1")), "same ETags report no change");
         assert_eq!(snapshot(&s), first, "same ETags");
+        assert!(!remove(&s, cal, "never-stored.ics"));
         batch(&s, None);
         batch(&s, None);
         let without = snapshot(&s);

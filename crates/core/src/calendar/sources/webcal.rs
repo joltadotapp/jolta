@@ -77,6 +77,7 @@ impl Webcal {
         let resp = req.send().await.map_err(http_error)?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_MODIFIED {
+            tracing::debug!("{}: not modified", self.url);
             return Ok(SyncBatch { changes: Vec::new(), cursor: calendar.cursor.clone(), refresh: None });
         }
         if !status.is_success() {
