@@ -67,3 +67,32 @@ struct TitleBarArea: NSViewRepresentable {
         }
     }
 }
+
+/// Remembers a window's size and place between launches. Kite's windows opt
+/// out of state restoration, because for it AppKit keeps a picture of the
+/// window in memory (20 MB or more on a large screen, two at once while it
+/// saves); this keeps the part of restoration people notice.
+struct WindowFrameMemory: NSViewRepresentable {
+    let name: String
+
+    func makeNSView(context: Context) -> NSView { Holder(name: name) }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    private final class Holder: NSView {
+        let name: String
+
+        init(name: String) {
+            self.name = name
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, window.frameAutosaveName != name else { return }
+            window.setFrameUsingName(name)
+            window.setFrameAutosaveName(name)
+        }
+    }
+}

@@ -18,6 +18,7 @@ struct KiteApp: App {
                 }
             }
             .frame(minWidth: 1140, minHeight: 600)
+            .background(WindowFrameMemory(name: "Kite main window"))
             .task {
                 guard model == nil else { return }
                 await ReaderPage.prepare()
@@ -26,6 +27,8 @@ struct KiteApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1440, height: 900)
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.presented)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandGroup(replacing: .appSettings) { SettingsMenuButton() }
@@ -58,9 +61,11 @@ struct KiteApp: App {
 
         Window("Settings", id: "settings") {
             SettingsView(model: model)
+                .background(WindowFrameMemory(name: "Kite settings window"))
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 720)
+        .restorationBehavior(.disabled)
         .windowResizability(.contentMinSize)
 
         MenuBarExtra {

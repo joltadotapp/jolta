@@ -29,6 +29,9 @@ pub use sections::*;
 
 const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql")];
 const READERS: usize = 4;
+const MMAP_BYTES: i64 = 2 << 30;
+const WRITER_CACHE_KIB: i64 = 8_000;
+const READER_CACHE_KIB: i64 = 2_000;
 
 #[derive(Clone)]
 pub struct Store {
@@ -44,7 +47,7 @@ struct Inner {
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         let mut writer = Connection::open(path)?;
-        configure(&writer)?;
+        configure(&writer, WRITER_CACHE_KIB)?;
         writer.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&mut writer)?;
 
@@ -54,7 +57,7 @@ impl Store {
                     path,
                     OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 )?;
-                configure(&conn)?;
+                configure(&conn, READER_CACHE_KIB)?;
                 Ok(Mutex::new(conn))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -104,11 +107,16 @@ impl Store {
     }
 }
 
-fn configure(conn: &Connection) -> Result<()> {
+/// Reads come from the database file mapped into memory, which macOS can
+/// drop under pressure and doesn't count against the app, so each
+/// connection's own page cache stays small: with five connections at the
+/// old 16 MB each, the caches alone could reach 80 MB.
+fn configure(conn: &Connection, cache_kib: i64) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    conn.pragma_update(None, "cache_size", -16000)?;
+    conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
+    conn.pragma_update(None, "cache_size", -cache_kib)?;
     Ok(())
 }
 
