@@ -32,6 +32,7 @@ struct JoltaApp: App {
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandGroup(replacing: .appSettings) { SettingsMenuButton() }
+            CommandGroup(replacing: .newItem) { NewMessageButton(model: model) }
             CommandMenu("Format") {
                 Button("Bold") { RichTextView.focused?.toggle(.bold) }.keyboardShortcut("b")
                 Button("Italic") { RichTextView.focused?.toggle(.italic) }.keyboardShortcut("i")
@@ -73,6 +74,23 @@ struct JoltaApp: App {
         } label: {
             MenuBarLabel(model: model)
         }
+    }
+}
+
+/// ⌘N, the same as C in the list. Off while a message is being written,
+/// which it would replace.
+struct NewMessageButton: View {
+    let model: AppModel?
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("New Message") {
+            openWindow(id: "main")
+            model?.palette = nil
+            model?.startCompose()
+        }
+        .keyboardShortcut("n")
+        .disabled(model == nil || model?.compose != nil)
     }
 }
 

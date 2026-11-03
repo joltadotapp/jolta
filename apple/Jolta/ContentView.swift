@@ -132,6 +132,7 @@ struct ColumnResizer: NSViewRepresentable {
 
 struct Sidebar: View {
     let model: AppModel
+    @AppStorage("AccountsCollapsed") private var accountsCollapsed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -193,7 +194,11 @@ struct Sidebar: View {
                         }
                     }
                     if !model.accounts.isEmpty {
-                        GroupLabel("Accounts")
+                        GroupLabel("Accounts", collapsed: $accountsCollapsed,
+                                   count: model.accounts.flatMap(\.mailboxes).filter { !$0.hidden && ($0.role == nil || $0.role == "inbox") }
+                                       .reduce(0) { $0 + Int($1.unread) })
+                    }
+                    if !model.accounts.isEmpty, !accountsCollapsed {
                         ForEach(model.accounts) { section in
                             let folders = section.mailboxes.filter { $0.role == nil || $0.role == "inbox" }
                             let hidden = folders.filter(\.hidden)
@@ -271,15 +276,53 @@ struct Sidebar: View {
 
 struct GroupLabel: View {
     let title: String
-    init(_ title: String) { self.title = title }
+    /// A group that folds away by clicking its label.
+    var collapsed: Binding<Bool>?
+    /// Unread mail inside the group, shown while it is folded away.
+    var count = 0
+    @State private var hovering = false
+
+    init(_ title: String, collapsed: Binding<Bool>? = nil, count: Int = 0) {
+        self.title = title
+        self.collapsed = collapsed
+        self.count = count
+    }
 
     var body: some View {
-        Text(title)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color(Theme.text3))
-            .padding(.horizontal, 10)
-            .padding(.top, 18)
-            .padding(.bottom, 6)
+        if let collapsed {
+            Button { withAnimation(.easeOut(duration: 0.15)) { collapsed.wrappedValue.toggle() } } label: {
+                HStack(spacing: 5) {
+                    label
+                    // Shown on hover, as in Finder, and always while folded so the hidden rows are findable.
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .rotationEffect(.degrees(collapsed.wrappedValue ? 0 : 90))
+                        .opacity(hovering || collapsed.wrappedValue ? 1 : 0)
+                    Spacer()
+                    if collapsed.wrappedValue, count > 0 {
+                        Text("\(count)").font(.system(size: 11).monospacedDigit())
+                    }
+                }
+                .foregroundStyle(Color(Theme.text3))
+                .padding(.horizontal, 10)
+                .padding(.top, 18)
+                .padding(.bottom, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .help(collapsed.wrappedValue ? "Show \(title.lowercased())" : "Hide \(title.lowercased())")
+        } else {
+            label
+                .foregroundStyle(Color(Theme.text3))
+                .padding(.horizontal, 10)
+                .padding(.top, 18)
+                .padding(.bottom, 6)
+        }
+    }
+
+    private var label: some View {
+        Text(title).font(.system(size: 11, weight: .semibold))
     }
 }
 

@@ -396,6 +396,10 @@ struct HelpView: View {
                     KeyCap(key: "⌘K").frame(width: 52, alignment: .leading)
                     Text("Command palette").foregroundStyle(Color(Theme.text2))
                 }
+                HStack(spacing: 10) {
+                    KeyCap(key: "⌘N").frame(width: 52, alignment: .leading)
+                    Text("New message").foregroundStyle(Color(Theme.text2))
+                }
             }
             .font(.system(size: 12.5))
         }

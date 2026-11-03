@@ -85,7 +85,32 @@ struct ComposeView: View {
                     FieldRow(label: "Bcc") { recipientField(draft.bcc, .bcc) }
                         .zIndex(focus == .bcc ? 1 : 0)
                 }
-                FieldRow(label: "Subject") { TextField("", text: draft.subject).focused($focus, equals: .subject) }
+                FieldRow(label: "Subject") {
+                    TextField("", text: draft.subject)
+                        .focused($focus, equals: .subject)
+                        // The body is an AppKit text view, outside SwiftUI's focus order.
+                        .onKeyPress(.tab) {
+                            guard let body = RichTextView.messageBody else { return .ignored }
+                            body.window?.makeFirstResponder(body)
+                            return .handled
+                        }
+                }
+                if let schedule = model.composeSchedule {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock").foregroundStyle(Color(Theme.text3))
+                        Text("Scheduled for \(schedule.label). Esc keeps it scheduled.").foregroundStyle(Color(Theme.text2))
+                        Button { model.composeSchedule = nil } label: {
+                            Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color(Theme.text3))
+                        .help("Don't send it then; keep it as a draft")
+                        Spacer()
+                    }
+                    .font(.system(size: 12.5))
+                    .frame(height: 34)
+                    .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+                }
                 if let reminder = model.composeReminder {
                     HStack(spacing: 8) {
                         Image(systemName: "bell").foregroundStyle(Color(Theme.text3))

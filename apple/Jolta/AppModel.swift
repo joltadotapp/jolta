@@ -64,6 +64,9 @@ final class AppModel {
     private(set) var scheduled: [ScheduledInfo] = []
     /// A reminder chosen for the message being written.
     var composeReminder: Reminder?
+    /// When the message being written was scheduled to go, while it is open
+    /// again from the sidebar. Closing it keeps it scheduled.
+    var composeSchedule: Reminder?
 
     struct Reminder: Equatable {
         let at: Int64
@@ -608,6 +611,7 @@ final class AppModel {
 
     func startCompose() {
         composeReminder = nil
+        composeSchedule = nil
         compose = (try? core.newCompose()) ?? .blank
     }
 
@@ -617,6 +621,7 @@ final class AppModel {
         Task {
             do {
                 composeReminder = nil
+                composeSchedule = nil
                 compose = try await core.replyCompose(threadId: thread, mode: mode, utcOffset: offset)
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
@@ -634,6 +639,7 @@ final class AppModel {
             if let reminder = composeReminder { text += ", reminder \(reminder.label)" }
             compose = nil
             composeReminder = nil
+            composeSchedule = nil
             requestListFocus()
             show(Toast(text: text, undo: .send(token)))
         } catch {
@@ -648,14 +654,18 @@ final class AppModel {
         editor.insert(body: core.expandSnippet(body: snippet.body, to: compose.to), core: core)
     }
 
-    /// Takes a scheduled message back for editing.
+    /// Opens a scheduled message for editing. It stays scheduled for the same
+    /// time unless it is sent now, given a new time or turned into a draft.
     func editScheduled(_ message: ScheduledInfo) {
+        // Replacing an open message would lose it, or its schedule.
+        if compose != nil { closeCompose() }
         guard let back = try? core.cancelSend(token: message.token) else {
             return show(Toast(text: "Already sent", undo: nil))
         }
+        composeReminder = nil
+        composeSchedule = Reminder(at: message.sendAt, label: PaletteView.when(message.sendAt))
         compose = back
         reloadAccounts()
-        show(Toast(text: "Unscheduled. Send it again when it's ready.", undo: nil))
     }
 
     func saveDraft() {
@@ -665,8 +675,14 @@ final class AppModel {
         }
     }
 
-    /// Closes the editor and keeps what was written as a draft.
+    /// Closes the editor and keeps what was written as a draft, or, for a
+    /// scheduled message, back in the outbox for its time.
     func closeCompose() {
+        if let schedule = composeSchedule, compose?.isEmpty == false {
+            let due = schedule.at <= Int64(Date.now.timeIntervalSince1970) + 10
+            return due ? sendCompose() : sendCompose(at: schedule.at, label: schedule.label)
+        }
+        composeSchedule = nil
         saveDraft()
         if compose?.isEmpty == false { show(Toast(text: "Saved to Drafts", undo: nil)) }
         compose = nil
@@ -674,6 +690,7 @@ final class AppModel {
     }
 
     func discardCompose() {
+        composeSchedule = nil
         if let id = compose?.draftId { try? core.discardDraft(draftId: id) }
         compose = nil
         requestListFocus()
