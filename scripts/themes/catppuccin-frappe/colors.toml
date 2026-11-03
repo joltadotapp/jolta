@@ -1,0 +1,28 @@
+# Catppuccin Frappé, from github.com/catppuccin/palette (palette.json at 07d02aa),
+# MIT License, Copyright (c) 2021 Catppuccin; see LICENSE-catppuccin.
+# Mapped onto Omarchy's names the way Omarchy maps Mocha (themes/catppuccin),
+# with Catppuccin's peach as orange.
+name = "Catppuccin Frappé"
+mode = "dark"
+
+accent = "#8caaee"
+selection = "#51576d"
+muted = "#626880"
+
+background = "#303446"
+dark_background = "#242734"
+darker_background = "#181a23"
+lighter_background = "#414559"
+
+foreground = "#c6d0f5"
+dark_foreground = "#737994"
+light_foreground = "#b5bfe2"
+bright_foreground = "#c6d0f5"
+
+red = "#e78284"
+yellow = "#e5c890"
+orange = "#ef9f76"
+green = "#a6d189"
+cyan = "#81c8be"
+blue = "#8caaee"
+magenta = "#f4b8e4"

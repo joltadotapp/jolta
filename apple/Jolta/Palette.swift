@@ -69,10 +69,12 @@ struct PaletteView: View {
         case .snippets: all = snippetItems
         case .themes: all = themeItems
         }
-        let needle = text.lowercased().trimmingCharacters(in: .whitespaces)
+        // "frappe" finds Catppuccin Frappé, "geneve" a folder called Genève.
+        let fold = { (s: String) in s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
+        let needle = fold(text).trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return all }
         let scored = all.compactMap { item -> (Int, PaletteItem)? in
-            guard let s = score(item.title.lowercased(), needle) else { return nil }
+            guard let s = score(fold(item.title), needle) else { return nil }
             return (s, item)
         }
         var out = scored.sorted { $0.0 > $1.0 }.map(\.1)

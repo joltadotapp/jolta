@@ -1,0 +1,28 @@
+# Catppuccin Macchiato, from github.com/catppuccin/palette (palette.json at 07d02aa),
+# MIT License, Copyright (c) 2021 Catppuccin; see LICENSE-catppuccin.
+# Mapped onto Omarchy's names the way Omarchy maps Mocha (themes/catppuccin),
+# with Catppuccin's peach as orange.
+name = "Catppuccin Macchiato"
+mode = "dark"
+
+accent = "#8aadf4"
+selection = "#494d64"
+muted = "#5b6078"
+
+background = "#24273a"
+dark_background = "#1b1d2c"
+darker_background = "#12141d"
+lighter_background = "#363a4f"
+
+foreground = "#cad3f5"
+dark_foreground = "#6e738d"
+light_foreground = "#b8c0e0"
+bright_foreground = "#cad3f5"
+
+red = "#ed8796"
+yellow = "#eed49f"
+orange = "#f5a97f"
+green = "#a6da95"
+cyan = "#8bd5ca"
+blue = "#8aadf4"
+magenta = "#f5bde6"

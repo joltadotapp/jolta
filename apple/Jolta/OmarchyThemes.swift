@@ -24,11 +24,39 @@
 // LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// Catppuccin Frappé and Macchiato come from Catppuccin's palette
+// (https://github.com/catppuccin/palette), mapped onto Omarchy's names in
+// scripts/themes/, used under its MIT license:
+//
+// MIT License
+//
+// Copyright (c) 2021 Catppuccin
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
 nonisolated extension OmarchyTheme {
     static let all: [OmarchyTheme] = [
-        OmarchyTheme(id: "catppuccin", name: "Catppuccin", mode: .dark, background: 0x1E1E2E, darkBackground: 0x161622, lighterBackground: 0x313244, foreground: 0xCDD6F4, selection: 0x45475A, accent: 0x89B4FA, yellow: 0xF9E2AF, blue: 0x89B4FA, cyan: 0x94E2D5, green: 0xA6E3A1, magenta: 0xF5C2E7, orange: 0xF6B6AB),
+        OmarchyTheme(id: "catppuccin-frappe", name: "Catppuccin Frappé", mode: .dark, background: 0x303446, darkBackground: 0x242734, lighterBackground: 0x414559, foreground: 0xC6D0F5, selection: 0x51576D, accent: 0x8CAAEE, yellow: 0xE5C890, blue: 0x8CAAEE, cyan: 0x81C8BE, green: 0xA6D189, magenta: 0xF4B8E4, orange: 0xEF9F76),
         OmarchyTheme(id: "catppuccin-latte", name: "Catppuccin Latte", mode: .light, background: 0xEFF1F5, darkBackground: 0xE3E4E8, lighterBackground: 0xDCE0E8, foreground: 0x4C4F69, selection: 0xCCD0DA, accent: 0x1E66F5, yellow: 0xDF8E1D, blue: 0x1E66F5, cyan: 0x179299, green: 0x40A02B, magenta: 0xEA76CB, orange: 0xD84E2B),
+        OmarchyTheme(id: "catppuccin-macchiato", name: "Catppuccin Macchiato", mode: .dark, background: 0x24273A, darkBackground: 0x1B1D2C, lighterBackground: 0x363A4F, foreground: 0xCAD3F5, selection: 0x494D64, accent: 0x8AADF4, yellow: 0xEED49F, blue: 0x8AADF4, cyan: 0x8BD5CA, green: 0xA6DA95, magenta: 0xF5BDE6, orange: 0xF5A97F),
+        OmarchyTheme(id: "catppuccin", name: "Catppuccin Mocha", mode: .dark, background: 0x1E1E2E, darkBackground: 0x161622, lighterBackground: 0x313244, foreground: 0xCDD6F4, selection: 0x45475A, accent: 0x89B4FA, yellow: 0xF9E2AF, blue: 0x89B4FA, cyan: 0x94E2D5, green: 0xA6E3A1, magenta: 0xF5C2E7, orange: 0xF6B6AB),
         OmarchyTheme(id: "ethereal", name: "Ethereal", mode: .dark, background: 0x060B1E, darkBackground: 0x040816, lighterBackground: 0x131A3A, foreground: 0xFFCEAD, selection: 0x252E56, accent: 0x7D82D9, yellow: 0xE9BB4F, blue: 0x7D82D9, cyan: 0xA3BFD1, green: 0x92A593, magenta: 0xC89DC1, orange: 0xEB8B54),
         OmarchyTheme(id: "everforest", name: "Everforest", mode: .dark, background: 0x2D353B, darkBackground: 0x21272C, lighterBackground: 0x343F44, foreground: 0xD3C6AA, selection: 0x3D484D, accent: 0x7FBBB3, yellow: 0xDBBC7F, blue: 0x7FBBB3, cyan: 0x83C092, green: 0xA7C080, magenta: 0xD699B6, orange: 0xE09D7F),
         OmarchyTheme(id: "flexoki-light", name: "Flexoki Light", mode: .light, background: 0xFFFCF0, darkBackground: 0xF2EFE4, lighterBackground: 0xE6E4D9, foreground: 0x100F0F, selection: 0xCECDC3, accent: 0x205EA6, yellow: 0xD0A215, blue: 0x205EA6, cyan: 0x3AA99F, green: 0x879A39, magenta: 0xCE5D97, orange: 0xD0772B),
