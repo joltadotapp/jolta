@@ -556,15 +556,38 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
             layout = if wide { " jolta-wide" } else { "" },
         ));
     }
-    let html = format!(
+    Rendered { html: document(app_css, &css, &body), remote_images: remote_by_message.iter().sum(), remote_by_message }
+}
+
+fn document(app_css: &str, css: &str, body: &str) -> String {
+    format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
          <meta name=\"color-scheme\" content=\"light dark\">\
          <style>{}</style><style>{css}</style></head><body>{body}</body></html>",
         app_css.replace("</", "<\\/")
-    );
-    Rendered { html, remote_images: remote_by_message.iter().sum(), remote_by_message }
+    )
+}
+
+/// An event description as a locked-down document: the same sanitiser, CSS
+/// filter, blocked remote images and CSP as mail, because descriptions come
+/// from whoever sent the invitation. Empty when there is no description.
+pub fn render_description(description: &str, is_html: bool, app_css: &str) -> String {
+    if description.trim().is_empty() {
+        return String::new();
+    }
+    let scope = "#jolta-description";
+    let (body, css) = if is_html {
+        let (html, styles) = extract_styles(description);
+        let clean = sanitizer().clean(&html).to_string();
+        let mut css: String = styles.iter().map(|s| filter_css(s, scope)).collect();
+        css.push_str(&dark_attribute_rules(&clean, scope));
+        (clean, css)
+    } else {
+        (text_to_html(description), String::new())
+    };
+    document(app_css, &css, &format!("<div class=\"jolta-body\" id=\"jolta-description\">{body}</div>"))
 }
 
 #[cfg(test)]
@@ -646,6 +669,22 @@ input[value^="a"] { background: url(http://evil.test/5) }
         assert!(html.contains("color: light-dark(blue, "), "inline colors survive, adapted for dark mode");
         assert!(html.contains("#m1{color: light-dark(red, "), "style blocks survive, scoped");
         assert!(html.contains("@media (max-width: 600px){#m1 .x{width: 100%}"));
+    }
+
+    #[test]
+    fn hostile_event_description_loads_nothing_remote() {
+        let body = HOSTILE.split_once("\n\n").unwrap().1;
+        let html = render_description(body, true, "body{}");
+        for n in 1..=18 {
+            let url = format!("evil.test/{n}");
+            assert!(!html.contains(&url), "leaked {url}:\n{html}");
+        }
+        assert!(html.contains("x-remote:http://evil.test/pixel.gif"));
+        assert!(html.contains("Content-Security-Policy"));
+        assert!(!html.contains("<script") && !html.contains("javascript:") && !html.contains("onload"));
+        assert!(html.contains("#jolta-description{color: light-dark(red, "), "style blocks survive, scoped");
+        assert!(render_description("<b>Agenda</b>", false, "").contains("&lt;b&gt;Agenda"), "text stays text");
+        assert_eq!(render_description("  \n", true, ""), "");
     }
 
     #[test]
