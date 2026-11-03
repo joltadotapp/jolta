@@ -4,10 +4,17 @@
 use std::time::{Duration, Instant};
 
 use super::series::Horizon;
-use super::sources::{Change, Source, caldav::CalDav, webcal::Webcal};
+use super::sources::{Change, Source, caldav::CalDav, google::Google, graph::GraphCalendar, webcal::Webcal};
 use super::{Calendar, CalendarId, CalendarSource};
 use crate::store::{self, RemoteCalendar};
 use crate::{Account, AccountId, AccountKind, Error, Jolta, Result};
+
+/// Whether turning calendar on needs the user to grant calendar access in
+/// the browser first (`oauth::begin_calendar`). Google and Microsoft accounts
+/// do until calendar is on; CalDAV uses the mail password.
+pub fn needs_consent(account: &Account) -> bool {
+    matches!(account.kind, AccountKind::Gmail | AccountKind::Graph) && !account.calendar
+}
 
 /// The source an account's calendars come from.
 async fn account_source(jolta: &Jolta, account: &Account) -> Result<Source> {
@@ -17,16 +24,15 @@ async fn account_source(jolta: &Jolta, account: &Account) -> Result<Source> {
             let url = jolta.store.read_async(move |c| store::caldav_url(c, id)).await?;
             Ok(Source::CalDav(CalDav::new(account, url.as_deref())?))
         }
-        AccountKind::Gmail | AccountKind::Graph => {
-            Err(Error::Other(format!("calendars for {} accounts need calendar permission, which comes next", account.kind)))
-        }
+        AccountKind::Gmail => Ok(Source::Google(Google::new(account)?)),
+        AccountKind::Graph => Ok(Source::Graph(GraphCalendar::new(account)?)),
     }
 }
 
 async fn calendar_source(jolta: &Jolta, calendar: &Calendar) -> Result<Source> {
     match (calendar.source, calendar.account_id) {
         (CalendarSource::Webcal, _) => Ok(Source::Webcal(Webcal::new(&calendar.remote_id)?)),
-        (CalendarSource::CalDav, Some(id)) => {
+        (CalendarSource::CalDav | CalendarSource::Google | CalendarSource::Graph, Some(id)) => {
             let account = jolta.store.read_async(move |c| store::account(c, id)).await?;
             account_source(jolta, &account).await
         }
@@ -37,10 +43,12 @@ async fn calendar_source(jolta: &Jolta, calendar: &Calendar) -> Result<Source> {
 /// Turns calendar on for an account and lists its calendars: the primary
 /// one shown, the others hidden until the user picks them. Calling it again
 /// refreshes the list and keeps those choices. When the server can't be
-/// reached, calendar stays off.
+/// reached, calendar stays off. For an account that `needs_consent`, run
+/// the calendar sign-in first; calendar turns on only when the list comes
+/// back, so a refused grant leaves the account as it was.
 pub async fn enable(jolta: &Jolta, account: AccountId) -> Result<Vec<Calendar>> {
     let a = jolta.store.read_async(move |c| store::account(c, account)).await?;
-    let source = account_source(jolta, &a).await?;
+    let source = account_source(jolta, &Account { calendar: true, ..a }).await?;
     let list = source.list_calendars().await?;
     let kind = source.kind();
     jolta

@@ -36,11 +36,11 @@ pub struct SyncBatch {
     pub refresh: Option<i64>,
 }
 
-/// Google and Microsoft Graph join as variants once calendar consent is
-/// asked for on those accounts.
 pub enum Source {
     CalDav(caldav::CalDav),
     Webcal(webcal::Webcal),
+    Google(google::Google),
+    Graph(graph::GraphCalendar),
 }
 
 impl Source {
@@ -48,6 +48,8 @@ impl Source {
         match self {
             Source::CalDav(_) => CalendarSource::CalDav,
             Source::Webcal(_) => CalendarSource::Webcal,
+            Source::Google(_) => CalendarSource::Google,
+            Source::Graph(_) => CalendarSource::Graph,
         }
     }
 
@@ -55,6 +57,8 @@ impl Source {
         match self {
             Source::CalDav(s) => s.list_calendars().await,
             Source::Webcal(s) => s.list_calendars().await,
+            Source::Google(s) => s.list_calendars().await,
+            Source::Graph(s) => s.list_calendars().await,
         }
     }
 
@@ -62,6 +66,8 @@ impl Source {
         match self {
             Source::CalDav(s) => s.sync(calendar, known).await,
             Source::Webcal(s) => s.sync(calendar, known).await,
+            Source::Google(s) => s.sync(calendar, known).await,
+            Source::Graph(s) => s.sync(calendar, known).await,
         }
     }
 }

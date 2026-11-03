@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use clap::{Subcommand, ValueEnum};
 use jolta_core::Jolta;
+use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, ical, sync, synth, tz};
@@ -17,8 +18,14 @@ use crate::{pct, truncate};
 
 #[derive(Subcommand)]
 pub enum CalCommand {
-    /// Turn calendar on for an account and list its calendars.
-    Enable { account: String },
+    /// Turn calendar on for an account and list its calendars. Google and
+    /// Microsoft accounts first grant calendar access in the browser.
+    Enable {
+        account: String,
+        /// Listen for the sign-in on this port, for an SSH tunnel (see `account add-microsoft`).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
     /// Turn calendar off for an account: its calendars leave Jolta, the server keeps them.
     Disable { account: String },
     /// Every calendar with its source, account, settings and event count.
@@ -68,8 +75,15 @@ pub enum OnOff {
 
 pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
     match cmd {
-        CalCommand::Enable { account } => {
+        CalCommand::Enable { account, port } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            if sync::needs_consent(&a) {
+                let provider = Provider::for_kind(a.kind).context("an OAuth account")?;
+                let pending = oauth::begin_calendar(&a, provider.client(&jolta.data_dir)?, port).await?;
+                println!("Jolta needs your permission to read {}'s calendars.", a.address);
+                let signed = crate::browser_sign_in(pending, port, a.provider_label()).await?;
+                oauth::save_grant(&a, &signed)?;
+            }
             let t = Instant::now();
             let list = sync::enable(jolta, a.id).await?;
             println!("Calendar is on for {} ({} calendars, listed in {:.1} s):", a.address, list.len(), t.elapsed().as_secs_f64());

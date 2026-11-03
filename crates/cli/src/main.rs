@@ -189,6 +189,39 @@ enum AccountCommand {
     },
 }
 
+/// Opens the browser on a sign-in and waits for its redirect, on the
+/// listener or pasted by hand when the browser runs on another machine.
+pub(crate) async fn browser_sign_in(pending: jolta_core::oauth::Pending, port: u16, label: &str) -> Result<jolta_core::oauth::SignedIn> {
+    println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
+    if port == 0 {
+        println!("Browser on another machine? Connect with ssh -L 8765:127.0.0.1:8765 and run this again with --port 8765.");
+        println!("For short addresses, pasting the 127.0.0.1 or localhost address it ends on here also works.");
+    } else {
+        println!("Waiting on port {port}. Through an SSH tunnel, the browser's redirect comes straight here.");
+    }
+    if std::env::var_os("JOLTA_NO_BROWSER").is_none() {
+        std::process::Command::new("open").arg(&pending.url).status().ok();
+    }
+    // A terminal in line-editing mode takes at most 1024 characters per
+    // line; Microsoft's redirect is longer. Read raw input instead.
+    let raw_tty = std::io::stdin().is_terminal()
+        && std::process::Command::new("stty").arg("-icanon").stdin(std::process::Stdio::inherit()).status().is_ok_and(|s| s.success());
+    let pasted = async {
+        let mut line = String::new();
+        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+        use tokio::io::AsyncBufReadExt;
+        match stdin.read_line(&mut line).await {
+            Ok(n) if n > 0 && line.contains("code=") => Some(line),
+            _ => std::future::pending().await,
+        }
+    };
+    let signed = pending.finish_or_paste(pasted).await;
+    if raw_tty {
+        std::process::Command::new("stty").arg("icanon").stdin(std::process::Stdio::inherit()).status().ok();
+    }
+    signed.map_err(|e| anyhow::anyhow!(jolta_core::graph::explain_sign_in_error(&e.to_string())))
+}
+
 #[derive(Subcommand)]
 enum DevCommand {
     /// APPEND .eml files to a mailbox (by server path, such as INBOX).
@@ -405,34 +438,7 @@ async fn account(jolta: &Jolta, cmd: AccountCommand) -> Result<()> {
             };
             let client = provider.client(&jolta.data_dir)?;
             let pending = oauth::begin(provider, client, port).await?;
-            println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
-            if port == 0 {
-                println!("Browser on another machine? Connect with ssh -L 8765:127.0.0.1:8765 and run this again with --port 8765.");
-                println!("For short addresses, pasting the 127.0.0.1 or localhost address it ends on here also works.");
-            } else {
-                println!("Waiting on port {port}. Through an SSH tunnel, the browser's redirect comes straight here.");
-            }
-            if std::env::var_os("JOLTA_NO_BROWSER").is_none() {
-                std::process::Command::new("open").arg(&pending.url).status().ok();
-            }
-            // A terminal in line-editing mode takes at most 1024 characters per
-            // line; Microsoft's redirect is longer. Read raw input instead.
-            let raw_tty = std::io::stdin().is_terminal()
-                && std::process::Command::new("stty").arg("-icanon").stdin(std::process::Stdio::inherit()).status().is_ok_and(|s| s.success());
-            let pasted = async {
-                let mut line = String::new();
-                let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
-                use tokio::io::AsyncBufReadExt;
-                match stdin.read_line(&mut line).await {
-                    Ok(n) if n > 0 && line.contains("code=") => Some(line),
-                    _ => std::future::pending().await,
-                }
-            };
-            let signed = pending.finish_or_paste(pasted).await;
-            if raw_tty {
-                std::process::Command::new("stty").arg("icanon").stdin(std::process::Stdio::inherit()).status().ok();
-            }
-            let signed = signed.map_err(|e| anyhow::anyhow!(jolta_core::graph::explain_sign_in_error(&e.to_string())))?;
+            let signed = browser_sign_in(pending, port, label).await?;
             let account = oauth::save_account(jolta, provider, &signed)?;
             println!("Added account {}: {}. Run `jolta sync {}` next.", account.id, account.address, account.id);
             Ok(())
