@@ -35,6 +35,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 rpassword = "7.5"
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+chrono-tz = { version = "0.10.4", features = ["serde"] }
+calcard = { version = "=0.3.14", default-features = false }
+rrule = "=0.14.0"
 
 [profile.release]
 lto = "thin"

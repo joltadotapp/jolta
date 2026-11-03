@@ -28,6 +28,8 @@ macro_rules! id_type {
     };
 }
 
+pub(crate) use id_type;
+
 id_type!(AccountId);
 id_type!(MailboxId);
 id_type!(MessageId);
@@ -70,8 +72,23 @@ macro_rules! text_enum {
                 value.as_str()?.parse().map_err(|e: String| FromSqlError::Other(e.into()))
             }
         }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+                let text = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+                text.parse().map_err(serde::de::Error::custom)
+            }
+        }
     };
 }
+
+pub(crate) use text_enum;
 
 text_enum!(AccountKind {
     Imap => "imap",
