@@ -31,19 +31,27 @@ final class ThemeStore {
     /// thread, so the colors read the pair here instead of capturing one.
     private nonisolated static let live = Mutex(ThemePair(dark: ThemePalette.graphiteDark.tokens, light: ThemePalette.graphiteLight.tokens))
     @ObservationIgnored private var colors: [KeyPath<ThemeTokens, UInt32>: NSColor] = [:]
-    @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private let keyPrefix: String
 
+    private static func key(_ mode: ThemeMode, _ prefix: String) -> String {
+        prefix + (mode == .dark ? "ThemeDark" : "ThemeLight")
+    }
+
     private init() {
+        let defaults = UserDefaults.standard
+        let test = AppModel.isTestData ? defaults.string(forKey: "JoltaTestData") ?? "" : ""
+        let prefix = test.isEmpty ? "" : test + "."
         // UI tests save under their own keys and start from Graphite each launch.
-        let test = UserDefaults.standard.string(forKey: "JoltaTestData") ?? ""
-        keyPrefix = test.isEmpty ? "" : test + "."
         if !test.isEmpty {
-            defaults.removeObject(forKey: keyPrefix + "ThemeDark")
-            defaults.removeObject(forKey: keyPrefix + "ThemeLight")
+            defaults.removeObject(forKey: Self.key(.dark, prefix))
+            defaults.removeObject(forKey: Self.key(.light, prefix))
         }
-        let dark = defaults.string(forKey: keyPrefix + "ThemeDark").flatMap(ThemePalette.named) ?? .graphiteDark
-        let light = defaults.string(forKey: keyPrefix + "ThemeLight").flatMap(ThemePalette.named) ?? .graphiteLight
+        func saved(_ mode: ThemeMode) -> ThemePalette? {
+            defaults.string(forKey: Self.key(mode, prefix)).flatMap(ThemePalette.named).flatMap { $0.mode == mode ? $0 : nil }
+        }
+        let dark = saved(.dark) ?? .graphiteDark
+        let light = saved(.light) ?? .graphiteLight
+        keyPrefix = prefix
         darkID = dark.id
         lightID = light.id
         active = ThemePair(dark: dark.tokens, light: light.tokens)
@@ -85,7 +93,7 @@ final class ThemeStore {
     /// Makes `palette` the theme for its mode and ends any preview.
     func save(_ palette: ThemePalette) {
         if palette.mode == .dark { darkID = palette.id } else { lightID = palette.id }
-        defaults.set(palette.id, forKey: keyPrefix + (palette.mode == .dark ? "ThemeDark" : "ThemeLight"))
+        UserDefaults.standard.set(palette.id, forKey: Self.key(palette.mode, keyPrefix))
         preview = nil
         NSApp.appearance = nil
         apply()
