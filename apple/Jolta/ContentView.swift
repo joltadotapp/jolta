@@ -41,14 +41,7 @@ struct ContentView: View {
         }
         .background(Color(Theme.bg))
         .background(MainWindowReader())
-        .alert("Empty Trash?", isPresented: Binding(get: { model.confirmEmpty != nil }, set: { if !$0 { model.confirmEmpty = nil } }),
-               presenting: model.confirmEmpty) { list in
-            Button("Empty Trash", role: .destructive) { model.emptyTrash(list) }
-            Button("Cancel", role: .cancel) {}
-        } message: { list in
-            let accounts = model.trashFolders(list).compactMap { box in model.accounts.first { $0.id == box.accountId }?.title }
-            Text("Everything in Trash in \(ListFormatter.localizedString(byJoining: accounts)) is deleted for good, on this Mac and on the server. You can't undo this.")
-        }
+        .confirmation(Binding(get: { model.confirmEmpty.map(emptyTrash) }, set: { if $0 == nil { model.confirmEmpty = nil } }))
         .foregroundStyle(Color(Theme.text))
         .font(.system(size: 13))
         .ignoresSafeArea()
@@ -125,6 +118,16 @@ struct ColumnResizer: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             start = nil
         }
+    }
+}
+
+extension ContentView {
+    private func emptyTrash(_ list: ListSource) -> Confirmation {
+        let accounts = model.trashFolders(list).compactMap { box in model.accounts.first { $0.id == box.accountId }?.title }
+        return Confirmation(
+            title: "Empty Trash?",
+            message: "Everything in Trash in \(ListFormatter.localizedString(byJoining: accounts)) is deleted for good, on this Mac and on the server. You can't undo this.",
+            action: "Empty Trash") { [model] in model.emptyTrash(list) }
     }
 }
 

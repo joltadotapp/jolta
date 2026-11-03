@@ -54,7 +54,7 @@ struct AccountPage: View {
     @State private var smtpPassword = ""
     @State private var saving = false
     @State private var message: (text: String, failed: Bool)?
-    @State private var confirmRemove = false
+    @State private var removal: Confirmation?
     @State private var signingIn = false
 
     private var isIMAP: Bool { section.account.kind == "imap" }
@@ -156,7 +156,16 @@ struct AccountPage: View {
             }
             SettingsSection("Remove") {
                 SettingsRow(title: "Remove this account", detail: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.") {
-                    Button("Remove…", role: .destructive) { confirmRemove = true }
+                    Button("Remove…", role: .destructive) {
+                        removal = Confirmation(
+                            title: "Remove \(section.account.address)?",
+                            message: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.",
+                            action: "Remove Account") {
+                                try? model.core.removeAccount(accountId: section.id)
+                                model.reloadAccounts()
+                                removed()
+                            }
+                    }
                 }
             }
         }
@@ -166,15 +175,7 @@ struct AccountPage: View {
                         workingText: isIMAP ? "Checking the servers…" : "Saving…", revert: revert, save: save)
             }
         }
-        .confirmationDialog("Remove \(section.account.address)?", isPresented: $confirmRemove) {
-            Button("Remove account and its local mail", role: .destructive) {
-                try? model.core.removeAccount(accountId: section.id)
-                model.reloadAccounts()
-                removed()
-            }
-        } message: {
-            Text("Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.")
-        }
+        .confirmation($removal)
     }
 
     private func binding<T>(_ path: WritableKeyPath<AccountSettingsInfo, T>) -> Binding<T> {
