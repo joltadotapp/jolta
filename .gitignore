@@ -1,6 +1,6 @@
 target/
-/apple/KiteFFI/KiteFFI.xcframework/
-/apple/KiteFFI/Sources/KiteFFI/kite_ffi.swift
+/apple/JoltaFFI/JoltaFFI.xcframework/
+/apple/JoltaFFI/Sources/JoltaFFI/jolta_ffi.swift
 xcuserdata/
 *.xcuserstate
 /build/

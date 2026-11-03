@@ -12,6 +12,7 @@ pub mod model;
 pub mod oauth;
 pub mod people;
 pub mod reader;
+mod rename;
 pub mod rich;
 pub mod render;
 pub mod search;
@@ -62,21 +63,21 @@ pub fn version() -> &'static str {
 }
 
 pub fn greeting() -> String {
-    format!("Kite core {} is running", version())
+    format!("Jolta core {} is running", version())
 }
 
-/// Where Kite keeps its data when nothing else is configured. The CLI and the
+/// Where Jolta keeps its data when nothing else is configured. The CLI and the
 /// sandboxed app share this folder; the app reaches it through a sandbox
 /// exception because macOS keeps unsandboxed tools out of the app group
 /// container (see decisions.md).
 pub fn default_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join("Library/Application Support/Kite")
+    home.join("Library/Application Support/Jolta")
 }
 
 /// The open data directory: the SQLite store plus the blob files.
 #[derive(Clone)]
-pub struct Kite {
+pub struct Jolta {
     pub store: store::Store,
     pub blobs: blobs::Blobs,
     pub data_dir: PathBuf,
@@ -84,12 +85,13 @@ pub struct Kite {
     pub focus: Arc<Mutex<Option<MailboxId>>>,
 }
 
-impl Kite {
-    pub fn open(data_dir: &Path) -> Result<Kite> {
+impl Jolta {
+    pub fn open(data_dir: &Path) -> Result<Jolta> {
+        rename::adopt_kite_data(data_dir)?;
         std::fs::create_dir_all(data_dir)?;
         oauth::set_data_dir(data_dir);
-        Ok(Kite {
-            store: store::Store::open(&data_dir.join("kite.sqlite"))?,
+        Ok(Jolta {
+            store: store::Store::open(&data_dir.join("jolta.sqlite"))?,
             blobs: blobs::Blobs::new(data_dir.join("blobs")),
             data_dir: data_dir.to_path_buf(),
             focus: Arc::default(),

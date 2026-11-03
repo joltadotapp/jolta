@@ -95,7 +95,7 @@ text_enum!(SmtpAuth {
 });
 
 // `System` marks folders the server manages for itself (Gmail's Starred and
-// Important, Outlook's Outbox and Conversation History). Kite keeps them out
+// Important, Outlook's Outbox and Conversation History). Jolta keeps them out
 // of the sidebar.
 text_enum!(MailboxRole {
     Inbox => "inbox",

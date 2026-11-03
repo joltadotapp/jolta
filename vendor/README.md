@@ -1,7 +1,7 @@
 # Vendored crates
 
 `llama-cpp-2` 0.1.160 from crates.io (MIT OR Apache-2.0), used only by the
-`kite-ai` helper, with three changes:
+`jolta-ai` helper, with three changes:
 
 - `LlamaModelParams::with_lazy_mode` (`docs/research/patches/llama-cpp-2-lazy-mode.patch`),
   so Gemma 4's per-layer embedding table stays on disk.

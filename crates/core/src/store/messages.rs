@@ -78,7 +78,7 @@ pub fn insert_message(conn: &Connection, m: &NewMessage) -> Result<Inserted> {
     Ok(Inserted::New(id))
 }
 
-/// A message Kite moved into this mailbox has a link without a UID until the
+/// A message Jolta moved into this mailbox has a link without a UID until the
 /// server reports it here. The first server message with the same
 /// Message-ID claims that link, so the move does not turn into a copy.
 fn adopt_moved(conn: &Connection, m: &NewMessage) -> Result<Option<MessageId>> {
@@ -98,7 +98,7 @@ fn adopt_moved(conn: &Connection, m: &NewMessage) -> Result<Option<MessageId>> {
     Ok(Some(id))
 }
 
-/// Drops links Kite made locally that the server never confirmed, once no
+/// Drops links Jolta made locally that the server never confirmed, once no
 /// queued change could still confirm them.
 pub fn drop_unconfirmed(conn: &Connection, mailbox: MailboxId) -> Result<()> {
     let ids: Vec<MessageId> = conn

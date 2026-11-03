@@ -1,10 +1,10 @@
 import AppKit
 
-// Draws Kite's app icon: a white kite on an orange squircle, its cross spar
+// Draws the app icon: a white kite on an orange squircle, its cross spar
 // folded like an envelope flap. Variant b is the dark one (orange kite on
 // graphite). Writes every macOS size into the asset catalog:
 //
-//   swiftc -O -o /tmp/app-icon scripts/app-icon.swift && /tmp/app-icon a apple/Kite/Assets.xcassets/AppIcon.appiconset
+//   swiftc -O -o /tmp/app-icon scripts/app-icon.swift && /tmp/app-icon a apple/Jolta/Assets.xcassets/AppIcon.appiconset
 let args = CommandLine.arguments
 let variant = args[1], folder = args[2]
 

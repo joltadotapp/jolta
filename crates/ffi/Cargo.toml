@@ -1,12 +1,12 @@
 [package]
-name = "kite-ffi"
+name = "jolta-ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [lib]
-name = "kite_ffi"
+name = "jolta_ffi"
 crate-type = ["staticlib", "lib"]
 
 [[bin]]
@@ -14,7 +14,7 @@ name = "uniffi-bindgen-swift"
 path = "src/bin/uniffi-bindgen-swift.rs"
 
 [dependencies]
-kite-core.workspace = true
+jolta-core.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 thiserror.workspace = true
 tokio.workspace = true

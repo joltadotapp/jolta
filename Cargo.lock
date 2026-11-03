@@ -1276,27 +1276,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-sys"
-version = "0.3.107"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
-dependencies = [
- "cfg-if",
- "futures-util",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "keyring-core"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29fbf4b551298c67925f38cf341a1ada797a75f1837bdf8ae1fc8e2ebc6efb59"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "kite-ai"
+name = "jolta-ai"
 version = "0.1.0"
 dependencies = [
  "llama-cpp-2",
@@ -1304,13 +1284,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kite-cli"
+name = "jolta-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "futures",
- "kite-core",
+ "jolta-core",
  "rpassword",
  "serde_json",
  "tokio",
@@ -1318,7 +1298,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kite-core"
+name = "jolta-core"
 version = "0.1.0"
 dependencies = [
  "ammonia",
@@ -1344,11 +1324,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "kite-ffi"
+name = "jolta-ffi"
 version = "0.1.0"
 dependencies = [
  "futures",
- "kite-core",
+ "jolta-core",
  "rusqlite",
  "thiserror 2.0.21",
  "tokio",
@@ -1357,10 +1337,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "kite-mcp"
+name = "jolta-mcp"
 version = "0.1.0"
 dependencies = [
  "tokio",
+]
+
+[[package]]
+name = "js-sys"
+version = "0.3.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "keyring-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29fbf4b551298c67925f38cf341a1ada797a75f1837bdf8ae1fc8e2ebc6efb59"
+dependencies = [
+ "log",
 ]
 
 [[package]]

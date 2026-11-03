@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use kite_core::ai::{self, Cancel, Finish, Phase, Progress, Provider, download, local, tasks};
-use kite_core::compose;
-use kite_core::{AccountId, ThreadId};
+use jolta_core::ai::{self, Cancel, Finish, Phase, Progress, Provider, download, local, tasks};
+use jolta_core::compose;
+use jolta_core::{AccountId, ThreadId};
 
 use crate::{ComposeData, Core, CoreError, CoreEvent, Result};
 
@@ -146,7 +146,7 @@ impl Core {
         if let Some(state) = self.downloads.lock().unwrap_or_else(|e| e.into_inner()).get(model.id) {
             return state.1.clone();
         }
-        match download::state(&self.kite.data_dir, model) {
+        match download::state(&self.jolta.data_dir, model) {
             download::State::Missing => ModelState::NotDownloaded,
             download::State::Partial(done) => ModelState::Paused { done },
             download::State::Ready => ModelState::Ready,
@@ -161,7 +161,7 @@ impl Core {
 #[uniffi::export]
 impl Core {
     pub fn ai_settings(&self) -> Result<AiSettingsInfo> {
-        let s = self.kite.store.read(ai::settings)?;
+        let s = self.jolta.store.read(ai::settings)?;
         Ok(AiSettingsInfo {
             provider: s.provider.map(Into::into),
             local_model: s.local_model.clone(),
@@ -187,9 +187,9 @@ impl Core {
             auto_summary: settings.auto_summary,
             sort_mail: settings.sort_mail,
         };
-        self.kite.store.write(|tx| ai::save_settings(tx, &s))?;
+        self.jolta.store.write(|tx| ai::save_settings(tx, &s))?;
         // Switching sorting on (or to a model that sorts) catches up on two weeks of inbox.
-        self.background.catch_up(&self.kite);
+        self.background.catch_up(&self.jolta);
         Ok(())
     }
 
@@ -199,14 +199,14 @@ impl Core {
         self.background.set_allowed(allowed);
     }
 
-    /// A search query in Kite's language for a plain-language request,
+    /// A search query in Jolta's language for a plain-language request,
     /// already checked by the parser. None when AI is off.
     pub async fn ai_search_query(&self, request: String, utc_offset: i32) -> Result<Option<String>> {
-        let (kite, ai) = (self.kite.clone(), self.ai.clone());
+        let (jolta, ai) = (self.jolta.clone(), self.ai.clone());
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         Ok(self
             .runtime
-            .spawn(async move { kite_core::ai::search::query(&kite, &ai, &request, now, utc_offset, &Cancel::default()).await })
+            .spawn(async move { jolta_core::ai::search::query(&jolta, &ai, &request, now, utc_offset, &Cancel::default()).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??)
     }
@@ -267,7 +267,7 @@ impl Core {
             if downloads.contains_key(model.id) {
                 return;
             }
-            let done = match download::state(&self.kite.data_dir, model) {
+            let done = match download::state(&self.jolta.data_dir, model) {
                 download::State::Partial(done) => done,
                 _ => 0,
             };
@@ -276,7 +276,7 @@ impl Core {
         self.model_event(model.id, self.model_state(model));
         let core = self.clone();
         self.runtime.spawn(async move {
-            let data_dir = core.kite.data_dir.clone();
+            let data_dir = core.jolta.data_dir.clone();
             let reporter = core.clone();
             let mut on = move |step: download::Step| {
                 let state = match step {
@@ -309,7 +309,7 @@ impl Core {
     pub fn remove_model(&self, id: String) -> Result<()> {
         self.pause_download(id.clone());
         let model = local::model(&id);
-        download::remove(&self.kite.data_dir, model)?;
+        download::remove(&self.jolta.data_dir, model)?;
         self.model_event(model.id, ModelState::NotDownloaded);
         Ok(())
     }
@@ -318,7 +318,7 @@ impl Core {
     /// one is made.
     pub fn cached_summary(&self, thread_id: i64) -> Result<Option<SummaryInfo>> {
         let thread = ThreadId(thread_id);
-        Ok(self.kite.store.read(|c| {
+        Ok(self.jolta.store.read(|c| {
             let Some(s) = tasks::cached_summary(c, thread)? else { return Ok(None) };
             let newest = tasks::newest_message(c, thread)?;
             Ok(Some(SummaryInfo { current: newest == Some(s.last_message), text: s.text, model: s.model }))
@@ -329,10 +329,10 @@ impl Core {
     /// the automatic-summary setting; `fresh` ignores a saved summary.
     pub fn summarize(&self, thread_id: i64, automatic: bool, fresh: bool, listener: Arc<dyn AiListener>) -> Arc<AiTask> {
         let cancel = Cancel::default();
-        let (kite, ai, stop) = (self.kite.clone(), self.ai.clone(), cancel.clone());
+        let (jolta, ai, stop) = (self.jolta.clone(), self.ai.clone(), cancel.clone());
         self.runtime.spawn(async move {
             let mut on = progress(&listener);
-            let outcome = match tasks::summarise(&kite, &ai, ThreadId(thread_id), automatic, fresh, &stop, &mut on).await {
+            let outcome = match tasks::summarise(&jolta, &ai, ThreadId(thread_id), automatic, fresh, &stop, &mut on).await {
                 Ok(tasks::SummaryOutcome::Done(s)) => AiOutcome::Done { text: s.text, model: s.model },
                 Ok(tasks::SummaryOutcome::NotNeeded) => AiOutcome::NotNeeded,
                 Ok(tasks::SummaryOutcome::NotSetUp) => AiOutcome::NotSetUp,
@@ -348,11 +348,11 @@ impl Core {
     /// arrives in the body format; put it in place with `with_written`.
     pub fn draft_message(&self, compose: ComposeData, instruction: String, listener: Arc<dyn AiListener>) -> Arc<AiTask> {
         let cancel = Cancel::default();
-        let (kite, ai, stop) = (self.kite.clone(), self.ai.clone(), cancel.clone());
+        let (jolta, ai, stop) = (self.jolta.clone(), self.ai.clone(), cancel.clone());
         self.runtime.spawn(async move {
             let mut on = progress(&listener);
-            let label = kite.store.read(ai::settings).map(|s| s.label()).unwrap_or_default();
-            let outcome = match tasks::draft(&kite, &ai, &compose.into(), &instruction, &stop, &mut on).await {
+            let label = jolta.store.read(ai::settings).map(|s| s.label()).unwrap_or_default();
+            let outcome = match tasks::draft(&jolta, &ai, &compose.into(), &instruction, &stop, &mut on).await {
                 Ok(Some(Finish::Done(text))) => AiOutcome::Done { text, model: label },
                 Ok(Some(Finish::Cancelled)) => AiOutcome::Cancelled,
                 Ok(None) => AiOutcome::NotSetUp,
@@ -379,16 +379,16 @@ impl Core {
 impl Core {
     fn account_signature(&self, account_id: Option<i64>) -> String {
         account_id
-            .and_then(|a| self.kite.store.read(|c| kite_core::store::account(c, AccountId(a))).ok())
+            .and_then(|a| self.jolta.store.read(|c| jolta_core::store::account(c, AccountId(a))).ok())
             .map(|a| a.signature)
             .unwrap_or_default()
     }
 }
 
-/// The helper next to the app's executable (`Kite.app/Contents/MacOS`).
+/// The helper next to the app's executable (`Jolta.app/Contents/MacOS`).
 pub(crate) fn helper_path() -> std::path::PathBuf {
-    std::env::var_os("KITE_AI_HELPER").map(Into::into).unwrap_or_else(|| {
-        std::env::current_exe().unwrap_or_default().with_file_name("kite-ai")
+    std::env::var_os("JOLTA_AI_HELPER").map(Into::into).unwrap_or_else(|| {
+        std::env::current_exe().unwrap_or_default().with_file_name("jolta-ai")
     })
 }
 

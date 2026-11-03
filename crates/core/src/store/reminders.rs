@@ -93,10 +93,10 @@ mod tests {
 
     #[test]
     fn unanswered_mail_comes_back_to_the_inbox_until_triaged() {
-        let dir = std::env::temp_dir().join(format!("kite-remind-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jolta-remind-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let s = crate::store::Store::open(&dir.join("kite.sqlite")).unwrap();
+        let s = crate::store::Store::open(&dir.join("jolta.sqlite")).unwrap();
         s.write(|tx| {
             tx.execute_batch(
                 "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'me@home.test', 'me', 'a1', 0);

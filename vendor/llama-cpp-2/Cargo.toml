@@ -120,6 +120,6 @@ priority = 0
 level = "warn"
 priority = 0
 
-# Kite: building without the `common` feature leaves some code unused.
+# Jolta: building without the `common` feature leaves some code unused.
 [lints.rust]
 unused = "allow"

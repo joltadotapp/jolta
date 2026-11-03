@@ -13,7 +13,7 @@ use super::{Ai, Cancel, Finish, Progress, Request, Settings};
 use crate::compose::{self, Compose};
 use crate::model::*;
 use crate::reader::{self, ThreadMessage};
-use crate::{Kite, Result, imap, rich, store};
+use crate::{Jolta, Result, imap, rich, store};
 
 /// Shorter conversations read faster than their summary: one or two
 /// messages under this many characters get none unless asked for.
@@ -122,11 +122,11 @@ struct Message {
     text: String,
 }
 
-async fn load(kite: &Kite, thread: ThreadId) -> Result<(String, Vec<Message>)> {
-    let (subject, metas) = kite.store.read_async(move |c| reader::thread_messages(c, thread)).await?;
+async fn load(jolta: &Jolta, thread: ThreadId) -> Result<(String, Vec<Message>)> {
+    let (subject, metas) = jolta.store.read_async(move |c| reader::thread_messages(c, thread)).await?;
     let mut out = Vec::with_capacity(metas.len());
     for meta in metas {
-        let raw = imap::message_source(kite, meta.id).await.unwrap_or_default();
+        let raw = imap::message_source(jolta, meta.id).await.unwrap_or_default();
         out.push(Message { text: message_text(&raw), meta });
     }
     Ok((subject, out))
@@ -163,7 +163,7 @@ fn transcript(messages: &[Message], budget: usize) -> String {
 }
 
 /// The language summaries are written in, whatever the mail's language:
-/// the app's. Kite's interface is English only for now.
+/// the app's. Jolta's interface is English only for now.
 pub const APP_LANGUAGE: &str = "English";
 
 fn summary_system(language: &str) -> String {
@@ -206,7 +206,7 @@ pub enum SummaryOutcome {
 /// the user turned automatic summaries off. `fresh` writes a new summary
 /// even when the saved one is current.
 pub async fn summarise(
-    kite: &Kite,
+    jolta: &Jolta,
     ai: &Ai,
     thread: ThreadId,
     automatic: bool,
@@ -214,7 +214,7 @@ pub async fn summarise(
     cancel: &Cancel,
     on: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<SummaryOutcome> {
-    let (settings, cached) = kite.store.read_async(move |c| Ok((super::settings(c)?, cached_summary(c, thread)?))).await?;
+    let (settings, cached) = jolta.store.read_async(move |c| Ok((super::settings(c)?, cached_summary(c, thread)?))).await?;
     let cached = cached.filter(|_| !fresh);
     if settings.provider.is_none() {
         return Ok(SummaryOutcome::NotSetUp);
@@ -222,7 +222,7 @@ pub async fn summarise(
     if automatic && !settings.auto_summary {
         return Ok(SummaryOutcome::NotNeeded);
     }
-    let (subject, messages) = load(kite, thread).await?;
+    let (subject, messages) = load(jolta, thread).await?;
     let Some(newest) = messages.last().map(|m| m.meta.id) else { return Ok(SummaryOutcome::NotNeeded) };
     if let Some(c) = cached.as_ref().filter(|c| c.last_message == newest) {
         return Ok(SummaryOutcome::Done(c.clone()));
@@ -259,7 +259,7 @@ pub async fn summarise(
     };
     let summary = Summary { text, model: settings.label(), last_message: newest };
     let saved = summary.clone();
-    kite.store.write(|tx| save_summary(tx, thread, &saved))?;
+    jolta.store.write(|tx| save_summary(tx, thread, &saved))?;
     Ok(SummaryOutcome::Done(summary))
 }
 
@@ -279,19 +279,19 @@ fn clean_bullets(text: &str) -> String {
 /// answers. Returns the text in the body format, for
 /// `compose::with_written`; None when AI is off.
 pub async fn draft(
-    kite: &Kite,
+    jolta: &Jolta,
     ai: &Ai,
     c: &Compose,
     instruction: &str,
     cancel: &Cancel,
     on: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<Option<Finish>> {
-    let settings: Settings = kite.store.read_async(super::settings).await?;
+    let settings: Settings = jolta.store.read_async(super::settings).await?;
     if settings.provider.is_none() {
         return Ok(None);
     }
     let (account, replying_to) = (c.account, c.replying_to);
-    let (sender, thread) = kite
+    let (sender, thread) = jolta
         .store
         .read_async(move |conn| {
             let sender = account.map(|a| store::account(conn, a)).transpose()?;
@@ -323,7 +323,7 @@ pub async fn draft(
     let mut language = None;
     match thread {
         Some(t) => {
-            let (subject, messages) = load(kite, t).await?;
+            let (subject, messages) = load(jolta, t).await?;
             let text = transcript(&messages, Ai::budget(&settings));
             user.push_str(&format!("The conversation, \"{subject}\":\n\n{text}\n\n"));
             user.push_str(&format!("The reply goes to: {}\n\n", if c.to.is_empty() { "the sender" } else { &c.to }));
@@ -346,7 +346,7 @@ pub async fn draft(
         None => "a short closing in the email's language",
     };
     let sign = match (signature.trim().is_empty(), first.is_empty()) {
-        (false, _) => format!("End with {closing} and no name: Kite adds the signature below it."),
+        (false, _) => format!("End with {closing} and no name: Jolta adds the signature below it."),
         (true, false) => format!("End with {closing} and the name {first}."),
         (true, true) => format!("End with {closing}."),
     };

@@ -1,4 +1,4 @@
-//! `kite`: a developer tool over the Kite core.
+//! `jolta`: a developer tool over the Jolta core.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -7,16 +7,16 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use kite_core::imap::{self, SyncEvent, SyncOptions};
-use kite_core::search::{self, ThreadRow};
-use kite_core::store;
-use kite_core::{AccountKind, Kite, MailboxRole, MessageId, secrets, synth};
+use jolta_core::imap::{self, SyncEvent, SyncOptions};
+use jolta_core::search::{self, ThreadRow};
+use jolta_core::store;
+use jolta_core::{AccountKind, Jolta, MailboxRole, MessageId, secrets, synth};
 
 #[derive(Parser)]
-#[command(name = "kite", version, about = "Kite mail core, from the command line")]
+#[command(name = "jolta", version, about = "Jolta mail core, from the command line")]
 struct Cli {
-    /// Data directory; defaults to the app group container shared with Kite.app.
-    #[arg(long, env = "KITE_DATA_DIR", global = true)]
+    /// Data directory; defaults to the app group container shared with Jolta.app.
+    #[arg(long, env = "JOLTA_DATA_DIR", global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -121,7 +121,7 @@ enum Command {
         /// For snooze: when to wake, in plain words ("tomorrow 9am", "in 2h"), in UTC.
         #[arg(long)]
         until: Option<String>,
-        /// Only record the change; Kite.app sends it at its next sync. Needs
+        /// Only record the change; Jolta.app sends it at its next sync. Needs
         /// no Keychain access, so it works for accounts the app signed in.
         #[arg(long)]
         no_wait: bool,
@@ -131,7 +131,7 @@ enum Command {
     /// Delete everything in a mailbox for good (Empty Trash), here and on the server.
     Empty {
         mailbox: i64,
-        /// Only record it; Kite.app deletes on the server at its next sync.
+        /// Only record it; Jolta.app deletes on the server at its next sync.
         #[arg(long)]
         no_wait: bool,
     },
@@ -196,14 +196,14 @@ enum DevCommand {
     },
     /// UID SEARCH, printing matching UIDs. Example criteria: SUBJECT "test".
     Search { account: String, mailbox: String, criteria: Vec<String> },
-    /// UID STORE. Example: kite dev store 3 INBOX 12,14 '+FLAGS (\Flagged)'
+    /// UID STORE. Example: jolta dev store 3 INBOX 12,14 '+FLAGS (\Flagged)'
     Store { account: String, mailbox: String, uids: String, change: String },
     /// Mark UIDs deleted and expunge them.
     Expunge { account: String, mailbox: String, uids: String },
     /// GET a Microsoft Graph path (such as /me/mailFolders/inbox/messages) and print the JSON.
     Graph { account: String, path: String },
     /// Add an account with no server and the usual folders, for test data
-    /// filled with `kite import`. The UI tests use it.
+    /// filled with `jolta import`. The UI tests use it.
     LocalAccount { address: String },
 }
 
@@ -229,15 +229,15 @@ enum Provider {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     let cli = Cli::parse();
-    let data_dir = cli.data_dir.unwrap_or_else(kite_core::default_data_dir);
-    let kite = Kite::open(&data_dir).with_context(|| format!("opening {}", data_dir.display()))?;
+    let data_dir = cli.data_dir.unwrap_or_else(jolta_core::default_data_dir);
+    let jolta = Jolta::open(&data_dir).with_context(|| format!("opening {}", data_dir.display()))?;
 
     match cli.command {
-        Command::Account(cmd) => account(&kite, cmd).await,
+        Command::Account(cmd) => account(&jolta, cmd).await,
         Command::Mailboxes { account } => {
-            let a = kite.store.read(|c| store::find_account(c, &account))?;
-            for m in kite.store.read(|c| store::mailboxes(c, a.id))? {
-                let count: i64 = kite.store.read(|c| {
+            let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            for m in jolta.store.read(|c| store::mailboxes(c, a.id))? {
+                let count: i64 = jolta.store.read(|c| {
                     Ok(c.query_row("SELECT count(*) FROM message_mailbox WHERE mailbox_id = ?1", [m.id], |r| r.get(0))?)
                 })?;
                 let role = m.role.map(|r| r.to_string()).unwrap_or_default();
@@ -245,60 +245,60 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Sync { account, no_bodies } => sync(&kite, account, !no_bodies).await,
+        Command::Sync { account, no_bodies } => sync(&jolta, account, !no_bodies).await,
         Command::Ls { query, limit, offset } => {
             let q = search::parse(&query.join(" "))?;
-            let rows = kite.store.read(|c| search::query_page(c, &q, offset, limit))?;
+            let rows = jolta.store.read(|c| search::query_page(c, &q, offset, limit))?;
             print_rows(&rows);
             Ok(())
         }
         Command::Search { query, limit } => {
             let q = search::parse(&query.join(" "))?;
             let t = Instant::now();
-            let rows = kite.store.read(|c| search::query_page(c, &q, 0, limit))?;
+            let rows = jolta.store.read(|c| search::query_page(c, &q, 0, limit))?;
             let page_ms = t.elapsed().as_secs_f64() * 1000.0;
             let t = Instant::now();
-            let count = kite.store.read(|c| search::query_count(c, &q))?;
+            let count = jolta.store.read(|c| search::query_count(c, &q))?;
             let count_ms = t.elapsed().as_secs_f64() * 1000.0;
             print_rows(&rows);
             println!("\n{count} threads. First page {page_ms:.2} ms, count {count_ms:.2} ms.");
             Ok(())
         }
-        Command::Show { id, raw } => show(&kite, MessageId(id), raw).await,
-        Command::Ai(cmd) => ai(&kite, cmd).await,
+        Command::Show { id, raw } => show(&jolta, MessageId(id), raw).await,
+        Command::Ai(cmd) => ai(&jolta, cmd).await,
         Command::Open { thread } => {
             let t = Instant::now();
-            let (_, messages) = kite.store.read(|c| kite_core::reader::thread_messages(c, kite_core::ThreadId(thread)))?;
+            let (_, messages) = jolta.store.read(|c| jolta_core::reader::thread_messages(c, jolta_core::ThreadId(thread)))?;
             println!("load rows: {:.2} ms ({} messages)", t.elapsed().as_secs_f64() * 1000.0, messages.len());
             for m in &messages {
                 let t = Instant::now();
-                let raw = imap::message_source(&kite, m.id).await?;
+                let raw = imap::message_source(&jolta, m.id).await?;
                 println!("  source {}: {:.2} ms, {} bytes", m.id.0, t.elapsed().as_secs_f64() * 1000.0, raw.len());
             }
             for _ in 0..3 {
                 let t = Instant::now();
-                let detail = kite_core::reader::open_thread(&kite, kite_core::ThreadId(thread), "", 0).await?;
+                let detail = jolta_core::reader::open_thread(&jolta, jolta_core::ThreadId(thread), "", 0).await?;
                 println!("open_thread total: {:.2} ms, {} bytes of HTML", t.elapsed().as_secs_f64() * 1000.0, detail.rendered.html.len());
             }
             Ok(())
         }
         Command::Import { account, mailbox, files } => {
-            let a = kite.store.read(|c| store::find_account(c, &account))?;
-            let boxes = kite.store.read(|c| store::mailboxes(c, a.id))?;
+            let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            let boxes = jolta.store.read(|c| store::mailboxes(c, a.id))?;
             let target = boxes
                 .iter()
                 .find(|b| b.id.0.to_string() == mailbox || b.role.is_some_and(|r| r.as_str() == mailbox))
                 .with_context(|| format!("no mailbox {mailbox} in {}", a.address))?;
             for f in files {
                 let raw = std::fs::read(&f).with_context(|| format!("reading {}", f.display()))?;
-                let id = kite_core::import::import_raw(&kite, a.id, target.id, &raw)?;
+                let id = jolta_core::import::import_raw(&jolta, a.id, target.id, &raw)?;
                 println!("{id}  {}", f.display());
             }
             Ok(())
         }
         Command::Gen { messages } => {
             let t = Instant::now();
-            let id = synth::generate(&kite, messages, |n| {
+            let id = synth::generate(&jolta, messages, |n| {
                 eprint!("\r{n} / {messages}");
                 std::io::stderr().flush().ok();
             })?;
@@ -306,57 +306,57 @@ async fn main() -> Result<()> {
             println!("Account {id} ({}) has {messages} messages, built in {:.1} s.", synth::ADDRESS, t.elapsed().as_secs_f64());
             Ok(())
         }
-        Command::Bench { runs } => bench(&kite, runs),
-        Command::Dev(cmd) => dev(&kite, cmd).await,
+        Command::Bench { runs } => bench(&jolta, runs),
+        Command::Dev(cmd) => dev(&jolta, cmd).await,
         Command::McpServe { socket } => {
             let t0 = Instant::now();
-            let sink: kite_core::engine::Sink = Arc::new(move |e| eprintln!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
-            let engine = kite_core::engine::Engine::start(kite.clone(), sink.clone(), tokio::runtime::Handle::current())?;
+            let sink: jolta_core::engine::Sink = Arc::new(move |e| eprintln!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
+            let engine = jolta_core::engine::Engine::start(jolta.clone(), sink.clone(), tokio::runtime::Handle::current())?;
             eprintln!("MCP server on {}", socket.display());
-            kite_core::mcp::serve(&socket, kite.clone(), engine, sink).await?;
+            jolta_core::mcp::serve(&socket, jolta.clone(), engine, sink).await?;
             Ok(())
         }
         Command::Agents { decision, agent, grants } => {
             if let (Some(d), Some(id)) = (decision, agent) {
                 let grants: Vec<_> = grants.split(',').filter_map(|g| store::Grant::parse(g.trim())).collect();
-                kite.store.write(|tx| store::decide_agent(tx, id, d == "approve", &grants))?;
+                jolta.store.write(|tx| store::decide_agent(tx, id, d == "approve", &grants))?;
             }
-            for a in kite.store.read(store::agents)? {
+            for a in jolta.store.read(store::agents)? {
                 let grants: Vec<&str> = a.grants.iter().map(|g| g.as_str()).collect();
                 println!("{:>3}  {:<24} {:?}  {}", a.id, a.name, a.state, grants.join(","));
             }
-            for e in kite.store.read(|c| store::audit_log(c, 10))? {
+            for e in jolta.store.read(|c| store::audit_log(c, 10))? {
                 println!("  audit: {} {} {} -> {}", e.agent, e.tool, e.summary, e.outcome);
             }
             Ok(())
         }
         Command::Watch => {
             let t0 = Instant::now();
-            let sink: kite_core::engine::Sink = Arc::new(move |e| println!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
-            let _engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+            let sink: jolta_core::engine::Sink = Arc::new(move |e| println!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
+            let _engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Command::Act { action, thread, from, undo, until, no_wait } => act(&kite, action, thread, from, undo, until, no_wait).await,
+        Command::Act { action, thread, from, undo, until, no_wait } => act(&jolta, action, thread, from, undo, until, no_wait).await,
         Command::MarkAllRead { query } => {
-            let q = kite_core::search::parse(&format!("{query} is:unread"))?;
-            list_action(&kite, |engine| Ok(engine.mark_all_read(&q)?.len())).await
+            let q = jolta_core::search::parse(&format!("{query} is:unread"))?;
+            list_action(&jolta, |engine| Ok(engine.mark_all_read(&q)?.len())).await
         }
         Command::Empty { mailbox, no_wait: true } => {
-            kite.store.write(|tx| kite_core::actions::empty(tx, kite_core::MailboxId(mailbox)))?;
-            println!("recorded; Kite.app empties it on the server at its next sync");
+            jolta.store.write(|tx| jolta_core::actions::empty(tx, jolta_core::MailboxId(mailbox)))?;
+            println!("recorded; Jolta.app empties it on the server at its next sync");
             Ok(())
         }
         Command::Empty { mailbox, no_wait: false } => {
-            list_action(&kite, |engine| Ok(engine.empty(&[kite_core::MailboxId(mailbox)]).map(|_| 1)?)).await
+            list_action(&jolta, |engine| Ok(engine.empty(&[jolta_core::MailboxId(mailbox)]).map(|_| 1)?)).await
         }
         Command::Send { account, to, subject, body, reply, all, attach } => {
-            send(&kite, &account, to, subject, body, reply, all, attach).await
+            send(&jolta, &account, to, subject, body, reply, all, attach).await
         }
     }
 }
 
-async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
+async fn account(jolta: &Jolta, cmd: AccountCommand) -> Result<()> {
     match cmd {
         AccountCommand::Add {
             address,
@@ -387,17 +387,17 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
                 imap_host,
                 smtp_host,
             };
-            let added = imap::add_account(&kite, setup).await.context("adding the account")?;
-            println!("Added account {}: {}. Run `kite sync {}` next.", added.id, added.address, added.id);
+            let added = imap::add_account(&jolta, setup).await.context("adding the account")?;
+            println!("Added account {}: {}. Run `jolta sync {}` next.", added.id, added.address, added.id);
             Ok(())
         }
         AccountCommand::AddGoogle { port } | AccountCommand::AddMicrosoft { port } => {
-            use kite_core::oauth::{self, Provider};
+            use jolta_core::oauth::{self, Provider};
             let (provider, label) = match cmd {
                 AccountCommand::AddGoogle { .. } => (Provider::Google, "Google"),
                 _ => (Provider::Microsoft, "Microsoft"),
             };
-            let client = provider.client(&kite.data_dir)?;
+            let client = provider.client(&jolta.data_dir)?;
             let pending = oauth::begin(provider, client, port).await?;
             println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
             if port == 0 {
@@ -406,7 +406,7 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             } else {
                 println!("Waiting on port {port}. Through an SSH tunnel, the browser's redirect comes straight here.");
             }
-            if std::env::var_os("KITE_NO_BROWSER").is_none() {
+            if std::env::var_os("JOLTA_NO_BROWSER").is_none() {
                 std::process::Command::new("open").arg(&pending.url).status().ok();
             }
             // A terminal in line-editing mode takes at most 1024 characters per
@@ -426,20 +426,20 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
             if raw_tty {
                 std::process::Command::new("stty").arg("icanon").stdin(std::process::Stdio::inherit()).status().ok();
             }
-            let signed = signed.map_err(|e| anyhow::anyhow!(kite_core::graph::explain_sign_in_error(&e.to_string())))?;
-            let account = oauth::save_account(kite, provider, &signed)?;
-            println!("Added account {}: {}. Run `kite sync {}` next.", account.id, account.address, account.id);
+            let signed = signed.map_err(|e| anyhow::anyhow!(jolta_core::graph::explain_sign_in_error(&e.to_string())))?;
+            let account = oauth::save_account(jolta, provider, &signed)?;
+            println!("Added account {}: {}. Run `jolta sync {}` next.", account.id, account.address, account.id);
             Ok(())
         }
         AccountCommand::List => {
-            for a in kite.store.read(store::accounts)? {
+            for a in jolta.store.read(store::accounts)? {
                 println!("{:>3}  {:<6} {:<40} {}", a.id, a.kind, a.address, a.imap_host);
             }
             Ok(())
         }
         AccountCommand::Remove { account } => {
-            let a = kite.store.read(|c| store::find_account(c, &account))?;
-            kite.store.write(|tx| store::delete_account(tx, a.id))?;
+            let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            jolta.store.write(|tx| store::delete_account(tx, a.id))?;
             secrets::delete(&a.secret_ref)?;
             println!("Removed account {} ({}).", a.id, a.address);
             Ok(())
@@ -449,7 +449,7 @@ async fn account(kite: &Kite, cmd: AccountCommand) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn send(
-    kite: &Kite,
+    jolta: &Jolta,
     account: &str,
     to: String,
     subject: String,
@@ -458,13 +458,13 @@ async fn send(
     all: bool,
     attach: Vec<PathBuf>,
 ) -> Result<()> {
-    use kite_core::compose::{self, AttachmentFile, Compose, ReplyKind};
-    let a = kite.store.read(|c| store::find_account(c, account))?;
+    use jolta_core::compose::{self, AttachmentFile, Compose, ReplyKind};
+    let a = jolta.store.read(|c| store::find_account(c, account))?;
     let mut c = match reply {
         Some(id) => {
-            let raw = imap::message_source(kite, MessageId(id)).await?;
+            let raw = imap::message_source(jolta, MessageId(id)).await?;
             let kind = if all { ReplyKind::ReplyAll } else { ReplyKind::Reply };
-            let mut c = kite.store.read(|conn| compose::reply(conn, MessageId(id), &raw, kind, 0))?;
+            let mut c = jolta.store.read(|conn| compose::reply(conn, MessageId(id), &raw, kind, 0))?;
             c.body = format!("{body}{}", c.body);
             c
         }
@@ -475,20 +475,20 @@ async fn send(
         c.attachments.push(AttachmentFile { name, mime_type: "application/octet-stream".into(), path: path.display().to_string() });
     }
     let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let sink: kite_core::engine::Sink = Arc::new(move |e| {
+    let sink: jolta_core::engine::Sink = Arc::new(move |e| {
         let _ = events.send(e);
     });
-    let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
     let t0 = Instant::now();
     let id = engine.send(&c, None, None)?;
     println!("queued as outbox {id}: to {} cc {} subject {:?}", c.to, c.cc, c.subject);
     while let Some(e) = rx.recv().await {
         match e {
-            kite_core::engine::Event::Sent { subject, .. } => {
-                println!("sent {subject:?} after {:.1} s (undo window {} s)", t0.elapsed().as_secs_f64(), kite_core::engine::UNDO_SEND_SECONDS);
+            jolta_core::engine::Event::Sent { subject, .. } => {
+                println!("sent {subject:?} after {:.1} s (undo window {} s)", t0.elapsed().as_secs_f64(), jolta_core::engine::UNDO_SEND_SECONDS);
                 break;
             }
-            kite_core::engine::Event::SendFailed(m) => anyhow::bail!("send failed: {m}"),
+            jolta_core::engine::Event::SendFailed(m) => anyhow::bail!("send failed: {m}"),
             _ => {}
         }
     }
@@ -497,11 +497,11 @@ async fn send(
     Ok(())
 }
 
-async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>, no_wait: bool) -> Result<()> {
-    use kite_core::actions::Action;
+async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>, no_wait: bool) -> Result<()> {
+    use jolta_core::actions::Action;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
     let wake_at = match &until {
-        Some(text) => Some(kite_core::when::parse(text, now, 0).with_context(|| format!("can't read {text:?} as a time"))?),
+        Some(text) => Some(jolta_core::when::parse(text, now, 0).with_context(|| format!("can't read {text:?} as a time"))?),
         None => None,
     };
     let action = match action {
@@ -513,27 +513,27 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
         ActionArg::Unflag => Action::Unflag,
         ActionArg::Snooze => Action::Snooze(wake_at.context("snooze needs --until")?),
     };
-    let context = from.map_or(kite_core::actions::Context::Inbox, |m| kite_core::actions::Context::Mailbox(kite_core::MailboxId(m)));
+    let context = from.map_or(jolta_core::actions::Context::Inbox, |m| jolta_core::actions::Context::Mailbox(jolta_core::MailboxId(m)));
     if no_wait {
-        let op = kite.store.write(|tx| kite_core::actions::perform(tx, kite_core::ThreadId(thread), action, context))?;
-        println!("{}", if op.is_some() { "recorded; Kite.app sends it at its next sync" } else { "nothing to change" });
+        let op = jolta.store.write(|tx| jolta_core::actions::perform(tx, jolta_core::ThreadId(thread), action, context))?;
+        println!("{}", if op.is_some() { "recorded; Jolta.app sends it at its next sync" } else { "nothing to change" });
         return Ok(());
     }
-    let sink: kite_core::engine::Sink = Arc::new(|_| {});
-    let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
+    let sink: jolta_core::engine::Sink = Arc::new(|_| {});
+    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
     let t0 = Instant::now();
-    let account = kite.store.read(|c| {
-        Ok(c.query_row("SELECT account_id FROM thread WHERE id = ?1", [thread], |r| r.get::<_, kite_core::AccountId>(0))?)
+    let account = jolta.store.read(|c| {
+        Ok(c.query_row("SELECT account_id FROM thread WHERE id = ?1", [thread], |r| r.get::<_, jolta_core::AccountId>(0))?)
     })?;
     let wait_sent = || async {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if !kite.store.read(|c| store::has_pending_ops(c, account))? {
+            if !jolta.store.read(|c| store::has_pending_ops(c, account))? {
                 return anyhow::Ok(());
             }
         }
     };
-    let op = engine.perform(&[kite_core::ThreadId(thread)], action, context)?.pop();
+    let op = engine.perform(&[jolta_core::ThreadId(thread)], action, context)?.pop();
     println!("applied locally in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
     let Some(op) = op else {
         println!("nothing to change");
@@ -552,16 +552,16 @@ async fn act(kite: &Kite, action: ActionArg, thread: i64, from: Option<i64>, und
 
 /// Runs an action over a whole list through the engine and waits until
 /// every account has sent its queued ops.
-async fn list_action(kite: &Kite, action: impl FnOnce(&kite_core::engine::Engine) -> Result<usize>) -> Result<()> {
-    let sink: kite_core::engine::Sink = Arc::new(|_| {});
-    let engine = kite_core::engine::Engine::start(kite.clone(), sink, tokio::runtime::Handle::current())?;
-    let last: i64 = kite.store.read(|c| Ok(c.query_row("SELECT coalesce(max(id), 0) FROM op", [], |r| r.get(0))?))?;
+async fn list_action(jolta: &Jolta, action: impl FnOnce(&jolta_core::engine::Engine) -> Result<usize>) -> Result<()> {
+    let sink: jolta_core::engine::Sink = Arc::new(|_| {});
+    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+    let last: i64 = jolta.store.read(|c| Ok(c.query_row("SELECT coalesce(max(id), 0) FROM op", [], |r| r.get(0))?))?;
     let t0 = Instant::now();
     let ops = action(&engine)?;
     println!("{ops} op(s) applied locally in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let pending: bool = kite
+        let pending: bool = jolta
             .store
             .read(|c| Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM op WHERE id > ?1 AND state = 'pending')", [last], |r| r.get(0))?))?;
         if !pending {
@@ -572,11 +572,11 @@ async fn list_action(kite: &Kite, action: impl FnOnce(&kite_core::engine::Engine
     Ok(())
 }
 
-async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
+async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
     use futures::TryStreamExt;
     if let DevCommand::Graph { account, path } = &cmd {
-        let a = kite.store.read(|c| store::find_account(c, account))?;
-        let json = kite_core::graph::Graph::new(&a)?.get(path).await?;
+        let a = jolta.store.read(|c| store::find_account(c, account))?;
+        let json = jolta_core::graph::Graph::new(&a)?.get(path).await?;
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
@@ -600,7 +600,7 @@ async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
                 selectable: true,
             })
             .collect();
-        let account = kite.store.write(|tx| {
+        let account = jolta.store.write(|tx| {
             let new = store::NewAccount {
                 kind: AccountKind::Imap,
                 address: address.clone(),
@@ -625,7 +625,7 @@ async fn dev(kite: &Kite, cmd: DevCommand) -> Result<()> {
         | DevCommand::Expunge { account, mailbox, .. } => (account.clone(), mailbox.clone()),
         DevCommand::Graph { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
     };
-    let a = kite.store.read(|c| store::find_account(c, &account))?;
+    let a = jolta.store.read(|c| store::find_account(c, &account))?;
     let mut session = imap::connect_account(&a).await?;
     match cmd {
         DevCommand::Append { files, seen, .. } => {
@@ -673,10 +673,10 @@ fn read_password(from_stdin: bool, address: &str) -> Result<String> {
     Ok(password)
 }
 
-async fn sync(kite: &Kite, account: Option<String>, bodies: bool) -> Result<()> {
+async fn sync(jolta: &Jolta, account: Option<String>, bodies: bool) -> Result<()> {
     let accounts = match account {
-        Some(spec) => vec![kite.store.read(|c| store::find_account(c, &spec))?],
-        None => kite
+        Some(spec) => vec![jolta.store.read(|c| store::find_account(c, &spec))?],
+        None => jolta
             .store
             .read(store::accounts)?
             .into_iter()
@@ -704,9 +704,9 @@ async fn sync(kite: &Kite, account: Option<String>, bodies: bool) -> Result<()> 
             }
         };
         let report = if a.kind == AccountKind::Graph {
-            kite_core::graph::Graph::new(&a)?.sync(kite, &imap::Scope::All, &mut on_event).await?
+            jolta_core::graph::Graph::new(&a)?.sync(jolta, &imap::Scope::All, &mut on_event).await?
         } else {
-            imap::sync_account(kite, &a, SyncOptions { bodies }, on_event).await?
+            imap::sync_account(jolta, &a, SyncOptions { bodies }, on_event).await?
         };
         if report.bodies > 0 {
             eprintln!();
@@ -770,8 +770,8 @@ fn print_rows(rows: &[ThreadRow]) {
     }
 }
 
-async fn show(kite: &Kite, id: MessageId, raw: bool) -> Result<()> {
-    let source = imap::message_source(kite, id).await?;
+async fn show(jolta: &Jolta, id: MessageId, raw: bool) -> Result<()> {
+    let source = imap::message_source(jolta, id).await?;
     if raw {
         std::io::stdout().write_all(&source)?;
         return Ok(());
@@ -782,7 +782,7 @@ async fn show(kite: &Kite, id: MessageId, raw: bool) -> Result<()> {
 }
 
 fn mail_parser_text(raw: &[u8]) -> String {
-    let (e, body) = kite_core::mime::parse_full(raw, String::new());
+    let (e, body) = jolta_core::mime::parse_full(raw, String::new());
     if e.subject.is_empty() && e.from_addr.is_empty() {
         return String::from_utf8_lossy(raw).into_owned();
     }
@@ -797,8 +797,8 @@ fn mail_parser_text(raw: &[u8]) -> String {
     )
 }
 
-fn bench(kite: &Kite, runs: usize) -> Result<()> {
-    let total: i64 = kite.store.read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))?;
+fn bench(jolta: &Jolta, runs: usize) -> Result<()> {
+    let total: i64 = jolta.store.read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))?;
     // Words of different frequency in the synthetic vocabulary: rank 1, 401 and 20,001.
     let common = synth::word(0);
     let mid = synth::word(400);
@@ -830,10 +830,10 @@ fn bench(kite: &Kite, runs: usize) -> Result<()> {
         let mut n = 0;
         for _ in 0..runs {
             let t = Instant::now();
-            kite.store.read(|c| search::query_page(c, &parsed, 0, 50))?;
+            jolta.store.read(|c| search::query_page(c, &parsed, 0, 50))?;
             page.push(t.elapsed().as_secs_f64() * 1000.0);
             let t = Instant::now();
-            n = kite.store.read(|c| search::query_count(c, &parsed))?;
+            n = jolta.store.read(|c| search::query_count(c, &parsed))?;
             count.push(t.elapsed().as_secs_f64() * 1000.0);
         }
         let (p50, p95, c95) = (pct(&mut page, 0.50), pct(&mut page, 0.95), pct(&mut count, 0.95));
@@ -853,7 +853,7 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
 #[derive(Subcommand)]
 enum AiCommand {
     /// Set the provider: off, local, openai or anthropic. The key comes from
-    /// KITE_AI_KEY, so it stays out of the shell history.
+    /// JOLTA_AI_KEY, so it stays out of the shell history.
     Use {
         provider: String,
         #[arg(long)]
@@ -885,14 +885,14 @@ enum AiCommand {
         /// Sort again what was sorted before.
         #[arg(long)]
         again: bool,
-        /// Compare with the X-Kite-Expect header of scripts/ai-fixtures.py mail.
+        /// Compare with the X-Jolta-Expect header of scripts/ai-fixtures.py mail.
         #[arg(long)]
         check: bool,
     },
 }
 
-fn ai_provider(name: &str) -> Result<Option<kite_core::ai::Provider>> {
-    use kite_core::ai::Provider;
+fn ai_provider(name: &str) -> Result<Option<jolta_core::ai::Provider>> {
+    use jolta_core::ai::Provider;
     Ok(match name {
         "off" => None,
         "local" => Some(Provider::Local),
@@ -902,13 +902,13 @@ fn ai_provider(name: &str) -> Result<Option<kite_core::ai::Provider>> {
     })
 }
 
-async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
-    use kite_core::ai::{self, Progress, tasks};
+async fn ai(jolta: &Jolta, cmd: AiCommand) -> Result<()> {
+    use jolta_core::ai::{self, Progress, tasks};
     use std::io::Write as _;
-    let helper = std::env::var_os("KITE_AI_HELPER")
+    let helper = std::env::var_os("JOLTA_AI_HELPER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("kite-ai"));
-    let engine = ai::Ai::new(&kite.data_dir, helper);
+        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("jolta-ai"));
+    let engine = ai::Ai::new(&jolta.data_dir, helper);
     let start = Instant::now();
     let mut printed = 0;
     let mut on = |p: Progress| match p {
@@ -922,10 +922,10 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
     match cmd {
         AiCommand::Use { provider, model, url } => {
             let provider = ai_provider(&provider)?;
-            if let (Some(p), Ok(key)) = (provider, std::env::var("KITE_AI_KEY")) {
+            if let (Some(p), Ok(key)) = (provider, std::env::var("JOLTA_AI_KEY")) {
                 ai::set_key(p, &key)?;
             }
-            kite.store.write(|tx| {
+            jolta.store.write(|tx| {
                 let mut s = ai::settings(tx)?;
                 s.provider = provider;
                 let remote = match provider {
@@ -949,11 +949,11 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
                 }
                 ai::save_settings(tx, &s)
             })?;
-            println!("{:?}", kite.store.read(ai::settings)?);
+            println!("{:?}", jolta.store.read(ai::settings)?);
         }
         AiCommand::Models { provider } => {
             let p = ai_provider(&provider)?.context("models of which provider?")?;
-            let s = kite.store.read(ai::settings)?;
+            let s = jolta.store.read(ai::settings)?;
             let url = if p == ai::Provider::Anthropic { s.anthropic.base_url } else { s.openai.base_url };
             for m in ai::models(p, &url, ai::key(p)).await? {
                 println!("{}  {}", m.id, m.name);
@@ -961,7 +961,7 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
         }
         AiCommand::Download { model } => {
             let m = ai::local::model(&model);
-            let done = ai::download::download(&kite.data_dir, m, &ai::Cancel::default(), &mut |step| eprint!("\r{step:?}          ")).await?;
+            let done = ai::download::download(&jolta.data_dir, m, &ai::Cancel::default(), &mut |step| eprint!("\r{step:?}          ")).await?;
             eprintln!("\n{} {}", m.name, if done { "is ready" } else { "paused" });
         }
         AiCommand::Summary { thread, fresh, cancel_after } => {
@@ -973,36 +973,36 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
                     c.cancel();
                 });
             }
-            let outcome = tasks::summarise(kite, &engine, kite_core::ThreadId(thread), false, fresh, &cancel, &mut on).await?;
+            let outcome = tasks::summarise(jolta, &engine, jolta_core::ThreadId(thread), false, fresh, &cancel, &mut on).await?;
             println!();
             eprintln!("[{:.2} s] {outcome:?}", start.elapsed().as_secs_f64());
         }
         AiCommand::Search { request } => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
             let t = Instant::now();
-            let query = ai::search::query(kite, &engine, &request.join(" "), now, 3600, &ai::Cancel::default())
+            let query = ai::search::query(jolta, &engine, &request.join(" "), now, 3600, &ai::Cancel::default())
                 .await?
                 .context("AI is off")?;
             println!("{query}   ({:.2} s)", t.elapsed().as_secs_f64());
             let q = search::parse(&query)?;
-            print_rows(&kite.store.read(|c| search::query_page(c, &q, 0, 10))?);
+            print_rows(&jolta.store.read(|c| search::query_page(c, &q, 0, 10))?);
         }
         AiCommand::Sort { again, check } => {
             let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64
                 - ai::background::CATCH_UP_DAYS * 86_400;
             if again {
-                kite.store.write(|tx| Ok(tx.execute("DELETE FROM ai_triage", [])?))?;
+                jolta.store.write(|tx| Ok(tx.execute("DELETE FROM ai_triage", [])?))?;
             }
-            let ids = kite.store.read(|c| ai::triage::unsorted_inbox(c, since))?;
+            let ids = jolta.store.read(|c| ai::triage::unsorted_inbox(c, since))?;
             let (mut right, mut checked) = ((0, 0), 0);
             for id in ids {
                 let t = Instant::now();
-                let Some(got) = ai::triage::sort(kite, &engine, id, &ai::Cancel::default()).await? else { continue };
-                let raw = imap::message_source(kite, id).await?;
-                let subject = kite.store.read(|c| Ok(c.query_row("SELECT subject FROM message WHERE id = ?1", [id], |r| r.get::<_, String>(0))?))?;
+                let Some(got) = ai::triage::sort(jolta, &engine, id, &ai::Cancel::default()).await? else { continue };
+                let raw = imap::message_source(jolta, id).await?;
+                let subject = jolta.store.read(|c| Ok(c.query_row("SELECT subject FROM message WHERE id = ?1", [id], |r| r.get::<_, String>(0))?))?;
                 let answer = format!("{} {}", got.category, if got.needs_reply { "yes" } else { "no" });
                 let expect = check
-                    .then(|| String::from_utf8_lossy(&raw).lines().find_map(|l| l.strip_prefix("X-Kite-Expect:").map(|v| v.trim().to_string())))
+                    .then(|| String::from_utf8_lossy(&raw).lines().find_map(|l| l.strip_prefix("X-Jolta-Expect:").map(|v| v.trim().to_string())))
                     .flatten();
                 let mark = match &expect {
                     Some(e) => {
@@ -1021,12 +1021,12 @@ async fn ai(kite: &Kite, cmd: AiCommand) -> Result<()> {
             }
         }
         AiCommand::Draft { message, instruction } => {
-            let raw = imap::message_source(kite, MessageId(message)).await?;
-            let compose = kite.store.read(|c| kite_core::compose::reply(c, MessageId(message), &raw, kite_core::compose::ReplyKind::Reply, 0))?;
-            let outcome = tasks::draft(kite, &engine, &compose, &instruction.join(" "), &ai::Cancel::default(), &mut on).await?;
+            let raw = imap::message_source(jolta, MessageId(message)).await?;
+            let compose = jolta.store.read(|c| jolta_core::compose::reply(c, MessageId(message), &raw, jolta_core::compose::ReplyKind::Reply, 0))?;
+            let outcome = tasks::draft(jolta, &engine, &compose, &instruction.join(" "), &ai::Cancel::default(), &mut on).await?;
             println!();
             if let Some(ai::Finish::Done(text)) = outcome {
-                println!("--- body ---\n{}", kite_core::compose::with_written(&compose.body, &kite.store.read(|c| store::account(c, compose.account.expect("reply account")))?.signature, &text));
+                println!("--- body ---\n{}", jolta_core::compose::with_written(&compose.body, &jolta.store.read(|c| store::account(c, compose.account.expect("reply account")))?.signature, &text));
             }
         }
     }

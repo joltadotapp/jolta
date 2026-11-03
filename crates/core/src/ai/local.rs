@@ -1,4 +1,4 @@
-//! Models that run on this Mac, through the `kite-ai` helper process. The
+//! Models that run on this Mac, through the `jolta-ai` helper process. The
 //! helper starts on the first request and quits after `IDLE` without one,
 //! which gives its 2 GB or so of memory back.
 
@@ -14,7 +14,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use super::{Cancel, Finish, Phase, Progress, Request};
 use crate::{Error, Result};
 
-/// A model Kite offers to download.
+/// A model Jolta offers to download.
 #[derive(Debug, PartialEq)]
 pub struct LocalModel {
     pub id: &'static str,
@@ -114,8 +114,8 @@ impl Local {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| Error::Other(format!("The local model's helper ({}) didn't start: {e}", self.path.display())))?;
-        let stdin = child.stdin.take().ok_or_else(|| Error::Other("no stdin for kite-ai".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| Error::Other("no stdout for kite-ai".into()))?;
+        let stdin = child.stdin.take().ok_or_else(|| Error::Other("no stdin for jolta-ai".into()))?;
+        let stdout = child.stdout.take().ok_or_else(|| Error::Other("no stdout for jolta-ai".into()))?;
         Ok(Helper { child, stdin, lines: BufReader::new(stdout).lines(), model: None })
     }
 

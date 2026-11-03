@@ -1,16 +1,16 @@
 [package]
-name = "kite-cli"
+name = "jolta-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "kite"
+name = "jolta"
 path = "src/main.rs"
 
 [dependencies]
-kite-core.workspace = true
+jolta-core.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 clap.workspace = true

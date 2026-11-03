@@ -20,7 +20,7 @@ use crate::graph::Graph;
 use crate::imap::{self, Caps, Scope, Session, SyncOptions};
 use crate::model::*;
 use crate::store::{self, OpId};
-use crate::{Kite, Result, mime};
+use crate::{Jolta, Result, mime};
 use futures::TryStreamExt;
 
 const FULL_SYNC_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -80,7 +80,7 @@ impl Wake {
 }
 
 pub struct Engine {
-    kite: Kite,
+    jolta: Jolta,
     sink: Sink,
     runtime: tokio::runtime::Handle,
     wakes: Mutex<HashMap<AccountId, Arc<Wake>>>,
@@ -88,21 +88,21 @@ pub struct Engine {
 
 impl Engine {
     /// Starts a worker and an IDLE task for every account that has a server.
-    pub fn start(kite: Kite, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
-        let engine = Arc::new(Engine { kite, sink, runtime, wakes: Mutex::new(HashMap::new()) });
-        for account in engine.kite.store.read(store::accounts)? {
+    pub fn start(jolta: Jolta, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
+        let engine = Arc::new(Engine { jolta, sink, runtime, wakes: Mutex::new(HashMap::new()) });
+        for account in engine.jolta.store.read(store::accounts)? {
             engine.spawn(account);
         }
-        let (kite, sink) = (engine.kite.clone(), engine.sink.clone());
-        engine.runtime.spawn_blocking(move || match scan_list_headers(&kite) {
+        let (jolta, sink) = (engine.jolta.clone(), engine.sink.clone());
+        engine.runtime.spawn_blocking(move || match scan_list_headers(&jolta) {
             Ok(0) => {}
             Ok(_) => sink(Event::ListsChanged),
             Err(e) => tracing::warn!("list header scan stopped: {e}"),
         });
-        let kite = engine.kite.clone();
+        let jolta = engine.jolta.clone();
         engine.runtime.spawn(async move {
             tokio::time::sleep(Duration::from_secs(120)).await;
-            match tokio::task::spawn_blocking(move || kite.collect_blobs(BLOB_MIN_AGE)).await {
+            match tokio::task::spawn_blocking(move || jolta.collect_blobs(BLOB_MIN_AGE)).await {
                 Ok(Ok(c)) if c.files > 0 => tracing::info!("deleted {} unused message files ({} bytes)", c.files, c.bytes),
                 Ok(Err(e)) => tracing::warn!("message file clean-up stopped: {e}"),
                 _ => {}
@@ -176,7 +176,7 @@ impl Engine {
     /// queue none.
     pub fn perform(&self, threads: &[ThreadId], action: Action, context: Context) -> Result<Vec<OpId>> {
         let triage = matches!(action, Action::Archive | Action::Trash | Action::MoveTo(_) | Action::Snooze(_));
-        let (queued, cleared) = self.kite.store.write(|tx| {
+        let (queued, cleared) = self.jolta.store.write(|tx| {
             let queued = threads.iter().filter_map(|&t| actions::perform(tx, t, action, context).transpose()).collect::<Result<Vec<_>>>()?;
             // Triage also takes a thread out of the inbox that a reminder put there.
             let mut cleared = 0;
@@ -195,7 +195,7 @@ impl Engine {
     }
 
     pub fn undo(&self, ops: &[OpId]) -> Result<()> {
-        let queued = self.kite.store.write(|tx| ops.iter().filter_map(|&op| actions::undo(tx, op).transpose()).collect::<Result<Vec<_>>>())?;
+        let queued = self.jolta.store.write(|tx| ops.iter().filter_map(|&op| actions::undo(tx, op).transpose()).collect::<Result<Vec<_>>>())?;
         (self.sink)(Event::ListsChanged);
         self.wake_all(&queued);
         Ok(())
@@ -203,7 +203,7 @@ impl Engine {
 
     /// Marks every unread message the query matches read. Returns undo tokens.
     pub fn mark_all_read(&self, query: &crate::search::Query) -> Result<Vec<OpId>> {
-        let queued = self.kite.store.write(|tx| {
+        let queued = self.jolta.store.write(|tx| {
             let unread = crate::search::query_messages(tx, query)?;
             actions::mark_read(tx, &unread)
         })?;
@@ -216,7 +216,7 @@ impl Engine {
 
     /// Empties these folders for good, on this Mac now and on the server next.
     pub fn empty(&self, mailboxes: &[MailboxId]) -> Result<()> {
-        let queued = self.kite.store.write(|tx| mailboxes.iter().map(|&m| actions::empty(tx, m)).collect::<Result<Vec<_>>>())?;
+        let queued = self.jolta.store.write(|tx| mailboxes.iter().map(|&m| actions::empty(tx, m)).collect::<Result<Vec<_>>>())?;
         (self.sink)(Event::ListsChanged);
         self.wake_all(&queued);
         Ok(())
@@ -236,12 +236,12 @@ impl Engine {
     /// inbox then unless someone replies. Returns a token for `cancel_send`.
     pub fn send(&self, compose: &Compose, send_at: Option<i64>, remind_at: Option<i64>) -> Result<i64> {
         let account_id = compose.account.ok_or_else(|| crate::Error::Other("Choose an account to send from.".into()))?;
-        let account = self.kite.store.read(|c| store::account(c, account_id))?;
+        let account = self.jolta.store.read(|c| store::account(c, account_id))?;
         let built = compose::build(&account, compose, true)?;
-        let blob = self.kite.blobs.put(&built.raw)?;
+        let blob = self.jolta.blobs.put(&built.raw)?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let delay = send_at.map_or(UNDO_SEND_SECONDS, |at| (at - now).max(UNDO_SEND_SECONDS));
-        let id = self.kite.store.write(|tx| {
+        let id = self.jolta.store.write(|tx| {
             let draft = store::save_draft(tx, compose)?;
             tx.execute("UPDATE draft SET dirty = 0 WHERE id = ?1", [draft])?;
             if let Some(remind_at) = remind_at {
@@ -258,16 +258,16 @@ impl Engine {
 
     /// Takes a waiting message back. Returns it as a draft to reopen.
     pub fn cancel_send(&self, outbox: i64) -> Result<Option<Compose>> {
-        let draft = self.kite.store.write(|tx| store::cancel_send(tx, outbox))?;
+        let draft = self.jolta.store.write(|tx| store::cancel_send(tx, outbox))?;
         match draft {
-            Some(d) => Ok(self.kite.store.read(|c| store::draft(c, d))?),
+            Some(d) => Ok(self.jolta.store.read(|c| store::draft(c, d))?),
             None => Ok(None),
         }
     }
 
     /// Saves a draft locally and, soon after, to the server's Drafts.
     pub fn save_draft(&self, compose: &Compose) -> Result<i64> {
-        let id = self.kite.store.write(|tx| store::save_draft(tx, compose))?;
+        let id = self.jolta.store.write(|tx| store::save_draft(tx, compose))?;
         if let Some(a) = compose.account {
             self.wake(a);
         }
@@ -275,7 +275,7 @@ impl Engine {
     }
 
     pub fn discard_draft(&self, id: i64) -> Result<()> {
-        let account = self.kite.store.write(|tx| {
+        let account = self.jolta.store.write(|tx| {
             store::discard_draft(tx, id)?;
             Ok(tx.query_row("SELECT account_id FROM draft WHERE id = ?1", [id], |r| r.get::<_, Option<AccountId>>(0))?)
         })?;
@@ -290,9 +290,9 @@ impl Engine {
     /// The user is looking at `mailbox`: sync it before other mailboxes, and
     /// now if it has never synced.
     pub fn focus_mailbox(&self, mailbox: Option<MailboxId>) {
-        *self.kite.focus.lock().unwrap_or_else(|e| e.into_inner()) = mailbox;
+        *self.jolta.focus.lock().unwrap_or_else(|e| e.into_inner()) = mailbox;
         let Some(id) = mailbox else { return };
-        let Ok(m) = self.kite.store.read(|c| store::mailbox(c, id)) else { return };
+        let Ok(m) = self.jolta.store.read(|c| store::mailbox(c, id)) else { return };
         if m.synced {
             return;
         }
@@ -303,12 +303,12 @@ impl Engine {
     }
 
     pub fn remove_account(&self, account: AccountId) -> Result<()> {
-        let a = self.kite.store.read(|c| store::account(c, account))?;
-        self.kite.store.write(|tx| store::delete_account(tx, account))?;
+        let a = self.jolta.store.read(|c| store::account(c, account))?;
+        self.jolta.store.write(|tx| store::delete_account(tx, account))?;
         self.wake(account);
         (self.sink)(Event::ListsChanged);
-        let kite = self.kite.clone();
-        self.runtime.spawn_blocking(move || kite.collect_blobs(BLOB_MIN_AGE));
+        let jolta = self.jolta.clone();
+        self.runtime.spawn_blocking(move || jolta.collect_blobs(BLOB_MIN_AGE));
         // Both secrets get a delete attempt even when the first one fails.
         let password = crate::secrets::delete(&a.secret_ref);
         let smtp = crate::secrets::delete(&crate::secrets::smtp_ref(&a.secret_ref));
@@ -331,7 +331,7 @@ impl Engine {
         let mut last_full = Instant::now();
         loop {
             let id = account.id;
-            match self.kite.store.read(|c| store::account(c, id)) {
+            match self.jolta.store.read(|c| store::account(c, id)) {
                 Err(crate::Error::NotFound(_)) => {
                     // The account was removed; stop syncing it.
                     self.wakes.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
@@ -361,9 +361,9 @@ impl Engine {
             let until_full = FULL_SYNC_EVERY.saturating_sub(last_full.elapsed());
             let account_id = account.id;
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            let until_wake = self.kite.store.read(|c| store::next_wake(c, account_id)).ok().flatten().map(|t| (t - now).max(0));
+            let until_wake = self.jolta.store.read(|c| store::next_wake(c, account_id)).ok().flatten().map(|t| (t - now).max(0));
             let until_send = self
-                .kite
+                .jolta
                 .store
                 .read(|c| store::next_send_in(c, account_id))
                 .ok()
@@ -403,28 +403,28 @@ impl Engine {
         let account_id = account.id;
         self.wake_snoozed(account_id).await?;
         self.fire_reminders(account_id).await?;
-        for op in self.kite.store.read_async(move |c| store::pending_ops(c, account_id)).await? {
+        for op in self.jolta.store.read_async(move |c| store::pending_ops(c, account_id)).await? {
             let applied = match link {
-                Link::Imap(session, caps) => imap::apply_op(&self.kite, session, *caps, &op).await,
-                Link::Graph(g) => g.apply_op(&self.kite, &op).await,
+                Link::Imap(session, caps) => imap::apply_op(&self.jolta, session, *caps, &op).await,
+                Link::Graph(g) => g.apply_op(&self.jolta, &op).await,
             };
             match applied {
                 Ok(mailboxes) => {
                     touched.extend(mailboxes);
                     let id = op.id;
-                    self.kite.store.write_async(move |tx| store::finish_op(tx, id)).await?;
+                    self.jolta.store.write_async(move |tx| store::finish_op(tx, id)).await?;
                 }
                 Err(e) if op.attempts + 1 >= MAX_ATTEMPTS => {
                     let message = e.to_string();
                     let op2 = op.clone();
                     let m2 = message.clone();
-                    self.kite.store.write_async(move |tx| actions::give_up(tx, &op2, &m2)).await?;
+                    self.jolta.store.write_async(move |tx| actions::give_up(tx, &op2, &m2)).await?;
                     (self.sink)(Event::ActionFailed(message));
                     (self.sink)(Event::ListsChanged);
                 }
                 Err(e) => {
                     let (id, message) = (op.id, e.to_string());
-                    self.kite.store.write_async(move |tx| store::fail_attempt(tx, id, &message, false)).await?;
+                    self.jolta.store.write_async(move |tx| store::fail_attempt(tx, id, &message, false)).await?;
                     return Err(e);
                 }
             }
@@ -443,7 +443,7 @@ impl Engine {
         } else {
             if wake.inbox_changed.swap(false, Ordering::SeqCst) {
                 let inbox = self
-                    .kite
+                    .jolta
                     .store
                     .read_async(move |c| Ok(store::mailboxes(c, account_id)?.into_iter().find(|m| m.role == Some(MailboxRole::Inbox))))
                     .await?;
@@ -476,9 +476,9 @@ impl Engine {
         };
         let report = match link {
             Link::Imap(session, caps) => {
-                imap::sync_session(&self.kite, session, *caps, account, &scope, SyncOptions { bodies: true }, &mut on_progress).await?
+                imap::sync_session(&self.jolta, session, *caps, account, &scope, SyncOptions { bodies: true }, &mut on_progress).await?
             }
-            Link::Graph(g) => g.sync(&self.kite, &scope, &mut on_progress).await?,
+            Link::Graph(g) => g.sync(&self.jolta, &scope, &mut on_progress).await?,
         };
         if report.changed() {
             (self.sink)(Event::ListsChanged);
@@ -496,7 +496,7 @@ impl Engine {
     /// the rest come back to the inbox.
     async fn fire_reminders(&self, account: AccountId) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let fired = self.kite.store.write_async(move |tx| store::fire_due_reminders(tx, account, now)).await?;
+        let fired = self.jolta.store.write_async(move |tx| store::fire_due_reminders(tx, account, now)).await?;
         for (thread, subject) in &fired {
             (self.sink)(Event::NoReply { account, thread: *thread, subject: subject.clone() });
         }
@@ -509,10 +509,10 @@ impl Engine {
     /// Moves snoozed threads whose time has come back to the inbox.
     async fn wake_snoozed(&self, account: AccountId) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        let due = self.kite.store.read_async(move |c| store::due_snoozes(c, account, now)).await?;
+        let due = self.jolta.store.read_async(move |c| store::due_snoozes(c, account, now)).await?;
         for (id, thread) in due {
             let subject = self
-                .kite
+                .jolta
                 .store
                 .write_async(move |tx| {
                     actions::wake(tx, id, thread)?;
@@ -528,7 +528,7 @@ impl Engine {
     }
 
     async fn role_mailbox(&self, account: AccountId, role: MailboxRole) -> Result<Option<Mailbox>> {
-        self.kite
+        self.jolta
             .store
             .read_async(move |c| Ok(store::mailboxes(c, account)?.into_iter().find(|m| m.role == Some(role))))
             .await
@@ -537,10 +537,10 @@ impl Engine {
     /// Sends every outbox message whose undo window has passed.
     async fn send_due(&self, account: &Account, link: &mut Link) -> Result<Vec<store::OutboxItem>> {
         let account_id = account.id;
-        let due = self.kite.store.read_async(move |c| store::due_outbox(c, account_id)).await?;
+        let due = self.jolta.store.read_async(move |c| store::due_outbox(c, account_id)).await?;
         let mut sent = Vec::new();
         for item in due {
-            let raw = self.kite.blobs.get(&item.blob)?;
+            let raw = self.jolta.blobs.get(&item.blob)?;
             let result = match link {
                 Link::Graph(g) => g.send_mime(&raw).await,
                 Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
@@ -548,7 +548,7 @@ impl Engine {
             match result {
                 Ok(()) => {
                     let done = item.clone();
-                    self.kite
+                    self.jolta
                         .store
                         .write_async(move |tx| {
                             store::outbox_sent(tx, &done)?;
@@ -569,7 +569,7 @@ impl Engine {
                 Err(e) => {
                     let give_up = item.attempts + 1 >= MAX_ATTEMPTS;
                     let (id, message) = (item.id, e.to_string());
-                    self.kite.store.write_async(move |tx| store::outbox_failed(tx, id, &message, give_up)).await?;
+                    self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &message, give_up)).await?;
                     (self.sink)(Event::SendFailed(e.to_string()));
                 }
             }
@@ -587,15 +587,15 @@ impl Engine {
         let mut appended = false;
         for item in sent {
             let (account_id, mid) = (account.id, item.message_id.clone());
-            if self.kite.store.read_async(move |c| store::in_sent(c, account_id, &mid)).await? {
+            if self.jolta.store.read_async(move |c| store::in_sent(c, account_id, &mid)).await? {
                 continue;
             }
-            let raw = self.kite.blobs.get(&item.blob)?;
+            let raw = self.jolta.blobs.get(&item.blob)?;
             session.append(&sent_box.remote_id, Some("(\\Seen)"), None, &raw).await?;
             appended = true;
         }
         if appended {
-            imap::sync_session(&self.kite, session, caps, account, &Scope::Mailboxes(vec![sent_box.id]), SyncOptions { bodies: true }, &mut |_| {}).await?;
+            imap::sync_session(&self.jolta, session, caps, account, &Scope::Mailboxes(vec![sent_box.id]), SyncOptions { bodies: true }, &mut |_| {}).await?;
             (self.sink)(Event::ListsChanged);
         }
         Ok(())
@@ -604,7 +604,7 @@ impl Engine {
     /// Replaces or removes server copies of drafts that changed.
     async fn sync_drafts(&self, account: &Account, link: &mut Link) -> Result<()> {
         let account_id = account.id;
-        let dirty = self.kite.store.read_async(move |c| store::dirty_drafts(c, account_id)).await?;
+        let dirty = self.jolta.store.read_async(move |c| store::dirty_drafts(c, account_id)).await?;
         if dirty.is_empty() {
             return Ok(());
         }
@@ -615,7 +615,7 @@ impl Engine {
                     let built = (!d.deleted).then(|| compose::build(account, &d.compose, false)).transpose()?;
                     g.save_draft(built.as_ref().map(|b| b.raw.as_slice()), d.server_message_id.as_deref()).await?;
                     let (id, deleted, server_id) = (d.id, d.deleted, built.map(|b| b.message_id));
-                    self.kite.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
+                    self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
                 }
                 return Ok(());
             }
@@ -623,7 +623,7 @@ impl Engine {
         let Some(drafts_box) = self.role_mailbox(account.id, MailboxRole::Drafts).await? else {
             for d in dirty {
                 let (id, deleted) = (d.id, d.deleted);
-                self.kite.store.write_async(move |tx| store::draft_synced(tx, id, None, deleted)).await?;
+                self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, None, deleted)).await?;
             }
             return Ok(());
         };
@@ -644,7 +644,7 @@ impl Engine {
                 server_id = Some(built.message_id);
             }
             let (id, deleted) = (d.id, d.deleted);
-            self.kite.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
+            self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
         }
         Ok(())
     }
@@ -655,7 +655,7 @@ impl Engine {
             return Ok(());
         }
         let fresh = self
-            .kite
+            .jolta
             .store
             .read_async(move |c| {
                 let mut stmt = c.prepare(
@@ -694,25 +694,25 @@ impl Backoff {
     }
 }
 
-/// Reads List-Id and List-Unsubscribe from bodies stored before Kite kept
+/// Reads List-Id and List-Unsubscribe from bodies stored before Jolta kept
 /// them, a batch per write so the app's own writes get turns. Returns how
 /// many messages it read.
-fn scan_list_headers(kite: &Kite) -> Result<usize> {
+fn scan_list_headers(jolta: &Jolta) -> Result<usize> {
     let mut done = 0;
     loop {
-        let batch = kite.store.read(|c| store::header_scan_batch(c, 200))?;
+        let batch = jolta.store.read(|c| store::header_scan_batch(c, 200))?;
         if batch.is_empty() {
             return Ok(done);
         }
         let found: Vec<_> = batch
             .into_iter()
             .map(|(id, blob)| {
-                let envelope = kite.blobs.get(&blob).ok().map(|raw| crate::mime::parse_envelope(&raw)).unwrap_or_default();
+                let envelope = jolta.blobs.get(&blob).ok().map(|raw| crate::mime::parse_envelope(&raw)).unwrap_or_default();
                 (id, envelope.list_id, envelope.list_unsubscribe)
             })
             .collect();
         done += found.len();
-        kite.store.write(|tx| {
+        jolta.store.write(|tx| {
             for (id, list_id, unsubscribe) in &found {
                 store::finish_header_scan(tx, *id, list_id.as_deref(), unsubscribe.as_deref())?;
             }

@@ -1,5 +1,5 @@
-"""Plays a naive agent that obeys an injected email, and checks that Kite
-sends nothing. Usage: mcp_injection_check.py <kite-mcp> <kite.sqlite>"""
+"""Plays a naive agent that obeys an injected email, and checks that Jolta
+sends nothing. Usage: mcp_injection_check.py <jolta-mcp> <jolta.sqlite>"""
 import re
 import sqlite3
 import sys

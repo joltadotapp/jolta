@@ -7,21 +7,21 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
-use kite_core::imap::{Endpoint, ImapSetup, Session};
-use kite_core::{Account, Security};
+use jolta_core::imap::{Endpoint, ImapSetup, Session};
+use jolta_core::{Account, Security};
 
 use crate::fixture::{App, Mail, block_on, unique};
 
 const IMAP: &str = "127.0.0.1:31143";
 const MAILPIT_API: &str = "127.0.0.1:31080";
-const PASSWORD: &str = "kite-test";
+const PASSWORD: &str = "jolta-test";
 
 /// True when the servers answer. Without them the sync tests skip, unless
-/// `KITE_SYNC_TESTS=1` asks for them, in which case they fail.
+/// `JOLTA_SYNC_TESTS=1` asks for them, in which case they fail.
 pub fn available() -> bool {
     let up = TcpStream::connect_timeout(&IMAP.parse::<SocketAddr>().unwrap(), Duration::from_millis(300)).is_ok();
     if !up {
-        assert!(std::env::var_os("KITE_SYNC_TESTS").is_none(), "KITE_SYNC_TESTS is set but Dovecot isn't running; run scripts/test-servers.sh up");
+        assert!(std::env::var_os("JOLTA_SYNC_TESTS").is_none(), "JOLTA_SYNC_TESTS is set but Dovecot isn't running; run scripts/test-servers.sh up");
         eprintln!("skipped: the test mail servers aren't running (scripts/test-servers.sh up)");
     }
     up
@@ -40,7 +40,7 @@ impl Mailbox {
     pub fn with<T>(&self, f: impl AsyncFnOnce(&mut Session) -> T) -> T {
         block_on(async {
             let endpoint = Endpoint { host: "127.0.0.1".into(), port: 31143, security: Security::Plain, verify_certs: false };
-            let mut session = kite_core::imap::connect(&endpoint, &self.user, PASSWORD).await.expect("Dovecot signs in");
+            let mut session = jolta_core::imap::connect(&endpoint, &self.user, PASSWORD).await.expect("Dovecot signs in");
             let out = f(&mut session).await;
             session.logout().await.ok();
             out
@@ -104,7 +104,7 @@ impl Mailbox {
             smtp_port: Some(31025),
             ..Default::default()
         };
-        let account = block_on(kite_core::imap::add_account(&app.kite, setup)).expect("the account signs in");
+        let account = block_on(jolta_core::imap::add_account(&app.jolta, setup)).expect("the account signs in");
         app.core.start().unwrap();
         account
     }

@@ -16,19 +16,19 @@ MAILPIT_IMAGE=axllent/mailpit:v1.33.0
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 down() {
-	docker rm -f kite-test-dovecot kite-test-mailpit >/dev/null 2>&1 || true
+	docker rm -f jolta-test-dovecot jolta-test-mailpit >/dev/null 2>&1 || true
 }
 
 case "${1:-}" in
 up)
 	down
-	docker run -d --name kite-test-dovecot \
+	docker run -d --name jolta-test-dovecot \
 		-p 127.0.0.1:31143:31143 \
-		-e USER_PASSWORD=kite-test \
+		-e USER_PASSWORD=jolta-test \
 		--tmpfs /srv/vmail:uid=1000,gid=1000 \
-		-v "$HERE/test-servers/dovecot.conf:/etc/dovecot/conf.d/kite-test.conf:ro" \
+		-v "$HERE/test-servers/dovecot.conf:/etc/dovecot/conf.d/jolta-test.conf:ro" \
 		"$DOVECOT_IMAGE" >/dev/null
-	docker run -d --name kite-test-mailpit \
+	docker run -d --name jolta-test-mailpit \
 		-p 127.0.0.1:31025:1025 -p 127.0.0.1:31080:8025 \
 		-e MP_SMTP_AUTH_ACCEPT_ANY=1 -e MP_SMTP_AUTH_ALLOW_INSECURE=1 \
 		"$MAILPIT_IMAGE" >/dev/null
@@ -40,7 +40,7 @@ up)
 		fi
 		sleep 0.2
 	done
-	echo "The test servers didn't start; see: docker logs kite-test-dovecot" >&2
+	echo "The test servers didn't start; see: docker logs jolta-test-dovecot" >&2
 	exit 1
 	;;
 down)

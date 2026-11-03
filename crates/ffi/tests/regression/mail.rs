@@ -1,5 +1,5 @@
-use kite_core::MailboxRole;
-use kite_ffi::{ListContext, ThreadAction};
+use jolta_core::MailboxRole;
+use jolta_ffi::{ListContext, ThreadAction};
 
 use crate::fixture::{App, Mail, now};
 
@@ -87,13 +87,13 @@ fn snooze_and_wake() {
     assert!(app.subjects("in:inbox").is_empty());
     assert_eq!(app.core.snoozed().unwrap().len(), 1);
 
-    let due = app.kite.store.read(|c| kite_core::store::due_snoozes(c, me.id, now() + 120)).unwrap();
+    let due = app.jolta.store.read(|c| jolta_core::store::due_snoozes(c, me.id, now() + 120)).unwrap();
     assert_eq!(due.len(), 1);
-    app.kite
+    app.jolta
         .store
         .write(|tx| {
             for (snooze, thread) in &due {
-                kite_core::actions::wake(tx, *snooze, *thread)?;
+                jolta_core::actions::wake(tx, *snooze, *thread)?;
             }
             Ok(())
         })

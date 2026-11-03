@@ -1,5 +1,5 @@
 -- Connection settings a power user can change per account. The defaults
--- match how Kite connected before: TLS everywhere except plain IMAP to a
+-- match how Jolta connected before: TLS everywhere except plain IMAP to a
 -- local test server, SMTP on 465 with TLS and elsewhere with STARTTLS.
 ALTER TABLE account ADD COLUMN imap_security TEXT NOT NULL DEFAULT 'tls';
 ALTER TABLE account ADD COLUMN smtp_security TEXT NOT NULL DEFAULT 'starttls';

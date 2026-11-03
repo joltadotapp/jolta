@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>be.example.kite.mcp</string>
+	<string>app.jolta.mac.mcp</string>
 	<key>CFBundleName</key>
-	<string>kite-mcp</string>
+	<string>jolta-mcp</string>
 </dict>
 </plist>

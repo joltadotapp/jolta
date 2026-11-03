@@ -37,7 +37,7 @@ struct Entry {
     by_account: HashMap<AccountId, f64>,
 }
 
-/// Everyone Kite can suggest, ranked. Build it once and query it per keystroke.
+/// Everyone Jolta can suggest, ranked. Build it once and query it per keystroke.
 pub struct People {
     entries: Vec<Entry>,
 }
@@ -164,10 +164,10 @@ mod tests {
     const NOW: i64 = 1_800_000_000;
 
     fn store_with_mail() -> (std::path::PathBuf, store::Store) {
-        let dir = std::env::temp_dir().join(format!("kite-people-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!("jolta-people-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let s = store::Store::open(&dir.join("kite.sqlite")).unwrap();
+        let s = store::Store::open(&dir.join("jolta.sqlite")).unwrap();
         s.write(|tx| {
             tx.execute_batch(
                 "INSERT INTO account (id, kind, address, username, secret_ref, created)

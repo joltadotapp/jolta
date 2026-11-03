@@ -6,7 +6,7 @@
 #   scripts/live-check.sh gmail-test@example.com m365-test@example.com you@icloud.com
 #
 # Safety, because these are real mailboxes:
-# - It works in its own data folder (Kite/LiveCheck) holding only the named
+# - It works in its own data folder (Jolta/LiveCheck) holding only the named
 #   accounts, copied from the real store with the same Keychain entries, so
 #   no other account is synced or touched.
 # - It refuses an account with more than 500 messages, which looks like a
@@ -20,18 +20,18 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-REAL="$HOME/Library/Application Support/Kite"
+REAL="$HOME/Library/Application Support/Jolta"
 DIR="$REAL/LiveCheck"
-KITE="target/release/kite"
-TOKEN="kite-live-$(date +%Y%m%d%H%M%S)-$RANDOM"
+JOLTA="target/release/jolta"
+TOKEN="jolta-live-$(date +%Y%m%d%H%M%S)-$RANDOM"
 [ $# -gt 0 ] || { echo "usage: $0 <account address>..." >&2; exit 2; }
-[ -x "$KITE" ] || scripts/build-cli.sh
+[ -x "$JOLTA" ] || scripts/build-cli.sh
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Every step gets three minutes; a step that hangs fails the check instead.
-k() { perl -e 'alarm shift; exec @ARGV' 180 "$KITE" --data-dir "$DIR" "$@" || fail "kite $* stopped or took over three minutes"; }
-q() { sqlite3 -readonly "$DIR/kite.sqlite" "$1"; }
+k() { perl -e 'alarm shift; exec @ARGV' 180 "$JOLTA" --data-dir "$DIR" "$@" || fail "jolta $* stopped or took over three minutes"; }
+q() { sqlite3 -readonly "$DIR/jolta.sqlite" "$1"; }
 step() { echo "  ok  $*"; }
 
 rm -rf "$DIR"
@@ -39,11 +39,11 @@ k account list >/dev/null
 cp "$REAL/oauth-clients.env" "$DIR/" 2>/dev/null || true
 
 for address in "$@"; do
-	id=$(sqlite3 -readonly "$REAL/kite.sqlite" "SELECT id FROM account WHERE address = '$address' COLLATE NOCASE")
+	id=$(sqlite3 -readonly "$REAL/jolta.sqlite" "SELECT id FROM account WHERE address = '$address' COLLATE NOCASE")
 	[ -n "$id" ] || fail "no account $address in the real store"
-	count=$(sqlite3 -readonly "$REAL/kite.sqlite" "SELECT count(*) FROM message WHERE account_id = $id")
+	count=$(sqlite3 -readonly "$REAL/jolta.sqlite" "SELECT count(*) FROM message WHERE account_id = $id")
 	[ "$count" -le 500 ] || fail "$address has $count messages; the check only runs on test mailboxes"
-	sqlite3 "$DIR/kite.sqlite" "ATTACH 'file:$REAL/kite.sqlite?mode=ro' AS real; INSERT INTO account SELECT * FROM real.account WHERE id = $id;"
+	sqlite3 "$DIR/jolta.sqlite" "ATTACH 'file:$REAL/jolta.sqlite?mode=ro' AS real; INSERT INTO account SELECT * FROM real.account WHERE id = $id;"
 done
 
 # Syncs until the query gives the wanted answer, for up to a minute.
@@ -70,7 +70,7 @@ for address in "$@"; do
 	before=$(others "$id")
 	step "first sync: $(q "SELECT count(*) FROM message WHERE account_id = $id") messages"
 
-	subject="Kite live check $TOKEN"
+	subject="Jolta live check $TOKEN"
 	k send "$id" --to "$address" --subject "$subject" --body "Sent by scripts/live-check.sh. It ends in Trash." >/dev/null
 	in_box() {
 		echo "SELECT count(*) FROM message m JOIN message_mailbox mm ON mm.message_id = m.id JOIN mailbox b ON b.id = mm.mailbox_id

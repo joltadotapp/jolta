@@ -12,9 +12,9 @@ use tokio::sync::Notify;
 
 use super::{Ai, Cancel, Provider, tasks, triage};
 use crate::model::*;
-use crate::{Kite, Result};
+use crate::{Jolta, Result};
 
-/// How far back sorting reaches when it is switched on or Kite starts.
+/// How far back sorting reaches when it is switched on or Jolta starts.
 pub const CATCH_UP_DAYS: i64 = 14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,10 +62,10 @@ pub struct Background {
 }
 
 impl Background {
-    pub fn start(kite: Kite, ai: Arc<Ai>, changed: Changed, runtime: &tokio::runtime::Handle) -> Arc<Background> {
+    pub fn start(jolta: Jolta, ai: Arc<Ai>, changed: Changed, runtime: &tokio::runtime::Handle) -> Arc<Background> {
         let bg = Arc::new(Background { queue: Mutex::default(), wake: Notify::new(), allowed: AtomicBool::new(true) });
         let worker = bg.clone();
-        runtime.spawn(async move { worker.run(kite, ai, changed).await });
+        runtime.spawn(async move { worker.run(jolta, ai, changed).await });
         bg
     }
 
@@ -92,8 +92,8 @@ impl Background {
 
     /// New mail arrived in a thread: sort its unsorted messages and, when
     /// it is long enough, summarise it.
-    pub fn new_mail(&self, kite: &Kite, thread: ThreadId) {
-        let Ok((settings, messages)) = kite.store.read(|c| {
+    pub fn new_mail(&self, jolta: &Jolta, thread: ThreadId) {
+        let Ok((settings, messages)) = jolta.store.read(|c| {
             let settings = super::settings(c)?;
             let mut stmt = c.prepare(
                 "SELECT m.id FROM message m WHERE m.thread_id = ?1
@@ -118,9 +118,9 @@ impl Background {
 
     /// Sorts the inbox mail of the last two weeks that isn't sorted yet:
     /// at start, and when sorting is switched on.
-    pub fn catch_up(&self, kite: &Kite) {
+    pub fn catch_up(&self, jolta: &Jolta) {
         let since = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) - CATCH_UP_DAYS * 86_400;
-        let Ok(Some(ids)) = kite.store.read(|c| {
+        let Ok(Some(ids)) = jolta.store.read(|c| {
             if !super::settings(c)?.sorts_new_mail() {
                 return Ok(None);
             }
@@ -131,7 +131,7 @@ impl Background {
         self.push(ids.into_iter().map(Job::Sort));
     }
 
-    async fn run(self: Arc<Self>, kite: Kite, ai: Arc<Ai>, changed: Changed) {
+    async fn run(self: Arc<Self>, jolta: Jolta, ai: Arc<Ai>, changed: Changed) {
         let mut done_since_report = 0;
         loop {
             let job = self.queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
@@ -143,7 +143,7 @@ impl Background {
                 self.wake.notified().await;
                 continue;
             };
-            let local = kite.store.read(super::settings).map(|s| s.provider == Some(Provider::Local)).unwrap_or(false);
+            let local = jolta.store.read(super::settings).map(|s| s.provider == Some(Provider::Local)).unwrap_or(false);
             while local && !self.allowed.load(Ordering::SeqCst) {
                 if done_since_report > 0 {
                     changed();
@@ -154,7 +154,7 @@ impl Background {
                     _ = tokio::time::sleep(Duration::from_secs(60)) => {}
                 }
             }
-            if let Err(e) = Self::work(&kite, &ai, job).await {
+            if let Err(e) = Self::work(&jolta, &ai, job).await {
                 tracing::warn!("background AI job {job:?} failed: {e}");
                 // A provider that is down or refusing would fail every job; slow down.
                 tokio::time::sleep(Duration::from_secs(30)).await;
@@ -167,14 +167,14 @@ impl Background {
         }
     }
 
-    async fn work(kite: &Kite, ai: &Ai, job: Job) -> Result<()> {
+    async fn work(jolta: &Jolta, ai: &Ai, job: Job) -> Result<()> {
         let cancel = Cancel::default();
         match job {
             Job::Sort(message) => {
-                triage::sort(kite, ai, message, &cancel).await?;
+                triage::sort(jolta, ai, message, &cancel).await?;
             }
             Job::Summary(thread) => {
-                tasks::summarise(kite, ai, thread, true, false, &cancel, &mut |_| {}).await?;
+                tasks::summarise(jolta, ai, thread, true, false, &cancel, &mut |_| {}).await?;
             }
         }
         Ok(())

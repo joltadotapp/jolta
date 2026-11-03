@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::model::*;
 use crate::render::{self, MessageView, Rendered};
-use crate::{Kite, Result, imap, store};
+use crate::{Jolta, Result, imap, store};
 
 #[derive(Clone, Debug)]
 pub struct ThreadMessage {
@@ -93,11 +93,11 @@ pub fn format_date(unix: i64, utc_offset: i32) -> String {
 
 /// Loads every message of a thread (downloading bodies the store lacks) and
 /// renders them. Unread messages and the newest one start expanded.
-pub async fn open_thread(kite: &Kite, thread: ThreadId, app_css: &str, utc_offset: i32) -> Result<ThreadDetail> {
-    let (subject, messages) = kite.store.read_async(move |c| thread_messages(c, thread)).await?;
+pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_offset: i32) -> Result<ThreadDetail> {
+    let (subject, messages) = jolta.store.read_async(move |c| thread_messages(c, thread)).await?;
     let mut raws = Vec::with_capacity(messages.len());
     for m in &messages {
-        raws.push(imap::message_source(kite, m.id).await.unwrap_or_default());
+        raws.push(imap::message_source(jolta, m.id).await.unwrap_or_default());
     }
     let names: Vec<(String, String)> = messages
         .iter()
@@ -132,7 +132,7 @@ pub async fn open_thread(kite: &Kite, thread: ThreadId, app_css: &str, utc_offse
     senders.dedup();
     let check = senders.clone();
     let images_trusted = !check.is_empty()
-        && kite
+        && jolta
             .store
             .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
             .await?;

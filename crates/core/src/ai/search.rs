@@ -1,9 +1,9 @@
 //! Plain-language search: "invoices from Els last month" becomes a query in
-//! Kite's search language, which the app shows and runs. The model only
+//! Jolta's search language, which the app shows and runs. The model only
 //! writes the query; the search itself runs over all mail as usual.
 
 use super::{Ai, Cancel, Finish, Request};
-use crate::{Error, Kite, Result, reader, search};
+use crate::{Error, Jolta, Result, reader, search};
 
 const LANGUAGE: &str = "Query language (all terms must match):
 - a word matches anywhere in the mail; \"an exact phrase\" in double quotes
@@ -15,10 +15,10 @@ const LANGUAGE: &str = "Query language (all terms must match):
 - after:YYYY-MM-DD (from that day on)  before:YYYY-MM-DD (until the day before)
 - a - in front excludes a term, as in -is:newsletter";
 
-/// The query for a request, checked by Kite's parser. One retry when the
+/// The query for a request, checked by Jolta's parser. One retry when the
 /// model writes something the parser refuses.
-pub async fn query(kite: &Kite, ai: &Ai, request: &str, now: i64, utc_offset: i32, cancel: &Cancel) -> Result<Option<String>> {
-    let settings = kite.store.read_async(super::settings).await?;
+pub async fn query(jolta: &Jolta, ai: &Ai, request: &str, now: i64, utc_offset: i32, cancel: &Cancel) -> Result<Option<String>> {
+    let settings = jolta.store.read_async(super::settings).await?;
     if settings.provider.is_none() {
         return Ok(None);
     }
@@ -38,7 +38,7 @@ pub async fn query(kite: &Kite, ai: &Ai, request: &str, now: i64, utc_offset: i3
     let weekday = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"]
         [((now + utc_offset as i64).div_euclid(86_400)).rem_euclid(7) as usize];
     let system = format!(
-        "You turn a request to find email into a search query for the mail app Kite. Answer with the query only, on one line.\n\n\
+        "You turn a request to find email into a search query for the mail app Jolta. Answer with the query only, on one line.\n\n\
          {LANGUAGE}\n\n\
          Use as few terms as you can: a person's first name or company in from:, and one or two keywords from the request, \
          in the request's language. Leave out in: unless the request names a folder. Today is {weekday} {today}.\n\n\

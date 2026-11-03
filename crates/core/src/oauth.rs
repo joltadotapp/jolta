@@ -56,7 +56,7 @@ impl Provider {
         }
     }
 
-    /// The scope Kite cannot work without, where the user can refuse it and
+    /// The scope Jolta cannot work without, where the user can refuse it and
     /// still finish signing in: Google's consent screen shows it as a
     /// checkbox, and Gmail then answers every login with AUTHENTICATIONFAILED.
     fn required_scope(self) -> Option<&'static str> {
@@ -176,9 +176,9 @@ pub async fn begin(provider: Provider, client: Client, port: u16) -> Result<Pend
     Ok(Pending { url, provider, client, verifier, state, redirect, listener })
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Kite</title>\
+const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Jolta</title>\
 <body style=\"font:15px -apple-system,system-ui;margin:20vh auto;max-width:420px;text-align:center\">\
-<h2>You're signed in</h2><p>You can close this tab and go back to Kite.</p>";
+<h2>You're signed in</h2><p>You can close this tab and go back to Jolta.</p>";
 
 impl Pending {
     /// Waits for the browser to come back (up to ten minutes), then trades
@@ -217,7 +217,7 @@ impl Pending {
         if let (Some(wanted), Some(granted)) = (self.provider.required_scope(), tokens["scope"].as_str()) {
             if !granted.split_whitespace().any(|s| s.eq_ignore_ascii_case(wanted)) {
                 return Err(Error::Auth(
-                    "you didn't give Kite access to your mail. Sign in again and tick the box that lets Kite \
+                    "you didn't give Jolta access to your mail. Sign in again and tick the box that lets Jolta \
                      read, compose and send your email."
                         .into(),
                 ));
@@ -320,7 +320,7 @@ fn jwt_claims(token: &str) -> Option<Value> {
     serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?).ok()
 }
 
-/// HTTPS clients use ring, the one crypto provider in Kite's TLS stack.
+/// HTTPS clients use ring, the one crypto provider in Jolta's TLS stack.
 pub fn init_tls() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 }
@@ -434,12 +434,12 @@ mod tests {
 
 /// Stores a finished sign-in as an account (or refreshes the token of the
 /// account with that address) and returns it.
-pub fn save_account(kite: &crate::Kite, provider: Provider, signed: &SignedIn) -> Result<Account> {
+pub fn save_account(jolta: &crate::Jolta, provider: Provider, signed: &SignedIn) -> Result<Account> {
     let kind = match provider {
         Provider::Google => AccountKind::Gmail,
         Provider::Microsoft => AccountKind::Graph,
     };
-    let existing = kite
+    let existing = jolta
         .store
         .read(crate::store::accounts)?
         .into_iter()
@@ -461,7 +461,7 @@ pub fn save_account(kite: &crate::Kite, provider: Provider, signed: &SignedIn) -
                 smtp_host: smtp_host.into(),
                 smtp_port,
             };
-            kite.store.write(|tx| crate::store::insert_account(tx, &new))?
+            jolta.store.write(|tx| crate::store::insert_account(tx, &new))?
         }
     };
     secrets::set_password(&account.secret_ref, &signed.refresh_token)?;

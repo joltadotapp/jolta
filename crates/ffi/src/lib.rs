@@ -1,17 +1,17 @@
-//! The Swift-facing API: thin wrappers over `kite_core`. Lists cross the
+//! The Swift-facing API: thin wrappers over `jolta_core`. Lists cross the
 //! bridge as pages; sync runs on the core's own tokio runtime and reports
 //! through `CoreListener`.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use kite_core::actions::{Action, Context};
-use kite_core::compose::{self, AttachmentFile, Compose, ReplyKind};
-use kite_core::engine::{Engine, Event};
-use kite_core::store::OpId;
-use kite_core::people::{self, People};
-use kite_core::rich;
-use kite_core::{AccountId, Kite, MailboxId, MessageId, ThreadId, reader, search, store};
+use jolta_core::actions::{Action, Context};
+use jolta_core::compose::{self, AttachmentFile, Compose, ReplyKind};
+use jolta_core::engine::{Engine, Event};
+use jolta_core::store::OpId;
+use jolta_core::people::{self, People};
+use jolta_core::rich;
+use jolta_core::{AccountId, Jolta, MailboxId, MessageId, ThreadId, reader, search, store};
 
 uniffi::setup_scaffolding!();
 
@@ -29,13 +29,13 @@ pub enum CoreError {
     Failed { message: String },
 }
 
-impl From<kite_core::Error> for CoreError {
-    fn from(e: kite_core::Error) -> Self {
+impl From<jolta_core::Error> for CoreError {
+    fn from(e: jolta_core::Error) -> Self {
         let message = e.to_string();
         match e {
-            kite_core::Error::Query(_) => CoreError::Query { message },
-            kite_core::Error::NotFound(_) => CoreError::NotFound { message },
-            kite_core::Error::Auth(_) => CoreError::SignIn { message },
+            jolta_core::Error::Query(_) => CoreError::Query { message },
+            jolta_core::Error::NotFound(_) => CoreError::NotFound { message },
+            jolta_core::Error::Auth(_) => CoreError::SignIn { message },
             _ => CoreError::Failed { message },
         }
     }
@@ -137,12 +137,12 @@ pub struct AccountSettingsInfo {
     pub verify_certs: bool,
 }
 
-impl From<kite_core::AccountSettings> for AccountSettingsInfo {
-    fn from(s: kite_core::AccountSettings) -> Self {
-        let security = |s: kite_core::Security| match s {
-            kite_core::Security::Tls => ConnectionSecurity::Tls,
-            kite_core::Security::StartTls => ConnectionSecurity::StartTls,
-            kite_core::Security::Plain => ConnectionSecurity::Plain,
+impl From<jolta_core::AccountSettings> for AccountSettingsInfo {
+    fn from(s: jolta_core::AccountSettings) -> Self {
+        let security = |s: jolta_core::Security| match s {
+            jolta_core::Security::Tls => ConnectionSecurity::Tls,
+            jolta_core::Security::StartTls => ConnectionSecurity::StartTls,
+            jolta_core::Security::Plain => ConnectionSecurity::Plain,
         };
         AccountSettingsInfo {
             display_name: s.display_name,
@@ -155,9 +155,9 @@ impl From<kite_core::AccountSettings> for AccountSettingsInfo {
             smtp_port: s.smtp_port,
             smtp_security: security(s.smtp_security),
             smtp_login: match s.smtp_auth {
-                kite_core::SmtpAuth::SameAsIncoming => SmtpLogin::SameAsIncoming,
-                kite_core::SmtpAuth::Separate => SmtpLogin::Separate,
-                kite_core::SmtpAuth::NoAuth => SmtpLogin::NoAuth,
+                jolta_core::SmtpAuth::SameAsIncoming => SmtpLogin::SameAsIncoming,
+                jolta_core::SmtpAuth::Separate => SmtpLogin::Separate,
+                jolta_core::SmtpAuth::NoAuth => SmtpLogin::NoAuth,
             },
             smtp_username: s.smtp_username,
             verify_certs: s.verify_certs,
@@ -165,14 +165,14 @@ impl From<kite_core::AccountSettings> for AccountSettingsInfo {
     }
 }
 
-impl From<AccountSettingsInfo> for kite_core::AccountSettings {
+impl From<AccountSettingsInfo> for jolta_core::AccountSettings {
     fn from(s: AccountSettingsInfo) -> Self {
         let security = |s: ConnectionSecurity| match s {
-            ConnectionSecurity::Tls => kite_core::Security::Tls,
-            ConnectionSecurity::StartTls => kite_core::Security::StartTls,
-            ConnectionSecurity::Plain => kite_core::Security::Plain,
+            ConnectionSecurity::Tls => jolta_core::Security::Tls,
+            ConnectionSecurity::StartTls => jolta_core::Security::StartTls,
+            ConnectionSecurity::Plain => jolta_core::Security::Plain,
         };
-        kite_core::AccountSettings {
+        jolta_core::AccountSettings {
             display_name: s.display_name,
             address: s.address,
             username: s.username,
@@ -183,9 +183,9 @@ impl From<AccountSettingsInfo> for kite_core::AccountSettings {
             smtp_port: s.smtp_port,
             smtp_security: security(s.smtp_security),
             smtp_auth: match s.smtp_login {
-                SmtpLogin::SameAsIncoming => kite_core::SmtpAuth::SameAsIncoming,
-                SmtpLogin::Separate => kite_core::SmtpAuth::Separate,
-                SmtpLogin::NoAuth => kite_core::SmtpAuth::NoAuth,
+                SmtpLogin::SameAsIncoming => jolta_core::SmtpAuth::SameAsIncoming,
+                SmtpLogin::Separate => jolta_core::SmtpAuth::Separate,
+                SmtpLogin::NoAuth => jolta_core::SmtpAuth::NoAuth,
             },
             smtp_username: s.smtp_username,
             verify_certs: s.verify_certs,
@@ -466,7 +466,7 @@ pub trait CoreListener: Send + Sync {
 
 #[uniffi::export]
 pub fn core_greeting() -> String {
-    kite_core::greeting()
+    jolta_core::greeting()
 }
 
 #[derive(uniffi::Enum)]
@@ -479,9 +479,9 @@ pub enum OAuthProvider {
 #[derive(uniffi::Object)]
 pub struct SignIn {
     url: String,
-    provider: kite_core::oauth::Provider,
-    pending: Mutex<Option<kite_core::oauth::Pending>>,
-    kite: Kite,
+    provider: jolta_core::oauth::Provider,
+    pending: Mutex<Option<jolta_core::oauth::Pending>>,
+    jolta: Jolta,
     runtime: tokio::runtime::Handle,
     engine: Option<Arc<Engine>>,
 }
@@ -500,18 +500,18 @@ impl SignIn {
             .unwrap_or_else(|e| e.into_inner())
             .take()
             .ok_or_else(|| CoreError::Failed { message: "this sign-in already finished".into() })?;
-        let (kite, provider, engine) = (self.kite.clone(), self.provider, self.engine.clone());
+        let (jolta, provider, engine) = (self.jolta.clone(), self.provider, self.engine.clone());
         self.runtime
             .spawn(async move {
                 let signed = pending
                     .finish()
                     .await
-                    .map_err(|e| kite_core::Error::Auth(kite_core::graph::explain_sign_in_error(&e.to_string())))?;
-                let account = kite_core::oauth::save_account(&kite, provider, &signed)?;
+                    .map_err(|e| jolta_core::Error::Auth(jolta_core::graph::explain_sign_in_error(&e.to_string())))?;
+                let account = jolta_core::oauth::save_account(&jolta, provider, &signed)?;
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }
-                Ok::<_, kite_core::Error>(AccountInfo {
+                Ok::<_, jolta_core::Error>(AccountInfo {
                     id: account.id.0,
                     kind: account.kind.to_string(),
                     provider: account.provider_label().to_string(),
@@ -527,11 +527,11 @@ impl SignIn {
 
 #[derive(uniffi::Object)]
 pub struct Core {
-    kite: Kite,
+    jolta: Jolta,
     runtime: tokio::runtime::Runtime,
     listener: Arc<dyn CoreListener>,
     engine: Mutex<Option<Arc<Engine>>>,
-    engine_sink: Mutex<Option<kite_core::engine::Sink>>,
+    engine_sink: Mutex<Option<jolta_core::engine::Sink>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
     order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>>,
@@ -539,18 +539,18 @@ pub struct Core {
     /// the address book or forgotten addresses change.
     people: Arc<Mutex<Option<(Instant, Arc<People>)>>>,
     address_book: Arc<Mutex<Vec<(String, String)>>>,
-    ai: Arc<kite_core::ai::Ai>,
+    ai: Arc<jolta_core::ai::Ai>,
     downloads: ai::Downloads,
     /// Sorting new mail and summaries made ahead, one job at a time.
-    background: Arc<kite_core::ai::background::Background>,
+    background: Arc<jolta_core::ai::background::Background>,
 }
 
 const PEOPLE_FRESH: Duration = Duration::from_secs(120);
 
-fn build_people(kite: &Kite, book: &Mutex<Vec<(String, String)>>) -> kite_core::Result<People> {
+fn build_people(jolta: &Jolta, book: &Mutex<Vec<(String, String)>>) -> jolta_core::Result<People> {
     let book = book.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-    kite.store.read(|c| People::build(c, now, &book))
+    jolta.store.read(|c| People::build(c, now, &book))
 }
 
 impl Core {
@@ -562,7 +562,7 @@ impl Core {
             }
         }
         let q = search::parse(query)?;
-        let order = Arc::new(self.kite.store.read(|c| search::query_order(c, &q, sort.into()))?);
+        let order = Arc::new(self.jolta.store.read(|c| search::query_order(c, &q, sort.into()))?);
         *cache = Some((query.to_string(), sort, order.clone()));
         Ok(order)
     }
@@ -572,23 +572,23 @@ impl Core {
 impl Core {
     #[uniffi::constructor]
     pub fn open(data_dir: String, listener: Arc<dyn CoreListener>) -> Result<Arc<Core>> {
-        let kite = Kite::open(std::path::Path::new(&data_dir))?;
+        let jolta = Jolta::open(std::path::Path::new(&data_dir))?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("kite-core")
+            .thread_name("jolta-core")
             .enable_all()
             .build()
             .map_err(|e| CoreError::Failed { message: e.to_string() })?;
-        let ai = Arc::new(kite_core::ai::Ai::new(&kite.data_dir, ai::helper_path()));
+        let ai = Arc::new(jolta_core::ai::Ai::new(&jolta.data_dir, ai::helper_path()));
         let order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>> = Arc::new(Mutex::new(None));
-        let changed: kite_core::ai::background::Changed = {
+        let changed: jolta_core::ai::background::Changed = {
             let (order, listener) = (order.clone(), listener.clone());
             Arc::new(move || {
                 *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 listener.on_event(CoreEvent::ListsChanged);
             })
         };
-        let background = kite_core::ai::background::Background::start(kite.clone(), ai.clone(), changed, runtime.handle());
+        let background = jolta_core::ai::background::Background::start(jolta.clone(), ai.clone(), changed, runtime.handle());
         Ok(Arc::new(Core {
             runtime,
             listener,
@@ -600,13 +600,13 @@ impl Core {
             ai,
             downloads: Arc::default(),
             background,
-            kite,
+            jolta,
         }))
     }
 
     pub fn accounts(&self) -> Result<Vec<AccountInfo>> {
         Ok(self
-            .kite
+            .jolta
             .store
             .read(store::accounts)?
             .into_iter()
@@ -621,7 +621,7 @@ impl Core {
     }
 
     pub fn mailboxes(&self, account_id: i64) -> Result<Vec<MailboxInfo>> {
-        self.kite.store.read(|c| {
+        self.jolta.store.read(|c| {
             let boxes = store::mailboxes(c, AccountId(account_id))?;
             let mut unread = c.prepare_cached(
                 "SELECT count(*) FROM message_mailbox mm JOIN message m ON m.id = mm.message_id
@@ -654,7 +654,7 @@ impl Core {
             }
         }
         let q = search::parse(&query)?;
-        Ok(self.kite.store.read(|c| search::query_count(c, &q))?)
+        Ok(self.jolta.store.read(|c| search::query_count(c, &q))?)
     }
 
     /// Length of the list being shown; caches its order for `query_page`.
@@ -664,7 +664,7 @@ impl Core {
 
     pub fn query_page(&self, query: String, sort: ListSort, offset: u32, limit: u32) -> Result<Vec<ThreadRow>> {
         let order = self.order(&query, sort)?;
-        let rows = self.kite.store.read(|c| search::thread_rows(c, slice(&order, offset, limit)))?;
+        let rows = self.jolta.store.read(|c| search::thread_rows(c, slice(&order, offset, limit)))?;
         Ok(rows
             .into_iter()
             .map(|r| ThreadRow {
@@ -701,10 +701,10 @@ impl Core {
     }
 
     pub async fn open_thread(&self, thread_id: i64, app_css: String, utc_offset: i32) -> Result<ThreadView> {
-        let kite = self.kite.clone();
+        let jolta = self.jolta.clone();
         let detail = self
             .runtime
-            .spawn(async move { reader::open_thread(&kite, ThreadId(thread_id), &app_css, utc_offset).await })
+            .spawn(async move { reader::open_thread(&jolta, ThreadId(thread_id), &app_css, utc_offset).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         Ok(ThreadView {
@@ -715,7 +715,7 @@ impl Core {
             remote_images: detail.rendered.remote_images,
             image_sender: detail.image_sender.unwrap_or_default(),
             images_trusted: detail.images_trusted,
-            mailing_list: self.kite.store.read(|c| {
+            mailing_list: self.jolta.store.read(|c| {
                 Ok(c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM message WHERE thread_id = ?1 AND list_unsubscribe IS NOT NULL)",
                     [thread_id],
@@ -729,11 +729,11 @@ impl Core {
     /// an unsubscribe email from the account that received it, or, when the
     /// list only offers a web page, that page for the app to open.
     pub async fn unsubscribe(&self, thread_id: i64) -> Result<UnsubscribeResult> {
-        let kite = self.kite.clone();
+        let jolta = self.jolta.clone();
         let engine = self.running_engine()?;
         self.runtime
             .spawn(async move {
-                let found: Option<(MessageId, AccountId, String)> = kite
+                let found: Option<(MessageId, AccountId, String)> = jolta
                     .store
                     .read_async(move |c| {
                         let row = c.query_row(
@@ -746,18 +746,18 @@ impl Core {
                     })
                     .await?;
                 let Some((message, account, list)) = found else { return Ok(UnsubscribeResult::NotAList) };
-                let raw = kite_core::imap::message_source(&kite, message).await?;
-                Ok::<_, kite_core::Error>(match kite_core::unsubscribe::method(&raw) {
+                let raw = jolta_core::imap::message_source(&jolta, message).await?;
+                Ok::<_, jolta_core::Error>(match jolta_core::unsubscribe::method(&raw) {
                     None => UnsubscribeResult::NotAList,
-                    Some(kite_core::unsubscribe::Method::OneClick(url)) => {
-                        kite_core::unsubscribe::one_click(&url).await?;
+                    Some(jolta_core::unsubscribe::Method::OneClick(url)) => {
+                        jolta_core::unsubscribe::one_click(&url).await?;
                         UnsubscribeResult::Unsubscribed { list }
                     }
-                    Some(kite_core::unsubscribe::Method::Mail { to, subject, body }) => {
+                    Some(jolta_core::unsubscribe::Method::Mail { to, subject, body }) => {
                         engine.send(&Compose { account: Some(account), to: to.clone(), subject, body, ..Default::default() }, None, None)?;
                         UnsubscribeResult::Emailed { list, to }
                     }
-                    Some(kite_core::unsubscribe::Method::Page(url)) => UnsubscribeResult::OpenPage { list, url },
+                    Some(jolta_core::unsubscribe::Method::Page(url)) => UnsubscribeResult::OpenPage { list, url },
                 })
             })
             .await
@@ -773,8 +773,8 @@ impl Core {
             return Ok(());
         }
         let (order, listener) = (self.order.clone(), self.listener.clone());
-        let (background, kite) = (self.background.clone(), self.kite.clone());
-        let sink: kite_core::engine::Sink = Arc::new(move |event| {
+        let (background, jolta) = (self.background.clone(), self.jolta.clone());
+        let sink: jolta_core::engine::Sink = Arc::new(move |event| {
             let event = match event {
                 Event::ListsChanged => {
                     *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -784,7 +784,7 @@ impl Core {
                 Event::SyncFinished(a) => CoreEvent::SyncFinished { account_id: a.0 },
                 Event::SyncFailed(a, message) => CoreEvent::SyncFailed { account_id: a.0, message },
                 Event::NewMail { account, thread, from, subject, vip } => {
-                    background.new_mail(&kite, thread);
+                    background.new_mail(&jolta, thread);
                     CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject, vip }
                 }
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
@@ -803,8 +803,8 @@ impl Core {
             listener.on_event(event);
         });
         *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
-        *engine = Some(Engine::start(self.kite.clone(), sink, self.runtime.handle().clone())?);
-        self.background.catch_up(&self.kite);
+        *engine = Some(Engine::start(self.jolta.clone(), sink, self.runtime.handle().clone())?);
+        self.background.catch_up(&self.jolta);
         Ok(())
     }
 
@@ -837,7 +837,7 @@ impl Core {
     /// A blank message from the first account that can send.
     pub fn new_compose(&self) -> Result<ComposeData> {
         let account = self
-            .kite
+            .jolta
             .store
             .read(store::accounts)?
             .into_iter()
@@ -850,7 +850,7 @@ impl Core {
     pub fn swap_signature(&self, body: String, from_account: Option<i64>, to_account: Option<i64>) -> Result<String> {
         let signature = |id: Option<i64>| -> Result<String> {
             Ok(match id {
-                Some(id) => self.kite.store.read(|c| store::account(c, AccountId(id)))?.signature,
+                Some(id) => self.jolta.store.read(|c| store::account(c, AccountId(id)))?.signature,
                 None => String::new(),
             })
         };
@@ -858,25 +858,25 @@ impl Core {
     }
 
     pub fn signature(&self, account_id: i64) -> Result<String> {
-        Ok(self.kite.store.read(|c| store::account(c, AccountId(account_id)))?.signature)
+        Ok(self.jolta.store.read(|c| store::account(c, AccountId(account_id)))?.signature)
     }
 
     pub fn set_signature(&self, account_id: i64, signature: String) -> Result<()> {
-        Ok(self.kite.store.write(|tx| store::set_signature(tx, AccountId(account_id), &signature))?)
+        Ok(self.jolta.store.write(|tx| store::set_signature(tx, AccountId(account_id), &signature))?)
     }
 
     pub fn snippets(&self) -> Result<Vec<SnippetInfo>> {
-        Ok(self.kite.store.read(store::snippets)?.into_iter().map(|s| SnippetInfo { id: s.id, name: s.name, body: s.body }).collect())
+        Ok(self.jolta.store.read(store::snippets)?.into_iter().map(|s| SnippetInfo { id: s.id, name: s.name, body: s.body }).collect())
     }
 
     /// Saves a snippet; id 0 adds one. Returns its id.
     pub fn save_snippet(&self, snippet: SnippetInfo) -> Result<i64> {
         let s = store::Snippet { id: snippet.id, name: snippet.name, body: snippet.body };
-        Ok(self.kite.store.write(|tx| store::save_snippet(tx, &s))?)
+        Ok(self.jolta.store.write(|tx| store::save_snippet(tx, &s))?)
     }
 
     pub fn delete_snippet(&self, id: i64) -> Result<()> {
-        Ok(self.kite.store.write(|tx| store::delete_snippet(tx, id))?)
+        Ok(self.jolta.store.write(|tx| store::delete_snippet(tx, id))?)
     }
 
     /// A snippet's body filled in for the message's first recipient.
@@ -896,14 +896,14 @@ impl Core {
 
     /// A reply, reply-all or forward of the newest message in a thread.
     pub async fn reply_compose(&self, thread_id: i64, mode: ReplyMode, utc_offset: i32) -> Result<ComposeData> {
-        let kite = self.kite.clone();
+        let jolta = self.jolta.clone();
         self.runtime
             .spawn(async move {
-                let message: MessageId = kite
+                let message: MessageId = jolta
                     .store
                     .read_async(move |c| Ok(c.query_row("SELECT max(id) FROM message WHERE thread_id = ?1", [thread_id], |r| r.get(0))?))
                     .await?;
-                let raw = kite_core::imap::message_source(&kite, message).await?;
+                let raw = jolta_core::imap::message_source(&jolta, message).await?;
                 let kind = match mode {
                     ReplyMode::Reply => ReplyKind::Reply,
                     ReplyMode::ReplyAll => ReplyKind::ReplyAll,
@@ -911,12 +911,12 @@ impl Core {
                 };
                 let raw = Arc::new(raw);
                 let source = raw.clone();
-                let mut c = kite.store.read_async(move |c| compose::reply(c, message, &source, kind, utc_offset)).await?;
+                let mut c = jolta.store.read_async(move |c| compose::reply(c, message, &source, kind, utc_offset)).await?;
                 if kind == ReplyKind::Forward {
-                    let dir = kite.data_dir.join("forwards").join(message.0.to_string());
+                    let dir = jolta.data_dir.join("forwards").join(message.0.to_string());
                     c.attachments = compose::forward_attachments(&raw, &dir)?;
                 }
-                Ok::<_, kite_core::Error>(c)
+                Ok::<_, jolta_core::Error>(c)
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
@@ -951,17 +951,17 @@ impl Core {
     }
 
     pub fn drafts(&self) -> Result<Vec<ComposeData>> {
-        Ok(self.kite.store.read(store::drafts)?.into_iter().map(Into::into).collect())
+        Ok(self.jolta.store.read(store::drafts)?.into_iter().map(Into::into).collect())
     }
 
     /// The part an inline `cid:` image names, for the reader.
     pub async fn inline_image(&self, message_id: i64, content_id: String) -> Result<AttachmentData> {
-        let kite = self.kite.clone();
+        let jolta = self.jolta.clone();
         self.runtime
             .spawn(async move {
-                let raw = kite_core::imap::message_source(&kite, MessageId(message_id)).await?;
-                kite_core::render::inline_part(&raw, &content_id)
-                    .ok_or_else(|| kite_core::Error::NotFound(format!("inline image {content_id}")))
+                let raw = jolta_core::imap::message_source(&jolta, MessageId(message_id)).await?;
+                jolta_core::render::inline_part(&raw, &content_id)
+                    .ok_or_else(|| jolta_core::Error::NotFound(format!("inline image {content_id}")))
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
@@ -971,11 +971,11 @@ impl Core {
 
     /// Loads remote images from this sender from now on, or stops.
     pub fn set_sender_trusted(&self, address: String, trusted: bool) -> Result<()> {
-        Ok(self.kite.store.write(|tx| store::set_sender_trusted(tx, &address, trusted))?)
+        Ok(self.jolta.store.write(|tx| store::set_sender_trusted(tx, &address, trusted))?)
     }
 
     pub fn account_settings(&self, account_id: i64) -> Result<AccountSettingsInfo> {
-        Ok(self.kite.store.read(|c| store::account(c, AccountId(account_id)))?.settings().into())
+        Ok(self.jolta.store.read(|c| store::account(c, AccountId(account_id)))?.settings().into())
     }
 
     /// Checks new settings against the servers, then saves them. Empty
@@ -987,11 +987,11 @@ impl Core {
         password: Option<String>,
         smtp_password: Option<String>,
     ) -> Result<AccountInfo> {
-        let (kite, engine) = (self.kite.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let (jolta, engine) = (self.jolta.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
         let id = AccountId(account_id);
         let account = self
             .runtime
-            .spawn(async move { kite_core::imap::update_account(&kite, id, settings.into(), password, smtp_password).await })
+            .spawn(async move { jolta_core::imap::update_account(&jolta, id, settings.into(), password, smtp_password).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         if let Some(engine) = engine {
@@ -1008,7 +1008,7 @@ impl Core {
 
     /// Hides or shows several folders at once.
     pub fn set_mailboxes_hidden(&self, mailbox_ids: Vec<i64>, hidden: bool) -> Result<()> {
-        self.kite.store.write(|tx| {
+        self.jolta.store.write(|tx| {
             for id in &mailbox_ids {
                 store::set_mailbox_hidden(tx, MailboxId(*id), hidden)?;
             }
@@ -1020,7 +1020,7 @@ impl Core {
 
     /// Keeps a folder out of the sidebar, or brings it back.
     pub fn set_mailbox_hidden(&self, mailbox_id: i64, hidden: bool) -> Result<()> {
-        self.kite.store.write(|tx| store::set_mailbox_hidden(tx, MailboxId(mailbox_id), hidden))?;
+        self.jolta.store.write(|tx| store::set_mailbox_hidden(tx, MailboxId(mailbox_id), hidden))?;
         self.changed();
         Ok(())
     }
@@ -1034,12 +1034,12 @@ impl Core {
 
     /// The bytes of one attachment of a message, for opening or saving.
     pub async fn attachment(&self, message_id: i64, index: u32) -> Result<AttachmentData> {
-        let kite = self.kite.clone();
+        let jolta = self.jolta.clone();
         self.runtime
             .spawn(async move {
-                let raw = kite_core::imap::message_source(&kite, MessageId(message_id)).await?;
-                kite_core::render::attachment_bytes(&raw, index as usize)
-                    .ok_or_else(|| kite_core::Error::NotFound(format!("attachment {index}")))
+                let raw = jolta_core::imap::message_source(&jolta, MessageId(message_id)).await?;
+                jolta_core::render::attachment_bytes(&raw, index as usize)
+                    .ok_or_else(|| jolta_core::Error::NotFound(format!("attachment {index}")))
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
@@ -1049,7 +1049,7 @@ impl Core {
 
     pub fn sections(&self) -> Result<Vec<SectionInfo>> {
         Ok(self
-            .kite
+            .jolta
             .store
             .read(store::sections)?
             .into_iter()
@@ -1063,25 +1063,25 @@ impl Core {
             search::parse(&s.query)?;
         }
         let list: Vec<(String, String)> = sections.into_iter().map(|s| (s.name, s.query)).collect();
-        self.kite.store.write(|tx| store::set_sections(tx, &list))?;
+        self.jolta.store.write(|tx| store::set_sections(tx, &list))?;
         self.changed();
         Ok(())
     }
 
     /// Marks these senders as VIPs, or stops.
     pub fn set_vips(&self, addresses: Vec<String>, vip: bool) -> Result<()> {
-        self.kite.store.write(|tx| addresses.iter().try_for_each(|a| store::set_vip(tx, a, vip)))?;
+        self.jolta.store.write(|tx| addresses.iter().try_for_each(|a| store::set_vip(tx, a, vip)))?;
         self.changed();
         Ok(())
     }
 
     pub fn is_vip(&self, address: String) -> Result<bool> {
-        Ok(self.kite.store.read(|c| store::is_vip(c, &address))?)
+        Ok(self.jolta.store.read(|c| store::is_vip(c, &address))?)
     }
 
     /// Every VIP address, A to Z.
     pub fn vips(&self) -> Result<Vec<String>> {
-        Ok(self.kite.store.read(store::vips)?)
+        Ok(self.jolta.store.read(store::vips)?)
     }
 
     /// People to suggest for what was typed in a recipient field, best
@@ -1100,7 +1100,7 @@ impl Core {
     /// Stops suggesting an address until mail is sent to it again.
     pub fn forget_address(&self, address: String) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-        self.kite.store.write(|tx| people::forget(tx, &address, now))?;
+        self.jolta.store.write(|tx| people::forget(tx, &address, now))?;
         *self.people.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
@@ -1115,9 +1115,9 @@ impl Core {
     /// Messages set to go out later, soonest first. Messages still in their
     /// undo window aren't listed.
     pub fn scheduled(&self) -> Result<Vec<ScheduledInfo>> {
-        let after = now() + kite_core::engine::UNDO_SEND_SECONDS;
+        let after = now() + jolta_core::engine::UNDO_SEND_SECONDS;
         Ok(self
-            .kite
+            .jolta
             .store
             .read(|c| store::scheduled(c, after))?
             .into_iter()
@@ -1128,7 +1128,7 @@ impl Core {
     /// Sleeping threads, soonest first.
     pub fn snoozed(&self) -> Result<Vec<SnoozeInfo>> {
         Ok(self
-            .kite
+            .jolta
             .store
             .read(store::snoozed)?
             .into_iter()
@@ -1137,23 +1137,23 @@ impl Core {
     }
 
     pub fn snooze_presets(&self, utc_offset: i32) -> Vec<SnoozeChoice> {
-        kite_core::when::presets(now(), utc_offset).into_iter().map(|(label, at)| SnoozeChoice { label, at }).collect()
+        jolta_core::when::presets(now(), utc_offset).into_iter().map(|(label, at)| SnoozeChoice { label, at }).collect()
     }
 
     /// A snooze time typed in plain words, or nothing if it makes no sense.
     pub fn parse_time(&self, text: String, utc_offset: i32) -> Option<i64> {
-        kite_core::when::parse(&text, now(), utc_offset)
+        jolta_core::when::parse(&text, now(), utc_offset)
     }
 
     /// Serves MCP on a Unix socket at `socket_path` for agents (through
-    /// the kite-mcp helper). Needs `start` first.
+    /// the jolta-mcp helper). Needs `start` first.
     pub fn start_mcp(&self, socket_path: String, utc_offset: i32) -> Result<()> {
         let engine = self.running_engine()?;
-        kite_core::mcp::set_local_offset(utc_offset);
-        let (kite, sink) = (self.kite.clone(), self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        jolta_core::mcp::set_local_offset(utc_offset);
+        let (jolta, sink) = (self.jolta.clone(), self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()).clone());
         let Some(sink) = sink else { return Err(CoreError::Failed { message: "the core has not been started".into() }) };
         self.runtime.spawn(async move {
-            if let Err(e) = kite_core::mcp::serve(std::path::Path::new(&socket_path), kite, engine, sink).await {
+            if let Err(e) = jolta_core::mcp::serve(std::path::Path::new(&socket_path), jolta, engine, sink).await {
                 tracing::error!("MCP server stopped: {e}");
             }
         });
@@ -1162,7 +1162,7 @@ impl Core {
 
     pub fn agents(&self) -> Result<Vec<AgentInfo>> {
         Ok(self
-            .kite
+            .jolta
             .store
             .read(store::agents)?
             .into_iter()
@@ -1185,12 +1185,12 @@ impl Core {
     /// account, or denies it.
     pub fn decide_agent(&self, agent_id: i64, approve: bool, grants: Vec<String>) -> Result<()> {
         let grants: Vec<store::Grant> = grants.iter().filter_map(|g| store::Grant::parse(g)).collect();
-        Ok(self.kite.store.write(|tx| store::decide_agent(tx, agent_id, approve, &grants))?)
+        Ok(self.jolta.store.write(|tx| store::decide_agent(tx, agent_id, approve, &grants))?)
     }
 
     pub fn audit_log(&self, limit: u32) -> Result<Vec<AuditInfo>> {
         Ok(self
-            .kite
+            .jolta
             .store
             .read(|c| store::audit_log(c, limit as usize))?
             .into_iter()
@@ -1199,15 +1199,15 @@ impl Core {
     }
 
     pub fn agents_paused(&self) -> Result<bool> {
-        Ok(self.kite.store.read(store::agents_paused)?)
+        Ok(self.jolta.store.read(store::agents_paused)?)
     }
 
     pub fn set_agents_paused(&self, paused: bool) -> Result<()> {
-        Ok(self.kite.store.write(|tx| store::set_agents_paused(tx, paused))?)
+        Ok(self.jolta.store.write(|tx| store::set_agents_paused(tx, paused))?)
     }
 
     pub fn draft(&self, draft_id: i64) -> Result<Option<ComposeData>> {
-        Ok(self.kite.store.read(|c| store::draft(c, draft_id))?.map(Into::into))
+        Ok(self.jolta.store.read(|c| store::draft(c, draft_id))?.map(Into::into))
     }
 
     pub fn remove_account(&self, account_id: i64) -> Result<()> {
@@ -1223,8 +1223,8 @@ impl Core {
         imap_host: String,
         smtp_host: String,
     ) -> Result<AccountInfo> {
-        let (kite, engine) = (self.kite.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
-        let setup = kite_core::imap::ImapSetup {
+        let (jolta, engine) = (self.jolta.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let setup = jolta_core::imap::ImapSetup {
             address,
             password,
             imap_host: Some(imap_host),
@@ -1233,11 +1233,11 @@ impl Core {
         };
         self.runtime
             .spawn(async move {
-                let account = kite_core::imap::add_account(&kite, setup).await?;
+                let account = jolta_core::imap::add_account(&jolta, setup).await?;
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }
-                Ok::<_, kite_core::Error>(AccountInfo {
+                Ok::<_, jolta_core::Error>(AccountInfo {
                     id: account.id.0,
                     kind: account.kind.to_string(),
                     provider: account.provider_label().to_string(),
@@ -1250,29 +1250,29 @@ impl Core {
             .map_err(Into::into)
     }
 
-    /// Whether Kite knows the servers for this address (iCloud, Fastmail),
+    /// Whether Jolta knows the servers for this address (iCloud, Fastmail),
     /// so the add form can hide the server fields.
     pub fn knows_servers(&self, address: String) -> bool {
-        kite_core::imap::known_servers(&address).is_some()
+        jolta_core::imap::known_servers(&address).is_some()
     }
 
     /// Starts a browser sign-in for a Google or Microsoft account.
     pub async fn begin_sign_in(&self, provider: OAuthProvider) -> Result<Arc<SignIn>> {
         let provider = match provider {
-            OAuthProvider::Google => kite_core::oauth::Provider::Google,
-            OAuthProvider::Microsoft => kite_core::oauth::Provider::Microsoft,
+            OAuthProvider::Google => jolta_core::oauth::Provider::Google,
+            OAuthProvider::Microsoft => jolta_core::oauth::Provider::Microsoft,
         };
-        let client = provider.client(&self.kite.data_dir)?;
+        let client = provider.client(&self.jolta.data_dir)?;
         let pending = self
             .runtime
-            .spawn(kite_core::oauth::begin(provider, client, 0))
+            .spawn(jolta_core::oauth::begin(provider, client, 0))
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         Ok(Arc::new(SignIn {
             url: pending.url.clone(),
             provider,
             pending: Mutex::new(Some(pending)),
-            kite: self.kite.clone(),
+            jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
             engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }))
@@ -1305,16 +1305,16 @@ impl Core {
             let people = people.clone();
             if built.elapsed() >= PEOPLE_FRESH {
                 *built = Instant::now();
-                let (kite, book, slot) = (self.kite.clone(), self.address_book.clone(), self.people.clone());
+                let (jolta, book, slot) = (self.jolta.clone(), self.address_book.clone(), self.people.clone());
                 std::thread::spawn(move || {
-                    if let Ok(fresh) = build_people(&kite, &book) {
+                    if let Ok(fresh) = build_people(&jolta, &book) {
                         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), Arc::new(fresh)));
                     }
                 });
             }
             return Ok(people);
         }
-        let people = Arc::new(build_people(&self.kite, &self.address_book)?);
+        let people = Arc::new(build_people(&self.jolta, &self.address_book)?);
         *cache = Some((Instant::now(), people.clone()));
         Ok(people)
     }

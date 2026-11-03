@@ -7,9 +7,9 @@ use rusqlite::Connection;
 
 use crate::model::*;
 use crate::store::{self, NewAccount, RemoteMailbox};
-use crate::{Kite, Result};
+use crate::{Jolta, Result};
 
-pub const ADDRESS: &str = "synthetic@kite.invalid";
+pub const ADDRESS: &str = "synthetic@jolta.invalid";
 const VOCABULARY: usize = 80_000;
 const ZIPF_S: f64 = 1.05;
 const YEARS: i64 = 5;
@@ -109,10 +109,10 @@ pub fn body_text(n: u64) -> String {
 }
 
 /// Adds a synthetic account with `count` messages and returns its id.
-pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Result<AccountId> {
+pub fn generate(jolta: &Jolta, count: u64, mut progress: impl FnMut(u64)) -> Result<AccountId> {
     let corpus = Corpus::new();
     let mut rng = Rng(42);
-    let (account, inbox, archive, sent) = kite.store.write(|tx| {
+    let (account, inbox, archive, sent) = jolta.store.write(|tx| {
         let id = store::insert_account(tx, &NewAccount {
             kind: AccountKind::Imap,
             address: ADDRESS.into(),
@@ -158,7 +158,7 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
     let mut n = 0u64;
     while n < count {
         let end = (n + batch).min(count);
-        kite.store.write(|tx| {
+        jolta.store.write(|tx| {
             for i in n..end {
                 let date = start + (i as f64 * step) as i64 + rng.below(60) as i64;
                 let age_days = (now - date) / 86_400;
@@ -175,7 +175,7 @@ pub fn generate(kite: &Kite, count: u64, mut progress: impl FnMut(u64)) -> Resul
                         c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or(s)
                     }
                 };
-                let message_id = format!("synth{i}@kite.invalid");
+                let message_id = format!("synth{i}@jolta.invalid");
                 let text = body_text(i);
                 let (from_name, from_addr) = match (from_me, list) {
                     (true, _) => ("Me".to_string(), ADDRESS.to_string()),

@@ -1,4 +1,4 @@
-//! `kite-ai`: runs a local language model for Kite, one request at a time.
+//! `jolta-ai`: runs a local language model for Jolta, one request at a time.
 //! It lives in its own process so a llama.cpp abort can't take the app down,
 //! and so quitting it gives the model's memory back.
 //!

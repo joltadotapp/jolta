@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use kite_core::Kite;
+use jolta_core::Jolta;
 
 const SCHEMA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/src/store");
 
@@ -20,10 +20,10 @@ fn schema_files() -> usize {
 /// `MIGRATIONS` fails here.
 #[test]
 fn old_data_folders_upgrade() {
-    let dir = std::env::temp_dir().join(format!("kite-regression-upgrade-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("jolta-regression-upgrade-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("kite.sqlite");
+    let path = dir.join("jolta.sqlite");
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(&std::fs::read_to_string(Path::new(SCHEMA_DIR).join("schema.sql")).unwrap()).unwrap();
@@ -37,16 +37,16 @@ fn old_data_folders_upgrade() {
         .unwrap();
     }
 
-    let kite = Kite::open(&dir).expect("the old folder opens");
-    let (version, accounts): (i64, i64) = kite
+    let jolta = Jolta::open(&dir).expect("the old folder opens");
+    let (version, accounts): (i64, i64) = jolta
         .store
         .read(|c| Ok((c.pragma_query_value(None, "user_version", |r| r.get(0))?, c.query_row("SELECT count(*) FROM account", [], |r| r.get(0))?)))
         .unwrap();
     assert_eq!(version as usize, schema_files(), "every schema file ran");
     assert_eq!(accounts, 1, "the account survived the upgrade");
-    assert_eq!(kite.store.read(kite_core::store::accounts).unwrap()[0].address, "me@test.invalid");
-    drop(kite);
+    assert_eq!(jolta.store.read(jolta_core::store::accounts).unwrap()[0].address, "me@test.invalid");
+    drop(jolta);
 
-    Kite::open(&dir).expect("opening again changes nothing");
+    Jolta::open(&dir).expect("opening again changes nothing");
     let _ = std::fs::remove_dir_all(&dir);
 }

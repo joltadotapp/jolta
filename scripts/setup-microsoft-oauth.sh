@@ -185,20 +185,20 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 TOTAL_STAGES=3
-ENV_FILE="$HOME/Library/Application Support/Kite/oauth-clients.env"
+ENV_FILE="$HOME/Library/Application Support/Jolta/oauth-clients.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 
-banner "Microsoft 365 sign-in for Kite (Entra app registration)"
+banner "Microsoft 365 sign-in for Jolta (Entra app registration)"
 
 stage "Register the app"
-say "Kite talks to Microsoft 365 through Microsoft Graph with its own app registration."
+say "Jolta talks to Microsoft 365 through Microsoft Graph with its own app registration."
 open_url "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade"
 step "Sign in with your Microsoft 365 work account."
-step "Name: Kite."
+step "Name: Jolta."
 step "Supported account types: Accounts in any organizational directory and personal Microsoft accounts."
 step "Redirect URI: platform 'Public client/native (mobile & desktop)', value http://localhost"
 step "Click Register."
-note "'Allow public client flows' can stay at No: Kite signs in through the browser with PKCE, which does not need it."
+note "'Allow public client flows' can stay at No: Jolta signs in through the browser with PKCE, which does not need it."
 pause "Registered?"
 
 stage "Copy the application ID"
@@ -215,5 +215,5 @@ note "Publisher verification (Branding & properties) is optional; it reduces con
 pause "Permissions added?"
 
 finish
-say "Tell the agent: the Microsoft client ID is in Kite's oauth-clients.env. It continues M6."
+say "Tell the agent: the Microsoft client ID is in Jolta's oauth-clients.env. It continues M6."
 printf '\n'

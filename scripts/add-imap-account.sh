@@ -186,16 +186,16 @@ finish() {
 
 TOTAL_STAGES=4
 cd "$(dirname "$0")/.."
-KITE=./target/release/kite
+JOLTA=./target/release/jolta
 
-banner "Add an iCloud or Fastmail account to Kite"
+banner "Add an iCloud or Fastmail account to Jolta"
 
 stage "Pick the account"
-say "Kite's first real account is an iCloud or Fastmail mailbox, signed in"
+say "Jolta's first real account is an iCloud or Fastmail mailbox, signed in"
 say "with an app-specific password. The password goes into your Keychain only."
 printf '\n'
-ask KITE_ADDRESS "Email address of the account:"
-case "${KITE_ADDRESS##*@}" in
+ask JOLTA_ADDRESS "Email address of the account:"
+case "${JOLTA_ADDRESS##*@}" in
   icloud.com|me.com|mac.com) PROVIDER=icloud ;;
   fastmail.com|fastmail.fm|fastmail.net) PROVIDER=fastmail ;;
   *)
@@ -212,52 +212,52 @@ pause
 stage "Create an app-specific password"
 if [[ "$PROVIDER" == icloud ]]; then
   open_url "https://account.apple.com/account/manage"
-  step "Sign in with the Apple Account that owns $KITE_ADDRESS."
+  step "Sign in with the Apple Account that owns $JOLTA_ADDRESS."
   step "Open Sign-In and Security, then App-Specific Passwords."
-  step "Click + (Generate an app-specific password), name it Kite, click Create."
+  step "Click + (Generate an app-specific password), name it Jolta, click Create."
   step "Copy the password it shows (format xxxx-xxxx-xxxx-xxxx)."
   note "Apple shows it once. If you lose it, revoke it there and make a new one."
 else
   open_url "https://app.fastmail.com/settings/security/apps"
   step "Sign in to Fastmail if asked. This is Settings, Privacy & Security."
   step "Under app passwords, click New app password."
-  step "Name it Kite and give it mail access (IMAP and SMTP), then generate it."
+  step "Name it Jolta and give it mail access (IMAP and SMTP), then generate it."
   step "Copy the password it shows."
   note "The labels may differ slightly; the page is Settings, Privacy & Security, app passwords."
 fi
 printf '\n'
-ask_secret KITE_PASSWORD "Paste the app-specific password (hidden):"
-while [[ -z "$KITE_PASSWORD" ]]; do
+ask_secret JOLTA_PASSWORD "Paste the app-specific password (hidden):"
+while [[ -z "$JOLTA_PASSWORD" ]]; do
   warn "Nothing was pasted."
-  ask_secret KITE_PASSWORD "Paste the app-specific password (hidden):"
+  ask_secret JOLTA_PASSWORD "Paste the app-specific password (hidden):"
 done
 
-stage "Add the account to Kite"
-if [[ ! -x "$KITE" ]]; then
-  say "Building the kite command line tool first (about a minute)..."
-  cargo build --release -p kite-cli
+stage "Add the account to Jolta"
+if [[ ! -x "$JOLTA" ]]; then
+  say "Building the jolta command line tool first (about a minute)..."
+  cargo build --release -p jolta-cli
 fi
 say "Signing in to check the password, then saving it in the login Keychain."
-note "If macOS asks whether kite may use the Keychain, click Always Allow."
+note "If macOS asks whether jolta may use the Keychain, click Always Allow."
 printf '\n'
-until printf '%s' "$KITE_PASSWORD" | "$KITE" account add "$KITE_ADDRESS" --provider "$PROVIDER" --password-stdin; do
+until printf '%s' "$JOLTA_PASSWORD" | "$JOLTA" account add "$JOLTA_ADDRESS" --provider "$PROVIDER" --password-stdin; do
   warn "That didn't work. Check the address and paste the password again."
-  ask_secret KITE_PASSWORD "App-specific password (hidden):"
+  ask_secret JOLTA_PASSWORD "App-specific password (hidden):"
 done
-unset KITE_PASSWORD
+unset JOLTA_PASSWORD
 pause
 
 stage "First sync"
-say "Kite now downloads the mailbox: headers first, newest mail first,"
+say "Jolta now downloads the mailbox: headers first, newest mail first,"
 say "then the message bodies. A large mailbox can take a few minutes."
 printf '\n'
 if confirm "Start the first sync now?"; then
-  "$KITE" sync "$KITE_ADDRESS" || SKIPPED+=("first sync failed; rerun: $KITE sync $KITE_ADDRESS")
+  "$JOLTA" sync "$JOLTA_ADDRESS" || SKIPPED+=("first sync failed; rerun: $JOLTA sync $JOLTA_ADDRESS")
   printf '\n'
-  "$KITE" mailboxes "$KITE_ADDRESS" || true
+  "$JOLTA" mailboxes "$JOLTA_ADDRESS" || true
   pause
 else
-  SKIPPED+=("first sync: run $KITE sync $KITE_ADDRESS")
+  SKIPPED+=("first sync: run $JOLTA sync $JOLTA_ADDRESS")
 fi
 
 finish

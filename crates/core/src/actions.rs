@@ -197,7 +197,7 @@ pub fn mark_read(conn: &Connection, messages: &[MessageId]) -> Result<Vec<(Accou
 }
 
 /// Empties a folder for good: its messages leave the store now, and the
-/// queued op empties the server folder, including mail Kite never
+/// queued op empties the server folder, including mail Jolta never
 /// downloaded (Gmail's Trash is not synced). Not undoable.
 pub fn empty(conn: &Connection, mailbox: MailboxId) -> Result<(AccountId, OpId)> {
     let account: AccountId = conn.query_row("SELECT account_id FROM mailbox WHERE id = ?1", [mailbox], |r| r.get(0))?;
@@ -239,10 +239,10 @@ mod tests {
     }
 
     fn store() -> (Dir, crate::store::Store) {
-        let path = std::env::temp_dir().join(format!("kite-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let path = std::env::temp_dir().join(format!("jolta-test-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::fs::create_dir_all(&path).unwrap();
         let dir = Dir(path);
-        let store = crate::store::Store::open(&dir.0.join("kite.sqlite")).unwrap();
+        let store = crate::store::Store::open(&dir.0.join("jolta.sqlite")).unwrap();
         store
             .write(|c| {
                 c.execute_batch(

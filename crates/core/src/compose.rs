@@ -86,7 +86,7 @@ fn quote(text: &str) -> String {
     text.lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {}", rich::escape(l)) }).collect::<Vec<_>>().join("\n")
 }
 
-/// Where a reply's quote or a forward's copy starts in a body Kite wrote.
+/// Where a reply's quote or a forward's copy starts in a body Jolta wrote.
 fn quote_start(body: &str) -> Option<usize> {
     let forward = body.find("\n\n---------- Forwarded message ----------");
     let reply = body.match_indices("\n\nOn ").map(|(i, _)| i).find(|&i| body[i..].lines().nth(2).is_some_and(|l| l.ends_with(" wrote:")));
@@ -283,7 +283,7 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
         return Err(Error::Other("Add at least one recipient.".into()));
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let domain = account.address.rsplit('@').next().unwrap_or("kite.invalid");
+    let domain = account.address.rsplit('@').next().unwrap_or("jolta.invalid");
     let message_id = format!("{}@{domain}", &hex::encode(Sha256::digest(format!("{now}{}", c.subject)))[..24]);
 
     let list = |l: &[(String, String)]| -> BuilderAddress<'static> {
@@ -340,7 +340,7 @@ mod tests {
             Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n\
             --x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"_inv.pdf\"\r\n\r\nsecond\r\n\
             --x--\r\n";
-        let dir = std::env::temp_dir().join(format!("kite-fwd-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jolta-fwd-{}", std::process::id()));
         let files = forward_attachments(raw.as_bytes(), &dir).unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["_inv.pdf", "_inv.pdf"], "the inline logo stays behind and the path is defused");

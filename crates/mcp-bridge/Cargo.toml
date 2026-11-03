@@ -1,12 +1,12 @@
 [package]
-name = "kite-mcp"
+name = "jolta-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "kite-mcp"
+name = "jolta-mcp"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,5 +1,5 @@
 //! Language models for summaries and reply drafts: a model on this Mac (run
-//! by the `kite-ai` helper), or the user's own OpenAI or Anthropic account.
+//! by the `jolta-ai` helper), or the user's own OpenAI or Anthropic account.
 //! Requests go straight from the Mac to the chosen provider; none of ours
 //! sits in between.
 

@@ -1,4 +1,4 @@
-//! A Kite data folder in a temporary directory, opened through the same
+//! A Jolta data folder in a temporary directory, opened through the same
 //! `Core` the Mac app uses, with accounts that have no server: the engine
 //! starts no sync for them, so every test runs offline and in milliseconds.
 
@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kite_core::store::{self, NewAccount, RemoteMailbox};
-use kite_core::{Account, AccountId, AccountKind, Kite, MailboxId, MailboxRole, MessageId, ThreadId};
-use kite_ffi::{Core, CoreEvent, CoreListener, ListSort, SortKey, ThreadRow};
+use jolta_core::store::{self, NewAccount, RemoteMailbox};
+use jolta_core::{Account, AccountId, AccountKind, Jolta, MailboxId, MailboxRole, MessageId, ThreadId};
+use jolta_ffi::{Core, CoreEvent, CoreListener, ListSort, SortKey, ThreadRow};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -51,7 +51,7 @@ pub struct App {
     pub core: Arc<Core>,
     /// A second handle on the same folder, for setting up and checking state
     /// the app has no call for.
-    pub kite: Kite,
+    pub jolta: Jolta,
     pub dir: PathBuf,
     pub events: Arc<Events>,
 }
@@ -65,13 +65,13 @@ impl App {
 
     /// The app before `start`: accounts added now are synced from the start.
     pub fn unstarted() -> App {
-        kite_core::secrets::use_memory_store();
-        let dir = std::env::temp_dir().join(format!("kite-regression-{}-{}", std::process::id(), unique()));
+        jolta_core::secrets::use_memory_store();
+        let dir = std::env::temp_dir().join(format!("jolta-regression-{}-{}", std::process::id(), unique()));
         let _ = std::fs::remove_dir_all(&dir);
         let events = Arc::new(Events::default());
         let core = Core::open(dir.to_string_lossy().into(), events.clone()).expect("the data folder opens");
-        let kite = Kite::open(&dir).expect("a second handle opens");
-        App { core, kite, dir, events }
+        let jolta = Jolta::open(&dir).expect("a second handle opens");
+        App { core, jolta, dir, events }
     }
 
     /// An IMAP account with the usual folders and no server.
@@ -85,7 +85,7 @@ impl App {
             ("Junk", Some(MailboxRole::Spam)),
             ("Projects", None),
         ];
-        self.kite
+        self.jolta
             .store
             .write(|tx| {
                 let account = store::insert_account(
@@ -119,7 +119,7 @@ impl App {
     }
 
     pub fn mailbox(&self, account: AccountId, role: MailboxRole) -> MailboxId {
-        self.kite
+        self.jolta
             .store
             .read(|c| Ok(store::mailboxes(c, account)?.into_iter().find(|m| m.role == Some(role)).expect("the role exists").id))
             .unwrap()
@@ -127,15 +127,15 @@ impl App {
 
     pub fn deliver(&self, account: &Account, role: MailboxRole, mail: &Mail) -> MessageId {
         let mailbox = self.mailbox(account.id, role);
-        kite_core::import::import_raw(&self.kite, account.id, mailbox, &mail.raw()).expect("the message imports")
+        jolta_core::import::import_raw(&self.jolta, account.id, mailbox, &mail.raw()).expect("the message imports")
     }
 
     pub fn thread_of(&self, message: MessageId) -> ThreadId {
-        self.kite.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [message], |r| r.get(0))?)).unwrap()
+        self.jolta.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [message], |r| r.get(0))?)).unwrap()
     }
 
     /// The list the app would show for this query, newest first. Changes
-    /// made through `kite` don't reach the app's cached list order, so the
+    /// made through `jolta` don't reach the app's cached list order, so the
     /// cache is pushed out first with another query.
     pub fn list(&self, query: &str) -> Vec<ThreadRow> {
         self.core.list_count("mailbox:0".into(), BY_DATE).unwrap();
@@ -148,10 +148,10 @@ impl App {
     }
 
     pub fn count(&self, sql: &str) -> i64 {
-        self.kite.store.read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?)).unwrap()
+        self.jolta.store.read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?)).unwrap()
     }
 
-    pub fn open(&self, thread: ThreadId) -> kite_ffi::ThreadView {
+    pub fn open(&self, thread: ThreadId) -> jolta_ffi::ThreadView {
         block_on(self.core.open_thread(thread.0, String::new(), 3600)).expect("the thread opens")
     }
 }
@@ -251,7 +251,7 @@ impl Mail {
         let body = match &self.attachment {
             None => format!("Content-Type: text/plain; charset=utf-8\r\n\r\n{}\r\n", self.body),
             Some((name, text)) => {
-                let b = "kite-boundary";
+                let b = "jolta-boundary";
                 format!(
                     "Content-Type: multipart/mixed; boundary=\"{b}\"\r\n\r\n--{b}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}\r\n\
                      --{b}\r\nContent-Type: text/plain; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\n\r\n{text}\r\n--{b}--\r\n",

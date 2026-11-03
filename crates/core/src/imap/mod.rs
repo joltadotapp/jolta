@@ -25,7 +25,7 @@ use tokio_rustls::rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::model::*;
 use crate::store::{self, RemoteMailbox};
-use crate::{Error, Kite, Result, mime, secrets};
+use crate::{Error, Jolta, Result, mime, secrets};
 
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::fmt::Debug> Io for T {}
@@ -190,7 +190,7 @@ pub fn known_servers(address: &str) -> Option<(&'static str, u16, &'static str, 
 /// Signs in to check the password, then saves the account and its password
 /// in the Keychain. An address that already has an IMAP account gets the new
 /// password instead of a second account.
-pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
+pub async fn add_account(jolta: &Jolta, setup: ImapSetup) -> Result<Account> {
     let address = setup.address.trim().to_string();
     // A password pasted from a password manager often ends in a newline.
     let password = setup.password.trim().to_string();
@@ -205,7 +205,7 @@ pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
             (h, setup.imap_port.unwrap_or(993), smtp.trim().to_string(), setup.smtp_port.unwrap_or(465))
         }
         (None, Some((i, ip, s, sp))) => (i.to_string(), ip, s.to_string(), sp),
-        (None, None) => return Err(Error::Auth(format!("Kite doesn't know the mail server for {address}; enter the IMAP server"))),
+        (None, None) => return Err(Error::Auth(format!("Jolta doesn't know the mail server for {address}; enter the IMAP server"))),
     };
 
     // iCloud takes the full address or the part before the @.
@@ -239,7 +239,7 @@ pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
         });
     };
 
-    let existing = kite
+    let existing = jolta
         .store
         .read(store::accounts)?
         .into_iter()
@@ -258,35 +258,35 @@ pub async fn add_account(kite: &Kite, setup: ImapSetup) -> Result<Account> {
                 smtp_host,
                 smtp_port,
             };
-            kite.store.write(|tx| store::insert_account(tx, &new))?
+            jolta.store.write(|tx| store::insert_account(tx, &new))?
         }
     };
     if let Err(e) = secrets::set_password(&account.secret_ref, &password) {
         if is_new {
-            kite.store.write(|tx| store::delete_account(tx, account.id))?;
+            jolta.store.write(|tx| store::delete_account(tx, account.id))?;
         }
         return Err(e);
     }
     Ok(account)
 }
 
-/// Saves new settings for an account. For IMAP accounts Kite first signs in
+/// Saves new settings for an account. For IMAP accounts Jolta first signs in
 /// to IMAP and SMTP with them, so a typo never replaces working settings.
 /// Passwords left empty keep the stored ones. Google and Microsoft accounts
 /// only take a new name; their servers are fixed.
 pub async fn update_account(
-    kite: &Kite,
+    jolta: &Jolta,
     id: AccountId,
     settings: AccountSettings,
     password: Option<String>,
     smtp_password: Option<String>,
 ) -> Result<Account> {
-    let current = kite.store.read(|c| store::account(c, id))?;
+    let current = jolta.store.read(|c| store::account(c, id))?;
     let mut s = settings;
     s.display_name = s.display_name.trim().to_string();
     if current.kind != AccountKind::Imap {
         let s = AccountSettings { display_name: s.display_name, ..current.settings() };
-        return kite.store.write(|tx| store::update_account(tx, id, &s));
+        return jolta.store.write(|tx| store::update_account(tx, id, &s));
     }
     for field in [&mut s.address, &mut s.username, &mut s.imap_host, &mut s.smtp_host, &mut s.smtp_username] {
         *field = field.trim().to_string();
@@ -317,7 +317,7 @@ pub async fn update_account(
     if !candidate.smtp_host.is_empty() {
         crate::smtp::check(&candidate, &password, smtp_password.as_deref()).await?;
     }
-    let saved = kite.store.write(|tx| store::update_account(tx, id, &s))?;
+    let saved = jolta.store.write(|tx| store::update_account(tx, id, &s))?;
     if let Some(p) = new_password {
         secrets::set_password(&saved.secret_ref, &p)?;
     }
@@ -373,8 +373,8 @@ pub async fn connect_xoauth2(endpoint: &Endpoint, username: &str, token: &str) -
         .await
         .map_err(|(e, _)| match e {
             async_imap::error::Error::No(msg) | async_imap::error::Error::Bad(msg) => Error::Auth(format!(
-                "Gmail refused {username} ({}). Kite may not have access to this mailbox: use Sign In Again \
-                 in Settings › Accounts and allow Kite to read, compose and send your email.",
+                "Gmail refused {username} ({}). Jolta may not have access to this mailbox: use Sign In Again \
+                 in Settings › Accounts and allow Jolta to read, compose and send your email.",
                 server_text(&msg)
             )),
             other => Error::Imap(other),
@@ -536,20 +536,20 @@ pub enum Scope {
 }
 
 pub async fn sync_account(
-    kite: &Kite,
+    jolta: &Jolta,
     account: &Account,
     opts: SyncOptions,
     mut progress: impl FnMut(SyncEvent),
 ) -> Result<SyncReport> {
     let mut session = connect_account(account).await?;
     let caps = caps(&mut session).await?;
-    let report = sync_session(kite, &mut session, caps, account, &Scope::All, opts, &mut progress).await;
+    let report = sync_session(jolta, &mut session, caps, account, &Scope::All, opts, &mut progress).await;
     session.logout().await.ok();
     report
 }
 
 pub async fn sync_session(
-    kite: &Kite,
+    jolta: &Jolta,
     session: &mut Session,
     caps: Caps,
     account: &Account,
@@ -558,17 +558,17 @@ pub async fn sync_session(
     progress: &mut impl FnMut(SyncEvent),
 ) -> Result<SyncReport> {
     if account.kind == AccountKind::Gmail {
-        return gmail::sync(kite, session, caps, account, opts, progress).await;
+        return gmail::sync(jolta, session, caps, account, opts, progress).await;
     }
     let account_id = account.id;
     let mailboxes = match scope {
         Scope::All => {
             let remote = list_mailboxes(session).await?;
-            kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?
+            jolta.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?
         }
         Scope::Mailboxes(ids) => {
             let ids = ids.clone();
-            kite.store
+            jolta.store
                 .read_async(move |c| Ok(store::mailboxes(c, account_id)?.into_iter().filter(|m| ids.contains(&m.id)).collect()))
                 .await?
         }
@@ -577,9 +577,9 @@ pub async fn sync_session(
 
     let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
     let mut queue: Vec<Mailbox> = mailboxes.into_iter().filter(|m| m.selectable).collect();
-    while let Some(mailbox) = kite.next_mailbox(&mut queue) {
+    while let Some(mailbox) = jolta.next_mailbox(&mut queue) {
         let mailbox = &mailbox;
-        let (new, removed, flag_changes) = sync_mailbox(kite, session, account, mailbox, caps.condstore, progress).await?;
+        let (new, removed, flag_changes) = sync_mailbox(jolta, session, account, mailbox, caps.condstore, progress).await?;
         report.new += new.len();
         report.new_messages.extend(new.iter().copied());
         report.removed += removed;
@@ -588,13 +588,13 @@ pub async fn sync_session(
     }
 
     if opts.bodies {
-        report.bodies = fetch_bodies(kite, session, account, progress).await?;
+        report.bodies = fetch_bodies(jolta, session, account, progress).await?;
     }
     Ok(report)
 }
 
 async fn sync_mailbox(
-    kite: &Kite,
+    jolta: &Jolta,
     session: &mut Session,
     account: &Account,
     mailbox: &Mailbox,
@@ -609,11 +609,11 @@ async fn sync_mailbox(
     let mailbox_id = mailbox.id;
     let mut since_modseq = mailbox.highest_modseq;
     if mailbox.uidvalidity.is_some() && mailbox.uidvalidity != selected.uid_validity {
-        kite.store.write_async(move |tx| store::clear_mailbox(tx, mailbox_id)).await?;
+        jolta.store.write_async(move |tx| store::clear_mailbox(tx, mailbox_id)).await?;
         since_modseq = None;
     }
 
-    let local = kite.store.read_async(move |c| store::mailbox_uids(c, mailbox_id)).await?;
+    let local = jolta.store.read_async(move |c| store::mailbox_uids(c, mailbox_id)).await?;
     let server: HashSet<u32> =
         if selected.exists == 0 { HashSet::new() } else { session.uid_search("ALL").await? };
 
@@ -621,7 +621,7 @@ async fn sync_mailbox(
         local.iter().filter(|(uid, _)| !server.contains(uid)).map(|(_, (id, _))| *id).collect();
     let removed_count = removed.len();
     if !removed.is_empty() {
-        kite.store.write_async(move |tx| store::unlink_messages(tx, mailbox_id, &removed)).await?;
+        jolta.store.write_async(move |tx| store::unlink_messages(tx, mailbox_id, &removed)).await?;
     }
 
     let mut new: Vec<u32> = server.iter().copied().filter(|u| !local.contains_key(u)).collect();
@@ -659,7 +659,7 @@ async fn sync_mailbox(
             })
             .collect();
         let account_id = account.id;
-        let ids = kite
+        let ids = jolta
             .store
             .write_async(move |tx| {
                 let moving = store::pending_move_uids(tx, account_id, mailbox_id)?;
@@ -706,7 +706,7 @@ async fn sync_mailbox(
     let change_count = changes.len();
     let (uidvalidity, modseq) = (selected.uid_validity, selected.highest_modseq);
     let account_id = account.id;
-    kite.store
+    jolta.store
         .write_async(move |tx| {
             let pending = store::pending_messages(tx, account_id)?;
             for (id, flags) in changes.iter().filter(|(id, _)| !pending.contains(id)) {
@@ -734,22 +734,22 @@ pub(crate) fn flag_list(bits: u32) -> String {
 
 /// Sends one queued op to the server. Returns the mailboxes it changed, so
 /// the caller can sync them (a moved message gets its new UID that way).
-pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store::Op) -> Result<Vec<MailboxId>> {
+pub async fn apply_op(jolta: &Jolta, session: &mut Session, caps: Caps, op: &store::Op) -> Result<Vec<MailboxId>> {
     let account = op.account;
     if let store::OpKind::Empty { mailbox } = op.kind {
         // The same for Gmail: deleting from [Gmail]/Trash deletes for good.
-        let path = kite.store.read_async(move |c| Ok(store::mailbox(c, mailbox)?.remote_id)).await?;
+        let path = jolta.store.read_async(move |c| Ok(store::mailbox(c, mailbox)?.remote_id)).await?;
         if session.select(&path).await?.exists > 0 {
             session.uid_store("1:*", "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;
             session.expunge().await?.try_collect::<Vec<_>>().await?;
         }
         return Ok(vec![mailbox]);
     }
-    let kind = kite.store.read_async(move |c| Ok(store::account(c, account)?.kind)).await?;
+    let kind = jolta.store.read_async(move |c| Ok(store::account(c, account)?.kind)).await?;
     if kind == AccountKind::Gmail {
-        return gmail::apply_op(kite, session, op).await;
+        return gmail::apply_op(jolta, session, op).await;
     }
-    let paths: HashMap<MailboxId, String> = kite
+    let paths: HashMap<MailboxId, String> = jolta
         .store
         .read_async(move |c| Ok(store::mailboxes(c, account)?.into_iter().map(|m| (m.id, m.remote_id)).collect()))
         .await?;
@@ -757,7 +757,7 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store
     match op.kind {
         store::OpKind::Flags { add, remove } => {
             let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
-            let locations = kite.store.read_async(move |c| store::server_locations(c, &ids)).await?;
+            let locations = jolta.store.read_async(move |c| store::server_locations(c, &ids)).await?;
             let mut by_mailbox: HashMap<MailboxId, Vec<u32>> = HashMap::new();
             for (mailbox, uid) in locations {
                 by_mailbox.entry(mailbox).or_default().push(uid);
@@ -781,7 +781,7 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, caps: Caps, op: &store
             let mut uids: Vec<u32> = op.messages.iter().filter_map(|(_, u)| *u).collect();
             let missing: Vec<MessageId> = op.messages.iter().filter(|(_, u)| u.is_none()).map(|(m, _)| *m).collect();
             if !missing.is_empty() {
-                let header_ids = kite.store.read_async(move |c| store::header_message_ids(c, &missing)).await?;
+                let header_ids = jolta.store.read_async(move |c| store::header_message_ids(c, &missing)).await?;
                 for mid in header_ids {
                     let found = session.uid_search(format!("HEADER Message-ID \"<{}>\"", mid.replace('"', ""))).await?;
                     uids.extend(found);
@@ -838,18 +838,18 @@ pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
     }
 }
 
-pub(crate) async fn store_body(kite: &Kite, id: MessageId, raw: Vec<u8>) -> Result<()> {
-    let kite2 = kite.clone();
+pub(crate) async fn store_body(jolta: &Jolta, id: MessageId, raw: Vec<u8>) -> Result<()> {
+    let jolta2 = jolta.clone();
     tokio::task::spawn_blocking(move || {
-        let hash = kite2.blobs.put(&raw)?;
+        let hash = jolta2.blobs.put(&raw)?;
         let (_, body) = mime::parse_full(&raw, hash);
-        kite2.store.write(|tx| store::attach_body(tx, id, &body))
+        jolta2.store.write(|tx| store::attach_body(tx, id, &body))
     })
     .await?
 }
 
 pub(crate) async fn fetch_bodies(
-    kite: &Kite,
+    jolta: &Jolta,
     session: &mut Session,
     account: &Account,
     progress: &mut impl FnMut(SyncEvent),
@@ -858,11 +858,11 @@ pub(crate) async fn fetch_bodies(
     let mut before = i64::MAX;
     let mut done = 0;
     let mut paths: HashMap<MailboxId, String> = HashMap::new();
-    for m in kite.store.read_async(move |c| store::mailboxes(c, account_id)).await? {
+    for m in jolta.store.read_async(move |c| store::mailboxes(c, account_id)).await? {
         paths.insert(m.id, m.remote_id);
     }
     loop {
-        let batch = kite
+        let batch = jolta
             .store
             .read_async(move |c| store::messages_without_body(c, account_id, MAX_BACKGROUND_BODY, before, BODY_BATCH))
             .await?;
@@ -883,7 +883,7 @@ pub(crate) async fn fetch_bodies(
             for f in fetched {
                 let (Some(uid), Some(raw)) = (f.uid, f.body()) else { continue };
                 let Some(&id) = ids.get(&uid) else { continue };
-                store_body(kite, id, raw.to_vec()).await?;
+                store_body(jolta, id, raw.to_vec()).await?;
                 done += 1;
             }
         }
@@ -893,15 +893,15 @@ pub(crate) async fn fetch_bodies(
 }
 
 /// The raw message, from the blob store or else downloaded now.
-pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
-    if let Some(blob) = kite.store.read_async(move |c| store::message_blob(c, id)).await? {
+pub async fn message_source(jolta: &Jolta, id: MessageId) -> Result<Vec<u8>> {
+    if let Some(blob) = jolta.store.read_async(move |c| store::message_blob(c, id)).await? {
         if let Some(n) = blob.strip_prefix("synth:") {
             let n = n.parse().unwrap_or(0);
-            return kite.store.read_async(move |c| crate::synth::raw_message(c, id, n)).await;
+            return jolta.store.read_async(move |c| crate::synth::raw_message(c, id, n)).await;
         }
-        return kite.blobs.get(&blob);
+        return jolta.blobs.get(&blob);
     }
-    let graph: Option<(Account, String)> = kite
+    let graph: Option<(Account, String)> = jolta
         .store
         .read_async(move |c| {
             let (account, remote): (AccountId, String) =
@@ -912,14 +912,14 @@ pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
         .await?;
     if let Some((account, remote)) = graph {
         let raw = crate::graph::Graph::new(&account)?.message_mime(&remote).await?;
-        store_body(kite, id, raw.clone()).await?;
+        store_body(jolta, id, raw.clone()).await?;
         return Ok(raw);
     }
-    let loc = kite.store.read_async(move |c| store::message_location(c, id)).await?;
+    let loc = jolta.store.read_async(move |c| store::message_location(c, id)).await?;
     let Some((account_id, _, path, uid, _)) = loc else {
         return Err(Error::NotFound(format!("message {id}")));
     };
-    let account = kite.store.read_async(move |c| store::account(c, account_id)).await?;
+    let account = jolta.store.read_async(move |c| store::account(c, account_id)).await?;
     let mut session = connect_account(&account).await?;
     session.examine(&path).await?;
     let fetched: Vec<Fetch> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])").await?.try_collect().await?;
@@ -929,7 +929,7 @@ pub async fn message_source(kite: &Kite, id: MessageId) -> Result<Vec<u8>> {
         .find_map(|f| f.body())
         .ok_or_else(|| Error::NotFound(format!("message {id} is no longer on the server")))?
         .to_vec();
-    store_body(kite, id, raw.clone()).await?;
+    store_body(jolta, id, raw.clone()).await?;
     Ok(raw)
 }
 

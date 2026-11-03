@@ -2,7 +2,7 @@
 //!
 //! Folders sync with one delta query each, with immutable ids, so a moved
 //! message keeps its id. Actions are PATCH (read, flag) and `move`; mail is
-//! sent and drafted as the MIME Kite builds. Graph files sent mail in Sent
+//! sent and drafted as the MIME Jolta builds. Graph files sent mail in Sent
 //! Items itself. New mail is found by polling the inbox's delta.
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::imap::{Scope, SyncEvent, SyncReport};
 use crate::model::*;
 use crate::store::{self, OpKind, RemoteMailbox};
-use crate::{Error, Kite, Result, mime, oauth};
+use crate::{Error, Jolta, Result, mime, oauth};
 
 const BASE: &str = "https://graph.microsoft.com/v1.0";
 const SELECT: &str = "subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,isDraft,flag,hasAttachments,\
@@ -188,50 +188,50 @@ impl Graph {
         Ok(out)
     }
 
-    pub async fn sync(&self, kite: &Kite, scope: &Scope, progress: &mut impl FnMut(SyncEvent)) -> Result<SyncReport> {
+    pub async fn sync(&self, jolta: &Jolta, scope: &Scope, progress: &mut impl FnMut(SyncEvent)) -> Result<SyncReport> {
         let account_id = self.account.id;
         let mailboxes = match scope {
             Scope::All => {
                 let remote = self.folders().await?;
-                kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?
+                jolta.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?
             }
             Scope::Mailboxes(ids) => {
                 let ids = ids.clone();
-                kite.store
+                jolta.store
                     .read_async(move |c| Ok(store::mailboxes(c, account_id)?.into_iter().filter(|m| ids.contains(&m.id)).collect()))
                     .await?
             }
         };
         progress(SyncEvent::Mailboxes(mailboxes.len()));
         let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
-        // Folders Kite created locally (a first Snoozed) have no Graph id yet.
+        // Folders Jolta created locally (a first Snoozed) have no Graph id yet.
         let mut queue: Vec<Mailbox> = mailboxes.into_iter().filter(|m| !m.remote_id.eq_ignore_ascii_case("Snoozed")).collect();
         let mut unfiled = Vec::new();
-        while let Some(m) = kite.next_mailbox(&mut queue) {
+        while let Some(m) = jolta.next_mailbox(&mut queue) {
             let m = &m;
             if m.role == Some(MailboxRole::System) {
                 // Outbox and chat history aren't mail to read; drop what an earlier sync fetched.
                 let id = m.id;
-                kite.store.write_async(move |tx| store::clear_mailbox(tx, id)).await?;
+                jolta.store.write_async(move |tx| store::clear_mailbox(tx, id)).await?;
                 continue;
             }
-            self.sync_folder(kite, m, &mut report, &mut unfiled, progress).await?;
+            self.sync_folder(jolta, m, &mut report, &mut unfiled, progress).await?;
         }
-        kite.store.write_async(move |tx| store::delete_unfiled(tx, &unfiled)).await?;
-        report.bodies = self.fetch_bodies(kite).await?;
+        jolta.store.write_async(move |tx| store::delete_unfiled(tx, &unfiled)).await?;
+        report.bodies = self.fetch_bodies(jolta).await?;
         Ok(report)
     }
 
     async fn sync_folder(
         &self,
-        kite: &Kite,
+        jolta: &Jolta,
         mailbox: &Mailbox,
         report: &mut SyncReport,
         unfiled: &mut Vec<MessageId>,
         progress: &mut impl FnMut(SyncEvent),
     ) -> Result<()> {
         let mailbox_id = mailbox.id;
-        let cursor: Option<String> = kite
+        let cursor: Option<String> = jolta
             .store
             .read_async(move |c| Ok(c.query_row("SELECT delta_link FROM mailbox WHERE id = ?1", [mailbox_id], |r| r.get(0))?))
             .await?;
@@ -243,14 +243,14 @@ impl Graph {
                 Ok(p) => p,
                 // An expired delta link (410 / syncStateNotFound) means start over.
                 Err(Error::Other(m)) if m.contains(" 410") || m.contains("SyncState") => {
-                    kite.store.write_async(move |tx| store::clear_mailbox(tx, mailbox_id)).await?;
+                    jolta.store.write_async(move |tx| store::clear_mailbox(tx, mailbox_id)).await?;
                     Value::Object(Default::default())
                 }
                 Err(e) => return Err(e),
             };
             let items = page["value"].as_array().cloned().unwrap_or_default();
             let account_id = self.account.id;
-            let delta = kite.store.write_async(move |tx| apply_delta(tx, account_id, mailbox_id, &items)).await?;
+            let delta = jolta.store.write_async(move |tx| apply_delta(tx, account_id, mailbox_id, &items)).await?;
             let n = delta.new;
             new += n;
             removed += delta.removed;
@@ -264,7 +264,7 @@ impl Graph {
             delta_link = page["@odata.deltaLink"].as_str().map(str::to_string).or(delta_link);
         }
         if let Some(link) = delta_link {
-            kite.store
+            jolta.store
                 .write_async(move |tx| Ok(tx.execute("UPDATE mailbox SET delta_link = ?2 WHERE id = ?1", rusqlite::params![mailbox_id, link])?))
                 .await?;
         }
@@ -282,9 +282,9 @@ impl Graph {
     }
 
     /// Downloads bodies the store lacks, newest first, up to 200 per sync.
-    async fn fetch_bodies(&self, kite: &Kite) -> Result<usize> {
+    async fn fetch_bodies(&self, jolta: &Jolta) -> Result<usize> {
         let account_id = self.account.id;
-        let todo: Vec<(MessageId, String)> = kite
+        let todo: Vec<(MessageId, String)> = jolta
             .store
             .read_async(move |c| {
                 let mut stmt = c.prepare(
@@ -297,33 +297,33 @@ impl Graph {
         let mut done = 0;
         for (id, remote) in todo {
             let raw = self.message_mime(&remote).await?;
-            crate::imap::store_body(kite, id, raw).await?;
+            crate::imap::store_body(jolta, id, raw).await?;
             done += 1;
         }
         Ok(done)
     }
 
-    async fn folder_id(&self, kite: &Kite, mailbox: MailboxId) -> Result<String> {
-        let m = kite.store.read_async(move |c| Ok(c.query_row("SELECT remote_id, name FROM mailbox WHERE id = ?1", [mailbox], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?)).await?;
+    async fn folder_id(&self, jolta: &Jolta, mailbox: MailboxId) -> Result<String> {
+        let m = jolta.store.read_async(move |c| Ok(c.query_row("SELECT remote_id, name FROM mailbox WHERE id = ?1", [mailbox], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?)).await?;
         if m.0.eq_ignore_ascii_case("Snoozed") {
             // Created locally by a first snooze: create it in Graph and record the real id.
             let created = self.post_json("/me/mailFolders", json!({"displayName": m.1})).await?;
             let id = created["id"].as_str().ok_or_else(|| Error::Other("Graph did not return the new folder's id".into()))?.to_string();
             let id2 = id.clone();
-            kite.store.write_async(move |tx| Ok(tx.execute("UPDATE mailbox SET remote_id = ?2 WHERE id = ?1", rusqlite::params![mailbox, id2])?)).await?;
+            jolta.store.write_async(move |tx| Ok(tx.execute("UPDATE mailbox SET remote_id = ?2 WHERE id = ?1", rusqlite::params![mailbox, id2])?)).await?;
             return Ok(id);
         }
         Ok(m.0)
     }
 
-    pub async fn apply_op(&self, kite: &Kite, op: &store::Op) -> Result<Vec<MailboxId>> {
+    pub async fn apply_op(&self, jolta: &Jolta, op: &store::Op) -> Result<Vec<MailboxId>> {
         if let OpKind::Empty { mailbox } = op.kind {
-            self.empty_folder(kite, mailbox).await?;
+            self.empty_folder(jolta, mailbox).await?;
             return Ok(vec![mailbox]);
         }
         let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
         // A message deleted here since the change was queued has nothing left to change.
-        let remotes: Vec<String> = kite
+        let remotes: Vec<String> = jolta
             .store
             .read_async(move |c| {
                 let mut out = Vec::new();
@@ -354,7 +354,7 @@ impl Graph {
             }
             OpKind::Empty { .. } => unreachable!("handled above"),
             OpKind::Move { from, to } => {
-                let destination = self.folder_id(kite, to).await?;
+                let destination = self.folder_id(jolta, to).await?;
                 for r in &remotes {
                     self.post_json(&format!("/me/messages/{r}/move"), json!({"destinationId": destination})).await?;
                 }
@@ -365,8 +365,8 @@ impl Graph {
 
     /// Deletes every message in the folder, as Outlook's Empty Folder does:
     /// Exchange keeps them in Recoverable Items for its retention period.
-    async fn empty_folder(&self, kite: &Kite, mailbox: MailboxId) -> Result<()> {
-        let folder = self.folder_id(kite, mailbox).await?;
+    async fn empty_folder(&self, jolta: &Jolta, mailbox: MailboxId) -> Result<()> {
+        let folder = self.folder_id(jolta, mailbox).await?;
         let page = format!("/me/mailFolders/{folder}/messages?$select=id&$top=100");
         // Each pass deletes a page; a folder of 100,000 messages takes 1,000 passes.
         for _ in 0..1000 {
@@ -387,7 +387,7 @@ impl Graph {
         Err(Error::Other("the folder still had messages after 100,000 deletions".into()))
     }
 
-    /// Sends a message Kite built; Graph keeps a copy in Sent Items.
+    /// Sends a message Jolta built; Graph keeps a copy in Sent Items.
     pub async fn send_mime(&self, raw: &[u8]) -> Result<()> {
         self.send(reqwest::Method::POST, "/me/sendMail", Some(("text/plain", STANDARD.encode(raw).into_bytes()))).await?;
         Ok(())
@@ -426,7 +426,7 @@ fn urlencode(s: &str) -> String {
 /// tenant policy that blocked the sign-in.
 pub fn explain_sign_in_error(message: &str) -> String {
     if message.contains("AADSTS65001") || message.contains("AADSTS90094") || message.contains("AADSTS90095") || message.contains("admin") && message.contains("consent") {
-        return format!("Your organization requires an administrator to approve Kite before you can sign in. Ask your IT admin to grant consent for Kite. ({message})");
+        return format!("Your organization requires an administrator to approve Jolta before you can sign in. Ask your IT admin to grant consent for Jolta. ({message})");
     }
     message.to_string()
 }
@@ -520,9 +520,9 @@ mod tests {
     /// scripts/live-check.sh on 2026-11-02: the undo then failed forever.
     #[test]
     fn delta_pages_leave_queued_changes_alone() {
-        let dir = std::env::temp_dir().join(format!("kite-graph-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jolta-graph-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = store::Store::open(&dir.join("kite.sqlite")).unwrap();
+        let store = store::Store::open(&dir.join("jolta.sqlite")).unwrap();
         let (inbox, archive) = (MailboxId(1), MailboxId(2));
         let row = |c: &rusqlite::Connection| -> rusqlite::Result<Vec<i64>> {
             c.prepare("SELECT mailbox_id FROM message_mailbox WHERE message_id = 7 ORDER BY 1")?.query_map([], |r| r.get(0))?.collect()

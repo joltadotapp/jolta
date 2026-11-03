@@ -2,7 +2,7 @@
 //! (Mailpit). Start them with `scripts/test-servers.sh up`; without them
 //! these tests skip.
 
-use kite_ffi::{ListContext, ThreadAction};
+use jolta_ffi::{ListContext, ThreadAction};
 
 use crate::fixture::{App, Mail, now};
 use crate::server::{Mailbox, available, caught, wait};
@@ -20,7 +20,7 @@ fn first_sync_and_new_mail() {
     }
     let server = Mailbox::new();
     server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "Welcome", "First message."));
-    server.append("Sent", &Mail::new(&server.user, "bob@test.invalid", "Sent earlier", "From before Kite."));
+    server.append("Sent", &Mail::new(&server.user, "bob@test.invalid", "Sent earlier", "From before Jolta."));
     let app = App::unstarted();
     let account = server.sign_in(&app);
 
@@ -31,12 +31,12 @@ fn first_sync_and_new_mail() {
         assert!(roles.iter().any(|r| r == role), "the {role} folder was recognised");
     }
 
-    server.append("INBOX", &Mail::new("carl@test.invalid", &server.user, "Fresh news", "Arrived while Kite ran."));
+    server.append("INBOX", &Mail::new("carl@test.invalid", &server.user, "Fresh news", "Arrived while Jolta ran."));
     wait(20, "IDLE brought the new message", || inbox_has(&app, "Fresh news"));
     assert!(app.events.seen("new mail"), "the app was told about new mail");
 }
 
-/// Archive, read, flag and trash in Kite reach the server, and undo after
+/// Archive, read, flag and trash in Jolta reach the server, and undo after
 /// sending puts things back there too.
 #[test]
 fn actions_reach_the_server() {
@@ -73,7 +73,7 @@ fn actions_reach_the_server() {
     assert!(!app.events.seen("action failed"));
 }
 
-/// Changes made elsewhere (a phone, the web) show up in Kite.
+/// Changes made elsewhere (a phone, the web) show up in Jolta.
 #[test]
 fn changes_from_elsewhere_arrive() {
     if !available() {
@@ -111,7 +111,7 @@ fn sending_reaches_smtp_and_sent() {
     wait(20, "the inbox synced", || inbox_has(&app, &question.subject));
 
     let thread = app.list("in:inbox")[0].thread_id;
-    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, kite_ffi::ReplyMode::Reply, 0)).unwrap();
+    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
     reply.body = format!("Yes, see you there.\n\n{}", reply.body);
     app.core.send(reply, None, None).unwrap();
 
@@ -144,7 +144,7 @@ fn snooze_round_trip() {
     wait(20, "the wake reached the server", || server.subjects("INBOX") == ["Later please"] && server.subjects("Snoozed").is_empty());
 }
 
-/// A draft saved in Kite appears in the server's Drafts, and discarding it
+/// A draft saved in Jolta appears in the server's Drafts, and discarding it
 /// removes it there.
 #[test]
 fn drafts_reach_the_server() {

@@ -185,29 +185,29 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 TOTAL_STAGES=5
-ENV_FILE="$HOME/Library/Application Support/Kite/oauth-clients.env"
+ENV_FILE="$HOME/Library/Application Support/Jolta/oauth-clients.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 
-banner "Google sign-in for Kite (Gmail / Workspace)"
+banner "Google sign-in for Jolta (Gmail / Workspace)"
 
 stage "Create the Google Cloud project"
-say "Kite signs in to Gmail with its own OAuth client, set to Internal so"
+say "Jolta signs in to Gmail with its own OAuth client, set to Internal so"
 say "accounts on your Workspace domain need no Google review and no weekly re-login."
 open_url "https://console.cloud.google.com/projectcreate"
 step "Sign in with your Google Workspace admin account (not a personal gmail.com one)."
-step "Project name: Kite. Organization: your Workspace domain. Click Create."
-step "When it finishes, make sure the Kite project is selected in the top bar."
+step "Project name: Jolta. Organization: your Workspace domain. Click Create."
+step "When it finishes, make sure the Jolta project is selected in the top bar."
 pause "Project created and selected?"
 
 stage "Turn on the Gmail API"
 open_url "https://console.cloud.google.com/apis/library/gmail.googleapis.com"
-step "Click Enable. (Kite syncs over IMAP; the API covers a few cheap calls later.)"
+step "Click Enable. (Jolta syncs over IMAP; the API covers a few cheap calls later.)"
 pause "Gmail API enabled?"
 
 stage "Set up the consent screen as Internal"
 open_url "https://console.cloud.google.com/auth/overview"
 step "Click Get started (or open Branding if it is already set up)."
-step "App name: Kite. User support email: your address. Click Next."
+step "App name: Jolta. User support email: your address. Click Next."
 step "Audience: Internal. Click Next."
 step "Contact email: your address. Agree to the policy, then Create."
 note "If Internal is greyed out, the project is not inside your Workspace organization."
@@ -222,9 +222,9 @@ pause "Scope https://mail.google.com/ saved?"
 
 stage "Create the desktop OAuth client"
 open_url "https://console.cloud.google.com/auth/clients/create"
-step "Application type: Desktop app. Name: Kite desktop. Click Create."
+step "Application type: Desktop app. Name: Jolta desktop. Click Create."
 step "The dialog shows a Client ID and a Client secret. Copy them here."
-note "For desktop apps Google treats the secret as public; Kite still keeps it out of git."
+note "For desktop apps Google treats the secret as public; Jolta still keeps it out of git."
 printf '\n'
 ask GOOGLE_CLIENT_ID "Client ID (ends in .apps.googleusercontent.com):"
 ask_secret GOOGLE_CLIENT_SECRET "Client secret (hidden):"
@@ -232,5 +232,5 @@ write_env GOOGLE_CLIENT_ID "$GOOGLE_CLIENT_ID"
 write_env GOOGLE_CLIENT_SECRET "$GOOGLE_CLIENT_SECRET"
 
 finish
-say "Tell the agent: the Google client is in Kite's oauth-clients.env. It continues M5."
+say "Tell the agent: the Google client is in Jolta's oauth-clients.env. It continues M5."
 printf '\n'

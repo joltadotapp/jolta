@@ -1,11 +1,11 @@
-"""A minimal MCP client for checks: speaks JSON-RPC lines to kite-mcp."""
+"""A minimal MCP client for checks: speaks JSON-RPC lines to jolta-mcp."""
 import json
 import subprocess
 import sys
 
 
 class Client:
-    def __init__(self, bridge, name="Kite check agent"):
+    def __init__(self, bridge, name="Jolta check agent"):
         self.proc = subprocess.Popen([bridge], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.next_id = 0
         self.init = self.request("initialize", {
@@ -40,5 +40,5 @@ if __name__ == "__main__":
     c = Client(sys.argv[1])
     print(json.dumps(c.init["result"]["serverInfo"]), c.init["result"]["protocolVersion"])
     print([t["name"] for t in c.request("tools/list")["result"]["tools"]])
-    print(c.call("search", query="kite send test", limit=3))
+    print(c.call("search", query="jolta send test", limit=3))
     c.close()

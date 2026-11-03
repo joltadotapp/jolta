@@ -1,8 +1,8 @@
 From: Weekly Digest <hello@news.example.com>
 To: koen@example.com
-Subject: [Kite fixture] Dark mode newsletter
+Subject: [Jolta fixture] Dark mode newsletter
 Date: Fri, 30 Oct 2026 10:00:00 +0100
-Message-ID: <darkmode-newsletter@kite.test>
+Message-ID: <darkmode-newsletter@jolta.test>
 List-Unsubscribe: <https://news.example.com/unsubscribe?u=1>
 MIME-Version: 1.0
 Content-Type: multipart/related; boundary="rel"
@@ -13,7 +13,7 @@ Content-Type: text/html; charset=utf-8
 <html><body style="margin:0;background-color:#f4f4f4">
 <table width="100%" bgcolor="#f4f4f4" cellpadding="0" cellspacing="0"><tr><td align="center">
 <table width="560" bgcolor="#ffffff" cellpadding="24"><tr><td style="color:#333333;font-family:Helvetica">
-<img src="cid:logo@kite.test" width="120" height="40" alt="Inline logo">
+<img src="cid:logo@jolta.test" width="120" height="40" alt="Inline logo">
 <h1 style="color:#111111">This week in dark mode</h1>
 <p>Body text in <span style="color:#333">dark grey</span> on a white card, as newsletters are designed.</p>
 <p><img src="http://127.0.0.1:18080/remote-banner.png" width="200" height="60" alt="Remote banner"></p>
@@ -23,7 +23,7 @@ Content-Type: text/html; charset=utf-8
 
 --rel
 Content-Type: image/png
-Content-ID: <logo@kite.test>
+Content-ID: <logo@jolta.test>
 Content-Disposition: inline; filename="logo.png"
 Content-Transfer-Encoding: base64
 

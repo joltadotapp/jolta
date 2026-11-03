@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::{Ai, Cancel, Finish, Request};
 use crate::model::*;
-use crate::{Kite, Result, imap};
+use crate::{Jolta, Result, imap};
 
 pub const CATEGORIES: [&str; 5] = ["personal", "work", "finance", "newsletter", "notification"];
 
@@ -78,8 +78,8 @@ pub fn unsorted_inbox(conn: &Connection, since: i64) -> Result<Vec<MessageId>> {
 
 /// Sorts one message and stores the answer. None when it was sorted already,
 /// is the user's own, or the request was cancelled.
-pub async fn sort(kite: &Kite, ai: &Ai, message: MessageId, cancel: &Cancel) -> Result<Option<Triage>> {
-    let (settings, meta) = kite
+pub async fn sort(jolta: &Jolta, ai: &Ai, message: MessageId, cancel: &Cancel) -> Result<Option<Triage>> {
+    let (settings, meta) = jolta
         .store
         .read_async(move |c| {
             let settings = super::settings(c)?;
@@ -100,7 +100,7 @@ pub async fn sort(kite: &Kite, ai: &Ai, message: MessageId, cancel: &Cancel) -> 
     if mine || settings.provider.is_none() {
         return Ok(None);
     }
-    let raw = imap::message_source(kite, message).await?;
+    let raw = imap::message_source(jolta, message).await?;
     let mut body = super::tasks::message_text(&raw);
     if body.len() > 3_000 {
         let mut end = 3_000;
@@ -129,7 +129,7 @@ pub async fn sort(kite: &Kite, ai: &Ai, message: MessageId, cancel: &Cancel) -> 
         return Err(crate::Error::Other(format!("the model's answer couldn't be read: {text:?}")));
     };
     let (stored, model) = (triage.clone(), settings.label());
-    kite.store
+    jolta.store
         .write(|tx| {
             tx.execute(
                 "INSERT OR REPLACE INTO ai_triage (message_id, category, needs_reply, model, at) VALUES (?1, ?2, ?3, ?4, unixepoch())",

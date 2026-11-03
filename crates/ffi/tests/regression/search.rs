@@ -1,5 +1,5 @@
-use kite_core::MailboxRole;
-use kite_ffi::{ListContext, ThreadAction};
+use jolta_core::MailboxRole;
+use jolta_ffi::{ListContext, ThreadAction};
 
 use crate::fixture::{App, Mail, now};
 
@@ -49,7 +49,7 @@ fn needs_reply_until_answered() {
     let ask = Mail::new("ann@test.invalid", "me@test.invalid", "Can you review?", "Before Thursday please.").at(now() - 7200);
     let message = app.deliver(&me, MailboxRole::Inbox, &ask);
     let bill = app.deliver(&me, MailboxRole::Inbox, &Mail::new("bank@test.invalid", "me@test.invalid", "Statement", "Nothing to do."));
-    app.kite
+    app.jolta
         .store
         .write(|tx| {
             tx.execute("INSERT INTO ai_triage (message_id, category, needs_reply, model, at) VALUES (?1, 'work', 1, 'test', 0)", [message])?;

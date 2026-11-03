@@ -126,7 +126,7 @@ pub async fn download(data_dir: &Path, model: &LocalModel, cancel: &Cancel, on: 
     .await??;
     if hash != model.sha256 {
         std::fs::remove_file(&part)?;
-        return Err(Error::Other("The downloaded file was damaged, so Kite deleted it. Try again.".into()));
+        return Err(Error::Other("The downloaded file was damaged, so Jolta deleted it. Try again.".into()));
     }
     std::fs::rename(&part, path(data_dir, model))?;
     Ok(true)

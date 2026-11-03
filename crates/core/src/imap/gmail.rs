@@ -1,4 +1,4 @@
-//! Gmail over IMAP. Kite syncs only `[Gmail]/All Mail`: every message once,
+//! Gmail over IMAP. Jolta syncs only `[Gmail]/All Mail`: every message once,
 //! with its labels (X-GM-LABELS) mapped onto the label mailboxes, its stable
 //! id (X-GM-MSGID) as remote id and its conversation (X-GM-THRID) as thread.
 //! Archive removes the \Inbox label; filing adds a label; Trash is a move.
@@ -12,7 +12,7 @@ use futures::TryStreamExt;
 use super::{Caps, Session, SyncEvent, SyncOptions, SyncReport, fetch_bodies, list_mailboxes, uid_set};
 use crate::model::*;
 use crate::store::{self, OpKind};
-use crate::{Error, Kite, Result, mime};
+use crate::{Error, Jolta, Result, mime};
 
 const BATCH: usize = 250;
 const ITEMS: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE X-GM-MSGID X-GM-THRID X-GM-LABELS BODY.PEEK[HEADER])";
@@ -159,7 +159,7 @@ fn quote(label: &str) -> String {
 }
 
 pub async fn sync(
-    kite: &Kite,
+    jolta: &Jolta,
     session: &mut Session,
     caps: Caps,
     account: &Account,
@@ -169,7 +169,7 @@ pub async fn sync(
     let account_id = account.id;
     let remote = list_mailboxes(session).await?;
     let important = remote.iter().find(|m| m.important).map(|m| m.remote_id.clone());
-    let mailboxes = kite.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?;
+    let mailboxes = jolta.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?;
     progress(SyncEvent::Mailboxes(mailboxes.len()));
     let all = mailboxes
         .iter()
@@ -183,22 +183,22 @@ pub async fn sync(
     let all_id = all.id;
     let mut since = all.highest_modseq;
     if all.uidvalidity.is_some() && all.uidvalidity != selected.uid_validity {
-        kite.store.write_async(move |tx| store::clear_mailbox(tx, all_id)).await?;
+        jolta.store.write_async(move |tx| store::clear_mailbox(tx, all_id)).await?;
         since = None;
     }
-    let local = kite.store.read_async(move |c| store::mailbox_uids(c, all_id)).await?;
+    let local = jolta.store.read_async(move |c| store::mailbox_uids(c, all_id)).await?;
     let server: HashSet<u32> = if selected.exists == 0 { HashSet::new() } else { session.uid_search("ALL").await? };
 
     let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
     let gone: Vec<MessageId> = local.iter().filter(|(u, _)| !server.contains(u)).map(|(_, (id, _))| *id).collect();
     report.removed = gone.len();
     if !gone.is_empty() {
-        kite.store.write_async(move |tx| store::delete_messages(tx, &gone)).await?;
+        jolta.store.write_async(move |tx| store::delete_messages(tx, &gone)).await?;
     }
     // A message in no All Mail, Trash or Spam mailbox left Gmail (trashed
     // from All Mail, deleted elsewhere) and only its label links remain.
     // Skipped while changes wait to be sent, which may still place it.
-    let orphans = kite
+    let orphans = jolta
         .store
         .write_async(move |tx| {
             if store::has_pending_ops(tx, account_id)? {
@@ -242,7 +242,7 @@ pub async fn sync(
                 (message, label_ids(&f.labels))
             })
             .collect();
-        let ids = kite
+        let ids = jolta
             .store
             .write_async(move |tx| {
                 let mut ids = Vec::new();
@@ -261,7 +261,7 @@ pub async fn sync(
         progress(SyncEvent::Headers { mailbox: all.name.clone(), done: ((i + 1) * BATCH).min(total), total });
     }
 
-    // Flag and label changes on messages Kite already has.
+    // Flag and label changes on messages Jolta already has.
     let known: HashMap<u32, (MessageId, Flags)> = local.into_iter().filter(|(u, _)| server.contains(u)).collect();
     if !known.is_empty() {
         let fetched = match (caps.condstore, since) {
@@ -278,7 +278,7 @@ pub async fn sync(
             .filter_map(|f| known.get(&f.uid).map(|(id, _)| (*id, f.flags, label_ids(&f.labels))))
             .collect();
         report.flag_changes = changes.len();
-        kite.store
+        jolta.store
             .write_async(move |tx| {
                 let pending = store::pending_messages(tx, account_id)?;
                 for (id, flags, labels) in changes.iter().filter(|(id, ..)| !pending.contains(id)) {
@@ -290,20 +290,20 @@ pub async fn sync(
             .await?;
     }
     let (uidvalidity, modseq) = (selected.uid_validity, selected.highest_modseq);
-    kite.store.write_async(move |tx| store::set_mailbox_cursor(tx, all_id, uidvalidity, modseq)).await?;
+    jolta.store.write_async(move |tx| store::set_mailbox_cursor(tx, all_id, uidvalidity, modseq)).await?;
     progress(SyncEvent::Mailbox { name: all.name.clone(), new: report.new, removed: report.removed, flag_changes: report.flag_changes });
 
     if opts.bodies {
-        report.bodies = fetch_bodies(kite, session, account, progress).await?;
+        report.bodies = fetch_bodies(jolta, session, account, progress).await?;
     }
     Ok(report)
 }
 
 /// Sends one op to Gmail. Everything happens in All Mail by UID: flags with
 /// STORE, label moves with X-GM-LABELS, and Trash with MOVE.
-pub async fn apply_op(kite: &Kite, session: &mut Session, op: &store::Op) -> Result<Vec<MailboxId>> {
+pub async fn apply_op(jolta: &Jolta, session: &mut Session, op: &store::Op) -> Result<Vec<MailboxId>> {
     let account = op.account;
-    let mailboxes = kite.store.read_async(move |c| store::mailboxes(c, account)).await?;
+    let mailboxes = jolta.store.read_async(move |c| store::mailboxes(c, account)).await?;
     let all = mailboxes
         .iter()
         .find(|m| m.role == Some(MailboxRole::All))
@@ -316,7 +316,7 @@ pub async fn apply_op(kite: &Kite, session: &mut Session, op: &store::Op) -> Res
     let uids: Vec<u32> = match op.kind {
         OpKind::Move { from, .. } if from == all_id => op.messages.iter().filter_map(|(_, u)| *u).collect(),
         _ => {
-            kite.store
+            jolta.store
                 .read_async(move |c| {
                     Ok(store::server_locations(c, &ids)?.into_iter().filter(|(m, _)| *m == all_id).map(|(_, u)| u).collect())
                 })

@@ -1,0 +1,447 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1000000000000000000F001 /* JoltaFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D001 /* JoltaFFI */; };
+		A1000000000000000000F003 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D002 /* Sparkle */; };
+		A1000000000000000000F002 /* jolta-mcp in Embed jolta-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A03 /* jolta-mcp */; };
+		A1000000000000000000F004 /* jolta-ai in Embed jolta-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A05 /* jolta-ai */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A10000000000000000004002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000001001;
+			remoteInfo = Jolta;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000A01 /* Jolta.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Jolta.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000A02 /* Jolta.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Jolta.entitlements; sourceTree = "<group>"; };
+		A10000000000000000000A03 /* jolta-mcp */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "jolta-mcp"; path = "Helpers/jolta-mcp"; sourceTree = "<group>"; };
+		A10000000000000000000A04 /* jolta-mcp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "jolta-mcp.entitlements"; sourceTree = "<group>"; };
+		A10000000000000000000A05 /* jolta-ai */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "jolta-ai"; path = "Helpers/jolta-ai"; sourceTree = "<group>"; };
+		A10000000000000000000A06 /* jolta-ai.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "jolta-ai.entitlements"; sourceTree = "<group>"; };
+		A10000000000000000000A07 /* JoltaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JoltaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A10000000000000000000C04 /* Embed jolta-mcp */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				A1000000000000000000F002 /* jolta-mcp in Embed jolta-mcp */,
+				A1000000000000000000F004 /* jolta-ai in Embed jolta-mcp */,
+			);
+			name = "Embed jolta-mcp";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A10000000000000000000B01 /* Jolta */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Jolta; sourceTree = "<group>"; };
+		A10000000000000000000B02 /* JoltaUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = JoltaUITests; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000C02 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000F001 /* JoltaFFI in Frameworks */,
+				A1000000000000000000F003 /* Sparkle in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000C12 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000E01 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000B01 /* Jolta */,
+				A10000000000000000000B02 /* JoltaUITests */,
+				A10000000000000000000A02 /* Jolta.entitlements */,
+				A10000000000000000000A04 /* jolta-mcp.entitlements */,
+				A10000000000000000000A03 /* jolta-mcp */,
+				A10000000000000000000A06 /* jolta-ai.entitlements */,
+				A10000000000000000000A05 /* jolta-ai */,
+				A10000000000000000000E02 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000E02 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000A01 /* Jolta.app */,
+				A10000000000000000000A07 /* JoltaUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000001001 /* Jolta */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000002002 /* Build configuration list for PBXNativeTarget "Jolta" */;
+			buildPhases = (
+				A10000000000000000000C01 /* Sources */,
+				A10000000000000000000C02 /* Frameworks */,
+				A10000000000000000000C03 /* Resources */,
+				A10000000000000000000C04 /* Embed jolta-mcp */,
+				A10000000000000000000C05 /* Sign jolta-mcp */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000000B01 /* Jolta */,
+			);
+			name = Jolta;
+			packageProductDependencies = (
+				A1000000000000000000D001 /* JoltaFFI */,
+				A1000000000000000000D002 /* Sparkle */,
+			);
+			productName = Jolta;
+			productReference = A10000000000000000000A01 /* Jolta.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A10000000000000000001002 /* JoltaUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000002003 /* Build configuration list for PBXNativeTarget "JoltaUITests" */;
+			buildPhases = (
+				A10000000000000000000C11 /* Sources */,
+				A10000000000000000000C12 /* Frameworks */,
+				A10000000000000000000C13 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10000000000000000004001 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000000B02 /* JoltaUITests */,
+			);
+			name = JoltaUITests;
+			productName = JoltaUITests;
+			productReference = A10000000000000000000A07 /* JoltaUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2710;
+				LastUpgradeCheck = 2710;
+				TargetAttributes = {
+					A10000000000000000001001 = {
+						CreatedOnToolsVersion = 27.1;
+					};
+					A10000000000000000001002 = {
+						CreatedOnToolsVersion = 27.1;
+						TestTargetID = A10000000000000000001001;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000002001 /* Build configuration list for PBXProject "Jolta" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000000E01;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A1000000000000000000D101 /* XCLocalSwiftPackageReference "JoltaFFI" */,
+				A1000000000000000000D102 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A10000000000000000000E02 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000000000000000001001 /* Jolta */,
+				A10000000000000000001002 /* JoltaUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000000C03 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000C13 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A10000000000000000000C05 /* Sign jolta-mcp */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Sign jolta-mcp";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# The helper gets its own sandbox and the app group, so an agent can launch it.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/jolta-mcp.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/jolta-mcp\"\n# jolta-ai runs local models inside the app's own sandbox, which it inherits.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/jolta-ai.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/jolta-ai\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000C01 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000C11 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A10000000000000000004001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000001001 /* Jolta */;
+			targetProxy = A10000000000000000004002 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000003001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		A10000000000000000003002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		A10000000000000000003003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Jolta.entitlements;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RWQLHW7V7V;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Jolta;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				INFOPLIST_FILE = "Jolta-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.jolta.mac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A10000000000000000003004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Jolta.entitlements;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RWQLHW7V7V;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Jolta;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				INFOPLIST_FILE = "Jolta-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.jolta.mac;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A10000000000000000003005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RWQLHW7V7V;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.jolta.mac.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = Jolta;
+			};
+			name = Debug;
+		};
+		A10000000000000000003006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RWQLHW7V7V;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.jolta.mac.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = Jolta;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000002001 /* Build configuration list for PBXProject "Jolta" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000003001 /* Debug */,
+				A10000000000000000003002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000002002 /* Build configuration list for PBXNativeTarget "Jolta" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000003003 /* Debug */,
+				A10000000000000000003004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000002003 /* Build configuration list for PBXNativeTarget "JoltaUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000003005 /* Debug */,
+				A10000000000000000003006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A1000000000000000000D101 /* XCLocalSwiftPackageReference "JoltaFFI" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = JoltaFFI;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A1000000000000000000D102 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.10.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1000000000000000000D001 /* JoltaFFI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = JoltaFFI;
+		};
+		A1000000000000000000D002 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1000000000000000000D102 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A10000000000000000000001 /* Project object */;
+}

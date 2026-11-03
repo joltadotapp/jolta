@@ -1,5 +1,5 @@
 //! Regression and journey tests, run offline through the same `Core` the
-//! Mac app calls. `cargo test -p kite-ffi --test regression`.
+//! Mac app calls. `cargo test -p jolta-ffi --test regression`.
 
 mod fixture;
 mod server;

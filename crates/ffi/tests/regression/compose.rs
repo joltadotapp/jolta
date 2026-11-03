@@ -1,5 +1,5 @@
-use kite_core::MailboxRole;
-use kite_ffi::ReplyMode;
+use jolta_core::MailboxRole;
+use jolta_ffi::ReplyMode;
 
 use crate::fixture::{App, Mail, block_on, now};
 

@@ -1,8 +1,8 @@
-"""Writes synthetic mail for checking Kite's AI features: .eml files dated in
-the last ten days, for one made-up person, Sam Peeters <synthetic@kite.invalid>.
+"""Writes synthetic mail for checking Jolta's AI features: .eml files dated in
+the last ten days, for one made-up person, Sam Peeters <synthetic@jolta.invalid>.
 Every person and company in them is invented. Each file carries the expected
-sorting in an X-Kite-Expect header ("work yes": category, needs reply), which
-`kite ai sort --check` compares against the model.
+sorting in an X-Jolta-Expect header ("work yes": category, needs reply), which
+`jolta ai sort --check` compares against the model.
 
     python3 -I scripts/ai-fixtures.py <out-dir>
 """
@@ -13,7 +13,7 @@ import os
 import sys
 from email.message import EmailMessage
 
-ME = "Sam Peeters <synthetic@kite.invalid>"
+ME = "Sam Peeters <synthetic@jolta.invalid>"
 NOW = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=1)))
 
 # (days ago, hours, from, subject, body, expect, extra headers, thread key)
@@ -100,7 +100,7 @@ def main(out):
             "Nora Jacobs <nora@kleurrijk.invalid>" if sender == ME else ME)
         m["Subject"] = subject
         m["Date"] = email.utils.format_datetime(when)
-        mid = f"<kite-ai-fixture-{i}@kite.invalid>"
+        mid = f"<jolta-ai-fixture-{i}@jolta.invalid>"
         m["Message-ID"] = mid
         if key:
             refs = threads.setdefault(key, [])
@@ -111,7 +111,7 @@ def main(out):
         for name, value in extra.items():
             m[name] = value
         if expect:
-            m["X-Kite-Expect"] = expect
+            m["X-Jolta-Expect"] = expect
         m.set_content(body)
         with open(os.path.join(out, f"{i:02d}.eml"), "wb") as f:
             f.write(bytes(m))

@@ -52,11 +52,11 @@ fn body_html(raw: &[u8]) -> String {
 }
 
 pub fn text_to_html(text: &str) -> String {
-    let mut out = String::from("<div class=\"kite-plain\">");
+    let mut out = String::from("<div class=\"jolta-plain\">");
     for line in text.lines() {
         let quoted = line.starts_with('>');
         if quoted {
-            out.push_str("<span class=\"kite-quote\">");
+            out.push_str("<span class=\"jolta-quote\">");
         }
         out.push_str(&ammonia::clean_text(line));
         if quoted {
@@ -524,10 +524,10 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
             .filter(|f| !f.content_id.as_ref().is_some_and(|c| clean.contains(&format!("cid:{}/{c}", m.id))))
             .collect();
         if !files.is_empty() {
-            clean.push_str("<div class=\"kite-files\">");
+            clean.push_str("<div class=\"jolta-files\">");
             for f in &files {
                 clean.push_str(&format!(
-                    "<a class=\"kite-file\" href=\"x-attachment:{}/{}\"><b>{}</b><small>{}</small></a>",
+                    "<a class=\"jolta-file\" href=\"x-attachment:{}/{}\"><b>{}</b><small>{}</small></a>",
                     m.id,
                     f.index,
                     escape(&f.name),
@@ -543,17 +543,17 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
         }
         css.push_str(&dark_attribute_rules(&clean, &scope));
         body.push_str(&format!(
-            "<details class=\"kite-message\"{open}><summary><span class=\"kite-from\">{from}</span>{vip}\
-             <span class=\"kite-snippet\">{snippet}</span><span class=\"kite-date\">{date}</span>\
-             <div class=\"kite-to\">to {to}</div></summary><div class=\"kite-body{layout}\" id=\"m{id}\">{clean}</div></details>",
+            "<details class=\"jolta-message\"{open}><summary><span class=\"jolta-from\">{from}</span>{vip}\
+             <span class=\"jolta-snippet\">{snippet}</span><span class=\"jolta-date\">{date}</span>\
+             <div class=\"jolta-to\">to {to}</div></summary><div class=\"jolta-body{layout}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
-            vip = if m.vip { "<span class=\"kite-vip\">VIP</span>" } else { "" },
+            vip = if m.vip { "<span class=\"jolta-vip\">VIP</span>" } else { "" },
             snippet = escape(m.snippet),
             date = escape(m.date),
             to = escape(m.to),
             id = m.id,
-            layout = if wide { " kite-wide" } else { "" },
+            layout = if wide { " jolta-wide" } else { "" },
         ));
     }
     let html = format!(
@@ -652,7 +652,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
     fn plain_text_is_escaped() {
         let out = render_thread(&[view(b"Subject: t\r\n\r\n<b>hi</b>\r\n> quoted\r\n")], "");
         assert!(out.html.contains("&lt;b&gt;hi&lt;/b&gt;"));
-        assert!(out.html.contains("<span class=\"kite-quote\">&gt; quoted</span>"));
+        assert!(out.html.contains("<span class=\"jolta-quote\">&gt; quoted</span>"));
     }
 
     #[test]

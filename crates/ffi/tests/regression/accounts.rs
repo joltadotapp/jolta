@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use kite_core::{MailboxRole, secrets};
-use kite_ffi::{ListContext, ThreadAction};
+use jolta_core::{MailboxRole, secrets};
+use jolta_ffi::{ListContext, ThreadAction};
 
 use crate::fixture::{App, Mail, now};
 
@@ -29,7 +29,7 @@ fn removing_an_account_leaves_nothing_behind() {
     draft.account_id = Some(gone.id.0);
     draft.subject = "Unfinished".into();
     app.core.save_draft(draft).unwrap();
-    app.kite
+    app.jolta
         .store
         .write(|tx| {
             tx.execute("INSERT INTO ai_triage (message_id, category, needs_reply, model, at) VALUES (?1, 'work', 1, 'test', 0)", [message])?;
@@ -54,7 +54,7 @@ fn removing_an_account_leaves_nothing_behind() {
     assert!(!secrets::exists(&gone.secret_ref).unwrap(), "the password stays in the Keychain");
     assert!(!secrets::exists(&secrets::smtp_ref(&gone.secret_ref)).unwrap(), "the SMTP password stays in the Keychain");
 
-    let collected = app.kite.collect_blobs(Duration::ZERO).unwrap();
+    let collected = app.jolta.collect_blobs(Duration::ZERO).unwrap();
     assert_eq!(collected.files, 3, "the removed account's three message files are deleted");
     assert_eq!(app.count("SELECT count(*) FROM message"), 1);
     let view = app.open(app.thread_of(survivor));
@@ -69,9 +69,9 @@ fn young_message_files_are_kept() {
     let app = App::new();
     let account = app.account("me@test.invalid");
     let message = app.deliver(&account, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Hi", "Hello."));
-    app.kite.store.write(|tx| Ok(kite_core::store::delete_messages(tx, &[message])?)).unwrap();
-    assert_eq!(app.kite.collect_blobs(Duration::from_secs(3600)).unwrap().files, 0);
-    assert_eq!(app.kite.collect_blobs(Duration::ZERO).unwrap().files, 1);
+    app.jolta.store.write(|tx| Ok(jolta_core::store::delete_messages(tx, &[message])?)).unwrap();
+    assert_eq!(app.jolta.collect_blobs(Duration::from_secs(3600)).unwrap().files, 0);
+    assert_eq!(app.jolta.collect_blobs(Duration::ZERO).unwrap().files, 1);
 }
 
 fn rusqlite_params(a: i64, b: i64) -> [i64; 2] {
@@ -81,7 +81,7 @@ fn rusqlite_params(a: i64, b: i64) -> [i64; 2] {
 /// Every table column that holds an account id, found from the schema so a
 /// new table is checked without changing this test.
 fn account_columns(app: &App) -> Vec<(String, String)> {
-    app.kite
+    app.jolta
         .store
         .read(|c| {
             let tables: Vec<String> = c
