@@ -1,0 +1,9 @@
+# gitleaks' own rules, plus host names that would reveal a Tailscale tailnet.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tailscale-hostname"
+description = "A host name in a Tailscale tailnet"
+regex = '''\b[a-z0-9-]+\.tail[0-9a-f]{4,}\.ts\.net\b'''
+keywords = ["ts.net"]

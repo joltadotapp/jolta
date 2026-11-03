@@ -16,7 +16,11 @@ BUILD=$(date +%Y%m%d%H%M)
 UPDATES=${JOLTA_UPDATES:-$HOME/jolta-updates/mac}
 SPARKLE_BIN=${SPARKLE_BIN:-$HOME/jolta-tools-sparkle/bin}
 ED_KEY=${ED_KEY:-$HOME/jolta-devid/sparkle-ed25519-private.key}
-FEED_PREFIX=https://mac-mini.example.ts.net:8448/mac/
+# The feed's address is on the tailnet, so it stays out of the repository:
+# one line such as https://<host>.<tailnet>.ts.net:8448/mac/ in this file.
+FEED_FILE=${JOLTA_FEED_FILE:-$HOME/jolta-devid/feed-url}
+[ -s "$FEED_FILE" ] || { echo "No feed address in $FEED_FILE."; exit 1; }
+FEED_PREFIX=$(tr -d '[:space:]' < "$FEED_FILE")
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -32,12 +36,15 @@ DERIVED="$ROOT/target/xcode-release"
 xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Release \
     -derivedDataPath "$DERIVED" \
     ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
-    MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" \
+    MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" JOLTA_FEED_URL="${FEED_PREFIX}appcast.xml" \
     CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM=RWQLHW7V7V \
     OTHER_CODE_SIGN_FLAGS=--timestamp CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
     build | grep -E "error:|BUILD (SUCCEEDED|FAILED)"
 
 APP="$DERIVED/Build/Products/Release/Jolta.app"
+# A build without the feed address could never update itself again.
+FEED_IN_APP=$(/usr/libexec/PlistBuddy -c "Print :SUFeedURL" "$APP/Contents/Info.plist")
+[ "$FEED_IN_APP" = "${FEED_PREFIX}appcast.xml" ] || { echo "The app's SUFeedURL is '$FEED_IN_APP', not the feed."; exit 1; }
 
 # Xcode re-signs Sparkle.framework but not the helpers inside it; sign them
 # inside-out with our identity, as Sparkle's documentation describes.

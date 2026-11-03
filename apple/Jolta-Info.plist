@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>SUFeedURL</key>
-	<string>https://mac-mini.example.ts.net:8448/mac/appcast.xml</string>
+	<string>$(JOLTA_FEED_URL)</string>
 	<key>SUPublicEDKey</key>
 	<string>lbTVjQLu66+oXvkVlhGE23i+CWInKwjtT59jityqw8I=</string>
 	<key>SUEnableAutomaticChecks</key>

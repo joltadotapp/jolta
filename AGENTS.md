@@ -16,6 +16,7 @@ Read these before changing anything:
 - Every dependency must be MIT, Apache-2.0, BSD, ISC, Zlib or MPL-2.0. No GPL, AGPL or LGPL code, copied or linked.
 - Jolta works fully without any server of ours. An optional subscription service may come later for features that need one, such as shared conversations or sending while the Mac is off; it adds to the app and never gates the core. No telemetry containing mail data. Once Gmail data reaches a server we run, Google's security assessment (CASA) applies; see `docs/decisions.md`.
 - Mail logic stays in Rust. Swift renders and forwards user intents.
+- The repository is public. A pre-commit hook in `.githooks/` refuses secrets (gitleaks), personal addresses and host names listed in `.git/info/private-strings`, and any commit email that isn't a GitHub no-reply address. Turn it on in a new clone with `git config core.hooksPath .githooks` and `brew install gitleaks`. Use the test accounts' roles in docs (the Google Workspace test account), never their addresses; the update feed's address lives in `~/jolta-devid/feed-url`.
 - Verify each milestone on the real artifact: the `jolta` CLI against a real account, or the app running on the Mac mini.
 
 ## Machines

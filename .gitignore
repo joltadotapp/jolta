@@ -1,12 +1,39 @@
+# Build output
 target/
-/apple/JoltaFFI/JoltaFFI.xcframework/
-/apple/JoltaFFI/Sources/JoltaFFI/jolta_ffi.swift
-xcuserdata/
-*.xcuserstate
 /build/
-.DS_Store
-.audit/
 .build/
 .swiftpm/
-/apple/Helpers/
+DerivedData/
 __pycache__/
+/apple/JoltaFFI/JoltaFFI.xcframework/
+/apple/JoltaFFI/Sources/JoltaFFI/jolta_ffi.swift
+/apple/Helpers/
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate
+
+# Agent scratch: decision trails and worktrees
+.audit/
+.claude/
+
+# Secrets and signing material: these live in the Keychain, ~/jolta-devid
+# and the data folder, never in the repository.
+.env
+.env.*
+*.env
+*.pem
+*.p8
+*.p12
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+
+# Local mail stores and logs
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+
+.DS_Store

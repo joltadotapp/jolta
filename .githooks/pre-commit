@@ -1,0 +1,26 @@
+#!/bin/sh
+# Stops a commit that would publish something private. Turned on per clone
+# with: git config core.hooksPath .githooks
+set -eu
+
+fail() { echo "pre-commit: $*" >&2; exit 1; }
+
+# Commits carry the GitHub no-reply address, never a personal one.
+for who in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+    case "$(git var "$who")" in
+        *@users.noreply.github.com\>*) ;;
+        *) fail "$who is not a GitHub no-reply address. Run: git config user.email <id>+<login>@users.noreply.github.com" ;;
+    esac
+done
+
+# Personal addresses and host names listed one per line in .git/info/private-strings,
+# which is never committed, so the list itself can't leak.
+PRIVATE="$(git rev-parse --git-common-dir)/info/private-strings"
+if [ -s "$PRIVATE" ]; then
+    if git diff --cached --no-color -U0 | grep '^+' | grep -i -F -q -f "$PRIVATE"; then
+        fail "the staged changes contain a string from $PRIVATE."
+    fi
+fi
+
+command -v gitleaks >/dev/null 2>&1 || fail "gitleaks is not installed, so staged changes can't be checked for secrets. Install it with: brew install gitleaks"
+exec gitleaks git --pre-commit --staged --redact --no-banner --verbose .
