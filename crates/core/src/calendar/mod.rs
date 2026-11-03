@@ -2,6 +2,7 @@
 //! repeating events, invitations and meeting links. Plan: docs/calendar-plan.md.
 
 pub mod ical;
+pub mod ical_edit;
 pub mod meeting;
 mod model;
 pub mod recur;
