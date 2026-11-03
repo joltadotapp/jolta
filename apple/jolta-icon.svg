@@ -1,0 +1,213 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Jolta</title>
+  <defs>
+    <clipPath id="tile">
+      <rect x="16" y="16" width="480" height="480" rx="108"/>
+    </clipPath>
+    <clipPath id="rightSide">
+      <polygon points="310,-20 226,250 272,250 190,540 540,540 540,-20"/>
+    </clipPath>
+    <clipPath id="leftSide">
+      <polygon points="-20,-20 380,-20 310,214 366,214 206,540 -20,540"/>
+    </clipPath>
+
+    <!-- Palette -->
+    <linearGradient id="left" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7F2E8"/>
+      <stop offset="1" stop-color="#DCD1BE"/>
+    </linearGradient>
+    <linearGradient id="flap" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#FFFDF8"/>
+      <stop offset="1" stop-color="#EEE6D8"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF9550"/>
+      <stop offset="1" stop-color="#C2370A"/>
+    </linearGradient>
+    <linearGradient id="header" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B83A0E"/>
+      <stop offset="1" stop-color="#982C06"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#FFE066"/>
+      <stop offset="0.45" stop-color="#FFC020"/>
+      <stop offset="1" stop-color="#FF8A00"/>
+    </linearGradient>
+
+    <!-- Glass glow and rim -->
+    <radialGradient id="glow" cx="0.2" cy="0.05" r="0.75">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="topEdge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.03" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.09" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.6"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.22"/>
+    </linearGradient>
+    <radialGradient id="glowR" cx="0.8" cy="0.8" r="0.45">
+      <stop offset="0" stop-color="#FFD0A0" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#FFD0A0" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Filters -->
+    <mask id="perf" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect x="150" y="52" width="84" height="100" fill="#fff"/>
+        <circle cx="150.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="162.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="162.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="174.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="174.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="186.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="186.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="198.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="198.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="210.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="210.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="222.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="222.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="52.0" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="152.0" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="64.5" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="64.5" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="77.0" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="77.0" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="89.5" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="89.5" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="102.0" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="102.0" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="114.5" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="114.5" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="127.0" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="127.0" r="4.6" fill="#000"/>
+        <circle cx="150.0" cy="139.5" r="4.6" fill="#000"/>
+        <circle cx="234.0" cy="139.5" r="4.6" fill="#000"/>
+    </mask>
+    <linearGradient id="stampArt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF9A55"/>
+      <stop offset="1" stop-color="#C9420F"/>
+    </linearGradient>
+    <filter id="stampShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#5A4426" flood-opacity="0.35"/>
+    </filter>
+    <filter id="paper" filterUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="3" seed="7" result="grain"/>
+      <feColorMatrix in="grain" type="matrix" values="0 0 0 0 0.42  0 0 0 0 0.34  0 0 0 0 0.22  0.5 0 0 0 -0.16"/>
+    </filter>
+    <filter id="tileShadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="8" stdDeviation="7" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="blur9" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <filter id="bevel" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="7" result="blur"/>
+      <feSpecularLighting in="blur" surfaceScale="6" specularConstant="1.1" specularExponent="24" lighting-color="#FFFFFF" result="spec">
+        <fePointLight x="80" y="-120" z="300"/>
+      </feSpecularLighting>
+      <feComposite in="spec" in2="SourceAlpha" operator="in" result="specIn"/>
+      <feComposite in="SourceGraphic" in2="specIn" operator="arithmetic" k1="0" k2="1" k3="0.7" k4="0"/>
+    </filter>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="halo" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- macOS icon grid: the 480 px tile is scaled to 412 px (824 of 1024) and centred, leaving room for the shadow. -->
+  <g transform="translate(36.267 36.267) scale(0.858333)">
+  <!-- Tile with outer shadow -->
+    <rect x="16" y="16" width="480" height="480" rx="108" fill="#000" filter="url(#tileShadow)"/>
+  
+    <g clip-path="url(#tile)">
+      <!-- ===== Right half: calendar page ===== -->
+      <g clip-path="url(#rightSide)">
+        <rect x="0" y="0" width="512" height="512" fill="url(#right)"/>
+        <rect x="0" y="0" width="512" height="512" fill="url(#glowR)"/>
+        <!-- Header strip -->
+        <rect x="0" y="0" width="512" height="150" fill="url(#header)"/>
+        <rect x="0" y="148" width="512" height="3" fill="#FFFFFF" opacity="0.18"/>
+        <!-- Day squares, sliding under the bolt -->
+        <g filter="url(#soft)" fill="#FFFFFF" fill-opacity="0.24" stroke="#FFFFFF" stroke-opacity="0.6" stroke-width="2">
+          <rect x="318" y="196" width="38" height="38" rx="9"/>
+          <rect x="370" y="196" width="38" height="38" rx="9"/>
+          <rect x="422" y="196" width="38" height="38" rx="9"/>
+          <rect x="266" y="248" width="38" height="38" rx="9"/>
+          <rect x="318" y="248" width="38" height="38" rx="9"/>
+          <rect x="370" y="248" width="38" height="38" rx="9"/>
+          <rect x="422" y="248" width="38" height="38" rx="9"/>
+          <rect x="266" y="300" width="38" height="38" rx="9"/>
+          <rect x="318" y="300" width="38" height="38" rx="9"/>
+          <rect x="422" y="300" width="38" height="38" rx="9"/>
+          <rect x="266" y="352" width="38" height="38" rx="9"/>
+          <rect x="318" y="352" width="38" height="38" rx="9"/>
+          <rect x="370" y="352" width="38" height="38" rx="9"/>
+          <rect x="422" y="352" width="38" height="38" rx="9"/>
+          <rect x="266" y="404" width="38" height="38" rx="9"/>
+          <rect x="318" y="404" width="38" height="38" rx="9"/>
+          <rect x="370" y="404" width="38" height="38" rx="9"/>
+        </g>
+        <!-- Today -->
+        <rect x="370" y="300" width="38" height="38" rx="9" fill="#FFFFFF" filter="url(#halo)"/>
+      </g>
+  
+      <!-- ===== Left half: back of an envelope ===== -->
+      <g clip-path="url(#leftSide)">
+        <rect x="0" y="0" width="512" height="512" fill="url(#left)"/>
+        <rect x="0" y="0" width="512" height="512" filter="url(#paper)"/>
+        <!-- Address lines -->
+        <g stroke-linecap="round">
+          <line x1="60" y1="300" x2="196" y2="300" stroke="#8F7E63" stroke-opacity="0.8" stroke-width="14"/>
+          <line x1="60" y1="338" x2="178" y2="338" stroke="#A8987D" stroke-opacity="0.7" stroke-width="12"/>
+          <line x1="60" y1="374" x2="150" y2="374" stroke="#A8987D" stroke-opacity="0.7" stroke-width="12"/>
+        </g>
+  
+        <!-- Stamp -->
+        <g filter="url(#stampShadow)">
+          <rect x="150" y="52" width="84" height="100" fill="#FFFDF8" mask="url(#perf)"/>
+        </g>
+        <rect x="160" y="62" width="64" height="80" rx="2" fill="url(#stampArt)"/>
+        <circle cx="208" cy="84" r="9" fill="#FFE066"/>
+        <path d="M160 142 L160 122 L180 102 L196 118 L206 110 L224 128 L224 142 Z" fill="#FFFDF8" fill-opacity="0.85"/>
+  
+        <!-- Postmark -->
+        <g fill="none" stroke="#6E5D45" stroke-opacity="0.45" stroke-width="3" stroke-linecap="round">
+          <circle cx="122" cy="104" r="30"/>
+          <path d="M56 92 q10 -8 20 0 t20 0 t20 0 t20 0 t20 0 t20 0 t20 0"/>
+          <path d="M56 106 q10 -8 20 0 t20 0 t20 0 t20 0 t20 0 t20 0 t20 0"/>
+          <path d="M56 120 q10 -8 20 0 t20 0 t20 0 t20 0 t20 0 t20 0 t20 0"/>
+        </g>
+      </g>
+  
+      <!-- ===== Bolt ===== -->
+      <polygon points="310,-20 380,-20 310,214 366,214 206,540 190,540 272,250 226,250"
+               fill="#000000" opacity="0.45" filter="url(#blur9)" transform="translate(8 12)"/>
+      <polygon points="310,-20 380,-20 310,214 366,214 206,540 190,540 272,250 226,250"
+               fill="url(#bolt)" stroke="#C86A00" stroke-opacity="0.55" stroke-width="2" stroke-linejoin="round" filter="url(#bevel)"/>
+  
+      <!-- Soft glass glow -->
+      <rect x="0" y="0" width="512" height="512" fill="url(#glow)"/>
+      <rect x="0" y="0" width="512" height="512" fill="url(#topEdge)"/>
+    </g>
+  
+    <!-- Binder rings (sit on top of the page) -->
+    <g filter="url(#soft)">
+      <rect x="398" y="104" width="22" height="70" rx="11" fill="#F4F1EC"/>
+      <rect x="448" y="104" width="22" height="70" rx="11" fill="#F4F1EC"/>
+    </g>
+    <g fill="#FFFFFF" opacity="0.9">
+      <rect x="402" y="110" width="6" height="40" rx="3"/>
+      <rect x="452" y="110" width="6" height="40" rx="3"/>
+    </g>
+  
+    <!-- Glass rim -->
+    <rect x="18" y="18" width="476" height="476" rx="106" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  </g>
+</svg>
