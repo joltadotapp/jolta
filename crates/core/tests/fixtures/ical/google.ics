@@ -1,0 +1,39 @@
+BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VEVENT
+DTSTART:20261105T090000Z
+DTEND:20261105T094500Z
+DTSTAMP:20261103T101112Z
+ORGANIZER;CN=Lotte Maes:mailto:lotte.maes@example.com
+UID:5f2k9q8v1n3m7c0b4x6z2a8d1e@google.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE
+ ;CN=Lotte Maes;X-NUM-GUESTS=0:mailto:lotte.maes@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE;CN=koen@example.org;X-NUM-GUESTS=0:mailto:koen@example.org
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=OPT-PARTICIPANT;PARTSTAT=TENTATIVE;RSVP=TRU
+ E;CN=Pieter Claes;X-NUM-GUESTS=0:mailto:pieter@example.org
+ATTENDEE;CUTYPE=RESOURCE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE;C
+ N=Gent-2-Belfort (6);X-NUM-GUESTS=0:mailto:c_1880a1b2c3d4e5f6@resource.exa
+ mple.com
+X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij
+X-MICROSOFT-CDO-OWNERAPPTID:-1234567890
+CREATED:20261103T101030Z
+DESCRIPTION:Design review voor de nieuwe inbox.\n\n-::~:~::~:~:~:~:~:~:~:~:
+ ~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-\nJoin 
+ with Google Meet: https://meet.google.com/abc-defg-hij\n\nJoin by phone\n(
+ BE) +32 2 123 45 67 PIN: 123456789#\n\nMore phone numbers: https://tel.mee
+ t/abc-defg-hij?pin=1234567890123\n\nLearn more about Meet at: https://supp
+ ort.google.com/a/users/answer/9282720\n\nPlease do not edit this section.\
+ n-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~
+ :~:~:~:~:~::~:~::-
+LAST-MODIFIED:20261103T101111Z
+LOCATION:Gent-2-Belfort (6)
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:Design review
+TRANSP:OPAQUE
+END:VEVENT
+END:VCALENDAR
