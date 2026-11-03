@@ -336,12 +336,12 @@ impl Pending {
             .or_else(|| claims["preferred_username"].as_str())
             .ok_or_else(|| Error::Auth("the provider did not say which address signed in".into()))?
             .to_string();
-        if let Some(address) = &self.address {
-            if !email.eq_ignore_ascii_case(address) {
-                return Err(Error::Auth(format!(
-                    "you signed in as {email}, but calendar was being turned on for {address}. Sign in as {address}."
-                )));
-            }
+        if let Some(address) = &self.address
+            && !email.eq_ignore_ascii_case(address)
+        {
+            return Err(Error::Auth(format!(
+                "you signed in as {email}, but calendar was being turned on for {address}. Sign in as {address}."
+            )));
         }
         Ok(SignedIn {
             name: claims["name"].as_str().unwrap_or_default().to_string(),

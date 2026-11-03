@@ -3,6 +3,7 @@
 
 pub mod caldav;
 pub mod dav;
+pub mod google;
 pub mod webcal;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,4 +88,15 @@ fn http_client(follow_redirects: bool) -> Result<reqwest::Client> {
 
 fn http_error(e: reqwest::Error) -> Error {
     Error::Other(format!("calendar request failed: {e}"))
+}
+
+/// Percent-encodes everything but unreserved characters, for an id in a
+/// path or a token in a query. Google calendar ids hold `#` and `@`.
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
