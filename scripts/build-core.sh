@@ -21,7 +21,7 @@ else
     CARGO_FLAGS=""
 fi
 
-export MACOSX_DEPLOYMENT_TARGET=27.0
+export MACOSX_DEPLOYMENT_TARGET=26.0
 
 LIBS=""
 for t in $TARGETS; do

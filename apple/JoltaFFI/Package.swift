@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "JoltaFFI",
-    platforms: [.macOS("27.0")],
+    platforms: [.macOS(.v26)],
     products: [
         .library(name: "JoltaFFI", targets: ["JoltaFFI"]),
     ],

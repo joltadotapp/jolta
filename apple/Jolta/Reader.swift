@@ -152,7 +152,9 @@ private struct Decider: WebPage.NavigationDeciding {
     let links: LinkActions
 
     func decidePolicy(for action: WebPage.NavigationAction, preferences: inout WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
-        preferences.securityRestrictionMode = .maximizeCompatibility
+        if #available(macOS 26.4, *) {
+            preferences.securityRestrictionMode = .maximizeCompatibility
+        }
         preferences.allowsContentJavaScript = false
         let url = action.request.url
         if action.navigationType == .other, url?.absoluteString == "about:blank" {

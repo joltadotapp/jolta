@@ -1,6 +1,6 @@
 # Jolta
 
-A native, keyboard-first, local-first email client, called Kite (its codename) until 2026-11-03. A Rust core holds all mail logic; a SwiftUI + AppKit app for macOS 27+ is the first UI.
+A native, keyboard-first, local-first email client, called Kite (its codename) until 2026-11-03. A Rust core holds all mail logic; a SwiftUI + AppKit app for macOS 26+ is the first UI.
 
 Read these before changing anything:
 
@@ -22,6 +22,7 @@ Read these before changing anything:
 
 - Day-to-day work runs on the Mac mini (macOS 27, Xcode 27.1, Rust 1.99.1). Build and run the app there.
 - The MacBook Pro runs macOS 27.2 and has Jolta installed from the update feed in `/Applications`. Reach it over SSH (`ssh macbook`) and launch the app with `open -g` so no window comes to the front while Koen works.
+- No machine runs macOS 26, the minimum target, any more. It gets checked in a macOS 26 VM at the end of the MVP.
 - Debug builds don't run Sparkle; release builds come only from `scripts/release.sh <version>`, one publish per version.
 - Agents may send test mail only to Koen's own addresses.
 
