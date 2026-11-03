@@ -11,6 +11,8 @@ enum PaletteMode: Equatable {
     /// A snippet to insert at the cursor of the message being written.
     case snippets
     case move
+    /// The theme for the Mac's dark or light appearance, previewed as the selection moves.
+    case themes
 }
 
 private struct PaletteItem: Identifiable {
@@ -19,11 +21,15 @@ private struct PaletteItem: Identifiable {
     var detail: String = ""
     let icon: String
     var keys: String?
+    /// A theme row shows the theme's colors and previews it while selected.
+    var theme: ThemePalette?
+    /// Runs with the palette left open, for items that switch it to another list.
+    var keepsOpen = false
     let run: () -> Void
 }
 
 /// ⌘K: every command, mailbox and section by name. The same panel picks a
-/// snooze time (H) and a destination folder (V, L).
+/// snooze time (H), a destination folder (V, L) and a theme.
 struct PaletteView: View {
     @Bindable var model: AppModel
     let mode: PaletteMode
@@ -39,6 +45,7 @@ struct PaletteView: View {
         case .remind: "Remind me if no reply… in 3 days, fri, next week"
         case .snippets: "Insert a snippet"
         case .move: "Move to folder"
+        case .themes: "Choose a theme"
         }
     }
 
@@ -48,6 +55,7 @@ struct PaletteView: View {
         case .sendLater: "paperplane"
         case .remind: "bell"
         case .snippets: "text.badge.plus"
+        case .themes: "paintpalette"
         case .commands, .move: "magnifyingglass"
         }
     }
@@ -59,6 +67,7 @@ struct PaletteView: View {
         case .snooze, .sendLater, .remind: return timeItems
         case .move: all = moveItems
         case .snippets: all = snippetItems
+        case .themes: all = themeItems
         }
         let needle = text.lowercased().trimmingCharacters(in: .whitespaces)
         guard !needle.isEmpty else { return all }
@@ -106,6 +115,33 @@ struct PaletteView: View {
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
             model.showsHelp = true
         })
+        out.append(PaletteItem(id: "themes", title: "Change Theme…", icon: "paintpalette", keepsOpen: true) { [model] in
+            model.palette = .themes
+        })
+        return out
+    }
+
+    /// Graphite, then Omarchy's themes by name. Choosing one makes it the
+    /// theme for its own mode, whichever mode the Mac is in.
+    private var themeItems: [PaletteItem] {
+        let store = ThemeStore.shared
+        var out: [PaletteItem] = []
+        if text.isEmpty {
+            out.append(PaletteItem(id: "back", title: "Back to Commands", icon: "chevron.left", keepsOpen: true) { [model] in
+                model.palette = .commands
+            })
+        }
+        for theme in ThemePalette.all {
+            out.append(PaletteItem(id: "theme-\(theme.id)", title: theme.name, detail: theme.mode == .dark ? "Dark" : "Light",
+                                   icon: "paintpalette", theme: theme) { [model] in
+                let system = store.systemMode
+                store.save(theme)
+                if theme.mode != system {
+                    let shown = system == .dark ? store.dark : store.light
+                    model.notify("\(theme.name) is your \(theme.mode.rawValue) theme. Your Mac is in \(system.rawValue) mode, so Jolta shows \(shown.name).")
+                }
+            })
+        }
         return out
     }
 
@@ -183,6 +219,7 @@ struct PaletteView: View {
 
     var body: some View {
         let list = items
+        let previewed = list.indices.contains(selected) ? list[selected].theme : nil
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: icon)
@@ -195,6 +232,11 @@ struct PaletteView: View {
                     .onSubmit { choose(list) }
                     .onKeyPress(.downArrow) { selected = min(selected + 1, max(list.count - 1, 0)); return .handled }
                     .onKeyPress(.upArrow) { selected = max(selected - 1, 0); return .handled }
+                    .onKeyPress(.delete) {
+                        guard mode == .themes, text.isEmpty else { return .ignored }
+                        model.palette = .commands
+                        return .handled
+                    }
                     .onChange(of: text) { selected = 0 }
                 if let row = model.cursorRow, mode == .snooze || mode == .move {
                     Text(row.subject).lineLimit(1).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
@@ -246,18 +288,39 @@ struct PaletteView: View {
         .onAppear {
             focused = true
             DispatchQueue.main.async { focused = true }
+            if mode == .themes, let i = list.firstIndex(where: { $0.theme == ThemeStore.shared.shown }) { selected = i }
         }
+        .onChange(of: previewed) { _, theme in
+            if let theme { ThemeStore.shared.startPreview(theme) } else { ThemeStore.shared.endPreview() }
+        }
+        // However the theme list goes away, a theme that wasn't chosen stops showing.
+        // Choosing one saves it first, which already ends the preview.
+        .onDisappear { if mode == .themes { ThemeStore.shared.endPreview() } }
         .onExitCommand { close() }
     }
 
     private func row(_ item: PaletteItem, on: Bool) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: item.icon).frame(width: 18).foregroundStyle(Color(Theme.text3))
+            if let theme = item.theme {
+                HStack(spacing: -3) {
+                    swatch(theme.tokens.bg)
+                    swatch(theme.tokens.text)
+                    swatch(theme.tokens.accent)
+                }
+                .frame(width: 18)
+            } else {
+                Image(systemName: item.icon).frame(width: 18).foregroundStyle(Color(Theme.text3))
+            }
             Text(item.title).foregroundStyle(Color(Theme.text)).lineLimit(1)
             if !item.detail.isEmpty {
                 Text(item.detail).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
             }
             Spacer()
+            if let theme = item.theme, ThemeStore.shared.isSaved(theme) {
+                HStack(spacing: 4) { Image(systemName: "checkmark"); Text("In use") }
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Color(Theme.text3))
+            }
             if let keys = item.keys {
                 HStack(spacing: 3) { ForEach(keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: $0.uppercased(), focused: on) } }
             }
@@ -273,10 +336,17 @@ struct PaletteView: View {
         .contentShape(Rectangle())
     }
 
+    private func swatch(_ color: UInt32) -> some View {
+        Circle()
+            .fill(Color(nsColor: NSColor(hex: color)))
+            .overlay(Circle().strokeBorder(Color(Theme.line), lineWidth: 1))
+            .frame(width: 8, height: 8)
+    }
+
     private func choose(_ list: [PaletteItem]) {
         guard list.indices.contains(selected) else { return }
         let item = list[selected]
-        close()
+        if !item.keepsOpen { close() }
         item.run()
     }
 

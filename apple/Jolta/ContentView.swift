@@ -54,7 +54,8 @@ struct ContentView: View {
         .ignoresSafeArea()
         .overlay {
             if model.palette != nil || model.showsHelp {
-                Color.black.opacity(0.35)
+                // Light while picking a theme, so the preview behind the palette shows.
+                Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
                     .ignoresSafeArea()
                     .onTapGesture { model.palette = nil; model.showsHelp = false }
             }

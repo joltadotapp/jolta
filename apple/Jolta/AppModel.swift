@@ -201,11 +201,12 @@ final class AppModel {
         }
         // `-JoltaSettings ai` opens the settings window on that page, for screenshots.
         if defaults.string(forKey: "JoltaSettings") == "ai" { settingsRequest = .ai }
-        // `-JoltaPalette commands|snooze|move` opens the palette, for screenshots.
+        // `-JoltaPalette commands|snooze|move|themes` opens the palette, for screenshots.
         switch defaults.string(forKey: "JoltaPalette") {
         case "commands": palette = .commands
         case "snooze": palette = .snooze
         case "move": palette = .move
+        case "themes": palette = .themes
         default: break
         }
         if defaults.bool(forKey: "JoltaOpenFirst"), let first = page(offset: 0, limit: 1).first {
@@ -692,6 +693,11 @@ final class AppModel {
                 show(Toast(text: "\(error)", undo: nil))
             }
         }
+    }
+
+    /// A message with nothing to undo.
+    func notify(_ text: String) {
+        show(Toast(text: text, undo: nil))
     }
 
     private func show(_ toast: Toast) {
