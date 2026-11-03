@@ -19,7 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-Third-party code keeps its own license: `vendor/llama-cpp-2` (MIT or
-Apache-2.0, see the license files there), and the Omarchy and Catppuccin theme
-colors in `apple/Jolta/OmarchyThemes.swift` and `scripts/themes/` (MIT).
