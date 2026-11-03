@@ -35,6 +35,11 @@ struct PaletteView: View {
     let mode: PaletteMode
     @State private var text = ""
     @State private var selected = 0
+    /// Where the pointer last selected a row, in screen coordinates. Rows that
+    /// scroll under a pointer that hasn't moved don't take the selection.
+    @State private var pointer: CGPoint?
+    /// The pointer chose the selection, so the list doesn't scroll to it.
+    @State private var pointerSelected = false
     @FocusState private var focused: Bool
 
     private var placeholder: String {
@@ -253,8 +258,16 @@ struct PaletteView: View {
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(Array(list.enumerated()), id: \.element.id) { i, item in
-                            row(item, on: i == selected).id(i)
-                                .onTapGesture { selected = i; choose(list) }
+                            Button { selected = i; choose(list) } label: { row(item, on: i == selected) }
+                                .buttonStyle(.plain)
+                                .id(i)
+                                .onContinuousHover { phase in
+                                    guard case .active = phase, NSEvent.mouseLocation != pointer else { return }
+                                    pointer = NSEvent.mouseLocation
+                                    guard selected != i else { return }
+                                    pointerSelected = true
+                                    selected = i
+                                }
                         }
                         if list.isEmpty {
                             Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”"
@@ -267,7 +280,9 @@ struct PaletteView: View {
                 }
                 .frame(maxHeight: 380)
                 .fixedSize(horizontal: false, vertical: true)
-                .onChange(of: selected) { _, i in proxy.scrollTo(i) }
+                .onChange(of: selected) { _, i in
+                    if pointerSelected { pointerSelected = false } else { proxy.scrollTo(i) }
+                }
             }
 
             HStack(spacing: 16) {
@@ -291,9 +306,12 @@ struct PaletteView: View {
         .onAppear {
             focused = true
             DispatchQueue.main.async { focused = true }
+            pointer = NSEvent.mouseLocation
             if mode == .themes, let i = list.firstIndex(where: { $0.theme == ThemeStore.shared.shown }) { selected = i }
         }
         .onChange(of: previewed) { _, theme in
+            // A click chooses and closes in one go; the selection it set arrives here after the save.
+            guard model.palette == .themes else { return }
             if let theme { ThemeStore.shared.startPreview(theme) } else { ThemeStore.shared.endPreview() }
         }
         // However the theme list goes away, a theme that wasn't chosen stops showing.
