@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// What an empty inbox looks like: a sky in the colours of the time of day,
-/// with the app icon's kite drifting on the wind. Drawn, not a photo, so it costs
-/// nothing to ship and fits every window size.
+/// with the app icon's lightning bolt floating above the words. Drawn, not a
+/// photo, so it costs nothing to ship and fits every window size.
 struct InboxZero: View {
     let compose: () -> Void
 
@@ -22,9 +22,11 @@ struct InboxZero: View {
                         }
                     }
                     drawHills(g, size: size, sky: sky)
-                    drawKite(g, size: size, t: t, sky: sky)
                 }
                 VStack(spacing: 10) {
+                    Canvas { g, size in drawBolt(g, size: size, t: t, sky: sky) }
+                        .frame(width: 150, height: 170)
+                        .padding(.bottom, 4)
                     Text("Inbox zero").font(.system(size: 26, weight: .semibold)).tracking(-0.4)
                     Text(sky.line).font(.system(size: 14)).opacity(0.8)
                     Button(action: compose) {
@@ -59,39 +61,48 @@ struct InboxZero: View {
         }
     }
 
-    /// The app icon's kite, swaying on a line from the near hill.
-    private func drawKite(_ g: GraphicsContext, size: CGSize, t: Double, sky: Sky) {
-        let anchor = CGPoint(x: size.width * 0.22, y: size.height * 0.88)
-        let center = CGPoint(x: size.width * 0.74 + 18 * sin(t * 0.35), y: size.height * 0.2 + 12 * sin(t * 0.53))
-        var line = Path()
-        line.move(to: anchor)
-        line.addQuadCurve(to: center, control: CGPoint(x: (anchor.x + center.x) / 2, y: max(anchor.y, center.y) - 30))
-        g.stroke(line, with: .color(sky.ink.opacity(0.35)), lineWidth: 1)
+    /// The app icon's bolt: amber, glossy, with a soft glow behind it,
+    /// bobbing slowly. Its outline is the icon's, closed to a point.
+    private func drawBolt(_ g: GraphicsContext, size: CGSize, t: Double, sky: Sky) {
+        let height = 128.0, width = height * 0.42
+        var b = g
+        b.translateBy(x: size.width / 2, y: size.height / 2 - 6 + 5 * sin(t * 0.9))
+        b.rotate(by: .radians(0.04 * sin(t * 0.6)))
 
-        var k = g
-        k.translateBy(x: center.x, y: center.y)
-        k.rotate(by: .radians(0.26 + 0.07 * sin(t * 0.7)))
-        let s = 0.17
-        let top = CGPoint(x: 0, y: -270 * s), left = CGPoint(x: -185 * s, y: -60 * s)
-        let right = CGPoint(x: 185 * s, y: -60 * s), bottom = CGPoint(x: 0, y: 250 * s)
-        var tail = Path()
-        tail.move(to: bottom)
-        tail.addCurve(to: CGPoint(x: (-60 + 40 * sin(t)) * s, y: 470 * s),
-                      control1: CGPoint(x: 60 * s, y: 330 * s), control2: CGPoint(x: (-150 + 30 * sin(t * 1.3)) * s, y: 380 * s))
-        k.stroke(tail, with: .color(sky.kite), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-        var body = Path()
-        body.move(to: top); body.addLine(to: right); body.addLine(to: bottom); body.addLine(to: left); body.closeSubpath()
-        k.fill(body, with: .color(sky.kite))
-        var flap = Path()
-        flap.move(to: left); flap.addLine(to: CGPoint(x: 0, y: 40 * s)); flap.addLine(to: right)
-        k.stroke(flap, with: .color(sky.flap), style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+        let glow = sky.glow * (0.85 + 0.15 * sin(t * 1.1))
+        b.fill(Path(ellipseIn: CGRect(x: -74, y: -74, width: 148, height: 148)),
+               with: .radialGradient(Gradient(stops: [0, 0.3, 0.6, 1].enumerated().map { i, at in
+                   .init(color: Color(red: 1, green: 0.86, blue: 0.45).opacity(glow * [1, 0.55, 0.18, 0][i]), location: at)
+               }),
+                                     center: .zero, startRadius: 0, endRadius: 74))
+
+        let points: [(Double, Double)] = [(310, -20), (380, -20), (310, 214), (366, 214), (198, 560), (272, 250), (226, 250)]
+        var bolt = Path()
+        bolt.addLines(points.map { CGPoint(x: ($0.0 - 198) / 182 * width - width / 2, y: ($0.1 + 20) / 580 * height - height / 2) })
+        bolt.closeSubpath()
+        let box = bolt.boundingRect
+
+        var shadowed = b
+        shadowed.addFilter(.shadow(color: .black.opacity(sky.stars ? 0.5 : 0.3), radius: 8, x: 5, y: 9))
+        shadowed.fill(bolt, with: .linearGradient(
+            Gradient(stops: [.init(color: Color(red: 1, green: 0.878, blue: 0.4), location: 0),
+                             .init(color: Color(red: 1, green: 0.753, blue: 0.125), location: 0.45),
+                             .init(color: Color(red: 1, green: 0.541, blue: 0), location: 1)]),
+            startPoint: CGPoint(x: box.minX, y: box.minY), endPoint: CGPoint(x: box.maxX * 0.6, y: box.maxY)))
+        b.fill(bolt, with: .linearGradient(Gradient(colors: [.white.opacity(0.55), .white.opacity(0)]),
+                                           startPoint: CGPoint(x: box.minX, y: box.minY),
+                                           endPoint: CGPoint(x: box.midX, y: box.minY + box.height * 0.45)))
+        b.stroke(bolt, with: .color(Color(red: 0.784, green: 0.416, blue: 0).opacity(0.55)),
+                 style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
     }
 }
 
 /// Sky colours for the hour: dawn, day, dusk, night.
 private struct Sky {
     let top: Color, bottom: Color, far: Color, near: Color
-    let kite: Color, flap: Color, ink: Color
+    let ink: Color
+    /// How strongly the bolt glows: more against a dark sky.
+    let glow: Double
     let stars: Bool
     let line: String
 
@@ -102,16 +113,16 @@ private struct Sky {
         switch hour {
         case 5..<9:
             return Sky(top: c(0x5B6EA8), bottom: c(0xF2B48A), far: c(0x6E6A8E), near: c(0x48466A),
-                       kite: c(0xFF8A4C), flap: c(0xFFFFFF), ink: .white, stars: false, line: "Nothing waiting. A quiet start to the day.")
+                       ink: .white, glow: 0.4, stars: false, line: "Nothing waiting. A quiet start to the day.")
         case 9..<17:
             return Sky(top: c(0x5FA8E8), bottom: c(0xCFE8F7), far: c(0x8DBF8A), near: c(0x5F9A63),
-                       kite: c(0xE5521A), flap: c(0xFFFFFF), ink: c(0x17304A), stars: false, line: "Nothing waiting. Go do something else.")
+                       ink: c(0x17304A), glow: 0.18, stars: false, line: "Nothing waiting. Go do something else.")
         case 17..<21:
             return Sky(top: c(0x2E3A78), bottom: c(0xF08A5D), far: c(0x6B4F7A), near: c(0x3B2E52),
-                       kite: c(0xFF8A4C), flap: c(0xFFFFFF), ink: .white, stars: false, line: "Nothing waiting. Enjoy your evening.")
+                       ink: .white, glow: 0.45, stars: false, line: "Nothing waiting. Enjoy your evening.")
         default:
             return Sky(top: c(0x0B1026), bottom: c(0x26305A), far: c(0x1C2244), near: c(0x121630),
-                       kite: c(0xFF6B2C), flap: c(0x121214), ink: .white, stars: true, line: "Nothing waiting. Time to rest.")
+                       ink: .white, glow: 0.55, stars: true, line: "Nothing waiting. Time to rest.")
         }
     }
 }
