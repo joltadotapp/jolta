@@ -17,7 +17,15 @@ KEYS = {
     "selection": "selection",
     "accent": "accent",
     "yellow": "yellow",
+    "blue": "blue",
+    "cyan": "cyan",
+    "green": "green",
+    "magenta": "magenta",
+    "orange": "orange",
 }
+
+# Omarchy's own fallbacks (bin/omarchy-theme-color) for keys a theme may leave out.
+FALLBACKS = {"orange": "yellow"}
 
 
 def fail(message):
@@ -55,7 +63,9 @@ def read_theme(folder):
     path = folder / "colors.toml"
     with path.open("rb") as f:
         colors = tomllib.load(f)
-    missing = [k for k in ["mode", *KEYS] if k not in colors]
+    for key, fallback in FALLBACKS.items():
+        colors.setdefault(key, colors.get(fallback))
+    missing = [k for k in ["mode", *KEYS] if colors.get(k) is None]
     if missing:
         fail(f"{path} has no {', '.join(missing)}")
     if colors["mode"] not in ("dark", "light"):

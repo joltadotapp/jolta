@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// What an empty inbox looks like: a sky in the colours of the time of day,
-/// with the app icon's lightning bolt floating above the words. Drawn, not a
-/// photo, so it costs nothing to ship and fits every window size.
+/// What an empty inbox looks like: a sky in the colours of the theme and the
+/// time of day, with the app icon's lightning bolt floating above the words.
+/// Drawn, not a photo, so it costs nothing to ship and fits every window size.
+/// The theme's `Scenery` holds the colours; a dark theme's sky stays dark.
 ///
 /// Core Animation layers draw the sky, the hills and the bolt, in the window
 /// server. When SwiftUI itself draws window-sized shapes or a Canvas, Jolta
@@ -12,11 +13,13 @@ import SwiftUI
 /// 190 MB for as long as a 30 fps animation ran (measured 2026-11-03).
 struct InboxZero: View {
     let compose: () -> Void
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        // The sky changes on the hour at most.
+        let scenery = ThemeStore.shared.active[scheme == .dark ? .dark : .light].scenery
+        // The sky changes on the hour at most, and when the theme does.
         TimelineView(.periodic(from: Calendar.current.dateInterval(of: .hour, for: .now)?.start ?? .now, by: 3600)) { context in
-            let sky = Sky.now(context.date)
+            let sky = Sky.now(context.date, scenery)
             ZStack {
                 SkyBackground(sky: sky)
                 VStack(spacing: 10) {
@@ -32,10 +35,10 @@ struct InboxZero: View {
                     .font(.system(size: 12.5))
                     .padding(.horizontal, 12)
                     .frame(height: 28)
-                    .background(Capsule().fill(.white.opacity(0.16)))
+                    .background(Capsule().fill(Color(NSColor(hex: sky.ink)).opacity(0.14)))
                     .padding(.top, 8)
                 }
-                .foregroundStyle(sky.ink)
+                .foregroundStyle(Color(NSColor(hex: sky.ink)))
                 .padding(.bottom, 120)
             }
         }
@@ -57,11 +60,8 @@ private struct SkyBackground: NSViewRepresentable {
 
 private final class SkyLayers: NSView {
     private let gradient = CAGradientLayer()
-    private let stars = [0.3, 0.55, 0.8].map { brightness in
-        let layer = CAShapeLayer()
-        layer.fillColor = NSColor.white.withAlphaComponent(brightness).cgColor
-        return layer
-    }
+    private static let starBrightness = [0.3, 0.55, 0.8]
+    private let stars = starBrightness.map { _ in CAShapeLayer() }
     private let far = CAShapeLayer()
     private let near = CAShapeLayer()
 
@@ -98,10 +98,13 @@ private final class SkyLayers: NSView {
     func show(_ sky: Sky) {
         CATransaction.begin()
         CATransaction.setAnimationDuration(1)
-        gradient.colors = [NSColor(sky.top).cgColor, NSColor(sky.bottom).cgColor]
-        far.fillColor = NSColor(sky.far).cgColor
-        near.fillColor = NSColor(sky.near).cgColor
-        for layer in stars { layer.isHidden = !sky.stars }
+        gradient.colors = [NSColor(hex: sky.top).cgColor, NSColor(hex: sky.bottom).cgColor]
+        far.fillColor = NSColor(hex: sky.far).cgColor
+        near.fillColor = NSColor(hex: sky.near).cgColor
+        for (layer, brightness) in zip(stars, Self.starBrightness) {
+            layer.fillColor = NSColor(hex: sky.starColor, alpha: brightness).cgColor
+            layer.isHidden = !sky.stars
+        }
         CATransaction.commit()
     }
 }
@@ -173,7 +176,7 @@ private struct FloatingBolt: NSViewRepresentable {
     /// The glow, 148 points across.
     static func glow(_ sky: Sky, scale: CGFloat) -> CGImage? {
         image(scale: scale) { ctx in
-            let colors = [1, 0.55, 0.18, 0].map { CGColor(srgbRed: 1, green: 0.86, blue: 0.45, alpha: sky.glow * $0) }
+            let colors = [1, 0.55, 0.18, 0].map { NSColor(hex: sky.glowColor, alpha: sky.glow * $0).cgColor }
             guard let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors as CFArray,
                                             locations: [0, 0.3, 0.6, 1]) else { return }
             ctx.drawRadialGradient(gradient, startCenter: centre, startRadius: 0, endCenter: centre, endRadius: 74, options: [])
@@ -200,8 +203,8 @@ private struct FloatingBolt: NSViewRepresentable {
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             ctx.addPath(bolt)
             ctx.clip()
-            let amber = [(0.878, 0.4), (0.753, 0.125), (0.541, 0.0)].map { CGColor(srgbRed: 1, green: $0.0, blue: $0.1, alpha: 1) }
-            if let fill = CGGradient(colorsSpace: srgb, colors: amber as CFArray, locations: [0, 0.45, 1]) {
+            let fillColors = [sky.boltTop, sky.boltMiddle, sky.boltTip].map { NSColor(hex: $0).cgColor }
+            if let fill = CGGradient(colorsSpace: srgb, colors: fillColors as CFArray, locations: [0, 0.45, 1]) {
                 ctx.drawLinearGradient(fill, start: CGPoint(x: box.minX, y: box.minY), end: CGPoint(x: box.maxX * 0.6 + centre.x * 0.4, y: box.maxY), options: [])
             }
             ctx.endTransparencyLayer()
@@ -218,7 +221,7 @@ private struct FloatingBolt: NSViewRepresentable {
             ctx.restoreGState()
 
             ctx.addPath(bolt)
-            ctx.setStrokeColor(CGColor(srgbRed: 0.784, green: 0.416, blue: 0, alpha: 0.55))
+            ctx.setStrokeColor(NSColor(hex: sky.boltEdge, alpha: 0.55).cgColor)
             ctx.setLineWidth(1.2)
             ctx.setLineJoin(.round)
             ctx.strokePath()
@@ -233,7 +236,7 @@ private final class BoltLayers: NSView {
     private let glow = CALayer()
     private let bolt = CALayer()
     private var sky: Sky?
-    private var shown: String?
+    private var shown: (sky: Sky, scale: CGFloat)?
 
     init() {
         super.init(frame: CGRect(origin: .zero, size: FloatingBolt.size))
@@ -266,9 +269,9 @@ private final class BoltLayers: NSView {
     func show(_ sky: Sky) {
         self.sky = sky
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let key = "\(sky.line) \(scale)"
-        guard shown != key else { return }
-        shown = key
+        // Two small images, drawn again only when the sky or the screen's scale changes.
+        if let shown, shown.sky == sky, shown.scale == scale { return }
+        shown = (sky, scale)
         for (layer, image) in [(glow, FloatingBolt.glow(sky, scale: scale)), (bolt, FloatingBolt.bolt(sky, scale: scale))] {
             layer.contents = image
             layer.contentsScale = scale
@@ -311,32 +314,27 @@ private final class BoltLayers: NSView {
     }
 }
 
-/// Sky colours for the hour: dawn, day, dusk, night.
-private struct Sky {
-    let top: Color, bottom: Color, far: Color, near: Color
-    let ink: Color
+/// The theme's sky for the hour: dawn, day, dusk or night.
+private struct Sky: Equatable {
+    let top, bottom, far, near, ink: UInt32
+    let boltTop, boltMiddle, boltTip, boltEdge, glowColor, starColor: UInt32
     /// How strongly the bolt glows: more against a dark sky.
     let glow: Double
     let stars: Bool
     let line: String
 
-    static func now(_ date: Date) -> Sky {
-        let c = { (hex: UInt32) in Color(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255) }
+    static func now(_ date: Date, _ scenery: Scenery) -> Sky {
         // `-JoltaSkyHour 14` previews another time of day.
         let hour = UserDefaults.standard.string(forKey: "JoltaSkyHour").flatMap { Int($0) } ?? Calendar.current.component(.hour, from: date)
-        switch hour {
-        case 5..<9:
-            return Sky(top: c(0x5B6EA8), bottom: c(0xF2B48A), far: c(0x6E6A8E), near: c(0x48466A),
-                       ink: .white, glow: 0.4, stars: false, line: "Nothing waiting. A quiet start to the day.")
-        case 9..<17:
-            return Sky(top: c(0x5FA8E8), bottom: c(0xCFE8F7), far: c(0x8DBF8A), near: c(0x5F9A63),
-                       ink: c(0x17304A), glow: 0.18, stars: false, line: "Nothing waiting. Go do something else.")
-        case 17..<21:
-            return Sky(top: c(0x2E3A78), bottom: c(0xF08A5D), far: c(0x6B4F7A), near: c(0x3B2E52),
-                       ink: .white, glow: 0.45, stars: false, line: "Nothing waiting. Enjoy your evening.")
-        default:
-            return Sky(top: c(0x0B1026), bottom: c(0x26305A), far: c(0x1C2244), near: c(0x121630),
-                       ink: .white, glow: 0.55, stars: true, line: "Nothing waiting. Time to rest.")
+        let (colors, glow, stars, line) = switch hour {
+        case 5..<9: (scenery.dawn, 0.4, false, "Nothing waiting. A quiet start to the day.")
+        case 9..<17: (scenery.day, 0.18, false, "Nothing waiting. Go do something else.")
+        case 17..<21: (scenery.dusk, 0.45, false, "Nothing waiting. Enjoy your evening.")
+        default: (scenery.night, 0.55, true, "Nothing waiting. Time to rest.")
         }
+        return Sky(top: colors.top, bottom: colors.bottom, far: colors.far, near: colors.near, ink: colors.ink,
+                   boltTop: scenery.boltTop, boltMiddle: scenery.boltMiddle, boltTip: scenery.boltTip,
+                   boltEdge: scenery.boltEdge, glowColor: scenery.glow, starColor: scenery.stars,
+                   glow: glow, stars: stars, line: line)
     }
 }
