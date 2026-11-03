@@ -51,7 +51,12 @@ final class ReaderPage {
     }
 
     func show(html: String) {
-        let html = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"jolta-images\">") : html
+        var html = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"jolta-images\">") : html
+        // Here rather than in the core's `appCss`: a page loads again, with
+        // images, from HTML rendered before the theme last changed.
+        if let head = html.range(of: "</head>") {
+            html.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>", at: head.lowerBound)
+        }
         let events = page.load(html: html, baseURL: URL(string: "about:blank")!)
         guard UserDefaults.standard.bool(forKey: "JoltaReaderDebug") else { return }
         Task {
@@ -66,6 +71,18 @@ final class ReaderPage {
             try? log.write(toFile: AppModel.dataDirectory + "/readerdebug.txt", atomically: true, encoding: .utf8)
             try? html.write(toFile: AppModel.dataDirectory + "/readerdebug.html", atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Swaps the theme's colors into the page on screen. The app's own
+    /// scripts run even with the page's JavaScript off.
+    func applyTheme() {
+        let script = """
+        const style = document.getElementById("jolta-theme") ?? document.createElement("style");
+        style.id = "jolta-theme";
+        style.textContent = css;
+        document.head.appendChild(style);
+        """
+        Task { _ = try? await page.callJavaScript(script, arguments: ["css": ReaderStyle.themeCSS]) }
     }
 }
 
@@ -309,15 +326,27 @@ struct ReaderView: View {
             if UserDefaults.standard.bool(forKey: "JoltaLoadImages"), imagesBlocked { loadImages() }
         }
         .onChange(of: thread.html) { render() }
+        .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }
     }
 }
 
 enum ReaderStyle {
-    /// Graphite styles for the page around each message. Message HTML keeps
-    /// its own look inside `.jolta-body`.
+    /// The variables `css` uses, from the light and the dark theme on screen.
+    static var themeCSS: String {
+        let pair = ThemeStore.shared.active
+        return ":root { \(variables(pair.light)) } @media (prefers-color-scheme: dark) { :root { \(variables(pair.dark)) } }"
+    }
+
+    private static func variables(_ t: ThemeTokens) -> String {
+        [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("acc", t.accent)]
+            .map { "--\($0.0):#\(String(format: "%06x", $0.1));" }
+            .joined(separator: " ")
+    }
+
+    /// Styles for the page around each message. Message HTML keeps its own
+    /// look inside `.jolta-body`.
     static let css = """
-    :root { color-scheme: light dark; --bg:#ffffff; --tx:#17171a; --tx2:#55555d; --tx3:#66666e; --line2:#efefec; --acc:#e5521a; }
-    @media (prefers-color-scheme: dark) { :root { --bg:#161619; --tx:#ececee; --tx2:#a6a6ae; --tx3:#8d8d97; --line2:#1c1c20; --acc:#ff6b2c; } }
+    :root { color-scheme: light dark; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx);
       font: 14px/22px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
     body { padding: 0 clamp(16px, 5vw, 56px) 40px; }
