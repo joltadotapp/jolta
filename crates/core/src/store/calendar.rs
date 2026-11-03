@@ -196,7 +196,6 @@ fn moment_text(m: &Moment) -> String {
 /// Replaces the events of one remote object and rebuilds the occurrences of
 /// every series it touched. An unchanged ETag skips the work, so applying the
 /// same batch twice is harmless. False when nothing changed.
-#[allow(clippy::too_many_arguments)]
 pub fn apply_item(
     conn: &Connection,
     calendar: CalendarId,

@@ -2,6 +2,8 @@
 //! Sources deliver them as separate objects, so the occurrences of a series
 //! are always worked out from all of its events together.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 
@@ -36,10 +38,14 @@ impl Horizon {
 /// The events of one object or feed grouped by UID, in first-seen order.
 pub fn group(events: Vec<EventData>) -> Vec<(String, Vec<EventData>)> {
     let mut out: Vec<(String, Vec<EventData>)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
     for e in events {
-        match out.iter_mut().find(|(uid, _)| *uid == e.uid) {
-            Some((_, list)) => list.push(e),
-            None => out.push((e.uid.clone(), vec![e])),
+        match index.get(&e.uid) {
+            Some(&i) => out[i].1.push(e),
+            None => {
+                index.insert(e.uid.clone(), out.len());
+                out.push((e.uid.clone(), vec![e]));
+            }
         }
     }
     out

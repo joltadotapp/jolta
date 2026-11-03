@@ -75,6 +75,8 @@ One model covers Gmail labels, IMAP folders and Graph folders. A message belongs
 | `agent`, `agent_grant`, `audit` | MCP clients, their permissions, and every action they took | |
 | `message_fts` | FTS5, contentless: subject, from, to, body text | Rowid is `message.id`. |
 
+Calendars have their own tables (`calendar`, `event`, `occurrence`), described in `calendar-plan.md` and written by `store/calendar.rs`. The views read only `occurrence`.
+
 Raw RFC 822 messages are stored as files in the data folder (`~/Library/Application Support/Jolta/blobs`), named by SHA-256. The SQLite file sits next to them; see `decisions.md` for why the folder is not the app group container. Headers and snippets go to SQLite on first sync; bodies download on demand and in the background for recent mail.
 
 ## Sync

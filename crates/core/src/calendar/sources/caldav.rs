@@ -35,6 +35,8 @@ pub struct CalDav {
     /// The user's own addresses, to find their answer on invitations.
     me: Vec<String>,
     fastmail: bool,
+    /// The start is a guess from the address's domain, not a known server.
+    guessed: bool,
 }
 
 /// Where the next sync starts: the sync token, or the collection's ctag on
@@ -93,6 +95,7 @@ impl CalDav {
         let host = account.imap_host.to_ascii_lowercase();
         let domain = account.address.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()).unwrap_or_default();
         let fastmail = host.ends_with("fastmail.com");
+        let guessed = override_url.is_none() && !host.ends_with("mail.me.com") && !fastmail;
         let starts = match override_url {
             Some(url) => vec![url.to_string()],
             None if host.ends_with("mail.me.com") => vec!["https://caldav.icloud.com/".into()],
@@ -111,6 +114,7 @@ impl CalDav {
             starts,
             me: vec![account.address.clone()],
             fastmail,
+            guessed,
         })
     }
 
@@ -200,8 +204,8 @@ impl CalDav {
                 }
             }
         }
-        Err(match (self.starts.len(), last) {
-            (1, Some(e)) if self.starts[0].path() != "/" => e,
+        Err(match last {
+            Some(e) if !self.guessed => e,
             _ => no_server(&self.me[0]),
         })
     }
