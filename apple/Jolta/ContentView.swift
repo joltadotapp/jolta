@@ -141,6 +141,8 @@ struct Sidebar: View {
                     NavRow(icon: "tray", title: "Inbox", count: model.unreadCount("in:inbox"),
                            selected: model.source == .unifiedInbox) { model.source = .unifiedInbox }
                         .contextMenu { ListActions(model: model, list: .unifiedInbox) }
+                    NavRow(icon: "star", title: "Starred", count: 0,
+                           selected: model.source == .starred) { model.source = .starred }
                     if !model.roles.isEmpty {
                         GroupLabel("Mailboxes")
                         ForEach(model.roles, id: \.self) { role in
@@ -656,13 +658,14 @@ struct ActionButton: View {
     let title: String
     let key: String
     var showsTitle = true
+    var iconTint: Color?
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                Image(systemName: icon).font(.system(size: 12.5))
+                Image(systemName: icon).font(.system(size: 12.5)).foregroundStyle(iconTint ?? Color(Theme.text2))
                 if showsTitle { Text(title) }
                 Text(key)
                     .font(.system(size: 10.5, weight: .medium))
@@ -693,7 +696,9 @@ struct ReaderColumn: View {
             ActionButton(icon: "archivebox", title: "Archive", key: "E", showsTitle: titles) { model.act(.archive, label: "Archived") }
             ActionButton(icon: "trash", title: "Trash", key: "#", showsTitle: titles) { model.act(.trash, label: "Moved to Trash") }
             ActionButton(icon: "envelope.badge", title: "Unread", key: "U", showsTitle: titles) { model.act(.markUnread, label: "Marked unread") }
-            ActionButton(icon: "star", title: "Star", key: "S", showsTitle: titles) { model.act(.flag, label: "Starred") }
+            let starred = model.cursorRow?.flagged == true
+            ActionButton(icon: starred ? "star.fill" : "star", title: starred ? "Unstar" : "Star", key: "S", showsTitle: titles,
+                         iconTint: starred ? Color(Theme.star) : nil) { model.run(.star) }
             if !model.isMultiSelection {
                 Rectangle().fill(Color(Theme.line)).frame(width: 1, height: 16).padding(.horizontal, 2)
                 ActionButton(icon: "arrowshape.turn.up.left", title: "Reply", key: "R", showsTitle: replyTitles) { model.reply(.reply) }

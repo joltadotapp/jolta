@@ -511,17 +511,22 @@ impl Engine {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let due = self.jolta.store.read_async(move |c| store::due_snoozes(c, account, now)).await?;
         for (id, thread) in due {
-            let subject = self
+            let subject: Option<String> = self
                 .jolta
                 .store
                 .write_async(move |tx| {
-                    actions::wake(tx, id, thread)?;
-                    Ok(tx
-                        .query_row("SELECT subject FROM message WHERE thread_id = ?1 ORDER BY id DESC LIMIT 1", [thread], |r| r.get(0))
-                        .unwrap_or_default())
+                    if actions::wake(tx, id, thread)?.is_none() {
+                        return Ok(None);
+                    }
+                    Ok(Some(
+                        tx.query_row("SELECT subject FROM message WHERE thread_id = ?1 ORDER BY id DESC LIMIT 1", [thread], |r| r.get(0))
+                            .unwrap_or_default(),
+                    ))
                 })
                 .await?;
-            (self.sink)(Event::Woke { account, thread, subject });
+            if let Some(subject) = subject {
+                (self.sink)(Event::Woke { account, thread, subject });
+            }
             (self.sink)(Event::ListsChanged);
         }
         Ok(())

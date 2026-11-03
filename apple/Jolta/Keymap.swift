@@ -8,7 +8,7 @@ enum Command: String, CaseIterable, Identifiable {
     case archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
     case toggleVIP, unsubscribe, summarize, nextSection, help
-    case goInbox, goSnoozed, goSent, goDrafts, goArchive
+    case goInbox, goStarred, goSnoozed, goSent, goDrafts, goArchive
 
     var id: String { rawValue }
 
@@ -37,6 +37,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .nextSection: "⇥"
         case .help: "?"
         case .goInbox: "g i"
+        case .goStarred: "g s"
         case .goSnoozed: "g h"
         case .goSent: "g t"
         case .goDrafts: "g d"
@@ -68,6 +69,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .nextSection: "Next inbox section"
         case .help: "Keyboard shortcuts"
         case .goInbox: "Go to Inbox"
+        case .goStarred: "Go to Starred"
         case .goSnoozed: "Go to Snoozed"
         case .goSent: "Go to Sent"
         case .goDrafts: "Go to Drafts"
@@ -99,6 +101,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .nextSection: "rectangle.split.3x1"
         case .help: "keyboard"
         case .goInbox: "tray"
+        case .goStarred: "star"
         case .goSnoozed: "clock"
         case .goSent: "paperplane"
         case .goDrafts: "pencil"
@@ -145,6 +148,7 @@ extension AppModel {
         case .summarize: if searchFocused { searchWithAI() } else { summarizeOpenThread() }
         case .help: showsHelp.toggle()
         case .goInbox: source = .unifiedInbox
+        case .goStarred: source = .starred
         case .goSnoozed: source = .role("snoozed")
         case .goSent: source = .role("sent")
         case .goDrafts: source = .role("drafts")

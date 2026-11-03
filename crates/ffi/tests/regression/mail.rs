@@ -101,3 +101,34 @@ fn snooze_and_wake() {
     assert_eq!(app.subjects("in:inbox"), ["Later"]);
     assert!(app.core.snoozed().unwrap().is_empty());
 }
+
+/// A snoozed thread trashed from Snoozed leaves "Next to wake" and stays in
+/// the Trash at its time; undoing the trash brings the snooze back.
+#[test]
+fn trashing_a_snoozed_thread_cancels_its_wake_up() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let message = app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Later", "Remind me."));
+    let thread = app.thread_of(message);
+    app.core.perform(ThreadAction::Snooze { until: now() + 60 }, vec![thread.0], ListContext::Inbox).unwrap();
+    let snoozed = || ListContext::Role { role: "snoozed".into() };
+
+    let tokens = app.core.perform(ThreadAction::Trash, vec![thread.0], snoozed()).unwrap();
+    assert!(app.core.snoozed().unwrap().is_empty(), "Next to wake drops it");
+    app.core.undo(tokens).unwrap();
+    assert_eq!(app.core.snoozed().unwrap().len(), 1, "undoing the trash brings it back");
+
+    app.core.perform(ThreadAction::Trash, vec![thread.0], snoozed()).unwrap();
+    let due = app.jolta.store.read(|c| jolta_core::store::due_snoozes(c, me.id, now() + 120)).unwrap();
+    let woke = app
+        .jolta
+        .store
+        .write(|tx| Ok(due.iter().map(|(snooze, thread)| jolta_core::actions::wake(tx, *snooze, *thread)).collect::<Result<Vec<_>, _>>()?))
+        .unwrap();
+    assert_eq!(woke.len(), 1);
+    assert!(woke[0].is_none(), "nothing wakes");
+    assert!(app.subjects("in:inbox").is_empty());
+    assert_eq!(app.subjects("in:trash"), ["Later"]);
+    let due = app.jolta.store.read(|c| jolta_core::store::due_snoozes(c, me.id, now() + 120)).unwrap();
+    assert!(due.is_empty(), "the retired snooze is not due again");
+}

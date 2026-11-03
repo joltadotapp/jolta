@@ -126,6 +126,8 @@ struct MessageList: NSViewRepresentable {
                 table.selectRowIndexes(kept, byExtendingSelection: false)
             }
             if resorted || previous != count, let first = kept.first { table.scrollRowToVisible(first) }
+            // The same row can come back changed, say starred, without a selection change.
+            if table.selectedRow >= 0, let r = row(at: table.selectedRow), r != model.cursorRow { model.cursorRow = r }
         }
 
         func row(at index: Int) -> ThreadRow? {
@@ -375,8 +377,10 @@ final class ThreadCell: NSTableCellView {
     private static let vipMark = mark("checkmark.seal.fill", label: "VIP")
     /// In front of the subject when AI sorting says the conversation waits for a reply.
     private static let replyMark = mark("arrowshape.turn.up.left.fill", label: "Needs your reply")
+    /// In front of the subject of a starred conversation.
+    private static let starMark = mark("star.fill", label: "Starred", tint: Theme.star)
 
-    private static func mark(_ symbolName: String, label: String) -> NSTextAttachment {
+    private static func mark(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSTextAttachment {
         let mark = NSTextAttachment()
         let config = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
         guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: label)?
@@ -384,7 +388,7 @@ final class ThreadCell: NSTableCellView {
         // Tinted as it draws, so cut-outs stay cut out and the colour follows the appearance.
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
-            Theme.text2.set()
+            tint.set()
             rect.fill(using: .sourceAtop)
             return true
         }
@@ -413,6 +417,10 @@ final class ThreadCell: NSTableCellView {
         }
         sender.attributedStringValue = name
         let line = NSMutableAttributedString()
+        if r.flagged {
+            line.append(NSAttributedString(attachment: Self.starMark))
+            line.append(NSAttributedString(string: " "))
+        }
         if r.needsReply {
             line.append(NSAttributedString(attachment: Self.replyMark))
             line.append(NSAttributedString(string: " "))

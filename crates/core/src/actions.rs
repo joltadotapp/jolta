@@ -207,16 +207,21 @@ pub fn empty(conn: &Connection, mailbox: MailboxId) -> Result<(AccountId, OpId)>
     Ok((account, store::insert_op(conn, account, &kind, &changed)?))
 }
 
-/// Wakes a snoozed thread: back to the inbox, unread.
-pub fn wake(conn: &Connection, snooze: i64, thread: ThreadId) -> Result<Vec<(AccountId, OpId)>> {
+/// Wakes a snoozed thread: back to the inbox, unread. A thread that has
+/// left Snoozed since, say to the Trash, stays where it is and gets `None`.
+pub fn wake(conn: &Connection, snooze: i64, thread: ThreadId) -> Result<Option<Vec<(AccountId, OpId)>>> {
+    let holds = store::snooze_holds(conn, snooze)?;
     store::snooze_woken(conn, snooze)?;
+    if !holds {
+        return Ok(None);
+    }
     let mut ops = Vec::new();
     let account = thread_account(conn, thread)?;
     if let Some(inbox) = role_mailbox(conn, account, MailboxRole::Inbox)? {
         ops.extend(perform(conn, thread, Action::MoveTo(inbox), Context::Role(MailboxRole::Snoozed))?);
     }
     ops.extend(perform(conn, thread, Action::MarkUnread, Context::Inbox)?);
-    Ok(ops)
+    Ok(Some(ops))
 }
 
 /// Reverts an op the server refused for good.

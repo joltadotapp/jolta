@@ -17,6 +17,8 @@ enum Theme {
     static let fill = dynamic(dark: 0x202025, light: 0xEEEEEB)
     static let hover = dynamic(dark: 0x18181C, light: 0xF5F5F3)
     static let accent = dynamic(dark: 0xFF6B2C, light: 0xE5521A)
+    /// A starred conversation's star: the app icon's amber, not a second accent.
+    static let star = dynamic(dark: 0xFFC233, light: 0xD99A00)
     static let accentText = dynamic(dark: 0xFF8A55, light: 0xB23A0A)
     static let kbd = dynamic(dark: 0x2A2A30, light: 0xECECEA)
     static let kbdText = dynamic(dark: 0xB4B4BC, light: 0x4A4A52)

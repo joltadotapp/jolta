@@ -10,10 +10,13 @@ enum ListSource: Hashable {
     case role(String)
     case mailbox(id: Int64, name: String)
     case allMail
+    /// Starred (flagged) conversations from every folder except Trash and Spam.
+    case starred
 
     var query: String {
         switch self {
         case .unifiedInbox: "in:inbox"
+        case .starred: "is:starred -in:trash -in:spam"
         case .role(let role): "in:\(role)"
         case .mailbox(let id, _): "mailbox:\(id)"
         case .allMail: ""
@@ -23,7 +26,7 @@ enum ListSource: Hashable {
     /// Where an action taken from this list moves messages out of.
     var actionContext: ListContext {
         switch self {
-        case .unifiedInbox, .allMail: .inbox
+        case .unifiedInbox, .allMail, .starred: .inbox
         case .role(let role): .role(role: role)
         case .mailbox(let id, _): .mailbox(mailboxId: id)
         }
@@ -35,6 +38,7 @@ enum ListSource: Hashable {
         case .role(let role): role.capitalized
         case .mailbox(_, let name): name
         case .allMail: "All mail"
+        case .starred: "Starred"
         }
     }
 }
@@ -280,7 +284,7 @@ final class AppModel {
         case .unifiedInbox: return boxes.filter { $0.role == "inbox" && !$0.synced }
         case .role(let role): return boxes.filter { $0.role == role && !$0.synced }
         case .mailbox(let id, _): return boxes.filter { $0.id == id && !$0.synced }
-        case .allMail: return []
+        case .allMail, .starred: return []
         }
     }
 

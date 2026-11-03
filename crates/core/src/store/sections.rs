@@ -96,19 +96,28 @@ pub struct Snoozed {
     pub subject: String,
 }
 
-/// Sleeping threads, soonest first.
+/// A snooze holds only while its thread still has a message in the
+/// account's Snoozed mailbox. Trashed, archived or moved elsewhere, in Jolta
+/// or on the server, it no longer wakes; undoing the move brings it back.
+const STILL_IN_SNOOZED: &str = "EXISTS (SELECT 1 FROM message m
+    JOIN message_mailbox mm ON mm.message_id = m.id JOIN mailbox b ON b.id = mm.mailbox_id
+    WHERE m.thread_id = s.thread_id AND b.account_id = s.account_id AND b.role = 'snoozed')";
+
+/// Sleeping threads still in Snoozed, soonest first.
 pub fn snoozed(conn: &Connection) -> Result<Vec<Snoozed>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT s.thread_id, s.account_id, s.wake_at,
                 (SELECT subject FROM message WHERE thread_id = s.thread_id ORDER BY id DESC LIMIT 1)
-         FROM snooze s WHERE s.state = 'sleeping' ORDER BY s.wake_at",
-    )?;
+         FROM snooze s WHERE s.state = 'sleeping' AND {STILL_IN_SNOOZED} ORDER BY s.wake_at"
+    ))?;
     let rows = stmt.query_map([], |r| {
         Ok(Snoozed { thread: r.get(0)?, account: r.get(1)?, wake_at: r.get(2)?, subject: r.get::<_, Option<String>>(3)?.unwrap_or_default() })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Snoozes whose time has come, including those whose thread has left
+/// Snoozed: `actions::wake` retires those without moving anything.
 pub fn due_snoozes(conn: &Connection, account: AccountId, now: i64) -> Result<Vec<(i64, ThreadId)>> {
     let mut stmt =
         conn.prepare("SELECT id, thread_id FROM snooze WHERE account_id = ?1 AND state = 'sleeping' AND wake_at <= ?2")?;
@@ -128,6 +137,11 @@ pub fn next_wake(conn: &Connection, account: AccountId) -> Result<Option<i64>> {
         [account],
         |r| r.get(0),
     )?)
+}
+
+/// Whether this snooze's thread still has a message in Snoozed.
+pub fn snooze_holds(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn.query_row(&format!("SELECT {STILL_IN_SNOOZED} FROM snooze s WHERE s.id = ?1"), [id], |r| r.get(0))?)
 }
 
 pub fn snooze_woken(conn: &Connection, id: i64) -> Result<()> {
