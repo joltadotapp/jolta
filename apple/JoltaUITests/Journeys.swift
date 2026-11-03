@@ -68,6 +68,92 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
     }
 
+    /// The color of the empty list below the rows, as 0–255 sRGB channels,
+    /// sampled until `done` accepts it or 5 seconds pass. Its screenshot is attached as `name`.
+    private func listColor(_ app: XCUIApplication, _ name: String, until done: ([Int]) -> Bool = { _ in true }) -> [Int] {
+        let window = app.windows.firstMatch
+        let deadline = Date() + 5
+        var shot: XCUIScreenshot
+        var color: [Int]
+        repeat {
+            shot = window.screenshot()
+            color = []
+            if let image = shot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                let scale = Double(image.width) / window.frame.width
+                // Left edge of the list column, under the rows and above the toasts.
+                let x = Int((232 + 12) * scale), y = Int((window.frame.height - 140) * scale)
+                if let c = NSBitmapImageRep(cgImage: image).colorAt(x: x, y: y)?.usingColorSpace(.sRGB) {
+                    color = [c.redComponent, c.greenComponent, c.blueComponent].map { Int(($0 * 255).rounded()) }
+                }
+            }
+        } while !done(color) && Date() < deadline
+        let attachment = XCTAttachment(screenshot: shot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        return color
+    }
+
+    private func distance(_ a: [Int], _ b: [Int]) -> Int {
+        guard a.count == 3, b.count == 3 else { return .max }
+        return zip(a, b).map { abs($0 - $1) }.max() ?? 0
+    }
+
+    private func openThemes(_ app: XCUIApplication) {
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("theme")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Back to Commands").waitForExistence(timeout: 5), "Change Theme… opens the theme list in the same palette")
+    }
+
+    private func commandField(_ app: XCUIApplication) -> XCUIElement {
+        app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "Type a command, mailbox or section")).firstMatch
+    }
+
+    /// The theme list opens on the theme in use; two rows down is the first
+    /// Omarchy theme of the Mac's own mode (Catppuccin or Catppuccin Latte).
+    func testThemePreviewAndChoose() throws {
+        let app = try launch()
+        let graphite = listColor(app, "Graphite, palette closed")
+
+        openThemes(app)
+        let listed = listColor(app, "Theme list open on Graphite")
+        app.typeKey(.downArrow, modifierFlags: [])
+        app.typeKey(.downArrow, modifierFlags: [])
+        let previewed = listColor(app, "Previewing the theme two rows down") { self.distance($0, listed) > 6 }
+        XCTAssertGreaterThan(distance(previewed, listed), 6, "moving the selection to another theme previews it behind the palette")
+
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Esc closes the theme list")
+        let reverted = listColor(app, "After Esc") { self.distance($0, graphite) <= 3 }
+        XCTAssertLessThanOrEqual(distance(reverted, graphite), 3, "Esc puts back the theme that was in use")
+
+        openThemes(app)
+        app.typeKey(.downArrow, modifierFlags: [])
+        app.typeKey(.downArrow, modifierFlags: [])
+        _ = listColor(app, "Previewing before choosing") { self.distance($0, listed) > 6 }
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on a theme closes the palette")
+        let chosen = listColor(app, "Chosen theme, palette closed") { self.distance($0, graphite) > 6 }
+        XCTAssertGreaterThan(distance(chosen, graphite), 6, "the chosen theme stays after the palette closes")
+
+        openThemes(app)
+        XCTAssertTrue(text(app, "In use").exists, "the theme list marks the saved themes")
+        for _ in 0..<5 { app.typeKey(.upArrow, modifierFlags: []) }
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on Back to Commands leaves the theme list")
+        XCTAssertTrue(commandField(app).waitForExistence(timeout: 5), "the palette shows the commands again")
+
+        app.typeText("theme")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Back to Commands").waitForExistence(timeout: 5), "the theme list opens again")
+        app.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(commandField(app).waitForExistence(timeout: 5), "⌫ in the empty field goes back to the commands")
+        app.typeKey(.escape, modifierFlags: [])
+        let kept = listColor(app, "Chosen theme after leaving the palette") { self.distance($0, chosen) <= 3 }
+        XCTAssertLessThanOrEqual(distance(kept, chosen), 3, "leaving the theme list without choosing keeps the saved theme")
+    }
+
     func testSearchFiltersTheList() throws {
         let app = try launch()
         let search = app.searchFields.firstMatch.exists ? app.searchFields.firstMatch : app.textFields.firstMatch
