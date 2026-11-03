@@ -17,7 +17,7 @@ pub struct NewAccount {
 
 const ACCOUNT_COLS: &str =
     "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port, secret_ref,
-     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs, signature";
+     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs, signature, calendar";
 
 fn account_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -37,6 +37,7 @@ fn account_row(r: &Row) -> rusqlite::Result<Account> {
         smtp_username: r.get(13)?,
         verify_certs: r.get(14)?,
         signature: r.get(15)?,
+        calendar: r.get(16)?,
     })
 }
 

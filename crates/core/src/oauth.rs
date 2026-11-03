@@ -46,23 +46,77 @@ impl Provider {
         }
     }
 
-    fn scopes(self) -> &'static str {
+    /// The mail scopes, without the sign-in ones.
+    fn mail_scopes(self) -> &'static [&'static str] {
         match self {
-            Provider::Google => "openid email profile https://mail.google.com/",
+            Provider::Google => &["https://mail.google.com/"],
+            Provider::Microsoft => &[
+                "https://graph.microsoft.com/Mail.ReadWrite",
+                "https://graph.microsoft.com/Mail.Send",
+                "https://graph.microsoft.com/User.Read",
+            ],
+        }
+    }
+
+    /// Asked for only when the user turns calendar on for the account.
+    pub fn calendar_scopes(self) -> &'static [&'static str] {
+        match self {
+            Provider::Google => &[
+                "https://www.googleapis.com/auth/calendar.events",
+                "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+                "https://www.googleapis.com/auth/calendar.freebusy",
+            ],
+            Provider::Microsoft => &[
+                "https://graph.microsoft.com/Calendars.ReadWrite",
+                "https://graph.microsoft.com/Calendars.ReadWrite.Shared",
+                "https://graph.microsoft.com/MailboxSettings.ReadWrite",
+            ],
+        }
+    }
+
+    fn identity_scopes(self) -> &'static [&'static str] {
+        match self {
+            Provider::Google => &["openid", "email", "profile"],
+            Provider::Microsoft => &["openid", "email", "profile", "offline_access"],
+        }
+    }
+
+    /// The `scope` of an authorization request. Google adds calendar to the
+    /// grant it already has (`include_granted_scopes`), so it is asked only
+    /// for the new scopes. Microsoft's dynamic consent asks for the whole set.
+    fn request_scopes(self, ask: Ask) -> String {
+        let extra: &[&[&str]] = match (self, ask) {
+            (_, Ask::Account) => &[self.mail_scopes()],
+            (Provider::Google, Ask::Calendar) => &[self.calendar_scopes()],
+            (Provider::Microsoft, Ask::Calendar) => &[self.mail_scopes(), self.calendar_scopes()],
+        };
+        [&[self.identity_scopes()], extra].concat().concat().join(" ")
+    }
+
+    /// The `scope` of a refresh request. Google's tokens carry everything
+    /// granted, so it takes none; Microsoft's carry only what the refresh
+    /// asks for, so an account with calendar on asks for calendar too.
+    fn refresh_scopes(self, calendar: bool) -> Option<String> {
+        match self {
+            Provider::Google => None,
             Provider::Microsoft => {
-                "openid email profile offline_access https://graph.microsoft.com/Mail.ReadWrite \
-                 https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read"
+                let calendar: &[&str] = if calendar { self.calendar_scopes() } else { &[] };
+                let all = [self.identity_scopes(), self.mail_scopes(), calendar].concat();
+                Some(all.join(" "))
             }
         }
     }
 
-    /// The scope Jolta cannot work without, where the user can refuse it and
-    /// still finish signing in: Google's consent screen shows it as a
-    /// checkbox, and Gmail then answers every login with AUTHENTICATIONFAILED.
-    fn required_scope(self) -> Option<&'static str> {
-        match self {
-            Provider::Google => Some("https://mail.google.com/"),
-            Provider::Microsoft => None,
+    /// Scopes the reply must grant, where the user can refuse one and still
+    /// finish signing in: Google's consent screen shows each as a checkbox,
+    /// and Gmail answers a login without mail access with AUTHENTICATIONFAILED.
+    /// Adding calendar must also leave the mail grant in place.
+    fn required_scopes(self, ask: Ask) -> Vec<&'static str> {
+        match (self, ask) {
+            (Provider::Google, Ask::Account) => self.mail_scopes().to_vec(),
+            (Provider::Google, Ask::Calendar) => [self.mail_scopes(), self.calendar_scopes()].concat(),
+            (Provider::Microsoft, Ask::Account) => Vec::new(),
+            (Provider::Microsoft, Ask::Calendar) => self.calendar_scopes().to_vec(),
         }
     }
 
@@ -120,11 +174,22 @@ fn form(pairs: &[(&str, &str)]) -> String {
     pairs.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&")
 }
 
+/// What a sign-in is for: adding the account (mail), or adding calendar
+/// access to an account Jolta already has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ask {
+    Account,
+    Calendar,
+}
+
 /// A sign-in in progress: the browser URL to open and the listener that
 /// will receive the redirect.
 pub struct Pending {
     pub url: String,
     provider: Provider,
+    ask: Ask,
+    /// The address that must sign in, when adding calendar to an account.
+    address: Option<String>,
     client: Client,
     verifier: String,
     state: String,
@@ -145,6 +210,19 @@ pub struct SignedIn {
 /// Starts a sign-in. `port` 0 picks a free port; a fixed port lets the
 /// redirect come in through an SSH tunnel from another machine's browser.
 pub async fn begin(provider: Provider, client: Client, port: u16) -> Result<Pending> {
+    start(provider, client, port, Ask::Account, None).await
+}
+
+/// Starts the sign-in that adds calendar access to `account`, which is
+/// signed in already: the same account, so mail keeps working on the new
+/// refresh token. Save the result with `save_grant`.
+pub async fn begin_calendar(account: &Account, client: Client, port: u16) -> Result<Pending> {
+    let provider = Provider::for_kind(account.kind)
+        .ok_or_else(|| Error::Auth(format!("{} uses its password for calendars, not a sign-in", account.address)))?;
+    start(provider, client, port, Ask::Calendar, Some(account.address.clone())).await
+}
+
+async fn start(provider: Provider, client: Client, port: u16, ask: Ask, address: Option<String>) -> Result<Pending> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let port = listener.local_addr()?.port();
     // Microsoft matches the registered "http://localhost" (any port) and
@@ -155,25 +233,44 @@ pub async fn begin(provider: Provider, client: Client, port: u16) -> Result<Pend
     };
     let redirect = format!("http://{host}:{port}/");
     let verifier = random_url_safe(32)?;
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let state = random_url_safe(16)?;
+    let url = authorize_url(provider, &client.id, &redirect, &verifier, &state, ask, address.as_deref());
+    Ok(Pending { url, provider, ask, address, client, verifier, state, redirect, listener })
+}
+
+fn authorize_url(
+    provider: Provider,
+    client_id: &str,
+    redirect: &str,
+    verifier: &str,
+    state: &str,
+    ask: Ask,
+    address: Option<&str>,
+) -> String {
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let scope = provider.request_scopes(ask);
     let mut params = vec![
-        ("client_id", client.id.as_str()),
-        ("redirect_uri", redirect.as_str()),
+        ("client_id", client_id),
+        ("redirect_uri", redirect),
         ("response_type", "code"),
-        ("scope", provider.scopes()),
+        ("scope", scope.as_str()),
         ("code_challenge", challenge.as_str()),
         ("code_challenge_method", "S256"),
-        ("state", state.as_str()),
+        ("state", state),
     ];
-    if provider == Provider::Google {
+    match (provider, ask) {
         // Ask for a refresh token every time, so re-adding an account works.
-        params.extend([("access_type", "offline"), ("prompt", "consent")]);
-    } else {
-        params.push(("prompt", "select_account"));
+        (Provider::Google, _) => params.extend([("access_type", "offline"), ("prompt", "consent")]),
+        (Provider::Microsoft, Ask::Account) => params.push(("prompt", "select_account")),
+        (Provider::Microsoft, Ask::Calendar) => {}
     }
-    let url = format!("{}?{}", provider.auth_url(), form(&params));
-    Ok(Pending { url, provider, client, verifier, state, redirect, listener })
+    if provider == Provider::Google && ask == Ask::Calendar {
+        params.push(("include_granted_scopes", "true"));
+    }
+    if let Some(address) = address {
+        params.push(("login_hint", address));
+    }
+    format!("{}?{}", provider.auth_url(), form(&params))
 }
 
 const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Jolta</title>\
@@ -214,11 +311,20 @@ impl Pending {
             .as_str()
             .ok_or_else(|| Error::Auth("the provider sent no refresh token".into()))?
             .to_string();
-        if let (Some(wanted), Some(granted)) = (self.provider.required_scope(), tokens["scope"].as_str()) {
-            if !granted.split_whitespace().any(|s| s.eq_ignore_ascii_case(wanted)) {
+        if let Some(granted) = tokens["scope"].as_str() {
+            let missing: Vec<&str> =
+                self.provider.required_scopes(self.ask).into_iter().filter(|w| !has_scope(granted, w)).collect();
+            if missing.iter().any(|m| self.provider.mail_scopes().contains(m)) {
                 return Err(Error::Auth(
                     "you didn't give Jolta access to your mail. Sign in again and tick the box that lets Jolta \
                      read, compose and send your email."
+                        .into(),
+                ));
+            }
+            if !missing.is_empty() {
+                return Err(Error::Auth(
+                    "you didn't give Jolta access to your calendar. Turn calendar on again and tick every \
+                     calendar box on the consent screen."
                         .into(),
                 ));
             }
@@ -230,6 +336,13 @@ impl Pending {
             .or_else(|| claims["preferred_username"].as_str())
             .ok_or_else(|| Error::Auth("the provider did not say which address signed in".into()))?
             .to_string();
+        if let Some(address) = &self.address {
+            if !email.eq_ignore_ascii_case(address) {
+                return Err(Error::Auth(format!(
+                    "you signed in as {email}, but calendar was being turned on for {address}. Sign in as {address}."
+                )));
+            }
+        }
         Ok(SignedIn {
             name: claims["name"].as_str().unwrap_or_default().to_string(),
             email,
@@ -281,6 +394,15 @@ impl Pending {
         query.get("code").cloned().ok_or_else(|| Error::Auth("the sign-in reply had no code".into()))
     }
 }
+
+/// Whether a token reply's space-separated `scope` holds `wanted`.
+/// Microsoft lists Graph scopes without their resource address.
+fn has_scope(granted: &str, wanted: &str) -> bool {
+    let short = |s: &str| s.trim_start_matches(GRAPH_RESOURCE).to_ascii_lowercase();
+    granted.split_whitespace().any(|g| short(g) == short(wanted))
+}
+
+const GRAPH_RESOURCE: &str = "https://graph.microsoft.com/";
 
 /// The query parameters of a URL or path, decoded.
 fn query_of(url: &str) -> HashMap<String, String> {
@@ -395,8 +517,9 @@ pub async fn access_token(account: &Account) -> Result<String> {
     if let Some(secret) = &client.secret {
         params.push(("client_secret", secret));
     }
-    if provider == Provider::Microsoft {
-        params.push(("scope", provider.scopes()));
+    let scope = provider.refresh_scopes(account.calendar);
+    if let Some(scope) = &scope {
+        params.push(("scope", scope));
     }
     let tokens = post_token(provider, &params).await?;
     let token = tokens["access_token"].as_str().ok_or_else(|| Error::Auth("no access token in the refresh reply".into()))?;
@@ -430,6 +553,77 @@ mod tests {
         let claims = jwt_claims(&format!("x.{payload}.sig")).unwrap();
         assert_eq!(claims["email"], "koen@example.com");
     }
+
+    #[test]
+    fn microsoft_refresh_asks_for_calendar_only_when_it_is_on() {
+        assert_eq!(
+            Provider::Microsoft.refresh_scopes(false).as_deref(),
+            Some(
+                "openid email profile offline_access https://graph.microsoft.com/Mail.ReadWrite \
+                 https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read"
+            ),
+            "mail-only accounts refresh with exactly the scopes they always had"
+        );
+        assert_eq!(
+            Provider::Microsoft.refresh_scopes(true).as_deref(),
+            Some(
+                "openid email profile offline_access https://graph.microsoft.com/Mail.ReadWrite \
+                 https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read \
+                 https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/Calendars.ReadWrite.Shared \
+                 https://graph.microsoft.com/MailboxSettings.ReadWrite"
+            )
+        );
+        assert_eq!(Provider::Google.refresh_scopes(true), None, "Google's refresh returns every granted scope");
+    }
+
+    fn params(url: &str) -> HashMap<String, String> {
+        query_of(url)
+    }
+
+    #[test]
+    fn google_calendar_consent_adds_to_the_existing_grant() {
+        let url = authorize_url(Provider::Google, "cid", "http://127.0.0.1:8765/", "verifier", "st", Ask::Calendar, Some("me@example.com"));
+        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        let p = params(&url);
+        assert_eq!(
+            p["scope"],
+            "openid email profile https://www.googleapis.com/auth/calendar.events \
+             https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.freebusy"
+        );
+        assert_eq!(p["include_granted_scopes"], "true");
+        assert_eq!(p["login_hint"], "me@example.com");
+        assert_eq!(p["access_type"], "offline");
+        assert_eq!(p["code_challenge_method"], "S256");
+        assert_eq!(p["code_challenge"], URL_SAFE_NO_PAD.encode(Sha256::digest(b"verifier")));
+        assert_eq!(p["redirect_uri"], "http://127.0.0.1:8765/");
+        let add = params(&authorize_url(Provider::Google, "cid", "http://127.0.0.1:1/", "v", "st", Ask::Account, None));
+        assert_eq!(add["scope"], "openid email profile https://mail.google.com/", "adding an account asks for mail only");
+        assert!(!add.contains_key("include_granted_scopes") && !add.contains_key("login_hint"));
+    }
+
+    #[test]
+    fn microsoft_calendar_consent_asks_for_mail_and_calendar() {
+        let p = params(&authorize_url(Provider::Microsoft, "cid", "http://localhost:8765/", "v", "st", Ask::Calendar, Some("me@example.com")));
+        assert_eq!(Some(p["scope"].clone()), Provider::Microsoft.refresh_scopes(true));
+        assert_eq!(p["login_hint"], "me@example.com");
+        assert!(!p.contains_key("prompt"), "the login hint picks the account; consent shows by itself");
+    }
+
+    #[test]
+    fn granted_scopes_match_with_or_without_the_graph_address() {
+        let granted = "Calendars.ReadWrite Mail.ReadWrite openid profile";
+        assert!(has_scope(granted, "https://graph.microsoft.com/Calendars.ReadWrite"));
+        assert!(!has_scope(granted, "https://graph.microsoft.com/Calendars.ReadWrite.Shared"));
+        assert!(has_scope("https://mail.google.com/ openid", "https://mail.google.com/"));
+    }
+}
+
+/// Stores the refresh token of a calendar sign-in for the account it was
+/// started for, in the same Keychain entry, replacing the mail-only one.
+pub fn save_grant(account: &Account, signed: &SignedIn) -> Result<()> {
+    secrets::set_password(&account.secret_ref, &signed.refresh_token)?;
+    remember(&account.secret_ref, &signed.access_token, signed.expires_in);
+    Ok(())
 }
 
 /// Stores a finished sign-in as an account (or refreshes the token of the

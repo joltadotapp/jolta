@@ -167,6 +167,9 @@ pub struct Account {
     pub verify_certs: bool,
     /// Added below new messages, replies and forwards; empty for none.
     pub signature: String,
+    /// Calendar is on. For Google and Microsoft this also means the user
+    /// granted calendar access, so token refreshes ask for it.
+    pub calendar: bool,
 }
 
 /// What the account settings screen can change.
