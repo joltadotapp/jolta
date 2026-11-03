@@ -40,6 +40,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 chrono-tz = { version = "0.10.4", features = ["serde"] }
 calcard = { version = "=0.3.14", default-features = false }
 rrule = "=0.14.0"
+quick-xml = "0.42.0"
 
 [profile.release]
 lto = "thin"

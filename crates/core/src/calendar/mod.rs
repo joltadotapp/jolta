@@ -6,6 +6,8 @@ pub mod meeting;
 mod model;
 pub mod recur;
 pub mod series;
+pub mod sources;
+pub mod sync;
 pub mod tz;
 
 pub use model::*;

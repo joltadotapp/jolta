@@ -31,3 +31,4 @@ chrono.workspace = true
 chrono-tz.workspace = true
 calcard.workspace = true
 rrule.workspace = true
+quick-xml.workspace = true
