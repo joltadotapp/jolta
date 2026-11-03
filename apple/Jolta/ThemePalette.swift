@@ -53,11 +53,13 @@ nonisolated extension ThemeTokens {
         let bg = o.background, fg = o.foreground
         let dark = o.mode == .dark
         let text2 = Self.readable(mix(fg, bg, 0.3), toward: fg, on: bg, contrast: 6)
+        // Last Horizon and Solitude give no lighter surface, so the palette would melt into the window.
+        let lifted = contrast(o.lighterBackground, bg) >= 1.05 ? o.lighterBackground : mix(bg, fg, 0.07)
         self.init(
             bg: bg,
             side: o.darkBackground,
-            reader: dark ? mix(bg, o.lighterBackground, 0.3) : mix(bg, 0xFFFFFF, 0.5),
-            raise: dark ? o.lighterBackground : mix(bg, 0xFFFFFF, 0.7),
+            reader: dark ? mix(bg, lifted, 0.3) : mix(bg, 0xFFFFFF, 0.5),
+            raise: dark ? lifted : mix(bg, 0xFFFFFF, 0.7),
             line: mix(bg, fg, 0.12),
             line2: mix(bg, fg, 0.07),
             text: fg,

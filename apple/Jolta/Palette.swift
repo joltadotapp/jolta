@@ -232,7 +232,8 @@ struct PaletteView: View {
                     .onSubmit { choose(list) }
                     .onKeyPress(.downArrow) { selected = min(selected + 1, max(list.count - 1, 0)); return .handled }
                     .onKeyPress(.upArrow) { selected = max(selected - 1, 0); return .handled }
-                    .onKeyPress(.delete) {
+                    // The Mac's ⌫ sends U+007F, which `.delete` (U+0008) doesn't match.
+                    .onKeyPress(keys: [.delete, KeyEquivalent("\u{7F}")]) { _ in
                         guard mode == .themes, text.isEmpty else { return .ignored }
                         model.palette = .commands
                         return .handled
