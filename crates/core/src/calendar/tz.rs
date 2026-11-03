@@ -24,6 +24,19 @@ pub fn zone(name: &str) -> Option<Tz> {
     }
 }
 
+/// The zone the Mac is in: `TZ` when set, else the zone `/etc/localtime`
+/// links to, else UTC.
+pub fn here() -> Tz {
+    let from_env = std::env::var("TZ").ok().and_then(|name| zone(name.trim_start_matches(':')));
+    from_env
+        .or_else(|| {
+            let target = std::fs::read_link("/etc/localtime").ok()?;
+            let target = target.to_str()?;
+            zone(target.rsplit_once("zoneinfo/").map_or(target, |(_, name)| name))
+        })
+        .unwrap_or(chrono_tz::UTC)
+}
+
 /// The instant a wall-clock time names in `tz`. A time the clocks skip moves
 /// forward by the gap (RFC 5545 section 3.3.5); a time that happens twice
 /// means the first.

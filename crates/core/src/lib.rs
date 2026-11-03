@@ -99,11 +99,11 @@ impl Jolta {
         })
     }
 
-    /// Deletes message files no message or outbox row names any more: left by
-    /// removed accounts and by mail deleted on the server.
+    /// Deletes blob files no message, outbox or event row names any more: left
+    /// by removed accounts and by mail and events deleted on the server.
     pub fn collect_blobs(&self, min_age: std::time::Duration) -> Result<blobs::Collected> {
         let keep: std::collections::HashSet<String> = self.store.read(|c| {
-            let mut stmt = c.prepare("SELECT blob FROM message WHERE blob IS NOT NULL UNION SELECT blob FROM outbox")?;
+            let mut stmt = c.prepare("SELECT blob FROM message WHERE blob IS NOT NULL UNION SELECT blob FROM outbox UNION SELECT blob FROM event WHERE blob IS NOT NULL")?;
             let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         })?;

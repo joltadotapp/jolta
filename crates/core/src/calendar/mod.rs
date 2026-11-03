@@ -5,6 +5,7 @@ pub mod ical;
 pub mod meeting;
 mod model;
 pub mod recur;
+pub mod series;
 pub mod tz;
 
 pub use model::*;

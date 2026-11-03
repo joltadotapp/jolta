@@ -201,6 +201,32 @@ pub struct EventData {
 }
 
 impl EventData {
+    /// A confirmed, busy event with nothing else set.
+    pub fn new(uid: impl Into<String>, span: Span) -> EventData {
+        EventData {
+            uid: uid.into(),
+            recurrence_id: None,
+            this_and_future: false,
+            span,
+            recurrence: None,
+            title: String::new(),
+            location: String::new(),
+            description: String::new(),
+            description_html: false,
+            url: None,
+            status: EventStatus::Confirmed,
+            show_as: ShowAs::Busy,
+            visibility: Visibility::Default,
+            organizer: None,
+            attendees: Vec::new(),
+            sequence: 0,
+            alarms: Vec::new(),
+            meeting: None,
+            categories: Vec::new(),
+            color: None,
+        }
+    }
+
     pub fn my_response(&self) -> Option<Response> {
         self.attendees.iter().find(|a| a.is_me).map(|a| a.response)
     }
@@ -215,6 +241,7 @@ pub struct Calendar {
     /// The calendar id (Graph, Google), collection URL (CalDAV) or feed URL.
     pub remote_id: String,
     pub name: String,
+    /// The user's color if they picked one, else the server's.
     pub color: Option<String>,
     pub zone: Option<String>,
     pub access: Access,
@@ -223,6 +250,10 @@ pub struct Calendar {
     pub notify: bool,
     pub default_reminder: Option<i64>,
     pub is_default: bool,
-    /// Delta link, sync token or feed ETag.
+    /// Delta link, sync token or feed ETag, in the source's own format.
     pub cursor: Option<String>,
+    /// Seconds between polls, when the source says (a feed's REFRESH-INTERVAL).
+    pub refresh: Option<i64>,
+    /// Unix seconds of the last sync that reached the server.
+    pub synced: Option<i64>,
 }

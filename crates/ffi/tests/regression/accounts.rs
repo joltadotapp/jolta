@@ -1,13 +1,16 @@
 use std::time::Duration;
 
+use jolta_core::calendar::series::Horizon;
+use jolta_core::calendar::{Access, CalendarSource, EventData, Span};
+use jolta_core::store::{self, RemoteCalendar};
 use jolta_core::{MailboxRole, secrets};
 use jolta_ffi::{ListContext, ThreadAction};
 
 use crate::fixture::{App, Mail, now};
 
-/// Removing an account leaves no row, no secret and no message file behind,
-/// and doesn't touch the other accounts. Before 2026-11-02 its message files
-/// stayed on disk for good (233 MB on the mini).
+/// Removing an account leaves no row, no secret, no message file and no
+/// calendar behind, and doesn't touch the other accounts. Before 2026-11-02
+/// its message files stayed on disk for good (233 MB on the mini).
 #[test]
 fn removing_an_account_leaves_nothing_behind() {
     let app = App::new();
@@ -40,6 +43,27 @@ fn removing_an_account_leaves_nothing_behind() {
             Ok(())
         })
         .unwrap();
+    let event_blob = app.jolta.blobs.put(b"BEGIN:VCALENDAR").unwrap();
+    app.jolta
+        .store
+        .write(|tx| {
+            let home = RemoteCalendar {
+                remote_id: "/calendars/home/".into(),
+                name: "Home".into(),
+                color: None,
+                zone: None,
+                access: Access::Owner,
+                primary: true,
+                refresh: None,
+            };
+            let calendar = store::sync_calendar_list(tx, gone.id, CalendarSource::CalDav, &[home])?[0].id;
+            let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+            let event = EventData::new("holiday", Span::AllDay { start: day, end: day.succ_opt().unwrap() });
+            let horizon = Horizon::around(chrono::DateTime::from_timestamp(now(), 0).unwrap(), jolta_core::calendar::tz::zone("UTC").unwrap());
+            store::apply_item(tx, calendar, "holiday.ics", Some("1"), &[event], Some(&event_blob), &horizon)
+        })
+        .unwrap();
+    assert_eq!(app.count("SELECT count(*) FROM occurrence"), 1);
 
     app.core.remove_account(gone.id.0).unwrap();
 
@@ -51,11 +75,13 @@ fn removing_an_account_leaves_nothing_behind() {
     assert_eq!(app.count("SELECT count(*) FROM ai_summary"), 0, "summaries of removed threads");
     assert_eq!(app.count("SELECT count(*) FROM thread_key WHERE thread_id NOT IN (SELECT id FROM thread)"), 0);
     assert_eq!(app.count("SELECT count(*) FROM snooze WHERE thread_id NOT IN (SELECT id FROM thread)"), 0);
+    assert_eq!(app.count("SELECT count(*) FROM event"), 0, "events of the removed account's calendars");
+    assert_eq!(app.count("SELECT count(*) FROM occurrence"), 0, "occurrences of the removed account's calendars");
     assert!(!secrets::exists(&gone.secret_ref).unwrap(), "the password stays in the Keychain");
     assert!(!secrets::exists(&secrets::smtp_ref(&gone.secret_ref)).unwrap(), "the SMTP password stays in the Keychain");
 
     let collected = app.jolta.collect_blobs(Duration::ZERO).unwrap();
-    assert_eq!(collected.files, 3, "the removed account's three message files are deleted");
+    assert_eq!(collected.files, 4, "the removed account's three message files and its event's source are deleted");
     assert_eq!(app.count("SELECT count(*) FROM message"), 1);
     let view = app.open(app.thread_of(survivor));
     assert!(view.html.contains("Keep me."), "the other account's mail still opens");

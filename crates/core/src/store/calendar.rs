@@ -1,0 +1,729 @@
+//! Calendars, their events and the expanded occurrences the views read.
+//!
+//! Sources deliver remote objects: a CalDAV resource, one UID of a feed, a
+//! Google or Graph event. `apply_item` replaces the event rows of one object
+//! and rebuilds the occurrences of every series it touched. A series is all
+//! events with one UID in one calendar, whichever objects they came from.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use chrono::{NaiveDate, NaiveTime};
+use chrono_tz::Tz;
+use rusqlite::{Connection, OptionalExtension, Row, params};
+
+use crate::calendar::recur::Source;
+use crate::calendar::series::{self, Horizon};
+use crate::calendar::{
+    Access, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, MeetingProvider, Moment,
+    Response, ShowAs, Zone, tz,
+};
+use crate::{AccountId, Error, Result};
+
+/// A calendar as its source lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteCalendar {
+    pub remote_id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub zone: Option<String>,
+    pub access: Access,
+    /// The account's main calendar, shown from the start. Others start hidden.
+    pub primary: bool,
+    pub refresh: Option<i64>,
+}
+
+const CALENDAR_COLS: &str = "id, account_id, source, remote_id, name, coalesce(user_color, color), zone, access, shown,
+     counts_as_busy, notify, default_reminder, is_default, cursor, refresh, synced";
+
+fn calendar_row(r: &Row) -> rusqlite::Result<Calendar> {
+    Ok(Calendar {
+        id: r.get(0)?,
+        account_id: r.get(1)?,
+        source: r.get(2)?,
+        remote_id: r.get(3)?,
+        name: r.get(4)?,
+        color: r.get(5)?,
+        zone: r.get(6)?,
+        access: r.get(7)?,
+        shown: r.get(8)?,
+        counts_as_busy: r.get(9)?,
+        notify: r.get(10)?,
+        default_reminder: r.get(11)?,
+        is_default: r.get(12)?,
+        cursor: r.get(13)?,
+        refresh: r.get(14)?,
+        synced: r.get(15)?,
+    })
+}
+
+pub fn calendars(conn: &Connection) -> Result<Vec<Calendar>> {
+    let mut stmt =
+        conn.prepare(&format!("SELECT {CALENDAR_COLS} FROM calendar ORDER BY ifnull(account_id, 1 << 62), source, name"))?;
+    let rows = stmt.query_map([], calendar_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn account_calendars(conn: &Connection, account: AccountId) -> Result<Vec<Calendar>> {
+    let mut stmt = conn.prepare(&format!("SELECT {CALENDAR_COLS} FROM calendar WHERE account_id = ?1 ORDER BY name"))?;
+    let rows = stmt.query_map([account], calendar_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn calendar(conn: &Connection, id: CalendarId) -> Result<Calendar> {
+    conn.query_row(&format!("SELECT {CALENDAR_COLS} FROM calendar WHERE id = ?1"), [id], calendar_row)
+        .optional()?
+        .ok_or_else(|| Error::NotFound(format!("calendar {id}")))
+}
+
+/// Inserts or refreshes one calendar. A known calendar keeps what the user
+/// chose: shown, color, counts as busy, notifications.
+fn upsert_calendar(conn: &Connection, account: Option<AccountId>, source: CalendarSource, c: &RemoteCalendar) -> Result<CalendarId> {
+    let busy_by_default = source != CalendarSource::Webcal;
+    Ok(conn.query_row(
+        "INSERT INTO calendar (account_id, source, remote_id, name, color, zone, access, shown, counts_as_busy, refresh)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT (ifnull(account_id, 0), source, remote_id) DO UPDATE SET
+           name = excluded.name, color = excluded.color, zone = excluded.zone, access = excluded.access,
+           refresh = coalesce(excluded.refresh, refresh)
+         RETURNING id",
+        params![account, source, c.remote_id, c.name, c.color, c.zone, c.access, c.primary, busy_by_default, c.refresh],
+        |r| r.get(0),
+    )?)
+}
+
+/// Brings an account's calendars from one source in line with the server's
+/// list. Calendars that disappeared are deleted with their events.
+pub fn sync_calendar_list(
+    conn: &Connection,
+    account: AccountId,
+    source: CalendarSource,
+    list: &[RemoteCalendar],
+) -> Result<Vec<Calendar>> {
+    let keep: BTreeSet<CalendarId> =
+        list.iter().map(|c| upsert_calendar(conn, Some(account), source, c)).collect::<Result<_>>()?;
+    for old in account_calendars(conn, account)? {
+        if old.source == source && !keep.contains(&old.id) {
+            delete_calendar(conn, old.id)?;
+        }
+    }
+    account_calendars(conn, account)
+}
+
+/// Adds a calendar that belongs to no account, such as a feed subscription.
+/// Adding the same one again changes nothing the user chose.
+pub fn add_calendar(conn: &Connection, source: CalendarSource, c: &RemoteCalendar) -> Result<Calendar> {
+    let id = upsert_calendar(conn, None, source, c)?;
+    calendar(conn, id)
+}
+
+pub fn delete_calendar(conn: &Connection, id: CalendarId) -> Result<()> {
+    conn.execute("DELETE FROM calendar WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+pub fn set_calendar_shown(conn: &Connection, id: CalendarId, shown: bool) -> Result<()> {
+    conn.execute("UPDATE calendar SET shown = ?2 WHERE id = ?1", params![id, shown])?;
+    Ok(())
+}
+
+pub fn set_calendar_busy(conn: &Connection, id: CalendarId, busy: bool) -> Result<()> {
+    conn.execute("UPDATE calendar SET counts_as_busy = ?2 WHERE id = ?1", params![id, busy])?;
+    Ok(())
+}
+
+pub fn set_calendar_notify(conn: &Connection, id: CalendarId, notify: bool) -> Result<()> {
+    conn.execute("UPDATE calendar SET notify = ?2 WHERE id = ?1", params![id, notify])?;
+    Ok(())
+}
+
+/// None goes back to the server's color.
+pub fn set_calendar_color(conn: &Connection, id: CalendarId, color: Option<&str>) -> Result<()> {
+    conn.execute("UPDATE calendar SET user_color = ?2 WHERE id = ?1", params![id, color])?;
+    Ok(())
+}
+
+/// Saves where the next sync starts, together with the changes it covers.
+pub fn set_calendar_cursor(conn: &Connection, id: CalendarId, cursor: Option<&str>, refresh: Option<i64>) -> Result<()> {
+    conn.execute(
+        "UPDATE calendar SET cursor = ?2, refresh = coalesce(?3, refresh), synced = unixepoch() WHERE id = ?1",
+        params![id, cursor, refresh],
+    )?;
+    Ok(())
+}
+
+pub fn account_calendar_on(conn: &Connection, account: AccountId) -> Result<bool> {
+    Ok(conn.query_row("SELECT calendar FROM account WHERE id = ?1", [account], |r| r.get(0))?)
+}
+
+/// Turning calendar off deletes the account's calendars, events and sync
+/// state here. The server keeps everything.
+pub fn set_account_calendar(conn: &Connection, account: AccountId, on: bool) -> Result<()> {
+    conn.execute("UPDATE account SET calendar = ?2 WHERE id = ?1", params![account, on])?;
+    if !on {
+        conn.execute("DELETE FROM calendar WHERE account_id = ?1", [account])?;
+    }
+    Ok(())
+}
+
+pub fn caldav_url(conn: &Connection, account: AccountId) -> Result<Option<String>> {
+    Ok(conn.query_row("SELECT caldav_url FROM account WHERE id = ?1", [account], |r| r.get(0))?)
+}
+
+pub fn set_caldav_url(conn: &Connection, account: AccountId, url: Option<&str>) -> Result<()> {
+    conn.execute("UPDATE account SET caldav_url = ?2 WHERE id = ?1", params![account, url])?;
+    Ok(())
+}
+
+/// The remote objects stored for a calendar with their ETags, so a sync
+/// fetches only what changed and can tell what disappeared.
+pub fn known_items(conn: &Connection, calendar: CalendarId) -> Result<BTreeMap<String, Option<String>>> {
+    let mut stmt = conn.prepare("SELECT remote_id, max(etag) FROM event WHERE calendar_id = ?1 GROUP BY remote_id")?;
+    let rows = stmt.query_map([calendar], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// How a recurrence id is stored: the same moment always gives the same text.
+fn moment_text(m: &Moment) -> String {
+    match m {
+        Moment::Date(d) => d.format("%Y%m%d").to_string(),
+        Moment::Time(t) => match t.zone {
+            Zone::Tz(tz) => format!("{} {tz}", t.wall.format("%Y%m%dT%H%M%S")),
+            Zone::Floating => t.wall.format("%Y%m%dT%H%M%S").to_string(),
+        },
+    }
+}
+
+/// Replaces the events of one remote object and rebuilds the occurrences of
+/// every series it touched. An unchanged ETag skips the work, so applying the
+/// same batch twice is harmless.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_item(
+    conn: &Connection,
+    calendar: CalendarId,
+    remote_id: &str,
+    etag: Option<&str>,
+    events: &[EventData],
+    blob: Option<&str>,
+    horizon: &Horizon,
+) -> Result<()> {
+    if let Some(etag) = etag {
+        let (rows, same): (i64, i64) = conn.query_row(
+            "SELECT count(*), count(*) FILTER (WHERE etag = ?3) FROM event WHERE calendar_id = ?1 AND remote_id = ?2",
+            params![calendar, remote_id, etag],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if rows > 0 && rows == same {
+            return Ok(());
+        }
+    }
+    let mut uids = item_uids(conn, calendar, remote_id)?;
+    conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
+    let mut insert = conn.prepare_cached(
+        "INSERT OR REPLACE INTO event (calendar_id, remote_id, etag, uid, recurrence_id, data, title, location, status,
+                                       show_as, my_response, sequence, meeting_provider, join_url, has_attendees, blob)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+    )?;
+    for e in events {
+        let data = serde_json::to_string(e).map_err(|err| Error::Other(format!("event {}: {err}", e.uid)))?;
+        insert.execute(params![
+            calendar,
+            remote_id,
+            etag,
+            e.uid,
+            e.recurrence_id.as_ref().map(moment_text).unwrap_or_default(),
+            data,
+            e.title,
+            e.location,
+            e.status,
+            e.show_as,
+            e.my_response(),
+            e.sequence,
+            e.meeting.as_ref().map(|m| m.provider),
+            e.meeting.as_ref().map(|m| m.join_url.as_str()),
+            !e.attendees.is_empty(),
+            blob,
+        ])?;
+        uids.insert(e.uid.clone());
+    }
+    for uid in &uids {
+        rebuild_series(conn, calendar, uid, horizon)?;
+    }
+    Ok(())
+}
+
+/// Deletes the events of one remote object. Series they belonged to keep
+/// their other events, rebuilt without them.
+pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, horizon: &Horizon) -> Result<()> {
+    let uids = item_uids(conn, calendar, remote_id)?;
+    conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
+    for uid in &uids {
+        rebuild_series(conn, calendar, uid, horizon)?;
+    }
+    Ok(())
+}
+
+fn item_uids(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare_cached("SELECT DISTINCT uid FROM event WHERE calendar_id = ?1 AND remote_id = ?2")?;
+    let rows = stmt.query_map(params![calendar, remote_id], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Rewrites the occurrences of one series from all its events in the
+/// calendar. `occurrence.busy` holds the event's own answer; readers combine
+/// it with the calendar's "counts as busy", so changing that needs no rewrite.
+fn rebuild_series(conn: &Connection, calendar: CalendarId, uid: &str, horizon: &Horizon) -> Result<()> {
+    conn.prepare_cached(
+        "DELETE FROM occurrence WHERE series_id IN (SELECT id FROM event WHERE calendar_id = ?1 AND uid = ?2)",
+    )?
+    .execute(params![calendar, uid])?;
+
+    let mut stmt =
+        conn.prepare_cached("SELECT id, recurrence_id = '', data FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY id")?;
+    let rows = stmt.query_map(params![calendar, uid], |r| {
+        Ok((r.get::<_, EventId>(0)?, r.get::<_, bool>(1)?, r.get::<_, String>(2)?))
+    })?;
+    let mut master: Option<(EventId, EventData)> = None;
+    let mut overrides: Vec<(EventId, EventData)> = Vec::new();
+    for row in rows {
+        let (id, is_master, data) = row?;
+        let event: EventData =
+            serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}")))?;
+        if is_master && master.is_none() {
+            master = Some((id, event));
+        } else if !is_master {
+            overrides.push((id, event));
+        }
+    }
+    let override_data: Vec<EventData> = overrides.iter().map(|(_, e)| e.clone()).collect();
+
+    let mut insert = conn.prepare_cached(
+        "INSERT INTO occurrence (calendar_id, series_id, event_id, start_utc, end_utc, start_day, end_day, busy)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    for occ in series::place(master.as_ref().map(|(_, e)| e), &override_data, horizon) {
+        let (event_id, event) = match occ.source {
+            Source::Master => master.as_ref().map(|(id, e)| (*id, e)),
+            Source::Override(i) => overrides.get(i).map(|(id, e)| (*id, e)),
+        }
+        .expect("place names one of the events it was given");
+        let series_id = master.as_ref().map_or(event_id, |(id, _)| *id);
+        let (start_utc, end_utc, start_day, end_day) = match occ.span.bounds(horizon.here) {
+            Bounds::Utc { start, end } => (Some(start.timestamp()), Some(end.timestamp()), None, None),
+            Bounds::Days { start, end } => (None, None, Some(start), Some(end)),
+        };
+        insert.execute(params![
+            calendar,
+            series_id,
+            event_id,
+            start_utc,
+            end_utc,
+            start_day,
+            end_day,
+            series::busy(event)
+        ])?;
+    }
+    Ok(())
+}
+
+/// An online meeting's provider and join link, as a list row shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinLink {
+    pub provider: MeetingProvider,
+    pub url: String,
+}
+
+/// One occurrence with what a week view draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OccurrenceRow {
+    /// The override when this occurrence was changed, else the series.
+    pub event_id: EventId,
+    pub calendar_id: CalendarId,
+    pub color: Option<String>,
+    pub title: String,
+    pub location: String,
+    pub bounds: Bounds,
+    pub status: EventStatus,
+    pub show_as: ShowAs,
+    pub my_response: Option<Response>,
+    pub meeting: Option<JoinLink>,
+    pub has_attendees: bool,
+    /// Blocks time: the event isn't free, cancelled or declined, and its
+    /// calendar counts as busy.
+    pub busy: bool,
+}
+
+impl OccurrenceRow {
+    pub fn all_day(&self) -> bool {
+        matches!(self.bounds, Bounds::Days { .. })
+    }
+}
+
+const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
+     o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
+     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy";
+
+fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
+    let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
+        (Some(start), Some(end)) => Bounds::Utc { start: utc(start), end: utc(end) },
+        _ => Bounds::Days { start: r.get(7)?, end: r.get(8)? },
+    };
+    let meeting = match (r.get::<_, Option<MeetingProvider>>(12)?, r.get::<_, Option<String>>(13)?) {
+        (Some(provider), Some(url)) => Some(JoinLink { provider, url }),
+        _ => None,
+    };
+    Ok(OccurrenceRow {
+        event_id: r.get(0)?,
+        calendar_id: r.get(1)?,
+        color: r.get(2)?,
+        title: r.get(3)?,
+        location: r.get(4)?,
+        bounds,
+        status: r.get(9)?,
+        show_as: r.get(10)?,
+        my_response: r.get(11)?,
+        meeting,
+        has_attendees: r.get(14)?,
+        busy: r.get(15)?,
+    })
+}
+
+fn utc(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp(seconds, 0).unwrap_or_default()
+}
+
+/// The occurrences in shown calendars that overlap the days `from` up to
+/// `to` (exclusive) in `here`, ordered by start. All-day events start at
+/// midnight in `here` for the ordering.
+///
+/// The start index alone would read every occurrence before `to`, so the
+/// start is also bounded from below by the longest occurrence.
+pub fn occurrences(conn: &Connection, from: NaiveDate, to: NaiveDate, here: Tz) -> Result<Vec<OccurrenceRow>> {
+    let midnight = |d: NaiveDate| tz::instant(d.and_time(NaiveTime::MIN), here).timestamp();
+    let (from_utc, to_utc) = (midnight(from), midnight(to));
+    let (from_day, to_day) = (tz::day_number(from), tz::day_number(to));
+    let (longest_utc, longest_days): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT (SELECT max(end_utc - start_utc) FROM occurrence WHERE start_utc IS NOT NULL),
+                (SELECT max(end_day - start_day) FROM occurrence WHERE start_day IS NOT NULL)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {OCCURRENCE_COLS} FROM occurrence o
+           JOIN calendar c ON c.id = o.calendar_id JOIN event e ON e.id = o.event_id
+         WHERE o.start_utc IS NOT NULL AND o.start_utc >= ?1 - ?3 AND o.start_utc < ?2
+           AND (o.end_utc > ?1 OR o.start_utc = ?1) AND c.shown
+         UNION ALL
+         SELECT {OCCURRENCE_COLS} FROM occurrence o
+           JOIN calendar c ON c.id = o.calendar_id JOIN event e ON e.id = o.event_id
+         WHERE o.start_day IS NOT NULL AND o.start_day >= ?4 - ?6 AND o.start_day < ?5
+           AND o.end_day > ?4 AND c.shown"
+    ))?;
+    let rows = stmt.query_map(
+        params![from_utc, to_utc, longest_utc.unwrap_or(0), from_day, to_day, longest_days.unwrap_or(0)],
+        occurrence_row,
+    )?;
+    let mut out: Vec<OccurrenceRow> = rows.collect::<rusqlite::Result<_>>()?;
+    let epoch = NaiveDate::default();
+    out.sort_by_cached_key(|o| match o.bounds {
+        Bounds::Utc { start, end } => (start.timestamp(), 1, end.timestamp()),
+        Bounds::Days { start, end } => {
+            (midnight(epoch + chrono::Duration::days(start.into())), 0, i64::from(end - start))
+        }
+    });
+    Ok(out)
+}
+
+/// How many events each calendar holds, for listings.
+pub fn event_counts(conn: &Connection) -> Result<BTreeMap<CalendarId, i64>> {
+    let mut stmt = conn.prepare("SELECT calendar_id, count(*) FROM event GROUP BY calendar_id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, NaiveDateTime, TimeZone, Utc};
+    use chrono_tz::Europe::Brussels;
+
+    use super::*;
+    use crate::calendar::{Attendee, Local, Person, Recurrence, Role, Span};
+    use crate::store::Store;
+
+    fn store(name: &str) -> Store {
+        let dir = std::env::temp_dir().join(format!("jolta-cal-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(&dir.join("jolta.sqlite")).unwrap();
+        s.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account (id, kind, address, username, secret_ref, created, calendar)
+                 VALUES (1, 'imap', 'me@example.com', 'me', 'a1', 0, 1)",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn horizon() -> Horizon {
+        Horizon::around(Utc.with_ymd_and_hms(2026, 11, 4, 0, 0, 0).unwrap(), Brussels)
+    }
+
+    fn remote(id: &str, primary: bool) -> RemoteCalendar {
+        RemoteCalendar {
+            remote_id: id.into(),
+            name: id.into(),
+            color: Some("#3366ff".into()),
+            zone: None,
+            access: Access::Owner,
+            primary,
+            refresh: None,
+        }
+    }
+
+    fn work_calendar(s: &Store) -> CalendarId {
+        s.write(|tx| sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &[remote("/cal/work/", true)]))
+            .unwrap()[0]
+            .id
+    }
+
+    fn local(s: &str) -> Local {
+        Local {
+            wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(),
+            zone: Zone::Tz(Brussels),
+        }
+    }
+
+    fn timed(start: &str, minutes: i64) -> Span {
+        let start = local(start);
+        Span::Timed { start, end: Local { wall: start.wall + Duration::minutes(minutes), ..start } }
+    }
+
+    fn weekly(uid: &str, start: &str, count: u32) -> EventData {
+        EventData {
+            title: "Standup".into(),
+            recurrence: Some(Recurrence { rules: vec![format!("FREQ=WEEKLY;COUNT={count}")], ..Recurrence::default() }),
+            ..EventData::new(uid, timed(start, 30))
+        }
+    }
+
+    fn moved(uid: &str, original: &str, to: &str) -> EventData {
+        EventData {
+            title: "Standup, moved".into(),
+            recurrence_id: Some(Moment::Time(local(original))),
+            ..EventData::new(uid, timed(to, 30))
+        }
+    }
+
+    fn apply(s: &Store, cal: CalendarId, remote_id: &str, etag: Option<&str>, events: &[EventData]) {
+        s.write(|tx| apply_item(tx, cal, remote_id, etag, events, None, &horizon())).unwrap();
+    }
+
+    fn remove(s: &Store, cal: CalendarId, remote_id: &str) {
+        s.write(|tx| remove_item(tx, cal, remote_id, &horizon())).unwrap();
+    }
+
+    /// (start, title) of every occurrence in November 2026, in order.
+    fn november(s: &Store) -> Vec<(String, String)> {
+        let rows = s
+            .read(|c| occurrences(c, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(), Brussels))
+            .unwrap();
+        rows.into_iter()
+            .map(|o| {
+                let start = match o.bounds {
+                    Bounds::Utc { start, .. } => start.with_timezone(&Brussels).format("%m-%d %H:%M").to_string(),
+                    Bounds::Days { start, .. } => format!("day {start}"),
+                };
+                (start, o.title)
+            })
+            .collect()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    /// Every stored row without ids, which change when rows are rewritten.
+    fn snapshot(s: &Store) -> (Vec<String>, Vec<String>) {
+        s.read(|c| {
+            let events = c
+                .prepare("SELECT remote_id || '|' || uid || '|' || recurrence_id || '|' || ifnull(etag, '') || '|' || data FROM event ORDER BY 1")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let occurrences = c
+                .prepare(
+                    "SELECT m.remote_id || '|' || e.remote_id || '|' || e.recurrence_id || '|' || ifnull(o.start_utc, o.start_day) || '|' || o.busy
+                     FROM occurrence o JOIN event e ON e.id = o.event_id JOIN event m ON m.id = o.series_id ORDER BY 1",
+                )?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((events, occurrences))
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn series_rebuilds_across_objects_whatever_order_they_arrive_in() {
+        let s = store("series");
+        let cal = work_calendar(&s);
+
+        apply(&s, cal, "override.ics", Some("o1"), &[moved("u1", "2026-11-10 09:00", "2026-11-10 14:00")]);
+        assert_eq!(november(&s), pairs(&[("11-10 14:00", "Standup, moved")]), "an override without its master still shows");
+
+        apply(&s, cal, "master.ics", Some("m1"), &[weekly("u1", "2026-11-03 09:00", 3)]);
+        assert_eq!(
+            november(&s),
+            pairs(&[("11-03 09:00", "Standup"), ("11-10 14:00", "Standup, moved"), ("11-17 09:00", "Standup")]),
+            "the master arriving later takes the override in"
+        );
+
+        let renamed = EventData { title: "Team standup".into(), ..weekly("u1", "2026-11-03 09:00", 4) };
+        apply(&s, cal, "master.ics", Some("m2"), &[renamed]);
+        assert_eq!(
+            november(&s),
+            pairs(&[
+                ("11-03 09:00", "Team standup"),
+                ("11-10 14:00", "Standup, moved"),
+                ("11-17 09:00", "Team standup"),
+                ("11-24 09:00", "Team standup")
+            ]),
+            "a replaced master keeps the override from the other object"
+        );
+
+        remove(&s, cal, "override.ics");
+        assert_eq!(
+            november(&s),
+            pairs(&[
+                ("11-03 09:00", "Team standup"),
+                ("11-10 09:00", "Team standup"),
+                ("11-17 09:00", "Team standup"),
+                ("11-24 09:00", "Team standup")
+            ]),
+            "removing the override brings the occurrence back"
+        );
+
+        remove(&s, cal, "master.ics");
+        assert!(november(&s).is_empty());
+        let left: i64 = s.read(|c| Ok(c.query_row("SELECT (SELECT count(*) FROM event) + (SELECT count(*) FROM occurrence)", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(left, 0, "deleting the series leaves no rows");
+    }
+
+    #[test]
+    fn applying_the_same_batch_twice_changes_nothing() {
+        let s = store("idempotent");
+        let cal = work_calendar(&s);
+        let batch = |s: &Store, etag: Option<&str>| {
+            apply(s, cal, "master.ics", etag, &[weekly("u1", "2026-11-03 09:00", 3), moved("u1", "2026-11-10 09:00", "2026-11-10 14:00")]);
+            apply(s, cal, "single.ics", etag, &[EventData { title: "Lunch".into(), ..EventData::new("u2", timed("2026-11-05 12:00", 60)) }]);
+        };
+        batch(&s, Some("e1"));
+        let first = snapshot(&s);
+        batch(&s, Some("e1"));
+        assert_eq!(snapshot(&s), first, "same ETags");
+        batch(&s, None);
+        batch(&s, None);
+        let without = snapshot(&s);
+        assert_eq!(without.1, first.1, "without ETags the occurrences are the same");
+        assert_eq!(first.1.len(), 4);
+    }
+
+    #[test]
+    fn cancelled_free_and_declined_events() {
+        let s = store("busy");
+        let cal = work_calendar(&s);
+        let declined = EventData {
+            title: "Declined".into(),
+            attendees: vec![Attendee {
+                person: Person { address: "me@example.com".into(), name: String::new() },
+                role: Role::Required,
+                response: Response::Declined,
+                comment: String::new(),
+                is_me: true,
+            }],
+            ..EventData::new("d", timed("2026-11-03 11:00", 60))
+        };
+        let free = EventData { title: "Free".into(), show_as: ShowAs::Free, ..EventData::new("f", timed("2026-11-03 12:00", 60)) };
+        let cancelled = EventData { title: "Cancelled".into(), status: EventStatus::Cancelled, ..EventData::new("c", timed("2026-11-03 13:00", 60)) };
+        let busy = EventData { title: "Busy".into(), ..EventData::new("b", timed("2026-11-03 14:00", 60)) };
+        for e in [&declined, &free, &cancelled, &busy] {
+            apply(&s, cal, &e.uid, None, std::slice::from_ref(e));
+        }
+        let mut cancelled_override = moved("u1", "2026-11-10 09:00", "2026-11-10 09:00");
+        cancelled_override.status = EventStatus::Cancelled;
+        apply(&s, cal, "series", None, &[weekly("u1", "2026-11-03 09:00", 3), cancelled_override]);
+
+        let rows = |s: &Store| {
+            s.read(|c| occurrences(c, NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(), NaiveDate::from_ymd_opt(2026, 12, 1).unwrap(), Brussels))
+                .unwrap()
+                .into_iter()
+                .map(|o| (o.title, o.busy))
+                .collect::<Vec<_>>()
+        };
+        let busy_rows = |list: &[(&str, bool)]| list.iter().map(|(t, b)| (t.to_string(), *b)).collect::<Vec<_>>();
+        assert_eq!(
+            rows(&s),
+            busy_rows(&[("Standup", true), ("Declined", false), ("Free", false), ("Busy", true), ("Standup", true)]),
+            "cancelled events and occurrences are not stored"
+        );
+        s.write(|tx| set_calendar_busy(tx, cal, false)).unwrap();
+        assert!(rows(&s).iter().all(|(_, busy)| !busy), "a calendar that doesn't count as busy blocks nothing");
+        s.write(|tx| set_calendar_shown(tx, cal, false)).unwrap();
+        assert!(rows(&s).is_empty(), "hidden calendars are left out");
+    }
+
+    #[test]
+    fn range_edges_long_events_and_all_day() {
+        let s = store("range");
+        let cal = work_calendar(&s);
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let events = [
+            EventData { title: "Conference".into(), ..EventData::new("long", timed("2026-10-01 09:00", 60 * 24 * 40)) },
+            EventData { title: "Before".into(), ..EventData::new("before", timed("2026-11-08 23:00", 60)) },
+            EventData { title: "Ends at the start".into(), ..EventData::new("edge", timed("2026-11-08 23:00", 60)) },
+            EventData { title: "Armistice".into(), ..EventData::new("holiday", Span::AllDay { start: day(11), end: day(12) }) },
+            EventData { title: "Trip".into(), ..EventData::new("trip", Span::AllDay { start: day(5), end: day(10) }) },
+            EventData { title: "Next week".into(), ..EventData::new("after", timed("2026-11-16 00:00", 30)) },
+        ];
+        for e in &events {
+            apply(&s, cal, &e.uid, None, std::slice::from_ref(e));
+        }
+        let titles: Vec<String> =
+            s.read(|c| occurrences(c, day(9), day(16), Brussels)).unwrap().into_iter().map(|o| o.title).collect();
+        assert_eq!(titles, ["Conference", "Trip", "Armistice"], "the week of 9 November in Brussels");
+    }
+
+    #[test]
+    fn relisting_keeps_what_the_user_chose() {
+        let s = store("relist");
+        let list = [remote("/cal/home/", true), remote("/cal/shared/", false)];
+        let first = s.write(|tx| sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &list)).unwrap();
+        let shown: Vec<bool> = first.iter().map(|c| c.shown).collect();
+        assert_eq!(shown, [true, false], "the primary calendar starts shown, others hidden");
+        let shared = first[1].id;
+        s.write(|tx| {
+            set_calendar_shown(tx, shared, true)?;
+            set_calendar_color(tx, shared, Some("#ff0000"))
+        })
+        .unwrap();
+        let mut renamed = list.clone();
+        renamed[1].name = "Shared, renamed".into();
+        renamed[1].color = Some("#00ff00".into());
+        let again = s.write(|tx| sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &renamed[1..])).unwrap();
+        assert_eq!(again.len(), 1, "the calendar gone from the server is deleted");
+        assert_eq!((again[0].id, again[0].shown, again[0].color.as_deref()), (shared, true, Some("#ff0000")));
+        assert_eq!(again[0].name, "Shared, renamed");
+    }
+
+    #[test]
+    fn turning_calendar_off_leaves_nothing_behind() {
+        let s = store("off");
+        let cal = work_calendar(&s);
+        apply(&s, cal, "master.ics", Some("m1"), &[weekly("u1", "2026-11-03 09:00", 3)]);
+        s.write(|tx| set_account_calendar(tx, AccountId(1), false)).unwrap();
+        let left: i64 = s
+            .read(|c| Ok(c.query_row("SELECT (SELECT count(*) FROM calendar) + (SELECT count(*) FROM event) + (SELECT count(*) FROM occurrence)", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(left, 0);
+        assert!(!s.read(|c| account_calendar_on(c, AccountId(1))).unwrap());
+    }
+}
