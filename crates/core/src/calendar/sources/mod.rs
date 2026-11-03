@@ -4,6 +4,7 @@
 pub mod caldav;
 pub mod dav;
 pub mod google;
+pub mod graph;
 pub mod webcal;
 
 use std::collections::{BTreeMap, BTreeSet};
