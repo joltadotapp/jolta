@@ -1,0 +1,36 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Calendly//Calendly Event//EN
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:BHC2A3F5E6D7C8B9@calendly.com
+DTSTAMP:20261103T153000Z
+DTSTART:20261112T130000Z
+DTEND:20261112T133000Z
+SUMMARY:30 Minute Meeting between Koen Test and Eva Wouters
+DESCRIPTION:Event Name: 30 Minute Meeting\n\nLocation: This is a Google Mee
+ t web conference.\nhttps://meet.google.com/xyz-abcd-efg\n\nPlease share an
+ ything that will help prepare for our meeting.: Over de Jolta beta\n\nNeed
+  to make changes to this event?\nCancel: https://calendly.com/cancellation
+ s/AAAAEXAMPLE\nReschedule: https://calendly.com/reschedulings/AAAAEXAMPLE\
+ n\nPowered by Calendly.com
+LOCATION:https://meet.google.com/xyz-abcd-efg
+ORGANIZER;CN=Eva Wouters:mailto:eva.wouters@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=Eva Wo
+ uters:mailto:eva.wouters@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE;CN=Koen Test:mailto:koen@example.org
+SEQUENCE:0
+STATUS:CONFIRMED
+TRANSP:OPAQUE
+CLASS:CONFIDENTIAL
+BEGIN:VALARM
+ACTION:EMAIL
+DESCRIPTION:Reminder
+SUMMARY:30 Minute Meeting
+ATTENDEE:mailto:koen@example.org
+TRIGGER:-PT1H
+END:VALARM
+END:VEVENT
+END:VCALENDAR
