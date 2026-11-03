@@ -1388,6 +1388,8 @@ name = "jolta-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "chrono-tz",
  "clap",
  "futures",
  "jolta-core",

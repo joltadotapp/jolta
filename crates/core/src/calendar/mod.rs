@@ -8,6 +8,7 @@ pub mod recur;
 pub mod series;
 pub mod sources;
 pub mod sync;
+pub mod synth;
 pub mod tz;
 
 pub use model::*;

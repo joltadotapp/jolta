@@ -1,0 +1,343 @@
+//! `jolta cal`: calendars from the command line.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use clap::{Subcommand, ValueEnum};
+use jolta_core::Jolta;
+use jolta_core::calendar::recur::Source as Origin;
+use jolta_core::calendar::series::{self, Horizon};
+use jolta_core::calendar::{Bounds, CalendarId, EventData, ical, sync, synth, tz};
+use jolta_core::store::{self, OccurrenceRow};
+
+use crate::{pct, truncate};
+
+#[derive(Subcommand)]
+pub enum CalCommand {
+    /// Turn calendar on for an account and list its calendars.
+    Enable { account: String },
+    /// Turn calendar off for an account: its calendars leave Jolta, the server keeps them.
+    Disable { account: String },
+    /// Every calendar with its source, account, settings and event count.
+    Calendars,
+    /// Show or hide a calendar. Hidden calendars aren't synced.
+    Show {
+        calendar: i64,
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+    /// Subscribe to a feed (webcal:// or https://).
+    Subscribe { url: String },
+    /// Sync shown calendars, or one.
+    Sync { calendar: Option<i64> },
+    /// Occurrences by day in this Mac's zone; this week (Monday first) by default.
+    List {
+        #[arg(long)]
+        from: Option<String>,
+        /// The last day shown.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Expand the events of an .ics file without storing them.
+    Expand {
+        file: PathBuf,
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Print the online meeting found in each event of an .ics file.
+    Meeting { file: PathBuf },
+    /// Build the synthetic calendar: 5 calendars, 20,000 events, 300 repeating.
+    Gen,
+    /// Time one-week occurrence queries over the store.
+    Bench {
+        #[arg(long, default_value_t = 200)]
+        runs: usize,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
+    match cmd {
+        CalCommand::Enable { account } => {
+            let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            let t = Instant::now();
+            let list = sync::enable(jolta, a.id).await?;
+            println!("Calendar is on for {} ({} calendars, listed in {:.1} s):", a.address, list.len(), t.elapsed().as_secs_f64());
+            for c in &list {
+                println!("  {:>4}  [{}] {}", c.id, if c.shown { "x" } else { " " }, c.name);
+            }
+            println!("Hidden calendars aren't synced. Show one with `jolta cal show <id> on`.");
+            Ok(())
+        }
+        CalCommand::Disable { account } => {
+            let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            sync::disable(jolta, a.id)?;
+            println!("Calendar is off for {}. Its calendars and events are gone from Jolta; the server keeps them.", a.address);
+            Ok(())
+        }
+        CalCommand::Calendars => {
+            let calendars = jolta.store.read(store::calendars)?;
+            let counts = jolta.store.read(store::event_counts)?;
+            let accounts: BTreeMap<_, _> =
+                jolta.store.read(store::accounts)?.into_iter().map(|a| (a.id, a.address)).collect();
+            println!("{:>4}  {:<8} {:<28} {:<5} {:<4} {:>7}  name", "id", "source", "account", "shown", "busy", "events");
+            for c in calendars {
+                let account = c.account_id.and_then(|id| accounts.get(&id)).map_or("-", String::as_str);
+                println!(
+                    "{:>4}  {:<8} {:<28} {:<5} {:<4} {:>7}  {}",
+                    c.id,
+                    c.source,
+                    truncate(account, 28),
+                    yes(c.shown),
+                    yes(c.counts_as_busy),
+                    counts.get(&c.id).copied().unwrap_or(0),
+                    c.name
+                );
+            }
+            Ok(())
+        }
+        CalCommand::Show { calendar, state } => {
+            let id = CalendarId(calendar);
+            let shown = matches!(state, OnOff::On);
+            jolta.store.write(|tx| store::set_calendar_shown(tx, id, shown))?;
+            let c = jolta.store.read(|c| store::calendar(c, id))?;
+            println!("{} is {}.", c.name, if shown { "shown; run `jolta cal sync` to fetch it" } else { "hidden" });
+            Ok(())
+        }
+        CalCommand::Subscribe { url } => {
+            let c = sync::subscribe(jolta, &url).await?;
+            println!("Subscribed: calendar {} ({}). Run `jolta cal sync {}` next.", c.id, c.name, c.id);
+            Ok(())
+        }
+        CalCommand::Sync { calendar } => {
+            let calendars = match calendar {
+                Some(id) => vec![jolta.store.read(|c| store::calendar(c, CalendarId(id)))?],
+                None => sync::shown(jolta)?,
+            };
+            let t = Instant::now();
+            let mut failed = 0;
+            for c in &calendars {
+                match sync::sync_calendar(jolta, c.id).await {
+                    Ok(r) if r.upserted + r.removed == 0 => {
+                        println!("{:>4}  {}: no changes ({:.2} s)", c.id, c.name, r.elapsed.as_secs_f64())
+                    }
+                    Ok(r) => println!(
+                        "{:>4}  {}: {} changed, {} removed ({:.2} s)",
+                        c.id,
+                        c.name,
+                        r.upserted,
+                        r.removed,
+                        r.elapsed.as_secs_f64()
+                    ),
+                    Err(e) => {
+                        failed += 1;
+                        println!("{:>4}  {}: failed: {e}", c.id, c.name);
+                    }
+                }
+            }
+            println!("{} calendars in {:.2} s.", calendars.len(), t.elapsed().as_secs_f64());
+            if failed > 0 {
+                bail!("{failed} calendars failed to sync");
+            }
+            Ok(())
+        }
+        CalCommand::List { from, to } => {
+            let here = tz::here();
+            let (from, to) = range(from.as_deref(), to.as_deref(), here)?;
+            let rows = jolta.store.read(|c| store::occurrences(c, from, to, here))?;
+            let names: BTreeMap<CalendarId, String> =
+                jolta.store.read(store::calendars)?.into_iter().map(|c| (c.id, c.name)).collect();
+            let mut days: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
+            for o in &rows {
+                let (day, when) = when(&o.bounds, here, from);
+                let response = o.my_response.map(|r| r.to_string()).unwrap_or_default();
+                let meeting = o.meeting.as_ref().map(|m| m.provider.to_string()).unwrap_or_default();
+                let calendar = names.get(&o.calendar_id).map_or("", String::as_str);
+                days.entry(day).or_default().push(format!(
+                    "  {when:<19} {:<40} {:<18} {response:<12} {meeting}",
+                    truncate(&title_of(o), 40),
+                    truncate(calendar, 18)
+                ));
+            }
+            for (day, lines) in days {
+                println!("{}", day.format("%a %-d %b %Y"));
+                for l in lines {
+                    println!("{}", l.trim_end());
+                }
+            }
+            println!("{} occurrences from {from} to {}.", rows.len(), to - Duration::days(1));
+            Ok(())
+        }
+        CalCommand::Expand { file, from, to } => {
+            let here = tz::here();
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let (from, to) = range(from.as_deref(), to.as_deref(), here)?;
+            let midnight = |d: NaiveDate| tz::instant(d.and_time(chrono::NaiveTime::MIN), here);
+            let horizon = Horizon { window: jolta_core::calendar::recur::Window { start: midnight(from), end: midnight(to) }, here };
+            let mut out: Vec<(Bounds, String)> = Vec::new();
+            for (_, events) in series::group(ical::read(&text, &[])?) {
+                let (masters, overrides): (Vec<EventData>, Vec<EventData>) =
+                    events.into_iter().partition(|e| e.recurrence_id.is_none());
+                for occ in series::place(masters.first(), &overrides, &horizon) {
+                    let event = match occ.source {
+                        Origin::Master => &masters[0],
+                        Origin::Override(i) => &overrides[i],
+                    };
+                    let mark = if matches!(occ.source, Origin::Override(_)) { "  (changed)" } else { "" };
+                    out.push((occ.span.bounds(here), format!("{}{mark}", event.title)));
+                }
+            }
+            out.sort_by_key(|(b, _)| start_key(b, here));
+            for (bounds, title) in &out {
+                let (day, when) = when(bounds, here, from);
+                println!("{}  {when:<19} {title}", day.format("%a %Y-%m-%d"));
+            }
+            println!("{} occurrences.", out.len());
+            Ok(())
+        }
+        CalCommand::Meeting { file } => {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            for e in ical::read(&text, &[])? {
+                match &e.meeting {
+                    None => println!("{}: no online meeting", e.title),
+                    Some(m) => {
+                        println!("{}: {} {}", e.title, m.provider, m.join_url);
+                        for (label, value) in [("meeting id", &m.meeting_id), ("passcode", &m.passcode)] {
+                            if let Some(v) = value {
+                                println!("  {label}: {v}");
+                            }
+                        }
+                        for p in &m.phones {
+                            println!("  phone: {p}");
+                        }
+                        if let Some(app) = jolta_core::calendar::meeting::app_url(m) {
+                            println!("  app: {app}");
+                        }
+                        for l in &m.other_links {
+                            println!("  other link: {l}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        CalCommand::Gen => {
+            let t = Instant::now();
+            let built = synth::generate(jolta, Utc::now())?;
+            println!(
+                "{} calendars, {} events ({} repeating, {} changed occurrences), {} occurrences, built in {:.1} s.",
+                synth::CALENDARS,
+                built.events,
+                synth::SERIES,
+                built.overrides,
+                built.occurrences,
+                t.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
+        CalCommand::Bench { runs } => bench(jolta, runs),
+    }
+}
+
+/// One-week queries for weeks spread over the stored window, the current
+/// week included.
+fn bench(jolta: &Jolta, runs: usize) -> Result<()> {
+    let here = tz::here();
+    let this_monday = monday(Utc::now().with_timezone(&here).date_naive());
+    let total: i64 = jolta.store.read(|c| Ok(c.query_row("SELECT count(*) FROM occurrence", [], |r| r.get(0))?))?;
+    let mut times = Vec::with_capacity(runs);
+    let mut rows = 0;
+    for i in 0..runs {
+        let offset = if i == 0 { 0 } else { (i as i64 * 7_919) % 156 - 52 };
+        let from = this_monday + Duration::weeks(offset);
+        let t = Instant::now();
+        let found: Vec<OccurrenceRow> = jolta.store.read(|c| store::occurrences(c, from, from + Duration::days(7), here))?;
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+        rows += found.len();
+    }
+    let mean = rows as f64 / runs as f64;
+    let (p50, p95) = (pct(&mut times, 0.50), pct(&mut times, 0.95));
+    println!("{total} occurrences stored; {runs} one-week queries, {mean:.0} occurrences a week on average.");
+    println!("week query p50 {p50:.2} ms, p95 {p95:.2} ms (budget 5 ms).");
+    Ok(())
+}
+
+fn monday(day: NaiveDate) -> NaiveDate {
+    day - Duration::days(day.weekday().num_days_from_monday().into())
+}
+
+/// `--from` and `--to` (the last day, inclusive) as a half-open range of
+/// days; this week from Monday by default.
+fn range(from: Option<&str>, to: Option<&str>, here: chrono_tz::Tz) -> Result<(NaiveDate, NaiveDate)> {
+    let parse = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").with_context(|| format!("{s} is not a date like 2026-11-09"));
+    let from = match from {
+        Some(s) => parse(s)?,
+        None => monday(Utc::now().with_timezone(&here).date_naive()),
+    };
+    let to = match to {
+        Some(s) => parse(s)? + Duration::days(1),
+        None => from + Duration::days(7),
+    };
+    if to <= from {
+        bail!("--to comes before --from");
+    }
+    Ok((from, to))
+}
+
+/// The day an occurrence is listed under (its start, or the first day of the
+/// range when it started earlier) and its time as text.
+fn when(bounds: &Bounds, here: chrono_tz::Tz, first: NaiveDate) -> (NaiveDate, String) {
+    match *bounds {
+        Bounds::Days { start, end } => {
+            let text = match (day(start) < first, end - start > 1) {
+                (true, _) => format!("all day until {}", day(end - 1).format("%a %-d")),
+                (false, true) => format!("all day to {}", day(end - 1).format("%a %-d")),
+                (false, false) => "all day".into(),
+            };
+            (day(start).max(first), text)
+        }
+        Bounds::Utc { start, end } => {
+            let (s, e) = (start.with_timezone(&here), end.with_timezone(&here));
+            let end_text = if e.date_naive() == s.date_naive() || e - s <= Duration::zero() {
+                e.format("%H:%M").to_string()
+            } else {
+                e.format("%a %-d %H:%M").to_string()
+            };
+            let text = if s.date_naive() < first {
+                format!("until {end_text}")
+            } else {
+                format!("{}–{end_text}", s.format("%H:%M"))
+            };
+            (s.date_naive().max(first), text)
+        }
+    }
+}
+
+fn start_key(bounds: &Bounds, here: chrono_tz::Tz) -> DateTime<Utc> {
+    match *bounds {
+        Bounds::Days { start, .. } => tz::instant(day(start).and_time(chrono::NaiveTime::MIN), here),
+        Bounds::Utc { start, .. } => start,
+    }
+}
+
+fn day(n: i32) -> NaiveDate {
+    NaiveDate::default() + Duration::days(n.into())
+}
+
+fn title_of(o: &OccurrenceRow) -> String {
+    if o.title.is_empty() { "(no title)".into() } else { o.title.clone() }
+}
+
+fn yes(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}

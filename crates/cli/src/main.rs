@@ -1,5 +1,7 @@
 //! `jolta`: a developer tool over the Jolta core.
 
+mod cal;
+
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,6 +145,9 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         runs: usize,
     },
+    /// Calendars: turn them on, subscribe, sync, list and expand.
+    #[command(subcommand)]
+    Cal(cal::CalCommand),
 }
 
 #[derive(Subcommand)]
@@ -307,6 +312,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Bench { runs } => bench(&jolta, runs),
+        Command::Cal(cmd) => cal::run(&jolta, cmd).await,
         Command::Dev(cmd) => dev(&jolta, cmd).await,
         Command::McpServe { socket } => {
             let t0 = Instant::now();
