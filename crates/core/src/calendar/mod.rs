@@ -6,6 +6,7 @@ pub mod ical_edit;
 pub mod meeting;
 mod model;
 pub mod recur;
+pub mod scheduler;
 pub mod series;
 pub mod sources;
 pub mod sync;

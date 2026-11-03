@@ -268,10 +268,42 @@ fn item_uids(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Every series in the store, as (calendar, UID), for rebuilding all
+/// occurrences when the window moves or the Mac's zone changes.
+pub fn series_keys(conn: &Connection) -> Result<Vec<(CalendarId, String)>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT calendar_id, uid FROM event ORDER BY calendar_id, uid")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The window start and zone the whole occurrence table was last rebuilt
+/// with. Syncs rebuild only the series they touch, so this is the oldest
+/// window any series may still have.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Built {
+    pub start: i64,
+    pub zone: String,
+}
+
+pub fn occurrences_built(conn: &Connection) -> Result<Option<Built>> {
+    let raw: Option<String> =
+        conn.query_row("SELECT value FROM setting WHERE key = 'calendar_occurrences'", [], |r| r.get(0)).optional()?;
+    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
+}
+
+pub fn set_occurrences_built(conn: &Connection, horizon: &Horizon) -> Result<()> {
+    let built = Built { start: horizon.window.start.timestamp(), zone: horizon.here.name().to_string() };
+    conn.execute(
+        "INSERT INTO setting (key, value) VALUES ('calendar_occurrences', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [serde_json::to_string(&built).expect("a horizon serializes")],
+    )?;
+    Ok(())
+}
+
 /// Rewrites the occurrences of one series from all its events in the
 /// calendar. `occurrence.busy` holds the event's own answer; readers combine
 /// it with the calendar's "counts as busy", so changing that needs no rewrite.
-fn rebuild_series(conn: &Connection, calendar: CalendarId, uid: &str, horizon: &Horizon) -> Result<()> {
+pub fn rebuild_series(conn: &Connection, calendar: CalendarId, uid: &str, horizon: &Horizon) -> Result<()> {
     conn.prepare_cached(
         "DELETE FROM occurrence WHERE series_id IN (SELECT id FROM event WHERE calendar_id = ?1 AND uid = ?2)",
     )?

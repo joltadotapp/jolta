@@ -217,6 +217,10 @@ pub enum CoreEvent {
     ActionFailed { message: String },
     /// A local model's download moved on, finished, stopped or was removed.
     ModelChanged { id: String, state: ai::ModelState },
+    /// The occurrences of these calendars changed; redraw views that show them.
+    CalendarChanged { calendar_ids: Vec<i64> },
+    /// A calendar sync ended. `error` is None when it reached the server.
+    CalendarSynced { calendar_id: i64, error: Option<String> },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -799,6 +803,8 @@ impl Core {
                 Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
                 Event::AgentActivity => CoreEvent::AgentActivity,
                 Event::SendFailed(message) => CoreEvent::SendFailed { message },
+                Event::CalendarsChanged(ids) => CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() },
+                Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
             };
             listener.on_event(event);
         });
