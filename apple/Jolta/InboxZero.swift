@@ -106,8 +106,8 @@ private final class SkyLayers: NSView {
     }
 }
 
-/// One of the two hills along the bottom: the far one higher and darker.
-private struct Hill: Shape {
+/// The outline of one of the two hills along the bottom: the far one higher.
+private struct Hill {
     let far: Bool
 
     func path(in rect: CGRect) -> Path {
@@ -126,7 +126,7 @@ private struct Hill: Shape {
 
 /// A third of the 70 night stars, spread over the top three quarters;
 /// each third has its own brightness.
-private struct Stars: Shape {
+private struct Stars {
     let band: Int
 
     func path(in rect: CGRect) -> Path {

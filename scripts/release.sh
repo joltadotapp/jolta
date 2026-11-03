@@ -9,7 +9,7 @@
 # publishes that on port 8448. Kite's old feed stays at the folder's root.
 # The appcast is signed with the EdDSA key in ~/jolta-devid; its public half is
 # SUPublicEDKey in apple/Jolta-Info.plist. Not notarized during the MVP.
-set -eu
+set -euo pipefail
 
 VERSION=${1:?usage: scripts/release.sh <version>}
 BUILD=$(date +%Y%m%d%H%M)
