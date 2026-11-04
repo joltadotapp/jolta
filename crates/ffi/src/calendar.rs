@@ -92,6 +92,18 @@ pub struct CalendarAccount {
     pub calendars: Vec<CalendarInfo>,
 }
 
+/// One calendar in an invitation card's Add to calendar menu.
+#[derive(uniffi::Record)]
+pub struct AddChoice {
+    pub calendar_id: i64,
+    pub name: String,
+    /// The address of the calendar's account.
+    pub account: String,
+    pub color: Option<String>,
+    /// The menu's default: the calendar last added to, else the default one.
+    pub is_default: bool,
+}
+
 #[derive(uniffi::Record)]
 pub struct CalendarList {
     pub accounts: Vec<CalendarAccount>,
@@ -337,6 +349,47 @@ impl Core {
         Ok(removed.text)
     }
 
+    /// The calendars an invitation card's Add to calendar menu offers,
+    /// its default marked.
+    pub async fn add_choices(&self, message_id: i64) -> Result<Vec<AddChoice>> {
+        let jolta = self.jolta.clone();
+        let choices = self
+            .runtime
+            .spawn(async move { cal::add::menu(&jolta, jolta_core::MessageId(message_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        Ok(choices
+            .into_iter()
+            .map(|c| AddChoice { calendar_id: c.calendar.0, name: c.name, account: c.account, color: c.color, is_default: c.default })
+            .collect())
+    }
+
+    /// Puts the invitation on a message into a calendar, the menu's default
+    /// without one, telling nobody. Returns the toast's words: "Added to Work."
+    pub async fn add_to_calendar(&self, message_id: i64, calendar_id: Option<i64>) -> Result<String> {
+        let jolta = self.jolta.clone();
+        let added = self
+            .runtime
+            .spawn(async move { cal::add::add(&jolta, jolta_core::MessageId(message_id), calendar_id.map(CalendarId)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.calendar_changed([added.calendar]);
+        Ok(added.text)
+    }
+
+    /// Writes the newer invitation on a message over the copy the user
+    /// added, telling nobody. Returns the toast's words: "Updated in Work."
+    pub async fn update_added_copy(&self, message_id: i64) -> Result<String> {
+        let jolta = self.jolta.clone();
+        let updated = self
+            .runtime
+            .spawn(async move { cal::add::update(&jolta, jolta_core::MessageId(message_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.calendar_changed([updated.calendar]);
+        Ok(updated.text)
+    }
+
     /// Answers an event from its detail; `time` names the occurrence, as
     /// for `calendar_event`.
     pub async fn answer_event(&self, event_id: i64, time: Option<OccurrenceTime>, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
@@ -533,12 +586,15 @@ impl Core {
     /// description document, as for `open_thread`.
     pub fn calendar_event(&self, event_id: i64, time: Option<OccurrenceTime>, app_css: String) -> Result<EventDetail> {
         let at = time.map(Bounds::try_from).transpose()?;
-        let (d, account) = self.jolta.store.read(|c| {
+        let (d, account, added) = self.jolta.store.read(|c| {
             let d = detail::open(c, EventId(event_id), at, tz::here(), &app_css)?;
             let account = d.calendar.account_id.map(|a| store::account(c, a)).transpose()?.map(|a| a.address).unwrap_or_default();
-            Ok((d, account))
+            let added = store::is_added_copy(c, d.calendar.id, &d.event.uid)?;
+            Ok((d, account, added))
         })?;
-        let can_answer = respond::can_answer(&account, &d.calendar, &d.event);
+        // A copy added for another account is answered from its mail, which
+        // tells the organizer; answering the copy would tell nobody.
+        let can_answer = !added && respond::can_answer(&account, &d.calendar, &d.event);
         let person = |p: cal::Person| PersonRecord { name: p.name, address: p.address };
         let e = d.event;
         Ok(EventDetail {

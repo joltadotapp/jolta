@@ -93,6 +93,12 @@ pub fn own_or_added(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
     }
 }
 
+/// Whether the event `uid` in `calendar` is a copy the user added for
+/// another account, which is answered from its invitation's mail.
+pub fn is_added_copy(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<bool> {
+    Ok(conn.query_row("SELECT 1 FROM added_copy WHERE calendar_id = ?1 AND uid = ?2", params![calendar, uid], |_| Ok(())).optional()?.is_some())
+}
+
 /// The calendar the user last added an invitation to.
 pub fn last_added_calendar(conn: &Connection) -> Result<Option<CalendarId>> {
     let id: Option<String> = conn.query_row("SELECT value FROM setting WHERE key = 'add_to_calendar'", [], |r| r.get(0)).optional()?;

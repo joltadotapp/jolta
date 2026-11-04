@@ -334,6 +334,14 @@ struct ReaderView: View {
         switch action {
         case "remove":
             model.removeCancelled(message: message)
+        case "update":
+            model.updateAddedCopy(message: message)
+        case "add":
+            if case .calendars = model.rsvpPanel { model.rsvpPanel = nil; return }
+            Task {
+                guard let frame = await reader.frame(of: ".jolta-add", message: message) else { return }
+                model.openAddMenu(message: message, at: frame)
+            }
         case "quiet":
             model.rsvpPanel = nil
             model.answerChoices.quiet.toggle()
@@ -355,6 +363,7 @@ struct ReaderView: View {
                 switch panel {
                 case .note: RsvpNotePanel(model: model, invitation: invitation)
                 case .scope: RsvpScopePanel(model: model, day: invitation.occurrenceDay ?? "this one")
+                case .calendars: AddCalendarPanel(model: model, message: model.rsvpMessage ?? invitation.messageId)
                 }
             }
             .offset(x: max(8, anchor.minX - 6), y: anchor.maxY + 6)
@@ -585,6 +594,12 @@ enum ReaderStyle {
       transition: background-color .16s ease; }
     .jolta-remove:hover { background: var(--fill); }
     .jolta-sending .jolta-remove { animation: jolta-sending .7s ease-in-out infinite alternate; }
+    .jolta-add, .jolta-update { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 10px;
+      border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
+      cursor: default; transition: background-color .16s ease; }
+    .jolta-add:hover, .jolta-update:hover { background: var(--fill); }
+    .jolta-add + .jolta-join, .jolta-update + .jolta-join { margin-left: auto; }
+    .jolta-sending .jolta-add, .jolta-sending .jolta-update { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-rsvp { display: inline-flex; gap: 6px; }
     .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
       border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;

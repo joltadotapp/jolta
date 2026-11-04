@@ -225,6 +225,15 @@ struct MessageList: NSViewRepresentable {
                 if event.keyCode == 53 { model.palette = nil; model.showsHelp = false }
                 return true
             }
+            if case .calendars = model.rsvpPanel {
+                switch event.keyCode {
+                case 125: model.moveAddHighlight(by: 1)
+                case 126: model.moveAddHighlight(by: -1)
+                case 36, 76: if let message = model.rsvpMessage { model.addToCalendar(message: message, calendar: model.addHighlight) }
+                default: model.rsvpPanel = nil
+                }
+                return true
+            }
             if case .scope = model.rsvpPanel {
                 switch event.keyCode {
                 case 125, 126: model.answerChoices.occurrenceOnly.toggle()

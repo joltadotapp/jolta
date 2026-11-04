@@ -18,10 +18,12 @@ struct AnswerChoices: Equatable {
 enum RsvpPanel: Equatable {
     case note(CGRect)
     case scope(CGRect)
+    /// The Add to calendar menu.
+    case calendars(CGRect)
 
     var anchor: CGRect {
         switch self {
-        case .note(let r), .scope(let r): r
+        case .note(let r), .scope(let r), .calendars(let r): r
         }
     }
 }

@@ -79,6 +79,17 @@ fn event(c: &EventCard) -> String {
             escape(&what)
         );
     }
+    if let Some(a) = &c.adding {
+        let _ = write!(answers, "<a class=\"jolta-add\" href=\"x-rsvp:{}/add\" title=\"Put this meeting in one of your calendars without telling anyone\">Add to calendar{CHEVRON}</a>", a.message.0);
+    }
+    if let Some(u) = &c.updating {
+        let _ = write!(
+            answers,
+            "<a class=\"jolta-update\" href=\"x-rsvp:{}/update\" title=\"Write this version into {} without telling anyone\">Update in your calendar</a>",
+            u.message.0,
+            escape(&u.calendar)
+        );
+    }
     let join = c.join.as_ref().map(join).unwrap_or_default();
     if !answers.is_empty() || !join.is_empty() {
         let _ = write!(h, "<div class=\"jolta-invite-actions\">{answers}{join}</div>");
@@ -313,6 +324,18 @@ mod tests {
         assert!(html.contains("<div class=\"jolta-invite-note jolta-warn\">You&#32;haven&apos;t"));
         assert!(html.contains("jolta-strip-busy jolta-conflict"));
         assert!(html.contains("<span class=\"jolta-invite-answer\">Not answered</span>"), "no buttons on this card, so the badge says it");
+    }
+
+    #[test]
+    fn add_and_update_are_links_the_app_handles() {
+        use crate::calendar::add::{Adding, Updating};
+        let message = crate::MessageId(7);
+        let add = card(&Card::Event(EventCard { adding: Some(Adding { message, uid: "u".into() }), ..hostile() }));
+        assert!(add.contains("<a class=\"jolta-add\" href=\"x-rsvp:7/add\""), "{add}");
+        let calendar = "<b>Work</b>".to_string();
+        let update = card(&Card::Event(EventCard { updating: Some(Updating { message, uid: "u".into(), calendar }), ..hostile() }));
+        assert!(update.contains("href=\"x-rsvp:7/update\"") && update.contains(">Update in your calendar</a>"), "{update}");
+        assert!(!update.contains("<b>Work"), "the calendar's name is escaped");
     }
 
     #[test]
