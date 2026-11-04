@@ -41,6 +41,8 @@ impl CoreListener for Events {
             CoreEvent::SyncFinished { .. } => "synced",
             CoreEvent::ActionFailed { .. } => "action failed",
             CoreEvent::SendFailed { .. } => "send failed",
+            CoreEvent::CalendarChanged { .. } => "calendar changed",
+            CoreEvent::CalendarSynced { .. } => "calendar synced",
             _ => "other",
         };
         self.0.lock().unwrap().push(name);

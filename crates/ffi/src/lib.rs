@@ -16,6 +16,7 @@ use jolta_core::{AccountId, Jolta, MailboxId, MessageId, ThreadId, reader, searc
 uniffi::setup_scaffolding!();
 
 mod ai;
+pub mod calendar;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
@@ -50,6 +51,18 @@ pub struct AccountInfo {
     pub provider: String,
     pub address: String,
     pub display_name: String,
+}
+
+impl From<jolta_core::Account> for AccountInfo {
+    fn from(a: jolta_core::Account) -> Self {
+        AccountInfo {
+            id: a.id.0,
+            kind: a.kind.to_string(),
+            provider: a.provider_label().to_string(),
+            address: a.address,
+            display_name: a.display_name,
+        }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -515,13 +528,7 @@ impl SignIn {
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }
-                Ok::<_, jolta_core::Error>(AccountInfo {
-                    id: account.id.0,
-                    kind: account.kind.to_string(),
-                    provider: account.provider_label().to_string(),
-                    address: account.address,
-                    display_name: account.display_name,
-                })
+                Ok::<_, jolta_core::Error>(AccountInfo::from(account))
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
@@ -614,13 +621,7 @@ impl Core {
             .store
             .read(store::accounts)?
             .into_iter()
-            .map(|a| AccountInfo {
-                id: a.id.0,
-                kind: a.kind.to_string(),
-                provider: a.provider_label().to_string(),
-                address: a.address,
-                display_name: a.display_name,
-            })
+            .map(AccountInfo::from)
             .collect())
     }
 
