@@ -15,7 +15,7 @@ use super::dav::{self, APPLE, CALDAV, CALENDARSERVER, DAV, MultiStatus, href_key
 use super::{Change, Gone, Known, SyncBatch, http_client, http_error, vanished};
 use crate::calendar::remove;
 use crate::calendar::rsvp::{self, Rsvp, Target};
-use crate::calendar::{Access, Calendar, ical};
+use crate::calendar::{Access, Calendar, EventData, ical};
 use crate::store::RemoteCalendar;
 use crate::{Account, Error, Result, secrets};
 
@@ -435,63 +435,88 @@ impl CalDav {
     /// (RFC 6638) replies for an attendee whose copy loses an event, so the
     /// copy first gets SCHEDULE-AGENT=CLIENT on its ORGANIZER, which stops
     /// that. A server that doesn't schedule ignores it. A copy that changed
-    /// since Jolta read it may have been reinstated, so a 412 stops there.
+    /// since Jolta read it may have been reinstated, so a 412, or a copy
+    /// fetched again that isn't the version Jolta knows, stops there. Every
+    /// write carries an ETag; without one the copy is left alone.
     pub async fn remove(&self, calendar: &Calendar, target: &Target) -> Result<Gone> {
         let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
         let url = join(&collection, &path_escape(&target.event.remote_id))?;
-        let uid = &target.event.data.uid;
+        let known = &target.event.data;
         let here = crate::calendar::tz::here();
-        let mut current = cached(&target.event);
-        for _ in 0..3 {
-            let (text, etag) = match current.take() {
-                Some(stored) => stored,
-                None => {
-                    let reply = self.exchange("GET", &url, &[], "").await?;
-                    match reply.status {
-                        200 => (reply.body, reply.etag),
-                        404 | 410 => return Ok(Gone::Already),
-                        status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
-                    }
-                }
-            };
-            let edited = match &target.occurrence {
-                Some(o) => match remove::without_occurrence(&text, uid, &o.recurrence_id, here)? {
-                    Some(edited) => Some(edited),
-                    None => return Ok(Gone::Already),
-                },
-                None => remove::quiet(&text, uid),
-            };
-            if let Some(edited) = edited {
-                let mut headers = vec![("Content-Type", "text/calendar; charset=utf-8")];
-                if let Some(etag) = &etag {
-                    headers.push(("If-Match", etag));
-                }
-                let reply = self.exchange("PUT", &url, &headers, &edited).await?;
-                match reply.status {
-                    200..300 if target.occurrence.is_some() => {
-                        let me = self.me().await;
-                        let events = ical::read(&edited, &me)?;
-                        let remote_id = target.event.remote_id.clone();
-                        return Ok(Gone::Deleted(Some(Change::Upsert { remote_id, etag: reply.etag, events, raw: Some(edited.into_bytes()) })));
-                    }
-                    // The DELETE goes with the ETag of what was just written.
-                    200..300 => current = reply.etag.map(|etag| (edited, Some(etag))),
-                    412 => return Ok(Gone::Changed),
-                    404 | 410 => return Ok(Gone::Already),
-                    status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
-                }
-                continue;
+        let (text, etag) = match cached(&target.event) {
+            Some((text, Some(etag))) => (text, etag),
+            _ => match self.versioned(&url).await? {
+                None => return Ok(Gone::Already),
+                Some((text, _)) if !same_version(known, &text, here) => return Ok(Gone::Changed),
+                Some(found) => found,
+            },
+        };
+        let edited = match &target.occurrence {
+            Some(o) => match remove::without_occurrence(&text, &known.uid, &o.recurrence_id, here)? {
+                Some(edited) => Some(edited),
+                None => return Ok(Gone::Already),
+            },
+            None => remove::quiet(&text, &known.uid),
+        };
+        let Some(edited) = edited else { return self.delete(&url, &etag).await };
+        let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag.as_str())];
+        let reply = self.exchange("PUT", &url, &headers, &edited).await?;
+        match reply.status {
+            200..300 if target.occurrence.is_some() => {
+                let events = ical::read(&edited, &self.me().await)?;
+                let remote_id = target.event.remote_id.clone();
+                return Ok(Gone::Deleted(Some(Change::Upsert { remote_id, etag: reply.etag, events, raw: Some(edited.into_bytes()) })));
             }
-            let headers: Vec<(&str, &str)> = etag.as_deref().map(|e| ("If-Match", e)).into_iter().collect();
-            let reply = self.exchange("DELETE", &url, &headers, "").await?;
-            match reply.status {
-                200..300 | 404 | 410 => return Ok(Gone::Deleted(None)),
-                412 => return Ok(Gone::Changed),
-                status => return Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
-            }
+            200..300 => {}
+            412 => return Ok(Gone::Changed),
+            404 | 410 => return Ok(Gone::Already),
+            status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
         }
-        Err(Error::Other(format!("CalDAV {url} kept changing while Jolta removed it; try again.")))
+        // A server that stored something else than what was sent gives no
+        // ETag (RFC 4791 section 5.3.4), and someone may write in between.
+        let etag = match reply.etag {
+            Some(etag) => etag,
+            None => match self.versioned(&url).await? {
+                None => return Ok(Gone::Already),
+                Some((text, _)) if !same_version(known, &text, here) => return Ok(Gone::Changed),
+                Some((_, etag)) => etag,
+            },
+        };
+        self.delete(&url, &etag).await
     }
+
+    /// The resource and its ETag, None when it is gone. A server that gives
+    /// no ETag leaves Jolta no way to write only over this version.
+    async fn versioned(&self, url: &Url) -> Result<Option<(String, String)>> {
+        let reply = self.exchange("GET", url, &[], "").await?;
+        match (reply.status, reply.etag) {
+            (200, Some(etag)) => Ok(Some((reply.body, etag))),
+            (200, None) => Err(Error::Other("Your calendar server gives this meeting no version tag (ETag), so Jolta can't tell whether it changed and leaves it alone. Remove it in another calendar app.".into())),
+            (404 | 410, _) => Ok(None),
+            (status, _) => Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
+        }
+    }
+
+    async fn delete(&self, url: &Url, etag: &str) -> Result<Gone> {
+        let reply = self.exchange("DELETE", url, &[("If-Match", etag)], "").await?;
+        match reply.status {
+            200..300 | 404 | 410 => Ok(Gone::Deleted(None)),
+            412 => Ok(Gone::Changed),
+            status => Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
+        }
+    }
+}
+
+/// Whether `text` holds the version of the event `known` that Jolta read:
+/// the same SEQUENCE, which an organizer's change raises (RFC 5546 section
+/// 2.1.4), and the same status.
+fn same_version(known: &EventData, text: &str, here: chrono_tz::Tz) -> bool {
+    let same_id = |e: &EventData| match (&e.recurrence_id, &known.recurrence_id) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.names(b, here),
+        _ => false,
+    };
+    ical::read(text, &[]).is_ok_and(|events| events.iter().any(|e| e.uid == known.uid && same_id(e) && e.sequence == known.sequence && e.status == known.status))
 }
 
 /// A stored resource path, decoded by `href_key`, escaped again for a URL.
@@ -624,23 +649,37 @@ fn cached(event: &rsvp::Stored) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
 
-    /// A copy that changed on the server since the last sync may have been
-    /// reinstated: the 412 stops the removal, with no second try.
-    #[tokio::test]
-    async fn a_copy_changed_since_the_sync_is_left_alone() {
+    /// Meeting `a` at a SEQUENCE, as the server stores it.
+    fn meeting(sequence: i64) -> String {
+        format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSEQUENCE:{sequence}\r\n\
+             ORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    /// A CalDAV server on localhost that answers each request in turn with
+    /// a status, an ETag or none, and for a GET meeting `a` at a SEQUENCE.
+    /// It returns each request's first line, with its If-Match when it has one.
+    async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<i64>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let mut seen = Vec::new();
-            // A retry would find the meeting reinstated and delete it.
-            for answer in ["412 Precondition Failed", "200 OK", "204 No Content", "204 No Content"] {
+            for (status, etag, sequence) in answers {
                 let Ok(Ok((mut socket, _))) = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await else { break };
                 let mut request = vec![0; 16384];
                 let n = socket.read(&mut request).await.unwrap();
-                seen.push(String::from_utf8_lossy(&request[..n]).lines().next().unwrap_or_default().to_string());
-                let body = if answer == "200 OK" { "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nORGANIZER:mailto:ann@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n" } else { "" };
-                let reply = format!("HTTP/1.1 {answer}\r\nETag: \"2\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let request = String::from_utf8_lossy(&request[..n]).to_string();
+                let first = request.lines().next().unwrap_or_default().trim_end_matches(" HTTP/1.1").to_string();
+                let guard = request.lines().find_map(|l| l.to_ascii_lowercase().starts_with("if-match:").then(|| l[9..].trim().to_string()));
+                seen.push(match guard {
+                    Some(etag) => format!("{first} If-Match {etag}"),
+                    None => first,
+                });
+                let body = sequence.map(meeting).unwrap_or_default();
+                let etag = etag.map(|e| format!("ETag: {e}\r\n")).unwrap_or_default();
+                let reply = format!("HTTP/1.1 {status}\r\n{etag}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(reply.as_bytes()).await.unwrap();
             }
             seen
@@ -665,17 +704,50 @@ mod tests {
             refresh: None,
             synced: None,
         };
-        let text = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nORGANIZER:mailto:ann@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        let stored = rsvp::Stored {
-            id: crate::calendar::EventId(1),
-            remote_id: "a.ics".into(),
-            etag: Some("\"1\"".into()),
-            raw: Some(text.as_bytes().to_vec()),
-            data: crate::calendar::EventData::new("a", crate::calendar::Span::AllDay { start: chrono::NaiveDate::MIN, end: chrono::NaiveDate::MIN }),
-        };
-        let target = Target { event: stored, occurrence: None, me: "me@example.com".into() };
-        assert_eq!(dav.remove(&calendar, &target).await.unwrap(), Gone::Changed);
-        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics HTTP/1.1"], "no GET, PUT or DELETE after the 412");
+        (dav, calendar, server)
+    }
+
+    /// The stored copy of meeting `a` at SEQUENCE 0.
+    fn stored(etag: Option<&str>) -> Target {
+        let text = meeting(0);
+        let data = ical::read(&text, &["me@example.com".into()]).unwrap().remove(0);
+        let event = rsvp::Stored { id: crate::calendar::EventId(1), remote_id: "a.ics".into(), etag: etag.map(str::to_string), raw: Some(text.into_bytes()), data };
+        Target { event, occurrence: None, me: "me@example.com".into() }
+    }
+
+    /// A copy that changed on the server since the last sync may have been
+    /// reinstated: the 412 stops the removal, with no second try.
+    #[tokio::test]
+    async fn a_copy_changed_since_the_sync_is_left_alone() {
+        let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", Some("\"2\""), None), ("200 OK", Some("\"2\""), Some(1)), ("204 No Content", None, None)]).await;
+        assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Changed);
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\""], "no GET, PUT or DELETE after the 412");
+    }
+
+    /// A server that changes what it stores answers the PUT without an
+    /// ETag; the copy fetched again is deleted only while it is the version
+    /// Jolta read.
+    #[tokio::test]
+    async fn a_put_without_an_etag_deletes_only_the_same_version() {
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(1)), ("204 No Content", None, None)]).await;
+        assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Changed);
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics"], "the organizer changed it in between");
+
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(0)), ("204 No Content", None, None)]).await;
+        assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Deleted(None));
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics", "DELETE /cal/a.ics If-Match \"3\""]);
+    }
+
+    #[tokio::test]
+    async fn a_copy_without_an_etag_is_never_written() {
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", None, Some(0)), ("204 No Content", None, None), ("204 No Content", None, None)]).await;
+        let err = dav.remove(&calendar, &stored(None)).await.unwrap_err();
+        assert!(err.to_string().contains("no version tag (ETag)"), "{err}");
+        assert_eq!(server.await.unwrap(), ["GET /cal/a.ics"]);
+
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"4\""), Some(2)), ("204 No Content", None, None)]).await;
+        assert_eq!(dav.remove(&calendar, &stored(None)).await.unwrap(), Gone::Changed, "newer than the stored copy");
+        assert_eq!(server.await.unwrap(), ["GET /cal/a.ics"]);
     }
 
     #[test]
