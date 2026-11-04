@@ -183,6 +183,11 @@ pub async fn refresh_occurrences(jolta: &Jolta, now: DateTime<Utc>, here: Tz) ->
         return Ok(Vec::new());
     }
     let keys = jolta.store.read_async(store::series_keys).await?;
+    // Without events there is nothing to rebuild, and a mail-only user's
+    // store gets no calendar write at every start.
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
     for batch in keys.chunks(REBUILD_BATCH) {
         let batch = batch.to_vec();
         jolta
