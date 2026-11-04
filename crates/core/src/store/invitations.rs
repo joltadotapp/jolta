@@ -2,6 +2,8 @@
 //! about them: the copy in the user's calendars and whether the user ever
 //! wrote to the sender.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -222,6 +224,7 @@ pub enum InvitationState {
 /// One `invitation` row with what its state depends on.
 struct Named {
     message: MessageId,
+    thread: ThreadId,
     account: AccountId,
     receiver: String,
     uid: String,
@@ -232,33 +235,45 @@ struct Named {
     ends: i64,
 }
 
-const NAMED: &str = "SELECT i.message_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends
+const NAMED: &str = "SELECT i.message_id, m.thread_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends
      FROM invitation i JOIN message m ON m.id = i.message_id JOIN account a ON a.id = m.account_id";
 
 fn named(r: &Row) -> rusqlite::Result<Named> {
     Ok(Named {
         message: r.get(0)?,
-        account: r.get(1)?,
-        receiver: r.get(2)?,
-        uid: r.get(3)?,
-        recurrence_id: r.get(4)?,
-        sequence: r.get(5)?,
-        method: r.get(6)?,
-        organizer: r.get(7)?,
-        ends: r.get(8)?,
+        thread: r.get(1)?,
+        account: r.get(2)?,
+        receiver: r.get(3)?,
+        uid: r.get(4)?,
+        recurrence_id: r.get(5)?,
+        sequence: r.get(6)?,
+        method: r.get(7)?,
+        organizer: r.get(8)?,
+        ends: r.get(9)?,
     })
 }
 
-/// The invitation a conversation shows: its newest message from the
-/// organizer, such as a request, an update or a cancellation, else its
-/// newest reply. A message's whole event or series comes before its
-/// changed occurrences.
-const THREAD: &str = "WHERE m.thread_id = ?1 ORDER BY i.method IN ('REPLY', 'COUNTER', 'REFRESH'), m.id DESC, i.recurrence_id != '' LIMIT 1";
+/// The invitations of a page of conversations, a JSON array of thread ids,
+/// in the order that puts the one each conversation shows first: its newest
+/// message from the organizer, such as a request, an update or a
+/// cancellation, else its newest reply, and a message's whole event or
+/// series before its changed occurrences. One statement for the page: a
+/// statement per row cost 18 µs each, mostly with nothing to find.
+const PAGE: &str = "WHERE m.thread_id IN (SELECT value FROM json_each(?1))
+     ORDER BY m.thread_id, i.method IN ('REPLY', 'COUNTER', 'REFRESH'), m.id DESC, i.recurrence_id != ''";
 
-/// The state of the invitation a conversation shows, if it has one.
-pub fn thread_invitation(conn: &Connection, thread: ThreadId, now: DateTime<Utc>, here: Tz) -> Result<Option<InvitationState>> {
-    let shown = conn.prepare_cached(&format!("{NAMED} {THREAD}"))?.query_row([thread], named).optional()?;
-    shown.map(|n| state(conn, &n, now, here)).transpose()
+/// The state of the invitation each of these conversations shows, for those
+/// that have one.
+pub fn thread_invitations(conn: &Connection, threads: &[ThreadId], now: DateTime<Utc>, here: Tz) -> Result<HashMap<ThreadId, InvitationState>> {
+    let ids = serde_json::to_string(&threads.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers");
+    let rows = conn.prepare_cached(&format!("{NAMED} {PAGE}"))?.query_map([ids], named)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = HashMap::new();
+    for n in rows {
+        if !out.contains_key(&n.thread) {
+            out.insert(n.thread, state(conn, &n, now, here)?);
+        }
+    }
+    Ok(out)
 }
 
 /// The messages with a request the user still has to answer, for
@@ -460,7 +475,7 @@ mod tests {
             .store
             .read(|c| {
                 let thread = c.query_row("SELECT thread_id FROM message WHERE id = ?1", [message], |r| r.get(0))?;
-                thread_invitation(c, thread, now, chrono_tz::Europe::Brussels)
+                Ok(thread_invitations(c, &[thread], now, chrono_tz::Europe::Brussels)?.get(&thread).copied())
             })
             .unwrap()
     }
@@ -541,17 +556,17 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_finds_its_invitation_through_indexes() {
+    fn a_page_finds_its_invitations_through_indexes() {
         let (jolta, _) = jolta("state-plan");
         let plans: Vec<String> = jolta
             .store
             .read(|c| {
-                let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {NAMED} {THREAD}"))?;
-                let rows = stmt.query_map([1], |r| r.get::<_, String>(3))?;
+                let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {NAMED} {PAGE}"))?;
+                let rows = stmt.query_map(["[1, 2]"], |r| r.get::<_, String>(3))?;
                 Ok(rows.collect::<rusqlite::Result<_>>()?)
             })
             .unwrap();
-        assert!(!plans.iter().any(|d| d.starts_with("SCAN")), "{plans:#?}");
+        assert!(!plans.iter().any(|d| d.starts_with("SCAN") && !d.starts_with("SCAN json_each")), "only the page's ids are read through: {plans:#?}");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

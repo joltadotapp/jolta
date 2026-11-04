@@ -356,18 +356,19 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             let found = jolta_core::engine::scan_invitations(jolta)?;
             println!("{found} bodies read now held invitations ({:.1} s).", t.elapsed().as_secs_f64());
             let (now, here) = (Utc::now(), tz::here());
-            let t = Instant::now();
-            let states = jolta.store.read(|c| {
+            let (threads, states, ms) = jolta.store.read(|c| {
                 let mut stmt = c.prepare("SELECT DISTINCT m.thread_id FROM invitation i JOIN message m ON m.id = i.message_id")?;
                 let threads: Vec<jolta_core::ThreadId> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-                threads.into_iter().map(|thread| store::thread_invitation(c, thread, now, here)).collect::<jolta_core::Result<Vec<_>>>()
+                let t = Instant::now();
+                let states = store::thread_invitations(c, &threads, now, here)?;
+                Ok((threads.len(), states, t.elapsed().as_secs_f64() * 1000.0))
             })?;
-            let each = t.elapsed().as_secs_f64() * 1000.0 / states.len().max(1) as f64;
+            let each = ms / threads.max(1) as f64;
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            for s in states.iter().flatten() {
+            for s in states.values() {
                 *counts.entry(format!("{s:?}")).or_default() += 1;
             }
-            println!("{} conversations with an invitation, {each:.3} ms each:", states.len());
+            println!("{threads} conversations with an invitation, {each:.3} ms each:");
             for (state, n) in counts {
                 println!("  {n:>6}  {state}");
             }

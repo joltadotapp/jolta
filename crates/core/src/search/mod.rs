@@ -376,7 +376,9 @@ pub fn query_messages(conn: &Connection, q: &Query) -> Result<Vec<MessageId>> {
 }
 
 pub fn thread_rows(conn: &Connection, hits: &[(ThreadId, MessageId)]) -> Result<Vec<ThreadRow>> {
-    hits.iter().map(|&(t, m)| thread_row(conn, t, m)).collect()
+    let threads: Vec<ThreadId> = hits.iter().map(|h| h.0).collect();
+    let invitations = crate::store::thread_invitations(conn, &threads, chrono::Utc::now(), tz::here())?;
+    hits.iter().map(|&(t, m)| thread_row(conn, t, m, invitations.get(&t).copied())).collect()
 }
 
 /// Number of threads matching the query.
@@ -386,7 +388,7 @@ pub fn query_count(conn: &Connection, q: &Query) -> Result<u32> {
     Ok(conn.prepare_cached(&text)?.query_row(params_from_iter(sql.params.iter()), |r| r.get(0))?)
 }
 
-fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result<ThreadRow> {
+fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId, invitation: Option<InvitationState>) -> Result<ThreadRow> {
     let mut row = conn.prepare_cached(
         "SELECT account_id, date, from_name, from_addr, subject, snippet,
                 EXISTS (SELECT 1 FROM vip v WHERE v.address = message.from_addr)
@@ -408,10 +410,9 @@ fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result
             has_attachments: false,
             vip: r.get(6)?,
             needs_reply: false,
-            invitation: None,
+            invitation,
         })
     })?;
-    row.invitation = crate::store::thread_invitation(conn, thread, chrono::Utc::now(), tz::here())?;
     // The conversation's newest message decides, as for `is:needs-reply`.
     row.needs_reply = conn
         .prepare_cached(&format!(
