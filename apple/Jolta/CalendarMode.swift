@@ -121,7 +121,8 @@ struct CalendarHeader: View {
                 }
             }
             .fixedSize()
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel([title.0, title.1].filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("calendar-title")
             if let next = cal.nextMeeting {
                 NextMeetingLine(next: next, now: cal.now)
@@ -335,6 +336,7 @@ struct CalendarRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .accessibilityLabel("\(c.name), \(c.shown ? "shown" : "hidden")")
+        .accessibilityValue(entry.number.map { "key \($0)" } ?? "")
         .accessibilityIdentifier("calendar-\(c.name)")
         .help(c.shown ? "Hide \(c.name)" : "Show \(c.name)")
     }

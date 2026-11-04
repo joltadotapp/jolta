@@ -371,10 +371,10 @@ final class DayStrip: CanvasView {
     override func accessibilityChildren() -> [Any]? {
         if elements == nil {
             elements = content.lanes.filter { $0.lane < Self.maxLanes }.map { item in
-                let event = item.event
-                let element = EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)") { [weak self] in self?.open(event) }
+                let event = item.event, rect = box(item)
+                let element = EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)",
+                                           place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.open(event) }
                 element.setAccessibilityParent(self)
-                element.setAccessibilityFrameInParentSpace(box(item))
                 return element
             }
         }
@@ -623,10 +623,13 @@ final class HourCanvas: CanvasView {
     override func accessibilityChildren() -> [Any]? {
         if elements == nil {
             elements = content.placed.map { p in
-                let event = p.event
-                let element = EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)") { [weak self] in self?.open(event) }
+                let event = p.event, rect = box(p)
+                let element = EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)",
+                                           place: { [weak self] in
+                                               guard let self else { return .zero }
+                                               return self.screenRect(rect.offsetBy(dx: 0, dy: -self.frame.minY))
+                                           }) { [weak self] in self?.open(event) }
                 element.setAccessibilityParent(self)
-                element.setAccessibilityFrameInParentSpace(box(p).offsetBy(dx: 0, dy: -frame.minY))
                 return element
             }
         }
@@ -634,22 +637,38 @@ final class HourCanvas: CanvasView {
     }
 }
 
-/// One event for VoiceOver; pressing it opens the event.
+/// One event for VoiceOver; pressing it opens the event. Its frame is
+/// worked out from its view when asked, so scrolling and window moves keep it right.
 nonisolated final class EventElement: NSAccessibilityElement {
     private let open: @MainActor @Sendable () -> Void
+    private let place: @MainActor @Sendable () -> CGRect
 
-    init(label: String, identifier: String, open: @escaping @MainActor @Sendable () -> Void) {
+    init(label: String, identifier: String, place: @escaping @MainActor @Sendable () -> CGRect, open: @escaping @MainActor @Sendable () -> Void) {
         self.open = open
+        self.place = place
         super.init()
         setAccessibilityRole(.button)
         setAccessibilityLabel(label)
         setAccessibilityIdentifier(identifier)
     }
 
+    override func accessibilityFrame() -> NSRect {
+        let place = self.place
+        return MainActor.assumeIsolated { place() }
+    }
+
     override func accessibilityPerformPress() -> Bool {
         let open = self.open
         MainActor.assumeIsolated { open() }
         return true
+    }
+}
+
+extension NSView {
+    /// A rectangle in this view as screen coordinates, for accessibility.
+    func screenRect(_ rect: CGRect) -> CGRect {
+        guard let window else { return .zero }
+        return window.convertToScreen(convert(rect, to: nil))
     }
 }
 
