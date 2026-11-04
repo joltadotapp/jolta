@@ -382,9 +382,16 @@ final class AppModel {
         }
     }
 
-    func saveSections(_ list: [SectionInfo]) throws {
+    /// Saves the sections and returns them as stored, read right away:
+    /// `reloadAccounts` lands later, and a page that read `sections` before
+    /// it did dropped the row being edited.
+    @discardableResult
+    func saveSections(_ list: [SectionInfo]) throws -> [SectionInfo] {
         try core.setSections(sections: list)
+        let stored = try core.sections()
+        sections = stored
         reloadAccounts()
+        return stored
     }
 
     /// Cycles the split-inbox tabs: Everything, then each section.

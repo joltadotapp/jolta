@@ -209,6 +209,31 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// Return in a new section's query field saves it. The page used to read
+    /// the sections before they reloaded, drop the new row under the focused
+    /// field, and crash (2026-11-04, a "Starred" section with is:starred).
+    func testAddSectionWithReturn() throws {
+        let app = try launch()
+        app.typeKey(",", modifierFlags: .command)
+        let page = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Sections' OR value == 'Sections'")).firstMatch
+        XCTAssertTrue(page.waitForExistence(timeout: 5), "settings lists the Sections page")
+        page.click()
+        app.buttons["Add Section"].firstMatch.click()
+        let name = app.textFields.matching(NSPredicate(format: "value == 'New section'")).firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 5), "Add Section adds a row")
+        name.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("Starred")
+        let query = app.textFields.matching(NSPredicate(format: "value == 'from:'")).firstMatch
+        query.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("is:starred")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.buttons["Revert"].waitForNonExistence(timeout: 5), "Return saves the sections")
+        XCTAssertEqual(app.state, .runningForeground, "Jolta is still running")
+        XCTAssertTrue(app.textFields.matching(NSPredicate(format: "value == 'Starred'")).firstMatch.exists, "the saved section stays on the page")
+    }
+
     private func waitUntil(_ done: () -> Bool) -> Bool {
         let deadline = Date() + 5
         while Date() < deadline {

@@ -29,7 +29,8 @@ struct SectionsSettings: View {
                 }
             } accessory: {
                 Button("Add Section") {
-                    sections.append(SectionInfo(id: -Int64(sections.count + 1), name: "New section", query: "from:"))
+                    let unused = min(0, sections.map(\.id).min() ?? 0) - 1
+                    sections.append(SectionInfo(id: unused, name: "New section", query: "from:"))
                 }
             }
         }
@@ -37,8 +38,7 @@ struct SectionsSettings: View {
             if sections != saved || error != nil {
                 SaveBar(message: error, failed: true, revert: { sections = saved; error = nil }) {
                     do {
-                        try model.saveSections(sections)
-                        saved = model.sections
+                        saved = try model.saveSections(sections)
                         sections = saved
                         error = nil
                     } catch {
