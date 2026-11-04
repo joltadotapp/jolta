@@ -138,8 +138,17 @@ pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurre
            notify = excluded.notify, reply = excluded.reply",
         params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), given.answer, given.note, given.notify, reply],
     )?;
-    // A whole series answered again replaces what was said for single occurrences.
+    // A whole series answered again replaces what was said for single
+    // occurrences, and takes back their replies still waiting.
     if recurrence_id.is_none() {
+        let mut stmt = conn.prepare(
+            "SELECT o.id FROM invitation_answer a JOIN outbox o ON o.id = a.reply
+             WHERE a.account_id = ?1 AND a.uid = ?2 AND a.recurrence_id != '' AND o.state = 'queued'",
+        )?;
+        let waiting = stmt.query_map(params![account, uid], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in waiting {
+            super::cancel_send(conn, id)?;
+        }
         conn.execute("DELETE FROM invitation_answer WHERE account_id = ?1 AND uid = ?2 AND recurrence_id != ''", params![account, uid])?;
     }
     Ok(())

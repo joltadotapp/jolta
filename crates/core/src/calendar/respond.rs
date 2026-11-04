@@ -561,6 +561,22 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    #[test]
+    fn a_series_answer_takes_back_an_occurrences_waiting_reply() {
+        let (j, _) = jolta("respond-series-over-occurrence");
+        let raw = "From: ann@example.com\r\nTo: me@example.com\r\nSubject: s\r\nMessage-ID: <weekly@example.com>\r\n\
+                   Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:weekly\r\n\
+                   DTSTART:20261112T100000Z\r\nDTEND:20261112T110000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:Weekly\r\n\
+                   ORGANIZER;CN=Ann:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let message = import(&j, raw.as_bytes());
+        run(&j, request(message, Answer::Accept, None, true, true)).unwrap();
+        assert_eq!(replies(&j).len(), 1, "the occurrence's Accept is waiting");
+        run(&j, request(message, Answer::Decline, None, false, false)).unwrap();
+        assert!(replies(&j).is_empty(), "declining the series without a reply takes the occurrence's Accept back");
+        assert_eq!(kept_answers(&j), [(String::new(), "declined".to_string())]);
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// Two of the user's accounts are invited, the other one listed first.
     /// The reply comes from the account the invitation came to and answers
     /// for that account alone.
