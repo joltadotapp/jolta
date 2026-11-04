@@ -258,9 +258,15 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let stored = copy(None)?;
     let seen = update::Seen { conn, blobs: cx.blobs, account: cx.account, message: cx.message, sender: cx.sender, me: cx.me, here: cx.here };
     let history = update::history(&seen, invitation)?;
+    // A series' message shows one occurrence; the account's calendar may
+    // hold that occurrence cancelled, which the list counts as the card does.
+    let occurrence_cancelled = sent.recurrence_id.is_none()
+        && at.is_some()
+        && store::stored_event(conn, &shown.uid, at.as_ref(), Some(cx.account), cx.here)?.is_some_and(|c| update::cancels(&c, sent.sequence));
+    let newer = history.newer.or(occurrence_cancelled.then_some(Method::Cancel));
     // An older version only points to the newer one: its time, link and
     // answers are out of date.
-    let current = history.newer.is_none();
+    let current = newer.is_none();
     // What changed matters to an update, not to a cancellation.
     let update = current && matches!(method, Method::Request | Method::Add);
     let changes = if update { changes(&history.before, described, cx) } else { Changes::default() };
@@ -274,7 +280,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         Method::Add => notes.push(Note { text: "Adds dates to a repeating event".into(), warn: false }),
         Method::Request | Method::Publish | Method::Reply => {}
     }
-    match history.newer {
+    match newer {
         Some(Method::Cancel) => notes.push(Note { text: "The organizer has since cancelled this meeting".into(), warn: false }),
         Some(_) => notes.push(Note { text: "There's a newer version of this invitation".into(), warn: false }),
         None if update && changes.is_empty() => notes.extend(retitled(&history.before, sent)),

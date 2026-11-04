@@ -1054,15 +1054,17 @@ mod tests {
                 if let Some(own) = &mut own {
                     answer(own, Response::Accepted);
                 }
+                let own_cancelled = own.clone().map(|o| EventData { status: crate::calendar::EventStatus::Cancelled, ..o });
                 let copies: Vec<(&str, Vec<EventData>)> = [
                     ("no copy", vec![]),
                     ("the event's copy", vec![whole.clone()]),
                     ("the occurrence's copy", own.iter().cloned().collect()),
                     ("both copies", [whole.clone()].into_iter().chain(own.clone()).collect()),
                     ("the event's cancelled copy and the occurrence's", [whole_cancelled.clone()].into_iter().chain(own.clone()).collect()),
+                    ("the event's copy and the occurrence's cancelled copy", [whole.clone()].into_iter().chain(own_cancelled.clone()).collect()),
                 ]
                 .into_iter()
-                .filter(|(_, c)| occurrence.is_some() || c.len() < 2)
+                .filter(|(name, c)| occurrence.is_some() || (c.len() < 2 && !name.contains("occurrence's cancelled")))
                 .collect();
                 let text = crate::calendar::invitation::calendar_text(&raw, &uid).unwrap();
                 for (calendar, source) in [(caldav, "CalDAV"), (graph, "Graph")] {
@@ -1108,10 +1110,17 @@ mod tests {
                                     true => InvitationState::Cancelled,
                                     false => InvitationState::Unanswered,
                                 };
+                                // Which occurrence an update shows decides whether the cancelled
+                                // one is on screen; the card and the list agreeing is the check.
+                                let only_agreement = copy.contains("occurrence's cancelled copy") && arrival != "nothing since";
                                 match arrival {
+                                    _ if only_agreement => {}
                                     "nothing since" => {
                                         if in_cancelled {
                                             assert_eq!(card(0), InvitationState::Cancelled, "{cell}: the series cancelled");
+                                        }
+                                        if copy.contains("occurrence's cancelled copy") {
+                                            assert_eq!(card(0), InvitationState::Cancelled, "{cell}: the occurrence shown cancelled");
                                         }
                                         before.insert(cell, card(0));
                                     }
