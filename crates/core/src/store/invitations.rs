@@ -242,7 +242,10 @@ pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, rec
 }
 
 /// The ORGANIZER and From of the account's requests for this UID, the
-/// whole event's and its occurrences', earliest first.
+/// whole event's and its occurrences', in the order they arrived: by the
+/// date sync took from the server (IMAP's INTERNALDATE, Graph's
+/// receivedDateTime), which a sender can't set. Ids don't keep that order,
+/// since sync stores each batch newest first.
 pub fn request_senders(conn: &Connection, account: AccountId, uid: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare_cached(
         "SELECT i.organizer, m.from_addr FROM invitation i JOIN message m ON m.id = i.message_id

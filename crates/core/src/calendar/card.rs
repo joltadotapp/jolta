@@ -1439,6 +1439,29 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// Sync stores a message's date from the server, IMAP's INTERNALDATE or
+    /// Graph's receivedDateTime, so a stranger's backdated Date header
+    /// doesn't put a later mail before the request that named the organizer.
+    #[test]
+    fn a_backdated_request_doesnt_replace_the_organizer() {
+        let (j, _) = jolta("card-backdated");
+        let dated = |raw: String, date: &str| raw.replace("Subject: s\r\n", &format!("Subject: s\r\nDate: {date}\r\n"));
+        let real = dated(version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1), "Wed, 04 Nov 2026 09:00:00 +0100");
+        let m1 = import(&j, real.as_bytes());
+        let stranger = dated(sent_as(&version("x1", "sync", "REQUEST", 1, "20261101T080000Z", V1), "eve@example.net", "eve@example.net"), "Sun, 01 Nov 2026 09:00:00 +0100");
+        let x1 = import(&j, stranger.as_bytes());
+        let arrived = |id: MessageId, at: &str| {
+            let at = DateTime::parse_from_rfc3339(at).unwrap().timestamp();
+            j.store.write(|tx| Ok(tx.execute("UPDATE message SET date = ?2 WHERE id = ?1", rusqlite::params![id, at]).map(|_| ())?)).unwrap();
+        };
+        arrived(m1, "2026-11-04T08:00:05Z");
+        arrived(x1, "2026-11-04T10:00:05Z");
+        let c = stored_card(&j, m1, &real);
+        assert!(c.answering.is_some() && !c.outdated, "{:?}", c.notes);
+        assert!(notes(&stored_card(&j, x1, &stranger)).contains(&"This isn't from the meeting's organizer"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     #[test]
     fn a_cancellation_without_an_organizer_is_nobodys() {
         let (j, calendar) = jolta("card-no-organizer");
