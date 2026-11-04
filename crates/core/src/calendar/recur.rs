@@ -502,7 +502,7 @@ pub fn same_repeat(a: Option<&Recurrence>, a_start: &Span, b: Option<&Recurrence
 }
 
 /// An RRULE as its parts, with what RFC 5545 leaves to the start written
-/// out, lists sorted, and UNTIL as the last day whose occurrence it keeps.
+/// out, lists sorted, and UNTIL as the start of the last occurrence it keeps.
 fn normal_rule(text: &str, start: &Span, here: Tz) -> std::collections::BTreeMap<String, String> {
     let text = text.trim();
     let mut parts: std::collections::BTreeMap<String, String> = text
@@ -522,9 +522,9 @@ fn normal_rule(text: &str, start: &Span, here: Tz) -> std::collections::BTreeMap
     if parts.get("INTERVAL").is_some_and(|i| i == "1") {
         parts.remove("INTERVAL");
     }
-    let (first, at) = match start {
-        Span::AllDay { start, .. } => (*start, None),
-        Span::Timed { start, .. } => (start.wall.date(), Some(*start)),
+    let first = match start {
+        Span::AllDay { start, .. } => *start,
+        Span::Timed { start, .. } => start.wall.date(),
     };
     let has = |p: &std::collections::BTreeMap<String, String>, names: &[&str]| names.iter().any(|n| p.contains_key(*n));
     let day_parts = ["BYDAY", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO"];
@@ -546,23 +546,30 @@ fn normal_rule(text: &str, start: &Span, here: Tz) -> std::collections::BTreeMap
     if !weeks_matter || parts.get("WKST").is_some_and(|w| w == "MO") {
         parts.remove("WKST");
     }
-    if let Some(until) = parts.get("UNTIL").and_then(|u| Until::parse(u)) {
-        let zone = match at.map(|l| l.zone) {
-            Some(Zone::Tz(tz)) => tz,
-            _ => here,
-        };
-        let last_day = |w: NaiveDateTime| match at {
-            Some(at) if w.time() < at.wall.time() => w.date() - Duration::days(1),
-            _ => w.date(),
-        };
-        let last = match until {
-            Until::Date(d) => d,
-            Until::Wall(w) => last_day(w),
-            Until::Utc(t) => last_day(t.with_timezone(&zone).naive_local()),
-        };
-        parts.insert("UNTIL".into(), last.format("%Y%m%d").to_string());
+    if let Some(last) = parts.get("UNTIL").and_then(|u| Until::parse(u)).and_then(|until| last_start(text, until, start, here)) {
+        parts.insert("UNTIL".into(), last);
     }
     parts
+}
+
+/// The start of the last occurrence `rule` makes from `start` up to its
+/// `until`, found by expanding back from `until` over ever longer windows.
+/// None when even 30 years back hold no occurrence, or for a rule too dense
+/// to expand, such as one every second.
+fn last_start(rule: &str, until: Until, start: &Span, here: Tz) -> Option<String> {
+    let clock = Clock::new(start, here);
+    let end = match clock.moment(clock.until(until)) {
+        Moment::Date(day) => midnight(day.succ_opt()?, here),
+        Moment::Time(local) => local.instant(here) + Duration::seconds(1),
+    };
+    let master = EventData { recurrence: Some(Recurrence { rules: vec![rule.to_string()], ..Recurrence::default() }), ..EventData::new("", *start) };
+    [1, 35, 800, 11_000].into_iter().find_map(|days| {
+        let window = Window { start: end - Duration::days(days), end };
+        expand(&master, &[], window, here).last().map(|o| match o.span.start() {
+            Moment::Date(day) => day.format("%Y%m%d").to_string(),
+            Moment::Time(local) => local.instant(here).format("%Y%m%dT%H%M%SZ").to_string(),
+        })
+    })
 }
 
 fn weekday_code(day: Weekday) -> &'static str {
@@ -1786,6 +1793,10 @@ mod tests {
         assert!(same("FREQ=WEEKLY;BYDAY=TH,TU", "freq=weekly;byday=TU,TH"));
         assert!(same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T150000Z", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T225959Z"), "both keep the 17 December occurrence");
         assert!(!same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T145959Z", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T225959Z"), "one stops a minute before it");
+        assert!(same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261219"), "no Thursday on the 18th or the 19th");
+        assert!(!same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261216", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217"));
+        assert!(same("FREQ=MONTHLY;UNTIL=20270115", "FREQ=MONTHLY;UNTIL=20270211T000000Z"), "both end on 12 January");
+        assert!(same("FREQ=SECONDLY;UNTIL=20261112T150500Z", "FREQ=SECONDLY;UNTIL=20261112T150500Z"));
         assert!(same("FREQ=MONTHLY", "FREQ=MONTHLY;BYMONTHDAY=12"));
         assert!(!same("FREQ=WEEKLY;BYDAY=TH", "FREQ=DAILY"));
         assert!(!same("FREQ=WEEKLY;INTERVAL=2;BYDAY=TH,SU;WKST=SU", "FREQ=WEEKLY;INTERVAL=2;BYDAY=TH,SU"), "every other week, the week start picks which Sunday");
