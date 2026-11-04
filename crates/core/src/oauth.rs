@@ -81,14 +81,14 @@ impl Provider {
         }
     }
 
-    /// The `scope` of an authorization request. Google adds calendar to the
-    /// grant it already has (`include_granted_scopes`), so it is asked only
-    /// for the new scopes. Microsoft's dynamic consent asks for the whole set.
+    /// The `scope` of an authorization request. Turning calendar on asks for
+    /// mail too: the account may have no mail grant for this client, such as
+    /// after a move to a new Google project, and Google shows only the
+    /// scopes the account hasn't granted yet.
     fn request_scopes(self, ask: Ask) -> String {
-        let extra: &[&[&str]] = match (self, ask) {
-            (_, Ask::Account) => &[self.mail_scopes()],
-            (Provider::Google, Ask::Calendar) => &[self.calendar_scopes()],
-            (Provider::Microsoft, Ask::Calendar) => &[self.mail_scopes(), self.calendar_scopes()],
+        let extra: &[&[&str]] = match ask {
+            Ask::Account => &[self.mail_scopes()],
+            Ask::Calendar => &[self.mail_scopes(), self.calendar_scopes()],
         };
         [&[self.identity_scopes()], extra].concat().concat().join(" ")
     }
@@ -582,14 +582,15 @@ mod tests {
     }
 
     #[test]
-    fn google_calendar_consent_adds_to_the_existing_grant() {
+    fn google_calendar_consent_asks_for_mail_and_calendar() {
         let url = authorize_url(Provider::Google, "cid", "http://127.0.0.1:8765/", "verifier", "st", Ask::Calendar, Some("me@example.com"));
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
         let p = params(&url);
         assert_eq!(
             p["scope"],
-            "openid email profile https://www.googleapis.com/auth/calendar.events \
-             https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.freebusy"
+            "openid email profile https://mail.google.com/ https://www.googleapis.com/auth/calendar.events \
+             https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.freebusy",
+            "an account without a mail grant for this client gets both in one sign-in"
         );
         assert_eq!(p["include_granted_scopes"], "true");
         assert_eq!(p["login_hint"], "me@example.com");
