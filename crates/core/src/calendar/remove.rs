@@ -14,7 +14,7 @@ use super::card::{self, Card, Removing};
 use super::ical_edit::{Component, Object, Prop};
 use super::rsvp::{self, Scope};
 use super::sources::{Change, Gone};
-use super::{Calendar, CalendarId, CalendarSource, EventStatus, Moment, ical, invitation, sync, tz};
+use super::{Access, Calendar, CalendarId, CalendarSource, EventData, EventStatus, Moment, ical, invitation, sync, tz};
 use crate::model::{AccountId, MessageId};
 use crate::{Error, Jolta, Result, imap, store};
 
@@ -69,7 +69,11 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
     let (calendar, target) = rsvp::target_of(jolta, event, &rid.map_or(Scope::Series, Scope::Occurrence)).await?;
 
     route(calendar.source)?;
-    let gone = sync::calendar_source(jolta, &calendar).await?.remove(&calendar, &target).await?;
+    guest_copy(&calendar, &target.event.data, std::slice::from_ref(&target.me))?;
+    let source = sync::calendar_source(jolta, &calendar).await?;
+    // A CalDAV server knows aliases the copy may not show.
+    guest_copy(&calendar, &target.event.data, &source.addresses().await)?;
+    let gone = source.remove(&calendar, &target).await?;
     let id = calendar.id;
     match &gone {
         Gone::Deleted(Some(Change::Upsert { remote_id, etag, events, raw })) => {
@@ -89,6 +93,40 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
         }
     }
     Ok(Removed { text: said(&calendar, &gone, removing.occurrence.as_ref().map(|(_, day)| day.as_str())), calendar: id })
+}
+
+/// Refuses what Remove from calendar leaves alone: a copy in a calendar the
+/// account doesn't own, one the user organizes, whose delete cancels the
+/// meeting for every guest on Microsoft 365, and one that doesn't list the
+/// user as a guest. `mine` holds the account's addresses; the attendees the
+/// copy marks as the user's count too.
+pub fn guest_copy(calendar: &Calendar, event: &EventData, mine: &[String]) -> Result<()> {
+    if calendar.access != Access::Owner {
+        return Err(Error::Other("This meeting is in a calendar shared with you, so Jolta leaves it to the calendar's owner.".into()));
+    }
+    let me: Vec<&str> = mine.iter().map(String::as_str).chain(event.attendees.iter().filter(|a| a.is_me).map(|a| a.person.address.as_str())).collect();
+    match &event.organizer {
+        Some(o) if !me.iter().any(|m| m.trim().eq_ignore_ascii_case(o.address.trim())) => {}
+        Some(_) => return Err(Error::Other("You organize this meeting. Cancel it from your calendar to tell the guests.".into())),
+        None => return Err(Error::Other("This event has no organizer, so it isn't a meeting Jolta can remove.".into())),
+    }
+    if !event.attendees.iter().any(|a| a.is_me) {
+        return Err(Error::Other("Your calendar's copy doesn't list you as a guest, so Jolta leaves it alone.".into()));
+    }
+    Ok(())
+}
+
+/// Why the account's copy of the meeting `uid` isn't one to remove: its
+/// series or single event, else the occurrence `rid` stored alone. None
+/// when it is one, or when there is no copy.
+pub(crate) fn refusal(conn: &rusqlite::Connection, uid: &str, rid: Option<&Moment>, account: AccountId, here: chrono_tz::Tz) -> Result<Option<Error>> {
+    let copy = match store::stored_event(conn, uid, None, Some(account), here)? {
+        None if rid.is_some() => store::stored_event(conn, uid, rid, Some(account), here)?,
+        found => found,
+    };
+    let Some(copy) = copy else { return Ok(None) };
+    let address = store::account(conn, account)?.address;
+    Ok(guest_copy(&store::calendar(conn, copy.calendar_id)?, &copy.event, &[address]).err())
 }
 
 /// "Removed from your calendar.", "Removed Thu 5 Nov from your calendar.",
@@ -130,8 +168,15 @@ async fn cancellation(jolta: &Jolta, message: MessageId) -> Result<(AccountId, R
                     Card::Event(e) => e.removing,
                     Card::Reply(_) => None,
                 })
-                .map(|r| (account, r))
-                .ok_or_else(|| Error::Other("Your calendar has no copy of this cancelled meeting to remove.".into()))
+                .map(|r| Ok((account, r)))
+                .unwrap_or_else(|| {
+                    let cancel = invitations.iter().find(|i| i.method == invitation::Method::Cancel).map(|i| &i.event);
+                    let why = match cancel {
+                        Some(e) => refusal(c, &e.uid, e.recurrence_id.as_ref(), account, tz::here())?,
+                        None => None,
+                    };
+                    Err(why.unwrap_or_else(|| Error::Other("Your calendar has no copy of this cancelled meeting to remove.".into())))
+                })
         })
         .await
 }

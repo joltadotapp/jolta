@@ -88,6 +88,15 @@ impl Source {
         }
     }
 
+    /// The user's addresses the server knows besides the account's own: a
+    /// CalDAV principal's calendar-user-address-set.
+    pub async fn addresses(&self) -> Vec<String> {
+        match self {
+            Source::CalDav(s) => s.me().await,
+            Source::Google(_) | Source::Graph(_) | Source::Webcal(_) => Vec::new(),
+        }
+    }
+
     /// Takes a meeting its organizer cancelled out of the calendar,
     /// telling nobody: the whole event, or the occurrence `target` names.
     pub async fn remove(&self, calendar: &Calendar, target: &Target) -> Result<Gone> {

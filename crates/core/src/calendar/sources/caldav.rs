@@ -325,7 +325,7 @@ impl CalDav {
     /// account's, and the principal's calendar-user-address-set (RFC 6638),
     /// which holds its aliases. Asked for once per run; without an answer
     /// the account's address stands alone.
-    async fn me(&self) -> Vec<String> {
+    pub(crate) async fn me(&self) -> Vec<String> {
         let key = format!("{} {}", self.username, self.starts[0]);
         if let Some(known) = KNOWN_ADDRESSES.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return known.clone();

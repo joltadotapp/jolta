@@ -363,7 +363,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
 
 /// Remove from calendar for a cancellation: when the account's calendar
 /// still holds the event, or the occurrence it cancels, and hasn't
-/// cancelled it there yet.
+/// cancelled it there yet, in a copy that is the user's as a guest.
 fn removable(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Option<Removing>> {
     let live = |e: &EventData| e.status != EventStatus::Cancelled;
     let copy = |rid: Option<&Moment>| store::stored_event(conn, &sent.uid, rid, Some(cx.account), cx.here);
@@ -374,6 +374,7 @@ fn removable(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Option
             None => copy(None)?.is_some_and(|m| live(&m.event) && occurs(&m.event, rid, cx.here)),
         },
     };
+    let held = held && super::remove::refusal(conn, &sent.uid, sent.recurrence_id.as_ref(), cx.account, cx.here)?.is_none();
     Ok(held.then(|| Removing {
         message: cx.message,
         uid: sent.uid.clone(),
@@ -1421,6 +1422,58 @@ pub(crate) mod tests {
         let v2 = import(&j, google.as_bytes());
         assert!(stored_card(&j, m1, &real).outdated, "Google sends for Ann");
         assert!(!notes(&stored_card(&j, v2, &google)).contains(&"This isn't from the meeting's organizer"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Deleting the organizer's copy cancels the meeting for its guests, and
+    /// a shared calendar's copy is someone else's.
+    #[test]
+    fn remove_only_the_users_copy_as_a_guest() {
+        let (j, calendar) = jolta("card-remove-guest");
+        let horizon = Horizon::around(now(), Brussels);
+        let hold = |calendar: CalendarId, organizer: &str, edit: &dyn Fn(&mut EventData)| {
+            let mut copy = invitation::find(version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1).as_bytes(), &[ME.into()]).remove(0).event;
+            copy.organizer = Some(Person { address: organizer.into(), name: String::new() });
+            edit(&mut copy);
+            j.store.write(|tx| store::apply_item(tx, calendar, "sync.ics", None, &[copy], None, &horizon)).unwrap();
+        };
+        let removing = |organizer: &str| {
+            let cancel = sent_as(&version(&format!("x-{organizer}"), "sync", "CANCEL", 1, "20261104T090000Z", V1), organizer, organizer);
+            let id = import(&j, cancel.as_bytes());
+            let c = stored_card(&j, id, &cancel);
+            j.store.write(|tx| Ok(tx.execute("DELETE FROM message WHERE id = ?1", [id]).map(|_| ())?)).unwrap();
+            assert!(!notes(&c).contains(&"This isn't from the meeting's organizer"), "{organizer}");
+            c.removing.is_some()
+        };
+        hold(calendar, "ann@example.com", &|_| {});
+        assert!(removing("ann@example.com"), "the user's copy as a guest");
+
+        hold(calendar, ME, &|_| {});
+        assert!(!removing(ME), "the user organizes it");
+        let alias = "me.too@example.com";
+        let chair = crate::calendar::Attendee { person: Person { address: alias.into(), name: String::new() }, role: Role::Chair, response: Response::Accepted, comment: String::new(), is_me: true };
+        hold(calendar, alias, &|e| e.attendees.push(chair.clone()));
+        assert!(!removing(alias), "as an alias the copy marks as the user's");
+        hold(calendar, "ann@example.com", &|e| e.attendees.retain(|a| !a.is_me));
+        assert!(!removing("ann@example.com"), "the copy doesn't list the user");
+
+        j.store.write(|tx| Ok(tx.execute("DELETE FROM event", []).map(|_| ())?)).unwrap();
+        let shared = calendar_of(&j, CalendarSource::Google, crate::calendar::Access::Write);
+        hold(shared, "ann@example.com", &|_| {});
+        assert!(!removing("ann@example.com"), "a calendar shared with the user");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removing_the_organizers_copy_is_refused_before_any_request() {
+        let (j, calendar) = jolta("remove-organizer");
+        let cancel = sent_as(&version("x", "sync", "CANCEL", 1, "20261104T090000Z", V1), ME, ME);
+        let id = import(&j, cancel.as_bytes());
+        let mut copy = invitation::find(version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1).as_bytes(), &[ME.into()]).remove(0).event;
+        copy.organizer = Some(Person { address: ME.into(), name: String::new() });
+        j.store.write(|tx| store::apply_item(tx, calendar, "sync.ics", None, &[copy], None, &Horizon::around(now(), Brussels))).unwrap();
+        let err = crate::calendar::remove::remove(&j, id).await.unwrap_err();
+        assert!(err.to_string().contains("You organize this meeting"), "{err}");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
