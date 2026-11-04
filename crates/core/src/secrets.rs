@@ -22,7 +22,7 @@ fn init() {
 }
 
 /// Keeps secrets in memory for this process instead of the Keychain, for
-/// tests: the Mac mini is headless, and a Keychain dialog there never closes.
+/// tests: a Keychain dialog on a Mac with nobody at the screen never closes.
 /// Must run before the first secret is read or written.
 pub fn use_memory_store() {
     ONCE.call_once(|| {

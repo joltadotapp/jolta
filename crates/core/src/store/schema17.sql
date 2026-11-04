@@ -1,4 +1,4 @@
--- Calendar sync (docs/calendar-plan.md, phases C0 and C1).
+-- Calendar sync: CalDAV, webcal feeds, Google and Microsoft 365.
 
 -- A CalDAV address typed under Advanced, for servers discovery can't find.
 ALTER TABLE account ADD COLUMN caldav_url TEXT;

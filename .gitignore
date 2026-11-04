@@ -37,3 +37,9 @@ xcuserdata/
 *.log
 
 .DS_Store
+
+# Planning docs and this checkout's own instructions stay local (AGENTS.local.md).
+/docs/*
+!/docs/architecture.md
+/AGENTS.local.md
+/CLAUDE.local.md

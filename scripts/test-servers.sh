@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Starts or stops the local mail servers the sync tests use, in Docker
-# (OrbStack on the Mac mini). Both listen on 127.0.0.1 only and keep no data
+# (OrbStack works). Both listen on 127.0.0.1 only and keep no data
 # between runs.
 #
 #   scripts/test-servers.sh up      Dovecot IMAP on 31143, Mailpit SMTP on 31025, its API on 31080

@@ -1,5 +1,5 @@
-//! `jolta cal fact`: the provider facts the calendar plan needs settled
-//! (docs/calendar-plan.md, "Facts to confirm in phase C0"). Each check
+//! `jolta cal fact`: provider facts the calendar design depends on, checked
+//! against a real account. Each check
 //! reads, or creates one event without attendees in the account's default
 //! calendar and deletes it again, so nobody is emailed.
 

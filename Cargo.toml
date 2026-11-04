@@ -47,7 +47,7 @@ lto = "thin"
 codegen-units = 4
 
 # llama-cpp-2 0.1.160 plus `with_lazy_mode`, so Gemma 4's per-layer embedding
-# table stays on disk (docs/research/patches/llama-cpp-2-lazy-mode.patch), and
+# table stays on disk (vendor/llama-cpp-2-lazy-mode.patch), and
 # without llama.cpp's `common` code.
 [patch.crates-io]
 llama-cpp-2 = { path = "vendor/llama-cpp-2" }

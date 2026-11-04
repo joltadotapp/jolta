@@ -6,7 +6,7 @@
 #   scripts/build-core.sh --release  release build for Apple silicon
 #   JOLTA_INTEL=1 scripts/build-core.sh --release   universal (arm64 + x86_64)
 #
-# Intel is off while iterating: no Mac here can test it (decisions.md).
+# Intel is off while iterating: no Mac here can test an Intel build.
 set -eu
 
 cd "$(dirname "$0")/.."

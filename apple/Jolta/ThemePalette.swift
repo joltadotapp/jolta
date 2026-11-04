@@ -20,7 +20,7 @@ nonisolated struct ThemePalette: Identifiable, Equatable, Sendable {
     let mode: ThemeMode
     let tokens: ThemeTokens
 
-    /// Graphite (docs/design/direction-a.html) first, then Omarchy's themes by name.
+    /// Graphite first, then Omarchy's themes by name.
     static let all: [ThemePalette] = [graphiteDark, graphiteLight] + OmarchyTheme.all.map {
         ThemePalette(id: $0.id, name: $0.name, mode: $0.mode, tokens: ThemeTokens(omarchy: $0))
     }

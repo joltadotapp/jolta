@@ -1,4 +1,4 @@
--- Calendars (docs/calendar-plan.md). Calendar is off per account until the
+-- Calendars. Calendar is off per account until the
 -- user turns it on; local, webcal and EventKit calendars have no account.
 ALTER TABLE account ADD COLUMN calendar INTEGER NOT NULL DEFAULT 0;
 

@@ -28,7 +28,7 @@ pub struct LocalModel {
     pub memory: &'static str,
 }
 
-/// Sizes and hashes from docs/research/local-inference-quantisation.md.
+/// Sizes and SHA-256 hashes of the files on Hugging Face.
 pub const MODELS: &[LocalModel] = &[
     LocalModel {
         id: "gemma-4-e2b",

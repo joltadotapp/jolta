@@ -71,7 +71,7 @@ pub fn greeting() -> String {
 /// Where Jolta keeps its data when nothing else is configured. The CLI and the
 /// sandboxed app share this folder; the app reaches it through a sandbox
 /// exception because macOS keeps unsandboxed tools out of the app group
-/// container (see decisions.md).
+/// container.
 pub fn default_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     home.join("Library/Application Support/Jolta")

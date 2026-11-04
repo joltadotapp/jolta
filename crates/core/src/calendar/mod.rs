@@ -1,5 +1,5 @@
 //! Calendars: sync from Graph, Google, CalDAV and webcal feeds, time zones,
-//! repeating events, invitations and meeting links. Plan: docs/calendar-plan.md.
+//! repeating events, invitations and meeting links.
 
 pub mod detail;
 pub mod ical;
