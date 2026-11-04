@@ -261,6 +261,7 @@ struct CalendarSidebar: View {
         let cal = model.calendar
         VStack(alignment: .leading, spacing: 0) {
             TitleBarArea().frame(height: 44)
+                .overlay(alignment: .topLeading) { ModeSwitcher(model: model).padding(.top, 5).padding(.leading, ModeSwitcher.leading) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     MiniMonth(cal: cal)
