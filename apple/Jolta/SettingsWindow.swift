@@ -28,9 +28,7 @@ struct SettingsView: View {
     private var groups: [(title: String?, items: [Item])] {
         let all = model?.accounts ?? []
         let accounts = all.map { a in
-            // Two accounts with one name show their addresses instead.
-            let shared = all.filter { $0.title == a.title }.count > 1
-            return Item(page: .account(a.id), title: shared ? a.account.address : a.title, icon: Self.icon(a.account.provider),
+            Item(page: .account(a.id), title: a.title, icon: Self.icon(a.account.provider),
                  keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove")
         }
         return [

@@ -480,7 +480,7 @@ final class CalendarModel {
         }
         var out: [CalendarGroup] = []
         for a in list.accounts where a.calendarOn && !a.calendars.isEmpty {
-            let name = a.account.displayName.isEmpty ? a.account.address : a.account.displayName
+            let name = a.account.address
             out.append(CalendarGroup(id: "account-\(a.account.id)", title: name, detail: a.account.provider, calendars: entries(a.calendars)))
         }
         let feeds = list.otherCalendars.filter { $0.kind == .webcal }

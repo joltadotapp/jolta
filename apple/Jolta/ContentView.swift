@@ -396,16 +396,29 @@ struct AccountHeader: View {
     let syncing: Bool
 
     var body: some View {
+        // The address names the account; a long one keeps its domain, which
+        // tells one person's accounts apart, and the provider steps aside.
+        ViewThatFits(in: .horizontal) {
+            row(showsProvider: true)
+            row(showsProvider: false)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .help("\(title), \(provider)")
+    }
+
+    private func row(showsProvider: Bool) -> some View {
         HStack(spacing: 8) {
-            Text(title).fontWeight(.medium).lineLimit(1)
+            Text(title).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+                .fixedSize(horizontal: showsProvider, vertical: false)
             Spacer(minLength: 4)
             if syncing {
                 ProgressView().controlSize(.mini)
             }
-            Text(provider).font(.system(size: 11)).foregroundStyle(Color(Theme.text3))
+            if showsProvider {
+                Text(provider).font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).fixedSize()
+            }
         }
-        .padding(.horizontal, 10)
-        .frame(height: 28)
     }
 }
 

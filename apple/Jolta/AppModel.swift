@@ -47,7 +47,9 @@ struct AccountSection: Identifiable {
     let account: AccountInfo
     let mailboxes: [MailboxInfo]
     var id: Int64 { account.id }
-    var title: String { account.displayName.isEmpty ? account.address : account.displayName }
+    /// The address: the display name is the sender name on mail, the same
+    /// for most of one person's accounts.
+    var title: String { account.address }
 }
 
 @MainActor

@@ -50,7 +50,7 @@ struct CalendarAccountRows: View {
         ForEach(list.accounts, id: \.account.id) { a in
             let id = a.account.id
             let message = switches.messages[id]
-            SettingsRow(title: a.account.displayName.isEmpty ? a.account.address : a.account.displayName,
+            SettingsRow(title: a.account.address,
                         detail: switches.working[id] ?? message?.text ?? Self.detail(a),
                         detailColor: message?.failed == true ? .red : Color(Theme.text3)) {
                 HStack(spacing: 8) {
