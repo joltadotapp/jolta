@@ -620,9 +620,9 @@ fn reply(e: &EventData, about: Option<&EventData>, cx: &Context) -> ReplyCard {
 }
 
 /// The occurrence a card is about, with the event that describes it: the
-/// event itself, or for a series the next occurrence that hasn't ended, or
-/// its last one when all have. A changed occurrence brings its own place,
-/// link and guests.
+/// event itself, or for a series the one `series::shown_occurrence` picks,
+/// as the list does. A changed occurrence brings its own place, link and
+/// guests.
 fn next<'a>(master: Option<&'a EventData>, events: &'a [EventData], cx: &Context) -> (&'a EventData, Span) {
     let Some(m) = master.filter(|m| m.recurrence.is_some()) else {
         let e = master.unwrap_or(&events[0]);
@@ -630,15 +630,12 @@ fn next<'a>(master: Option<&'a EventData>, events: &'a [EventData], cx: &Context
     };
     let overrides: Vec<&EventData> = events.iter().filter(|e| e.recurrence_id.is_some()).collect();
     let owned: Vec<EventData> = overrides.iter().map(|&e| e.clone()).collect();
-    let placed = series::place(Some(m), &owned, &Horizon::around(cx.now, cx.here));
-    let ended = |s: &Span| match s.bounds(cx.here) {
-        Bounds::Utc { end, .. } => end <= cx.now,
-        Bounds::Days { end, .. } => day(end) <= cx.now.with_timezone(&cx.here).date_naive(),
-    };
-    let Some(o) = placed.iter().find(|o| !ended(&o.span)).or(placed.last()) else { return (m, m.span) };
-    match o.source {
-        Source::Master => (m, o.span),
-        Source::Override(i) => (overrides[i], o.span),
+    match series::shown_occurrence(m, &owned, cx.now, cx.here) {
+        None => (m, m.span),
+        Some(o) => match o.source {
+            Source::Master => (m, o.span),
+            Source::Override(i) => (overrides[i], o.span),
+        },
     }
 }
 
