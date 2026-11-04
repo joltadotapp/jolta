@@ -82,16 +82,13 @@ struct AppearanceSettings: View {
 
     private func themeRow(_ row: Row, title: String, detail: String, selected: ThemePalette) -> some View {
         SettingsRow(title: title, detail: detail) {
-            HStack(spacing: 10) {
-                ThemeSwatch(theme: selected)
-                Picker(title, selection: Binding(get: { selected.id }, set: { id in ThemePalette.named(id).map { choose($0, in: row) } })) {
-                    ForEach(themes(row)) { theme in
-                        Label { Text(theme.name) } icon: { Image(nsImage: Self.swatchImage(theme)).renderingMode(.original) }
-                            .tag(theme.id)
-                    }
+            Picker(title, selection: Binding(get: { selected.id }, set: { id in ThemePalette.named(id).map { choose($0, in: row) } })) {
+                ForEach(themes(row)) { theme in
+                    Label { Text(theme.name) } icon: { Image(nsImage: Self.swatchImage(theme)).renderingMode(.original) }
+                        .tag(theme.id)
                 }
-                .settingsMenu()
             }
+            .settingsMenu()
         }
         .modifier(Marked(on: focused && current == row))
     }
@@ -119,9 +116,10 @@ struct AppearanceSettings: View {
         choose(list[min(max(i + step, 0), list.count - 1)], in: current)
     }
 
-    /// A menu item shows an image rather than a view, so the swatch is drawn once as one.
+    /// A menu item shows an image rather than a view, so the swatch is drawn
+    /// as one, with room after it because the menu sets the name right beside it.
     private static func swatchImage(_ theme: ThemePalette) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 8), flipped: false) { _ in
+        let image = NSImage(size: NSSize(width: 23, height: 8), flipped: false) { _ in
             for (i, color) in [theme.tokens.bg, theme.tokens.text, theme.tokens.accent].enumerated() {
                 let dot = NSBezierPath(ovalIn: NSRect(x: CGFloat(i) * 5 + 0.5, y: 0.5, width: 7, height: 7))
                 NSColor(hex: color).setFill()
