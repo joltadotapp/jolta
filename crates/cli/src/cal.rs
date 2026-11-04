@@ -60,6 +60,15 @@ pub enum CalCommand {
     Meeting { file: PathBuf },
     /// Build the synthetic calendar: 5 calendars, 20,000 events, 300 repeating.
     Gen,
+    /// Read an .ics file into a local calendar of that name, replacing its events.
+    Import {
+        file: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// "#rrggbb".
+        #[arg(long)]
+        color: Option<String>,
+    },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
         #[arg(value_enum)]
@@ -264,6 +273,31 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 built.occurrences,
                 t.elapsed().as_secs_f64()
             );
+            Ok(())
+        }
+        CalCommand::Import { file, name, color } => {
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let me: Vec<String> = jolta.store.read(store::accounts)?.into_iter().map(|a| a.address).collect();
+            let items = series::group(ical::read(&text, &me)?);
+            let horizon = Horizon::around(Utc::now(), tz::here());
+            let remote = store::RemoteCalendar {
+                remote_id: format!("import:{name}"),
+                name: name.clone(),
+                color,
+                zone: None,
+                access: jolta_core::calendar::Access::Owner,
+                primary: true,
+                refresh: None,
+            };
+            let count = jolta.store.write(|tx| {
+                let calendar = store::add_calendar(tx, jolta_core::calendar::CalendarSource::Local, &remote)?;
+                tx.execute("DELETE FROM event WHERE calendar_id = ?1", [calendar.id])?;
+                for (uid, events) in &items {
+                    store::apply_item(tx, calendar.id, uid, None, events, None, &horizon)?;
+                }
+                Ok(items.len())
+            })?;
+            println!("{count} events in the local calendar {name}.");
             Ok(())
         }
         CalCommand::Fact { fact, account } => {
