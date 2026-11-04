@@ -114,7 +114,8 @@ struct EventDetailCard: View {
                 if let mine = detail.myResponse, mine != .needsAction {
                     row("You", mine.word.capitalized)
                 }
-                row("Calendar", ([detail.calendarName] + [Self.reminders(detail.alarms)].compactMap { $0 }).joined(separator: " · "))
+                let others = event.record.copies > 1 ? "also in \(event.record.copies - 1) other calendar\(event.record.copies > 2 ? "s" : "")" : nil
+                row("Calendar", ([detail.calendarName] + [others, Self.reminders(detail.alarms)].compactMap { $0 }).joined(separator: " · "))
             }
             .padding(.top, 8)
             if !detail.descriptionHtml.isEmpty {

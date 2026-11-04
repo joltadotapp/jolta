@@ -68,7 +68,7 @@ struct GraphEvent {
     #[serde(rename = "type")]
     kind: String,
     series_master_id: Option<String>,
-    #[serde(rename = "iCalUId")]
+    #[serde(rename = "iCalUId", deserialize_with = "original_uid")]
     ical_uid: Option<String>,
     subject: Option<String>,
     body: Option<Body>,
@@ -427,6 +427,24 @@ fn remote_calendar(c: &Value, me: &str) -> RemoteCalendar {
         primary: c["isDefaultCalendar"].as_bool() == Some(true),
         refresh: None,
     }
+}
+
+/// The UID the invitation carried. Exchange keeps a UID from outside
+/// Outlook, such as a Google invitation's, inside its Global Object ID as
+/// "vCal-Uid", a version number and the UID ending in a zero byte
+/// ([MS-OXCICAL] 2.1.3.1.1.20.26). Unpacked, the same meeting has the same
+/// UID in a Google and a Microsoft calendar.
+fn original_uid<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.map(|uid| unpack_uid(&uid).unwrap_or(uid)))
+}
+
+fn unpack_uid(goid: &str) -> Option<String> {
+    let bytes = hex::decode(goid).ok()?;
+    let marker = b"vCal-Uid";
+    let at = bytes.windows(marker.len()).position(|w| w == marker)?;
+    let rest = bytes.get(at + marker.len() + 4..)?;
+    let uid = &rest[..rest.iter().position(|&b| b == 0).unwrap_or(rest.len())];
+    String::from_utf8(uid.to_vec()).ok().filter(|u| !u.is_empty())
 }
 
 fn parse_items(items: Vec<Value>) -> Vec<(GraphEvent, Vec<u8>)> {
@@ -821,6 +839,17 @@ mod tests {
         let master = mapped(master_json(json!({"type": "absoluteMonthly", "interval": 1, "dayOfMonth": 31}), json!({"type": "noEnd"})));
         let master = EventData { span: Span::Timed { start: Local { wall: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap().and_hms_opt(9, 0, 0).unwrap(), zone: Zone::Tz(Europe::Brussels) }, end: Local { wall: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap().and_hms_opt(10, 0, 0).unwrap(), zone: Zone::Tz(Europe::Brussels) } }, ..master };
         assert_eq!(starts(&master, &[], (2026, 10), 5), ["2026-10-31 09:00", "2026-11-30 09:00", "2026-12-31 09:00", "2027-01-31 09:00", "2027-02-28 09:00"]);
+    }
+
+    #[test]
+    fn an_outlook_id_holding_a_google_uid_gives_the_google_uid() {
+        let packed = "040000008200E00074C5B7101A82E00800000000000000000000000000000000000000002B0000007643616C2D55696401000000\
+                      61626331323340676F6F676C652E636F6D00";
+        assert_eq!(unpack_uid(packed).as_deref(), Some("abc123@google.com"));
+        let outlook = "040000008200E00074C5B7101A82E0080000000080B7E1E3F0A3DC01000000000000000010000000AB2D1E8C9F3B7A4C8E5D6F7A8B9C0D1E";
+        assert_eq!(unpack_uid(outlook), None, "an Outlook meeting keeps its own id");
+        let g: GraphEvent = serde_json::from_value(json!({"id": "E", "iCalUId": packed})).unwrap();
+        assert_eq!(g.ical_uid.as_deref(), Some("abc123@google.com"));
     }
 
     #[test]

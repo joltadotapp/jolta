@@ -5,7 +5,7 @@
 //! and rebuilds the occurrences of every series it touched. A series is all
 //! events with one UID in one calendar, whichever objects they came from.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{NaiveDate, NaiveTime};
 use chrono_tz::Tz;
@@ -385,6 +385,9 @@ pub struct OccurrenceRow {
     /// Blocks time: the event isn't free, cancelled or declined, and its
     /// calendar counts as busy.
     pub busy: bool,
+    /// How many shown calendars hold this meeting (same UID and time); the
+    /// views show it once.
+    pub copies: u32,
 }
 
 impl OccurrenceRow {
@@ -420,6 +423,7 @@ fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
         meeting,
         has_attendees: r.get(14)?,
         busy: r.get(15)?,
+        copies: 1,
     })
 }
 
@@ -458,7 +462,28 @@ pub fn occurrences(conn: &Connection, from: NaiveDate, to: NaiveDate, here: Tz) 
         params![from_utc, to_utc, longest_utc.unwrap_or(0), from_day, to_day, longest_days.unwrap_or(0)],
         occurrence_row,
     )?;
-    let mut out: Vec<OccurrenceRow> = rows.collect::<rusqlite::Result<_>>()?;
+    let mut out: Vec<OccurrenceRow> = Vec::new();
+    // The same meeting arrives through two accounts, such as a Google
+    // invitation to an address whose calendar is in Microsoft 365. The
+    // calendar added first keeps it, so the choice holds across queries.
+    let mut seen: HashMap<(String, Bounds), usize> = HashMap::new();
+    for row in rows {
+        let row = row?;
+        match seen.get(&(row.uid.clone(), row.bounds)) {
+            Some(&i) => {
+                let (copies, busy) = (out[i].copies + 1, out[i].busy || row.busy);
+                if row.calendar_id < out[i].calendar_id {
+                    out[i] = row;
+                }
+                out[i].copies = copies;
+                out[i].busy = busy;
+            }
+            None => {
+                seen.insert((row.uid.clone(), row.bounds), out.len());
+                out.push(row);
+            }
+        }
+    }
     let epoch = NaiveDate::default();
     out.sort_by_cached_key(|o| match o.bounds {
         Bounds::Utc { start, end } => (start.timestamp(), 1, end.timestamp()),
@@ -727,6 +752,25 @@ mod tests {
         let titles: Vec<String> =
             s.read(|c| occurrences(c, day(9), day(16), Brussels)).unwrap().into_iter().map(|o| o.title).collect();
         assert_eq!(titles, ["Conference", "Trip", "Armistice"], "the week of 9 November in Brussels");
+    }
+
+    #[test]
+    fn a_meeting_in_two_calendars_shows_and_reminds_once() {
+        let s = store("copies");
+        let first = work_calendar(&s);
+        let second = s.write(|tx| add_calendar(tx, CalendarSource::Local, &remote("shared", false))).unwrap().id;
+        s.write(|tx| set_calendar_shown(tx, second, true)).unwrap();
+        let alarm = crate::calendar::Alarm { trigger: crate::calendar::AlarmTrigger::MinutesBefore(10), email: false };
+        let meeting = |title: &str| EventData { title: title.into(), alarms: vec![alarm], ..EventData::new("abc@google.com", timed("2026-11-17 14:00", 60)) };
+        apply(&s, second, "g1", None, &[meeting("Klium x Speed Kit")]);
+        apply(&s, first, "o1", None, &[meeting("Invitation: Klium x Speed Kit")]);
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let rows = s.read(|c| occurrences(c, day(17), day(18), Brussels)).unwrap();
+        assert_eq!(rows.iter().map(|o| (o.title.as_str(), o.calendar_id, o.copies)).collect::<Vec<_>>(), [("Invitation: Klium x Speed Kit", first, 2)]);
+        let fires = s
+            .read(|c| crate::calendar::remind::between(c, Utc.with_ymd_and_hms(2026, 11, 17, 0, 0, 0).unwrap(), Utc.with_ymd_and_hms(2026, 11, 18, 0, 0, 0).unwrap(), Brussels))
+            .unwrap();
+        assert_eq!(fires.iter().map(|r| r.calendar_id).collect::<Vec<_>>(), [first], "one reminder, from the same calendar the view shows");
     }
 
     #[test]

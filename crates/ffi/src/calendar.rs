@@ -106,6 +106,8 @@ pub struct OccurrenceRecord {
     pub has_attendees: bool,
     /// Blocks time: not free, cancelled or declined, in a calendar that counts as busy.
     pub busy: bool,
+    /// How many shown calendars hold this meeting; it is listed once.
+    pub copies: u32,
 }
 
 #[derive(uniffi::Enum, Debug)]
@@ -397,6 +399,7 @@ impl Core {
                 join_url: o.meeting.map(|m| m.url),
                 has_attendees: o.has_attendees,
                 busy: o.busy,
+                copies: o.copies,
             })
             .collect())
     }

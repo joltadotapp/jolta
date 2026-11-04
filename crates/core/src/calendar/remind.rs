@@ -97,8 +97,13 @@ pub fn between(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>, here: 
             continue;
         }
         reminder.id = reminder_id(reminder.calendar_id, &uid, &reminder.bounds, trigger);
-        out.push(reminder);
+        out.push((uid, reminder));
     }
+    // A meeting in two calendars reminds once, from the calendar added
+    // first, as the views show it.
+    out.sort_by(|(ua, a), (ub, b)| (ua, a.fire_at, a.calendar_id).cmp(&(ub, b.fire_at, b.calendar_id)));
+    out.dedup_by(|(ua, a), (ub, b)| ua == ub && a.bounds == b.bounds && a.fire_at == b.fire_at);
+    let mut out: Vec<Reminder> = out.into_iter().map(|(_, r)| r).collect();
     out.sort_by(|a, b| (a.fire_at, &a.id).cmp(&(b.fire_at, &b.id)));
     Ok(out)
 }

@@ -116,7 +116,7 @@ pub enum Span {
 
 /// A span placed on the timeline, as the occurrence table stores it. Days
 /// count from 1970-01-01.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Bounds {
     Days { start: i32, end: i32 },
     Utc { start: DateTime<Utc>, end: DateTime<Utc> },
