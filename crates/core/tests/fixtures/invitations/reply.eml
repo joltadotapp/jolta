@@ -1,0 +1,36 @@
+From: Bo Nilsson <bo@example.com>
+To: me@example.com
+Subject: Accepted: Design crit @ Fri 13 Nov 2026 10:00 - 10:45 (CET)
+Date: Wed, 04 Nov 2026 10:30:00 +0000
+Message-ID: <reply@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed"
+
+--mixed
+Content-Type: text/plain; charset="UTF-8"
+
+Bo Nilsson has accepted this invitation.
+
+--mixed
+Content-Type: text/calendar; charset="UTF-8"; method=REPLY
+
+BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+METHOD:REPLY
+BEGIN:VEVENT
+DTSTART:20261113T090000Z
+DTEND:20261113T094500Z
+DTSTAMP:20261104T103000Z
+ORGANIZER;CN=Me:mailto:me@example.com
+UID:design-crit-1113@example.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=Bo Nil
+ sson:mailto:bo@example.com
+COMMENT:See you there
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:Design crit
+END:VEVENT
+END:VCALENDAR
+
+--mixed--

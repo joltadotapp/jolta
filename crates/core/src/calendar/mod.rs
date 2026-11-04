@@ -4,6 +4,7 @@
 pub mod detail;
 pub mod ical;
 pub mod ical_edit;
+pub mod invitation;
 pub mod meeting;
 mod model;
 pub mod recur;

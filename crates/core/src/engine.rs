@@ -113,6 +113,12 @@ impl Engine {
             Err(e) => tracing::warn!("S/MIME scan stopped: {e}"),
         });
         let jolta = engine.jolta.clone();
+        engine.runtime.spawn_blocking(move || {
+            if let Err(e) = scan_invitations(&jolta) {
+                tracing::warn!("invitation scan stopped: {e}");
+            }
+        });
+        let jolta = engine.jolta.clone();
         engine.runtime.spawn(async move {
             tokio::time::sleep(Duration::from_secs(120)).await;
             match tokio::task::spawn_blocking(move || jolta.collect_blobs(BLOB_MIN_AGE)).await {
@@ -755,6 +761,35 @@ fn scan_smime(jolta: &Jolta) -> Result<usize> {
             }
             for (id, _) in &batch {
                 store::finish_smime_scan(tx, *id)?;
+            }
+            Ok(())
+        })?;
+    }
+}
+
+/// Records the invitations in bodies stored before Jolta read them. A
+/// message is parsed only when its bytes name a calendar part. Returns how
+/// many messages held one.
+pub fn scan_invitations(jolta: &Jolta) -> Result<usize> {
+    use crate::calendar::invitation;
+    let mut found = 0;
+    loop {
+        let batch = jolta.store.read(|c| store::invitation_scan_batch(c, 200))?;
+        if batch.is_empty() {
+            return Ok(found);
+        }
+        let read: Vec<_> = batch
+            .iter()
+            .map(|(id, blob)| {
+                let raw = if blob.is_empty() { None } else { jolta.blobs.get(blob).ok() };
+                let events = raw.filter(|r| invitation::may_hold(r)).map(|r| invitation::find(&r, &[])).unwrap_or_default();
+                (*id, events)
+            })
+            .collect();
+        found += read.iter().filter(|(_, events)| !events.is_empty()).count();
+        jolta.store.write(|tx| {
+            for (id, events) in &read {
+                store::finish_invitation_scan(tx, *id, events)?;
             }
             Ok(())
         })?;

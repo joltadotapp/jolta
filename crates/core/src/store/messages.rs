@@ -75,6 +75,9 @@ pub fn insert_message(conn: &Connection, m: &NewMessage) -> Result<Inserted> {
     )?;
     link_mailbox(conn, id, m.mailbox_id, m.uid)?;
     index_fts(conn, id, e, m.body.as_ref().map_or("", |b| b.text.as_str()))?;
+    if let Some(body) = &m.body {
+        super::set_invitations(conn, id, &body.invitations)?;
+    }
     Ok(Inserted::New(id))
 }
 
@@ -127,8 +130,8 @@ fn index_fts(conn: &Connection, id: MessageId, e: &Envelope, body: &str) -> Resu
     Ok(())
 }
 
-/// Stores a downloaded body: blob reference, snippet, and the body text in
-/// the search index.
+/// Stores a downloaded body: blob reference, snippet, the body text in the
+/// search index, and the events its calendar parts name.
 pub fn attach_body(conn: &Connection, id: MessageId, body: &BodyInfo) -> Result<()> {
     let e: Option<Envelope> = conn
         .query_row(
@@ -154,7 +157,8 @@ pub fn attach_body(conn: &Connection, id: MessageId, body: &BodyInfo) -> Result<
         params![id, body.blob, body.snippet, body.has_attachments, body.list_id, body.list_unsubscribe],
     )?;
     conn.execute("DELETE FROM message_fts WHERE rowid = ?1", [id])?;
-    index_fts(conn, id, &e, &body.text)
+    index_fts(conn, id, &e, &body.text)?;
+    super::set_invitations(conn, id, &body.invitations)
 }
 
 /// The next messages whose stored body hasn't been read for list headers.
