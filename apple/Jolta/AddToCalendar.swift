@@ -53,10 +53,23 @@ extension AppModel {
     }
 }
 
+extension RsvpPanel {
+    /// Where the panel's left edge goes: under its link, or for the Add to
+    /// calendar menu, whose link sits in the card's right corner, ending
+    /// under the link's right edge.
+    var left: CGFloat {
+        switch self {
+        case .calendars(let r): r.maxX + 6 - AddCalendarPanel.width
+        default: anchor.minX - 6
+        }
+    }
+}
+
 /// The Add to calendar menu: the calendars Jolta can write to, on any
 /// account, the default first highlighted. ↑ and ↓ choose, Return adds,
 /// Esc closes (keys in `MessageList`).
 struct AddCalendarPanel: View {
+    static let width: CGFloat = 280
     @Bindable var model: AppModel
     let message: Int64
 
@@ -73,7 +86,7 @@ struct AddCalendarPanel: View {
             }
         }
         .padding(4)
-        .frame(width: 280)
+        .frame(width: Self.width)
         .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
         .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)

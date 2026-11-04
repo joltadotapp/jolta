@@ -27,6 +27,7 @@ fn event(c: &EventCard) -> String {
     if let Some(answer) = c.answer.filter(|_| c.answering.is_none()) {
         let _ = write!(h, "<span class=\"jolta-invite-answer\">{}</span>", answer_word(answer));
     }
+    h.push_str(&copy_link(c));
     let _ = write!(h, "</div><div class=\"jolta-invite-title\">{}</div>", escape(&c.title));
     match (&c.changes.when, &c.when) {
         (Some(e), _) => {
@@ -79,17 +80,6 @@ fn event(c: &EventCard) -> String {
             escape(&what)
         );
     }
-    if let Some(a) = &c.adding {
-        let _ = write!(answers, "<a class=\"jolta-add\" href=\"x-rsvp:{}/add\" title=\"Put this meeting in one of your calendars without telling anyone\">Add to calendar{CHEVRON}</a>", a.message.0);
-    }
-    if let Some(u) = &c.updating {
-        let _ = write!(
-            answers,
-            "<a class=\"jolta-update\" href=\"x-rsvp:{}/update\" title=\"Write this version into {} without telling anyone\">Update in your calendar</a>",
-            u.message.0,
-            escape(&u.calendar)
-        );
-    }
     let join = c.join.as_ref().map(join).unwrap_or_default();
     if !answers.is_empty() || !join.is_empty() {
         let _ = write!(h, "<div class=\"jolta-invite-actions\">{answers}{join}</div>");
@@ -99,6 +89,23 @@ fn event(c: &EventCard) -> String {
     }
     h.push_str("</section>");
     h
+}
+
+/// Add to calendar or Update in your calendar, in the head's free corner:
+/// both come only with the answer buttons, which take the badge's place.
+fn copy_link(c: &EventCard) -> String {
+    match (&c.adding, &c.updating) {
+        (Some(a), _) => format!(
+            "<a class=\"jolta-add\" href=\"x-rsvp:{}/add\" title=\"Put this meeting in one of your calendars without telling anyone\">Add to calendar{CHEVRON}</a>",
+            a.message.0
+        ),
+        (_, Some(u)) => format!(
+            "<a class=\"jolta-update\" href=\"x-rsvp:{}/update\" title=\"Write this version into {} without telling anyone\">Update in your calendar</a>",
+            u.message.0,
+            escape(&u.calendar)
+        ),
+        _ => String::new(),
+    }
 }
 
 /// A changed line: the old part struck through, the new one marked. A
