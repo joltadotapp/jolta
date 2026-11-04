@@ -311,8 +311,9 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         None => (None, stored.clone()),
     };
 
-    let removing = if method == Method::Cancel && current && trusted { removable(conn, sent, cx)? } else { None };
-    if method == Method::Cancel && current && removing.is_none() && store::account_calendar_on(conn, cx.account)? {
+    let held = method == Method::Cancel && current && held(conn, sent, cx)?;
+    let removing = if held && trusted { removable(conn, sent, cx)? } else { None };
+    if method == Method::Cancel && current && !held && store::account_calendar_on(conn, cx.account)? {
         notes.push(Note { text: "Not in your calendar".into(), warn: false });
     }
 
@@ -361,21 +362,25 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     })
 }
 
-/// Remove from calendar for a cancellation: when the account's calendar
-/// still holds the event, or the occurrence it cancels, and hasn't
-/// cancelled it there yet, in a copy that is the user's as a guest.
-fn removable(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Option<Removing>> {
+/// Whether the account's calendar still holds the cancelled event, or the
+/// occurrence it cancels, and hasn't cancelled it there yet.
+fn held(conn: &Connection, sent: &EventData, cx: &Context) -> Result<bool> {
     let live = |e: &EventData| e.status != EventStatus::Cancelled;
     let copy = |rid: Option<&Moment>| store::stored_event(conn, &sent.uid, rid, Some(cx.account), cx.here);
-    let held = match &sent.recurrence_id {
+    Ok(match &sent.recurrence_id {
         None => copy(None)?.is_some_and(|s| live(&s.event)),
         Some(rid) => match copy(Some(rid))? {
             Some(changed) => live(&changed.event),
             None => copy(None)?.is_some_and(|m| live(&m.event) && occurs(&m.event, rid, cx.here)),
         },
-    };
-    let held = held && super::remove::refusal(conn, &sent.uid, sent.recurrence_id.as_ref(), cx.account, cx.here)?.is_none();
-    Ok(held.then(|| Removing {
+    })
+}
+
+/// Remove from calendar for a cancellation the calendar holds, when its
+/// copy is the user's as a guest.
+fn removable(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Option<Removing>> {
+    let guest = super::remove::refusal(conn, &sent.uid, sent.recurrence_id.as_ref(), cx.account, cx.here)?.is_none();
+    Ok(guest.then(|| Removing {
         message: cx.message,
         uid: sent.uid.clone(),
         occurrence: sent.recurrence_id.map(|rid| {
@@ -1466,6 +1471,9 @@ pub(crate) mod tests {
 
         hold(calendar, ME, &|_| {});
         assert!(!removing(ME), "the user organizes it");
+        let organizer = sent_as(&version("x-own", "sync", "CANCEL", 1, "20261104T090000Z", V1), ME, ME);
+        let own = import(&j, organizer.as_bytes());
+        assert!(!notes(&stored_card(&j, own, &organizer)).contains(&"Not in your calendar"), "the calendar holds the organizer's copy");
         let alias = "me.too@example.com";
         let chair = crate::calendar::Attendee { person: Person { address: alias.into(), name: String::new() }, role: Role::Chair, response: Response::Accepted, comment: String::new(), is_me: true };
         hold(calendar, alias, &|e| e.attendees.push(chair.clone()));
