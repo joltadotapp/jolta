@@ -193,6 +193,20 @@ pub(super) fn moment_text(m: &Moment) -> String {
     }
 }
 
+/// The moment `moment_text` wrote; None for '' and anything it didn't write.
+pub(super) fn moment_from_text(text: &str) -> Option<Moment> {
+    let (wall, zone) = text.split_once(' ').map_or((text, None), |(wall, zone)| (wall, Some(zone)));
+    if wall.len() == 8 && zone.is_none() {
+        return NaiveDate::parse_from_str(wall, "%Y%m%d").ok().map(Moment::Date);
+    }
+    let wall = chrono::NaiveDateTime::parse_from_str(wall, "%Y%m%dT%H%M%S").ok()?;
+    let zone = match zone {
+        Some(name) => Zone::Tz(name.parse().ok()?),
+        None => Zone::Floating,
+    };
+    Some(Moment::Time(crate::calendar::Local { wall, zone }))
+}
+
 /// Replaces the events of one remote object and rebuilds the occurrences of
 /// every series it touched. An unchanged ETag skips the work, so applying the
 /// same batch twice is harmless. False when nothing changed.
@@ -539,6 +553,20 @@ mod tests {
     use super::*;
     use crate::calendar::{Attendee, Local, Person, Recurrence, Role, Span};
     use crate::store::Store;
+
+    #[test]
+    fn a_stored_recurrence_id_reads_back_as_its_moment() {
+        let wall = NaiveDateTime::parse_from_str("2026-11-05 09:30", "%Y-%m-%d %H:%M").unwrap();
+        for m in [
+            Moment::Date(NaiveDate::from_ymd_opt(2026, 11, 5).unwrap()),
+            Moment::Time(Local { wall, zone: Zone::Tz(Brussels) }),
+            Moment::Time(Local { wall, zone: Zone::Floating }),
+        ] {
+            assert_eq!(moment_from_text(&moment_text(&m)), Some(m));
+        }
+        assert_eq!(moment_from_text(""), None);
+        assert_eq!(moment_from_text("20261105T093000 Mars/Olympus"), None);
+    }
 
     fn store(name: &str) -> Store {
         let dir = std::env::temp_dir().join(format!("jolta-cal-{name}-{}", std::process::id()));

@@ -1,5 +1,5 @@
 //! The search language: `from:`, `to:`, `subject:`, `has:attachment`,
-//! `is:unread`, `is:needs-reply`, `category:`, `in:`, `label:`, `account:`,
+//! `is:unread`, `is:needs-reply`, `is:invite`, `category:`, `in:`, `label:`, `account:`,
 //! `before:`, `after:`, quoted phrases, bare words, and `-` to negate any of
 //! them.
 
@@ -36,6 +36,8 @@ pub enum Status {
     Notification,
     /// AI sorting says the newest message waits for the user's reply.
     NeedsReply,
+    /// An invitation the user still has to answer.
+    Invite,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,8 +172,9 @@ pub fn parse(input: &str) -> Result<Query> {
                 "newsletter" | "newsletters" => Status::Newsletter,
                 "notification" | "notifications" => Status::Notification,
                 "needs-reply" | "needsreply" | "needs_reply" => Status::NeedsReply,
+                "invite" | "invites" | "invitation" | "invitations" => Status::Invite,
                 v => return Err(Error::Query(format!(
-                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter, is:notification or is:needs-reply"
+                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter, is:notification, is:needs-reply or is:invite"
                 ))),
             }),
             Some("category") => {
@@ -257,6 +260,7 @@ mod tests {
             ]
         );
         assert_eq!(kinds("mailbox:12"), vec![(false, TermKind::Mailbox(12))]);
+        assert_eq!(kinds("is:invite -is:invitations"), vec![(false, TermKind::Is(Status::Invite)), (true, TermKind::Is(Status::Invite))]);
         assert_eq!(kinds("-has:list"), vec![(true, TermKind::HasList)]);
         assert!(parse("mailbox:inbox").is_err());
     }

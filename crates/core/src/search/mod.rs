@@ -11,7 +11,8 @@ use rusqlite::{Connection, params_from_iter};
 pub use query::{Query, Status, Term, TermKind, TextField, parse};
 
 use crate::model::*;
-use crate::store::{base_subject, date_to_id_floor};
+use crate::calendar::tz;
+use crate::store::{InvitationState, base_subject, date_to_id_floor};
 use crate::Result;
 
 /// One row of a message list: a thread, shown through its newest matching message.
@@ -33,6 +34,7 @@ pub struct ThreadRow {
     pub vip: bool,
     /// AI sorting says the conversation waits for the user's reply.
     pub needs_reply: bool,
+    pub invitation: Option<InvitationState>,
 }
 
 fn fts_string(text: &str, phrase: bool, prefix: bool) -> String {
@@ -79,8 +81,9 @@ impl Sql {
 /// Builds `SELECT m.id, m.thread_id ... ORDER BY newest`. The driving table
 /// is the FTS index when there is text to match, the mailbox link table when
 /// the query names a mailbox, and the message table otherwise, so each walks
-/// its own index in date order and stops early.
-fn plan(q: &Query) -> Sql {
+/// its own index in date order and stops early. `is:invite` asks the store
+/// first, since whether an invitation is answered depends on the calendars.
+fn plan(conn: &Connection, q: &Query) -> Result<Sql> {
     let mut sql = Sql { from: String::new(), order: "", conds: Vec::new(), params: Vec::new() };
 
     let positive_text: Vec<String> = q
@@ -155,6 +158,11 @@ fn plan(q: &Query) -> Sql {
             TermKind::Is(Status::Vip) => "EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)".into(),
             TermKind::Is(Status::Notification) => NOTIFICATION.into(),
             TermKind::Is(Status::NeedsReply) => crate::ai::triage::NEEDS_REPLY.into(),
+            TermKind::Is(Status::Invite) => {
+                let ids = crate::store::unanswered_invitations(conn, chrono::Utc::now(), tz::here())?;
+                let p = sql.param(serde_json::to_string(&ids.iter().map(|m| m.0).collect::<Vec<_>>()).expect("numbers"));
+                format!("m.id IN (SELECT value FROM json_each(?{p}))")
+            }
             TermKind::Category(c) => {
                 let p = sql.param(c.clone());
                 format!("EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id AND t.category = ?{p})")
@@ -172,7 +180,7 @@ fn plan(q: &Query) -> Sql {
         };
         sql.conds.push(if t.negated { format!("NOT ({cond})") } else { cond });
     }
-    sql
+    Ok(sql)
 }
 
 fn is_anywhere(mailbox: &str) -> bool {
@@ -324,7 +332,7 @@ fn for_each_thread(
     extra: &str,
     mut each: impl FnMut(ThreadId, MessageId, &rusqlite::Row) -> Result<bool>,
 ) -> Result<()> {
-    let sql = plan(q);
+    let sql = plan(conn, q)?;
     let text = format!(
         "SELECT m.id, m.thread_id{extra} FROM {}{} ORDER BY {}",
         sql.from,
@@ -360,7 +368,7 @@ pub(crate) fn sort_text(text: &str) -> String {
 
 /// Every message the query matches, ignoring threads.
 pub fn query_messages(conn: &Connection, q: &Query) -> Result<Vec<MessageId>> {
-    let sql = plan(q);
+    let sql = plan(conn, q)?;
     let text = format!("SELECT m.id FROM {}{}", sql.from, where_clause(&sql));
     let mut stmt = conn.prepare_cached(&text)?;
     let ids = stmt.query_map(params_from_iter(sql.params.iter()), |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -373,7 +381,7 @@ pub fn thread_rows(conn: &Connection, hits: &[(ThreadId, MessageId)]) -> Result<
 
 /// Number of threads matching the query.
 pub fn query_count(conn: &Connection, q: &Query) -> Result<u32> {
-    let sql = plan(q);
+    let sql = plan(conn, q)?;
     let text = format!("SELECT count(DISTINCT m.thread_id) FROM {}{}", sql.from, where_clause(&sql));
     Ok(conn.prepare_cached(&text)?.query_row(params_from_iter(sql.params.iter()), |r| r.get(0))?)
 }
@@ -400,8 +408,10 @@ fn thread_row(conn: &Connection, thread: ThreadId, message: MessageId) -> Result
             has_attachments: false,
             vip: r.get(6)?,
             needs_reply: false,
+            invitation: None,
         })
     })?;
+    row.invitation = crate::store::thread_invitation(conn, thread, chrono::Utc::now(), tz::here())?;
     // The conversation's newest message decides, as for `is:needs-reply`.
     row.needs_reply = conn
         .prepare_cached(&format!(

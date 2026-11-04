@@ -2,13 +2,14 @@
 //! about them: the copy in the user's calendars and whether the user ever
 //! wrote to the sender.
 
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::calendar::moment_text;
-use crate::calendar::invitation::Invitation;
+use super::calendar::{moment_from_text, moment_text};
+use crate::calendar::invitation::{Invitation, Method};
 use crate::calendar::series::copy_rank;
-use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response};
+use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response, tz};
 use crate::model::*;
 use crate::{Error, Result, compose};
 
@@ -16,9 +17,10 @@ use crate::{Error, Result, compose};
 pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitation]) -> Result<()> {
     conn.prepare_cached("DELETE FROM invitation WHERE message_id = ?1")?.execute([id])?;
     let mut insert = conn.prepare_cached(
-        "INSERT OR IGNORE INTO invitation (message_id, uid, recurrence_id, sequence, method, organizer)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR IGNORE INTO invitation (message_id, uid, recurrence_id, sequence, method, organizer, ends)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
+    let here = tz::here();
     for i in invitations {
         let e = &i.event;
         insert.execute(params![
@@ -28,6 +30,7 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
             e.sequence,
             i.method,
             e.organizer.as_ref().map(|o| o.address.as_str()).unwrap_or_default(),
+            i.ends(here).map_or(0, |t| t.timestamp()),
         ])?;
     }
     Ok(())
@@ -186,6 +189,121 @@ pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recur
         .optional()?)
 }
 
+/// The user's answer to an invitation on the account it came to, as its
+/// card shows it: `copy` is that account's copy of the event and
+/// `remembered` the answer given from Jolta. Jolta answers through a
+/// provider's or a CalDAV copy, so that one holds the answer it gave; a
+/// feed's or this Mac's copy only says what it was imported with.
+pub fn shown_answer(conn: &Connection, copy: Option<&StoredEvent>, remembered: Option<Response>) -> Result<Option<Response>> {
+    match copy {
+        Some(s) if answered_there(conn, s)? => Ok(s.event.my_response()),
+        copy => Ok(remembered.or(copy.and_then(|s| s.event.my_response()))),
+    }
+}
+
+fn answered_there(conn: &Connection, copy: &StoredEvent) -> Result<bool> {
+    let source = super::calendar(conn, copy.calendar_id)?.source;
+    Ok(!matches!(source, CalendarSource::Webcal | CalendarSource::Local))
+}
+
+/// What the message list shows for a conversation with an invitation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationState {
+    /// A request for an event still to come that the user hasn't answered.
+    Unanswered,
+    Answered(Response),
+    /// A cancellation, or a request whose event was cancelled since.
+    Cancelled,
+    /// Only the mark: a reply, the user's own meeting, a request for an
+    /// event that passed unanswered, and the other methods.
+    Plain,
+}
+
+/// One `invitation` row with what its state depends on.
+struct Named {
+    message: MessageId,
+    account: AccountId,
+    receiver: String,
+    uid: String,
+    recurrence_id: String,
+    sequence: i64,
+    method: Method,
+    organizer: String,
+    ends: i64,
+}
+
+const NAMED: &str = "SELECT i.message_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends
+     FROM invitation i JOIN message m ON m.id = i.message_id JOIN account a ON a.id = m.account_id";
+
+fn named(r: &Row) -> rusqlite::Result<Named> {
+    Ok(Named {
+        message: r.get(0)?,
+        account: r.get(1)?,
+        receiver: r.get(2)?,
+        uid: r.get(3)?,
+        recurrence_id: r.get(4)?,
+        sequence: r.get(5)?,
+        method: r.get(6)?,
+        organizer: r.get(7)?,
+        ends: r.get(8)?,
+    })
+}
+
+/// The invitation a conversation shows: its newest message from the
+/// organizer, such as a request, an update or a cancellation, else its
+/// newest reply. A message's whole event or series comes before its
+/// changed occurrences.
+const THREAD: &str = "WHERE m.thread_id = ?1 ORDER BY i.method IN ('REPLY', 'COUNTER', 'REFRESH'), m.id DESC, i.recurrence_id != '' LIMIT 1";
+
+/// The state of the invitation a conversation shows, if it has one.
+pub fn thread_invitation(conn: &Connection, thread: ThreadId, now: DateTime<Utc>, here: Tz) -> Result<Option<InvitationState>> {
+    let shown = conn.prepare_cached(&format!("{NAMED} {THREAD}"))?.query_row([thread], named).optional()?;
+    shown.map(|n| state(conn, &n, now, here)).transpose()
+}
+
+/// The messages with a request the user still has to answer, for
+/// `is:invite`: an event to come, from an organizer other than the
+/// account it came to, neither answered nor cancelled.
+pub fn unanswered_invitations(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Vec<MessageId>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "{NAMED} WHERE i.method = 'REQUEST' AND i.ends > ?1 ORDER BY i.message_id, i.recurrence_id != ''"
+    ))?;
+    let rows = stmt.query_map([now.timestamp()], named)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out: Vec<MessageId> = Vec::new();
+    for n in rows {
+        if out.last() != Some(&n.message) && state(conn, &n, now, here)? == InvitationState::Unanswered {
+            out.push(n.message);
+        }
+    }
+    Ok(out)
+}
+
+/// A request is answered in the calendars of the account it came to, as
+/// its card answers it.
+fn state(conn: &Connection, n: &Named, now: DateTime<Utc>, here: Tz) -> Result<InvitationState> {
+    match n.method {
+        Method::Cancel => return Ok(InvitationState::Cancelled),
+        Method::Request if !n.organizer.trim().is_empty() && !n.organizer.trim().eq_ignore_ascii_case(&n.receiver) => {}
+        _ => return Ok(InvitationState::Plain),
+    }
+    let rid = moment_from_text(&n.recurrence_id);
+    let copy = stored_event(conn, &n.uid, rid.as_ref(), Some(n.account), here)?;
+    let cancelled: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM invitation WHERE uid = ?1 AND method = 'CANCEL' AND recurrence_id IN (?2, '') AND sequence >= ?3)",
+        )?
+        .query_row(params![n.uid, n.recurrence_id, n.sequence], |r| r.get(0))?;
+    if cancelled || copy.as_ref().is_some_and(|c| c.event.status == EventStatus::Cancelled) {
+        return Ok(InvitationState::Cancelled);
+    }
+    let remembered = remembered_answer(conn, n.account, &n.uid, rid.as_ref())?;
+    Ok(match shown_answer(conn, copy.as_ref(), remembered)? {
+        Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
+        _ if n.ends > now.timestamp() => InvitationState::Unanswered,
+        _ => InvitationState::Plain,
+    })
+}
+
 /// Mail from the address that the user answered, through the partial
 /// index `message_answered`, which needs this exact `flags & 4` term.
 const REPLIED: &str = "SELECT EXISTS (SELECT 1 FROM message WHERE from_addr = ?1 COLLATE NOCASE AND (flags & 4) != 0)";
@@ -223,7 +341,7 @@ pub fn has_written_to(conn: &Connection, address: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::TimeZone;
 
     use super::*;
     use crate::calendar::Response;
@@ -330,6 +448,110 @@ mod tests {
         let later = Moment::Time(crate::calendar::Local { wall: local.wall + chrono::Duration::hours(1), ..local });
         assert_eq!(found(&later), None);
         assert_eq!(jolta.store.read(|c| stored_event(c, &moved.uid, None, None, chrono_tz::Europe::Brussels)).unwrap(), None, "no master stored");
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()
+    }
+
+    fn shown(jolta: &crate::Jolta, message: MessageId, now: DateTime<Utc>) -> Option<InvitationState> {
+        jolta
+            .store
+            .read(|c| {
+                let thread = c.query_row("SELECT thread_id FROM message WHERE id = ?1", [message], |r| r.get(0))?;
+                thread_invitation(c, thread, now, chrono_tz::Europe::Brussels)
+            })
+            .unwrap()
+    }
+
+    fn open(jolta: &crate::Jolta, now: DateTime<Utc>) -> Vec<MessageId> {
+        jolta.store.read(|c| unanswered_invitations(c, now, chrono_tz::Europe::Brussels)).unwrap()
+    }
+
+    fn copy_answered(jolta: &crate::Jolta, calendar: CalendarId, response: Response) {
+        let mut copy = crate::calendar::invitation::find(mail!("google-request.eml"), &["me@example.com".into()]).remove(0).event;
+        copy.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = response);
+        let horizon = Horizon::around(now(), chrono_tz::Europe::Brussels);
+        jolta.store.write(|tx| crate::store::apply_item(tx, calendar, "g1", None, &[copy], None, &horizon)).unwrap();
+    }
+
+    #[test]
+    fn a_request_shows_the_answer_its_card_shows() {
+        let (jolta, calendar) = jolta("state-answer");
+        let request = import(&jolta, mail!("google-request.eml"));
+        assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Unanswered));
+        assert_eq!(open(&jolta, now()), [request]);
+
+        let given = GivenAnswer { answer: Response::Tentative, note: String::new(), notify: true };
+        jolta.store.write(|tx| remember_answer(tx, AccountId(1), "7kq2m4p9r1s3t5v7x9z0b2d4f6@google.com", None, &given, None)).unwrap();
+        assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Answered(Response::Tentative)), "the answer given from Jolta");
+        assert!(open(&jolta, now()).is_empty());
+
+        copy_answered(&jolta, calendar, Response::Declined);
+        assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Answered(Response::Declined)), "the CalDAV copy Jolta answers through wins");
+        copy_answered(&jolta, calendar, Response::NeedsAction);
+        assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Unanswered), "answered elsewhere and taken back");
+
+        let later = Utc.with_ymd_and_hms(2026, 11, 12, 16, 0, 0).unwrap();
+        assert_eq!(shown(&jolta, request, later), Some(InvitationState::Plain), "16:45 Brussels has passed, unanswered");
+        assert!(open(&jolta, later).is_empty());
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_cancellation_cancels_the_request_it_follows() {
+        let (jolta, _) = jolta("state-cancel");
+        let request = import(&jolta, mail!("google-request.eml"));
+        let cancel = import(&jolta, mail!("cancel.eml"));
+        assert_eq!(shown(&jolta, cancel, now()), Some(InvitationState::Cancelled));
+        assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Cancelled), "a later SEQUENCE cancels it");
+        assert!(open(&jolta, now()).is_empty());
+        jolta.store.write(|tx| Ok(tx.execute("UPDATE invitation SET sequence = 2 WHERE message_id = ?1", [request])?)).unwrap();
+        assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Unanswered), "sent again after the cancellation");
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn replies_and_the_users_own_meetings_get_the_mark_alone() {
+        let (jolta, _) = jolta("state-plain");
+        let reply = import(&jolta, mail!("reply.eml"));
+        assert_eq!(shown(&jolta, reply, now()), Some(InvitationState::Plain));
+        let mine = import(&jolta, &String::from_utf8_lossy(mail!("series.eml")).replace("mailto:ann@example.com", "mailto:ME@example.com").into_bytes());
+        assert_eq!(shown(&jolta, mine, now()), Some(InvitationState::Plain), "organized by the account it came to");
+        let plain = import(&jolta, b"Subject: plain\r\n\r\nNo calendar.\r\n");
+        assert_eq!(shown(&jolta, plain, now()), None);
+        assert!(open(&jolta, now()).is_empty());
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_series_is_to_come_until_its_last_occurrence() {
+        let (jolta, _) = jolta("state-series");
+        let series = import(&jolta, mail!("series.eml"));
+        let ends: i64 = jolta.store.read(|c| Ok(c.query_row("SELECT ends FROM invitation WHERE recurrence_id = ''", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(DateTime::from_timestamp(ends, 0), Utc.with_ymd_and_hms(2026, 12, 17, 8, 45, 0).single(), "Thursday 17 December, 09:45 Brussels");
+        assert_eq!(open(&jolta, now()), [series]);
+        assert_eq!(open(&jolta, Utc.with_ymd_and_hms(2026, 12, 18, 0, 0, 0).unwrap()), []);
+
+        let endless = String::from_utf8_lossy(mail!("series.eml")).replace(";UNTIL=20261217T225959Z", "").replace("standup-series@", "endless@");
+        let endless = crate::calendar::invitation::find(endless.as_bytes(), &[]).remove(0);
+        assert_eq!(endless.ends(chrono_tz::Europe::Brussels), Some(DateTime::<Utc>::MAX_UTC));
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_conversation_finds_its_invitation_through_indexes() {
+        let (jolta, _) = jolta("state-plan");
+        let plans: Vec<String> = jolta
+            .store
+            .read(|c| {
+                let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {NAMED} {THREAD}"))?;
+                let rows = stmt.query_map([1], |r| r.get::<_, String>(3))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert!(!plans.iter().any(|d| d.starts_with("SCAN")), "{plans:#?}");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

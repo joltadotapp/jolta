@@ -10,6 +10,7 @@ const LANGUAGE: &str = "Query language (all terms must match):
 - from:name-or-address  to:name-or-address  subject:word
 - has:attachment
 - is:unread  is:read  is:starred  is:vip  is:newsletter  is:notification  is:needs-reply
+- is:invite (meeting invitations not answered yet)
 - category:personal  category:work  category:finance  category:newsletter  category:notification
 - in:inbox  in:sent  in:archive  in:drafts  in:trash  in:snoozed
 - after:YYYY-MM-DD (from that day on)  before:YYYY-MM-DD (until the day before)
@@ -48,6 +49,7 @@ pub async fn query(jolta: &Jolta, ai: &Ai, request: &str, now: i64, utc_offset: 
          unread mail from my bank -> is:unread category:finance\n\
          the pdf Tom sent about billing -> from:tom has:attachment billing\n\
          what still needs an answer from me -> is:needs-reply\n\
+         invitations I haven't answered -> is:invite\n\
          mails van mama over zondag -> from:mama zondag"
     );
     let request = with_dates(request.trim(), local_day, monday, &this_month, &last_month, &ymd);

@@ -5,10 +5,13 @@ use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
+use chrono::{DateTime, Duration, NaiveTime, Utc};
+use chrono_tz::Tz;
 use mail_parser::{MessageParser, MessagePart, MessageRef};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
-use super::{EventData, ical};
+use super::recur::{self, Window};
+use super::{EventData, Span, ical, tz};
 use crate::model::text_enum;
 
 text_enum!(Method {
@@ -38,6 +41,37 @@ impl Method {
     /// CANCEL, REPLY and DECLINECOUNTER.
     fn names_without_start(self) -> bool {
         matches!(self, Method::Refresh | Method::Cancel | Method::Reply | Method::DeclineCounter)
+    }
+}
+
+impl Invitation {
+    /// When the event ends, for a series its last occurrence: None when the
+    /// message gives no time, and `DateTime::MAX_UTC` for a series whose
+    /// rule has no UNTIL or COUNT.
+    pub fn ends(&self, here: Tz) -> Option<DateTime<Utc>> {
+        let e = &self.event;
+        if !self.dated {
+            return None;
+        }
+        let Some(rec) = &e.recurrence else { return Some(end_of(&e.span, here)) };
+        let bounded = |rule: &String| ["UNTIL=", "COUNT="].iter().any(|k| rule.to_ascii_uppercase().contains(k));
+        if !rec.rules.iter().all(bounded) {
+            return Some(DateTime::<Utc>::MAX_UTC);
+        }
+        let start = match &e.span {
+            Span::AllDay { start, .. } => tz::instant(start.and_time(NaiveTime::MIN), here),
+            Span::Timed { start, .. } => start.instant(here),
+        };
+        let window = Window { start: start - Duration::days(1), end: start + Duration::days(100 * 366) };
+        let last = recur::expand(e, &[], window, here).last().map(|o| end_of(&o.span, here));
+        Some(last.unwrap_or_else(|| end_of(&e.span, here)))
+    }
+}
+
+fn end_of(span: &Span, here: Tz) -> DateTime<Utc> {
+    match span {
+        Span::AllDay { end, .. } => tz::instant(end.and_time(NaiveTime::MIN), here),
+        Span::Timed { end, .. } => end.instant(here),
     }
 }
 

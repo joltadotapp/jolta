@@ -112,11 +112,11 @@ impl Engine {
             Ok(_) => sink(Event::ListsChanged),
             Err(e) => tracing::warn!("S/MIME scan stopped: {e}"),
         });
-        let jolta = engine.jolta.clone();
-        engine.runtime.spawn_blocking(move || {
-            if let Err(e) = scan_invitations(&jolta) {
-                tracing::warn!("invitation scan stopped: {e}");
-            }
+        let (jolta, sink) = (engine.jolta.clone(), engine.sink.clone());
+        engine.runtime.spawn_blocking(move || match scan_invitations(&jolta) {
+            Ok(0) => {}
+            Ok(_) => sink(Event::ListsChanged),
+            Err(e) => tracing::warn!("invitation scan stopped: {e}"),
         });
         let jolta = engine.jolta.clone();
         engine.runtime.spawn(async move {
