@@ -122,6 +122,18 @@ impl Object {
         close(&mut copy.nodes).then(|| copy.to_string())
     }
 
+    /// A text holding one component, normally a VCALENDAR, with CRLF line endings.
+    pub fn new(calendar: Component) -> Object {
+        Object { nodes: vec![Node::Component(calendar)], eol: "\r\n" }
+    }
+
+    pub fn calendar(&self) -> Option<&Component> {
+        self.nodes.iter().find_map(|n| match n {
+            Node::Component(c) if c.name == "VCALENDAR" => Some(c),
+            _ => None,
+        })
+    }
+
     /// The first VCALENDAR, to set METHOD on a reply, for example.
     pub fn calendar_mut(&mut self) -> Option<&mut Component> {
         self.nodes.iter_mut().find_map(|n| match n {
@@ -345,6 +357,15 @@ impl Component {
 
     pub fn push(&mut self, component: Component) {
         self.nodes.push(Node::Component(component));
+    }
+
+    /// The components directly inside this one, such as a VCALENDAR's
+    /// VTIMEZONEs and VEVENTs.
+    pub fn components(&self) -> impl Iterator<Item = &Component> {
+        self.nodes.iter().filter_map(|n| match n {
+            Node::Component(c) => Some(c),
+            Node::Line(_) => None,
+        })
     }
 }
 
@@ -679,7 +700,7 @@ pub fn write_event(e: &EventData, prodid: &str) -> String {
     cal.add(Prop::text_value("PRODID", prodid));
     cal.add(Prop::new("CALSCALE", "GREGORIAN"));
     cal.push(ev);
-    Object { nodes: vec![Node::Component(cal)], eol: "\r\n" }.to_string()
+    Object::new(cal).to_string()
 }
 
 fn person_prop(name: &str, p: &Person) -> Prop {

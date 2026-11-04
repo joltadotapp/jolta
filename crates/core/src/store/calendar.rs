@@ -217,37 +217,60 @@ pub fn apply_item(
     }
     let mut uids = item_uids(conn, calendar, remote_id)?;
     conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
-    let mut insert = conn.prepare_cached(
-        "INSERT OR REPLACE INTO event (calendar_id, remote_id, etag, uid, recurrence_id, data, title, location, status,
-                                       show_as, my_response, sequence, meeting_provider, join_url, has_attendees, blob)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-    )?;
     for e in events {
-        let data = serde_json::to_string(e).map_err(|err| Error::Other(format!("event {}: {err}", e.uid)))?;
-        insert.execute(params![
-            calendar,
-            remote_id,
-            etag,
-            e.uid,
-            e.recurrence_id.as_ref().map(moment_text).unwrap_or_default(),
-            data,
-            e.title,
-            e.location,
-            e.status,
-            e.show_as,
-            e.my_response(),
-            e.sequence,
-            e.meeting.as_ref().map(|m| m.provider),
-            e.meeting.as_ref().map(|m| m.join_url.as_str()),
-            !e.attendees.is_empty(),
-            blob,
-        ])?;
+        insert_event(conn, calendar, remote_id, etag, e, blob)?;
         uids.insert(e.uid.clone());
     }
     for uid in &uids {
         rebuild_series(conn, calendar, uid, horizon)?;
     }
     Ok(true)
+}
+
+/// Stores one event of a remote object beside the others, replacing only an
+/// event with the same recurrence id. The caller rebuilds the series.
+pub fn insert_event(
+    conn: &Connection,
+    calendar: CalendarId,
+    remote_id: &str,
+    etag: Option<&str>,
+    e: &EventData,
+    blob: Option<&str>,
+) -> Result<()> {
+    let data = serde_json::to_string(e).map_err(|err| Error::Other(format!("event {}: {err}", e.uid)))?;
+    conn.prepare_cached(
+        "INSERT OR REPLACE INTO event (calendar_id, remote_id, etag, uid, recurrence_id, data, title, location, status,
+                                       show_as, my_response, sequence, meeting_provider, join_url, has_attendees, blob)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+    )?
+    .execute(params![
+        calendar,
+        remote_id,
+        etag,
+        e.uid,
+        e.recurrence_id.as_ref().map(moment_text).unwrap_or_default(),
+        data,
+        e.title,
+        e.location,
+        e.status,
+        e.show_as,
+        e.my_response(),
+        e.sequence,
+        e.meeting.as_ref().map(|m| m.provider),
+        e.meeting.as_ref().map(|m| m.join_url.as_str()),
+        !e.attendees.is_empty(),
+        blob,
+    ])?;
+    Ok(())
+}
+
+/// Rewrites a stored event's data and answer in place. Its ETag stays, so
+/// the next sync still takes the server's version over this one. The caller
+/// rebuilds the series.
+pub fn set_event_data(conn: &Connection, id: EventId, e: &EventData) -> Result<()> {
+    let data = serde_json::to_string(e).map_err(|err| Error::Other(format!("event {}: {err}", e.uid)))?;
+    conn.execute("UPDATE event SET data = ?2, my_response = ?3 WHERE id = ?1", params![id, data, e.my_response()])?;
+    Ok(())
 }
 
 /// Deletes the events of one remote object. Series they belonged to keep
