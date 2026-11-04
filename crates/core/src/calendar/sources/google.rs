@@ -362,14 +362,19 @@ impl Google {
     }
 }
 
-/// The event's attendee list with the user's own entry answered. Google's
-/// `self` flag marks it; the address is the fallback.
+/// Which attendee the calendar answers as: the entry Google marks `self`,
+/// which on a calendar shared with the user is the calendar's owner, and
+/// only without one the first with one of the user's addresses.
+fn own_entry<T>(attendees: &[T], is_self: impl Fn(&T) -> bool, email: impl Fn(&T) -> &str, me: &[String]) -> Option<usize> {
+    attendees.iter().position(is_self).or_else(|| attendees.iter().position(|a| me.iter().any(|m| m.eq_ignore_ascii_case(email(a)))))
+}
+
+/// The event's attendee list with the user's own entry answered.
 fn answered(event: &Value, me: &str, rsvp: &Rsvp) -> Result<Vec<Value>> {
     let mut attendees = event["attendees"].as_array().cloned().unwrap_or_default();
-    let own = attendees
-        .iter_mut()
-        .find(|a| a["self"] == true || a["email"].as_str().is_some_and(|e| e.eq_ignore_ascii_case(me)))
+    let own = own_entry(&attendees, |a| a["self"] == true, |a| a["email"].as_str().unwrap_or_default(), &[me.to_string()])
         .ok_or_else(|| Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")))?;
+    let own = &mut attendees[own];
     own["responseStatus"] = json!(match rsvp.answer.response() {
         Response::Accepted => "accepted",
         Response::Tentative => "tentative",
@@ -498,11 +503,12 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
         _ if g.transparency.as_deref() == Some("transparent") => ShowAs::Free,
         _ => ShowAs::Busy,
     };
-    let is_me = |a: &GoogleAttendee| a.is_self || me.iter().any(|m| m.eq_ignore_ascii_case(&a.email));
+    let own = own_entry(&g.attendees, |a| a.is_self, |a| a.email.as_str(), me);
     let attendees = g
         .attendees
         .iter()
-        .map(|a| Attendee {
+        .enumerate()
+        .map(|(i, a)| Attendee {
             person: Person { address: a.email.clone(), name: a.display_name.clone() },
             role: if a.resource {
                 Role::Resource
@@ -518,7 +524,7 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
                 _ => Response::NeedsAction,
             },
             comment: a.comment.clone(),
-            is_me: is_me(a),
+            is_me: own == Some(i),
         })
         .collect();
     let reminders: &[Reminder] = match &g.reminders {
@@ -703,6 +709,7 @@ mod tests {
 
     use super::*;
     use crate::calendar::recur::{self, Window};
+    use crate::calendar::rsvp::{Answer, Scope};
 
     fn wall(s: &str) -> NaiveDateTime {
         NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
@@ -777,6 +784,34 @@ mod tests {
         assert_eq!(m.phones.len(), 1);
         assert_eq!(e.color.as_deref(), Some("#dc2127"));
         assert_eq!(e.organizer.unwrap().name, "Boss");
+    }
+
+    #[test]
+    fn a_shared_calendar_answers_as_its_owner_in_the_patch_and_the_store() {
+        let event = |attendees: Value| {
+            json!({
+                "id": "shared", "iCalUID": "shared@google.com", "summary": "Planning",
+                "start": {"date": "2026-12-01"}, "end": {"date": "2026-12-02"},
+                "attendees": attendees
+            })
+        };
+        let accept = Rsvp { event: crate::calendar::EventId(1), answer: Answer::Accept, note: None, notify: true, scope: Scope::Series };
+        let statuses = |list: &[Value]| list.iter().map(|a| a["responseStatus"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>();
+        let marked = |e: &EventData| e.attendees.iter().map(|a| a.is_me).collect::<Vec<_>>();
+
+        let shared = event(json!([
+            {"email": "me@example.com", "responseStatus": "needsAction"},
+            {"email": "owner@example.com", "self": true, "responseStatus": "needsAction"}
+        ]));
+        assert_eq!(statuses(&answered(&shared, "me@example.com", &accept).unwrap()), ["needsAction", "accepted"]);
+        assert_eq!(marked(&mapped(shared)), [false, true]);
+
+        let own = event(json!([
+            {"email": "boss@example.com", "responseStatus": "accepted"},
+            {"email": "ME@example.com", "responseStatus": "needsAction"}
+        ]));
+        assert_eq!(statuses(&answered(&own, "me@example.com", &accept).unwrap()), ["accepted", "accepted"], "without a self entry the address decides");
+        assert_eq!(marked(&mapped(own)), [false, true]);
     }
 
     #[test]
