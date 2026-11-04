@@ -6,7 +6,7 @@ use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::calendar::moment_text;
-use crate::calendar::invitation::Invitation;
+use crate::calendar::invitation::{Invitation, Method};
 use crate::calendar::series::copy_rank;
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response};
 use crate::model::*;
@@ -90,15 +90,16 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
 }
 
 /// Every stored event of the series with this UID, the master and its
-/// overrides, from the one calendar the views show it from.
-pub fn stored_series(conn: &Connection, uid: &str) -> Result<Vec<EventData>> {
+/// overrides, from the one calendar the views show it from, of `account`
+/// only when one is given.
+pub fn stored_series(conn: &Connection, uid: &str, account: Option<AccountId>) -> Result<Vec<EventData>> {
     let mut stmt = conn.prepare_cached(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND c.shown",
+         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR c.account_id = ?2)",
     )?;
     let rows = stmt
-        .query_map([uid], |r| {
+        .query_map(params![uid, account], |r| {
             let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
             Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
         })?
@@ -184,6 +185,47 @@ pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recur
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// The reply mail Jolta sent with the answer `remembered_answer` finds:
+/// its blob, which names the version answered. None for an answer given
+/// without a reply, or a reply that failed for good.
+pub fn remembered_reply(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<String>> {
+    let rid = recurrence_id.map(moment_text).unwrap_or_default();
+    Ok(conn
+        .query_row(
+            "SELECT o.blob FROM invitation_answer a JOIN outbox o ON o.id = a.reply AND o.state IN ('queued', 'sent')
+             WHERE a.account_id = ?1 AND a.uid = ?2 AND a.recurrence_id IN (?3, '')
+             ORDER BY a.recurrence_id = '' LIMIT 1",
+            params![account, uid, rid],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// One message on an account that carries a version of an event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionRow {
+    pub message: MessageId,
+    pub method: Method,
+    pub sequence: i64,
+    /// The stored body.
+    pub blob: Option<String>,
+}
+
+/// The requests, additions and cancellations for this UID and recurrence
+/// id in the account's messages other than `skip`, highest SEQUENCE first.
+pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, skip: MessageId) -> Result<Vec<VersionRow>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT i.message_id, i.method, i.sequence, m.blob FROM invitation i JOIN message m ON m.id = i.message_id
+         WHERE i.uid = ?1 AND i.recurrence_id = ?2 AND m.account_id = ?3 AND i.message_id != ?4
+           AND i.method IN ('REQUEST', 'ADD', 'CANCEL') AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')
+         ORDER BY i.sequence DESC, i.message_id DESC LIMIT 20",
+    )?;
+    let rows = stmt.query_map(params![uid, recurrence_id.map(moment_text).unwrap_or_default(), account, skip], |r| {
+        Ok(VersionRow { message: r.get(0)?, method: r.get(1)?, sequence: r.get(2)?, blob: r.get(3)? })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Mail from the address that the user answered, through the partial

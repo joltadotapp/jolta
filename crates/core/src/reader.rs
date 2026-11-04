@@ -178,6 +178,7 @@ async fn invitation_cards(jolta: &Jolta, messages: &[ThreadMessage], raws: &[Vec
     if found.iter().all(|(.., i)| i.is_empty()) {
         return Ok(vec![Vec::new(); messages.len()]);
     }
+    let blobs = jolta.blobs.clone();
     jolta
         .store
         .read_async(move |c| {
@@ -185,7 +186,7 @@ async fn invitation_cards(jolta: &Jolta, messages: &[ThreadMessage], raws: &[Vec
             found
                 .iter()
                 .map(|(message, account, sender, invitations)| {
-                    card::cards(c, invitations, &card::Context { message: *message, account: *account, me: &me, sender, now, here })
+                    card::cards(c, invitations, &card::Context { message: *message, account: *account, me: &me, sender, now, here, blobs: &blobs })
                 })
                 .collect()
         })

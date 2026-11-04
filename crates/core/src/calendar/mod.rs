@@ -18,5 +18,6 @@ pub mod sources;
 pub mod sync;
 pub mod synth;
 pub mod tz;
+pub mod update;
 
 pub use model::*;

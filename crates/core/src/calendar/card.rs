@@ -8,10 +8,12 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 
 use super::detail::{city, instant_only, offset, range};
-use super::invitation::{Invitation, Method};
+use super::invitation::{self, Invitation, Method};
 use super::recur::Source;
 use super::series::{self, Horizon};
+use super::update;
 use super::{Bounds, CalendarSource, EventData, EventStatus, MeetingProvider, Moment, Person, Response, Role, Span, Zone, meeting, recur, tz};
+use crate::blobs::Blobs;
 use crate::model::{AccountId, MessageId};
 use crate::{Result, store};
 
@@ -41,6 +43,10 @@ pub struct EventCard {
     pub organizer: Option<String>,
     /// "Ann, Bo and 4 others".
     pub guests: Option<String>,
+    /// What an update changed since the version the user had.
+    pub changes: Changes,
+    /// A newer version of this invitation replaces it.
+    pub outdated: bool,
     pub notes: Vec<Note>,
     /// The user's answer: in their own calendar, else the one they gave
     /// from Jolta for an event no calendar of theirs holds.
@@ -72,6 +78,35 @@ pub struct ShownOccurrence {
     /// The invitation is for this occurrence only, without its series, so
     /// it is answered alone and there is no scope to choose.
     pub alone: bool,
+}
+
+/// The lines an update changed, each with its old value, which the card
+/// strikes through before the new one: "~~Tue 10 Nov~~ Wed 11 Nov · 14:00
+/// to 15:00".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub when: Option<Edit>,
+    pub repeat: Option<Edit>,
+    pub location: Option<Edit>,
+    /// The meeting link: "Zoom" to "Google Meet", or "New Zoom link".
+    pub join: Option<Edit>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        *self == Changes::default()
+    }
+}
+
+/// One changed line: `lead`, `old` struck through, `new`, then `tail`, the
+/// parts both versions share around what changed. An empty `old` is a line
+/// the update added, an empty `new` one it took away.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Edit {
+    pub lead: String,
+    pub old: String,
+    pub new: String,
+    pub tail: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,6 +173,8 @@ pub struct Context<'a> {
     pub sender: &'a str,
     pub now: DateTime<Utc>,
     pub here: Tz,
+    /// Stored messages, for the other versions of an invitation.
+    pub blobs: &'a Blobs,
 }
 
 /// One card per event the message's calendar parts name, a series with its
@@ -158,7 +195,7 @@ pub fn cards(conn: &Connection, invitations: &[Invitation], cx: &Context) -> Res
         };
         out.push(match i.method {
             Method::Reply => Card::Reply(reply(sent, described.iter().find(|e| e.recurrence_id.is_none()).or(described.first()), cx)),
-            method => Card::Event(event(conn, method, &events, described, cx)?),
+            _ => Card::Event(event(conn, i, &events, described, cx)?),
         });
     }
     Ok(out)
@@ -168,7 +205,7 @@ pub fn cards(conn: &Connection, invitations: &[Invitation], cx: &Context) -> Res
 /// whole series, so the next occurrence is chosen as for a dated message,
 /// or for one named occurrence its override, else the master moved to it.
 fn stored_copy(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Vec<EventData>> {
-    let series = store::stored_series(conn, &sent.uid)?;
+    let series = store::stored_series(conn, &sent.uid, None)?;
     let Some(rid) = sent.recurrence_id else { return Ok(series) };
     if let Some(o) = series.iter().find(|e| e.recurrence_id.is_some_and(|stored| rid.names(&stored, cx.here))) {
         return Ok(vec![o.clone()]);
@@ -180,14 +217,16 @@ fn stored_copy(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Vec<
         .collect())
 }
 
-/// `message` holds the events the mail sends, which say who asked and which
-/// version it is; `described` the ones that give the time and place: the
-/// same events, the calendar's copy, or none.
-fn event(conn: &Connection, method: Method, message: &[EventData], described: &[EventData], cx: &Context) -> Result<EventCard> {
+/// `sent` is the invitation the card is about, the series or single event
+/// of its message; `message` holds the events the mail sends, which say who
+/// asked and which version it is; `described` the ones that give the time
+/// and place: the same events, the calendar's copy, or none.
+fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], described: &[EventData], cx: &Context) -> Result<EventCard> {
+    let method = invitation.method;
     let master = described.iter().find(|e| e.recurrence_id.is_none());
     let occurrence = (!described.is_empty()).then(|| next(master, described, cx));
     let repeats = master.is_some_and(|m| m.recurrence.is_some());
-    let sent = message.iter().find(|e| e.recurrence_id.is_none()).unwrap_or(&message[0]);
+    let sent = &invitation.event;
     let shown = occurrence.map_or(sent, |(e, _)| e);
     let said = message.iter().find(|e| e.recurrence_id == shown.recurrence_id).unwrap_or(sent);
     let bounds = occurrence.map(|(_, span)| span.bounds(cx.here));
@@ -205,6 +244,12 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         })
     };
     let stored = copy(None)?;
+    let seen = update::Seen { conn, blobs: cx.blobs, account: cx.account, message: cx.message, me: cx.me, here: cx.here };
+    let history = update::history(&seen, invitation)?;
+    // An older version only points to the newer one: its time, link and
+    // answers are out of date.
+    let current = history.newer.is_none();
+    let changes = if current { changes(&history.before, described, cx) } else { Changes::default() };
 
     let mut notes = Vec::new();
     match method {
@@ -215,8 +260,11 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         Method::Add => notes.push(Note { text: "Adds dates to a repeating event".into(), warn: false }),
         Method::Request | Method::Publish | Method::Reply => {}
     }
-    if stored.as_ref().is_some_and(|s| s.event.sequence > said.sequence) {
-        notes.push(Note { text: "Your calendar has a newer version of this event".into(), warn: false });
+    match history.newer {
+        Some(Method::Cancel) => notes.push(Note { text: "The organizer has since cancelled this meeting".into(), warn: false }),
+        Some(_) => notes.push(Note { text: "There's a newer version of this invitation".into(), warn: false }),
+        None if changes.is_empty() => notes.extend(retitled(&history.before, sent)),
+        None => {}
     }
     if method != Method::Cancel && stranger(conn, said, cx)? {
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
@@ -224,7 +272,7 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
 
     let receiver = store::account(conn, cx.account)?.address;
     let alone = sent.recurrence_id.is_some();
-    let answering = answerable(method, sent, &receiver).then(|| Answering {
+    let answering = (current && answerable(method, sent, &receiver)).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
         occurrence: occurrence.filter(|_| repeats || alone).map(|(e, span)| ShownOccurrence {
@@ -240,37 +288,144 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
     // An invitation the user answers is answered in the calendars of the
     // account it came to; another account's copy may be the organizer's own.
     let (remembered, answered) = match &answering {
-        Some(a) => (store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?, copy(Some(cx.account))?),
+        Some(a) => (remembered(conn, a, cx)?, copy(Some(cx.account))?),
         None => (None, stored.clone()),
     };
 
     let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
     let availability = match bounds {
-        Some(bounds) if wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
+        Some(bounds) if current && wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
         _ => None,
     };
 
     Ok(EventCard {
-        label: label(method, said),
+        label: label(method, said, !history.before.is_empty()),
         title: if shown.title.trim().is_empty() { "(no title)".into() } else { shown.title.trim().to_string() },
         cancelled: method == Method::Cancel || shown.status == EventStatus::Cancelled,
         when,
         elsewhere,
-        repeat: master
-            .and_then(|m| m.recurrence.as_ref().map(|r| recur::describe(r, &m.span).unwrap_or_else(|| "Custom repeat".into()))),
+        repeat: repeat(master),
         location: location(shown),
-        join: join(shown, bounds, cx.now),
+        join: join(shown, bounds, cx.now).filter(|_| current),
         organizer: shown.organizer.as_ref().map(|o| name(o, cx.me, false)),
         guests: guests(shown, cx.me),
+        changes,
+        outdated: !current,
         notes,
-        answer: match answered.filter(|_| method != Method::Cancel) {
+        answer: match answered.filter(|_| current && method != Method::Cancel) {
             // Jolta answers through these, so they hold the answer it gave.
-            Some(s) if answered_there(conn, &s)? => s.event.my_response(),
-            stored => remembered.or(stored.and_then(|s| s.event.my_response())),
+            Some(s) if answered_there(conn, &s)? => {
+                let source = store::calendar(conn, s.calendar_id)?.source;
+                let holds = version_of(message, &s.event, cx).is_none_or(|now| update::answer_holds(&s.event, Some(source), now, cx.here));
+                s.event.my_response().map(|r| if holds { r } else { Response::NeedsAction })
+            }
+            stored if current => match remembered {
+                Some((answer, reply)) => {
+                    let holds = reply.is_none_or(|r| version_of(message, &r, cx).is_none_or(|now| update::reply_holds(&r, now, cx.here)));
+                    Some(if holds { answer } else { Response::NeedsAction })
+                }
+                None => stored.and_then(|s| s.event.my_response()),
+            },
+            _ => None,
         },
         availability,
         answering,
     })
+}
+
+/// The answer given from Jolta to this invitation, and the event its reply
+/// mail answered, which says the version.
+fn remembered(conn: &Connection, a: &Answering, cx: &Context) -> Result<Option<(Response, Option<EventData>)>> {
+    let rid = a.occurrence.as_ref().map(|o| &o.recurrence_id);
+    let Some(answer) = store::remembered_answer(conn, cx.account, &a.uid, rid)? else { return Ok(None) };
+    let reply = store::remembered_reply(conn, cx.account, &a.uid, rid)?
+        .and_then(|hash| cx.blobs.get(&hash).ok())
+        .and_then(|raw| invitation::find(&raw, cx.me).into_iter().find(|i| i.method == Method::Reply && i.event.uid == a.uid))
+        .map(|i| i.event);
+    Ok(Some((answer, reply)))
+}
+
+/// The event in this message that `other`, a version of the same event or
+/// occurrence, compares with.
+fn version_of<'a>(message: &'a [EventData], other: &EventData, cx: &Context) -> Option<&'a EventData> {
+    message.iter().find(|e| match (&e.recurrence_id, &other.recurrence_id) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.names(b, cx.here),
+        _ => false,
+    })
+}
+
+/// "The organizer changed the title": an update that changed nothing the
+/// card shows besides the title or the description.
+fn retitled(before: &[EventData], sent: &EventData) -> Option<Note> {
+    let old = before.iter().find(|e| e.recurrence_id == sent.recurrence_id).or(before.first())?;
+    let what = match (old.title.trim() != sent.title.trim(), old.description.trim() != sent.description.trim()) {
+        (true, true) => "the title and the description",
+        (true, false) => "the title",
+        (false, true) => "the description",
+        (false, false) => return None,
+    };
+    Some(Note { text: format!("The organizer changed {what}"), warn: false })
+}
+
+/// The lines of a card an update can change, for one version.
+struct Lines {
+    /// "Thu 5 Nov" for a timed occurrence within one day.
+    date: Option<String>,
+    /// "16:00 to 16:45", or the whole span when it has no date of its own.
+    time: String,
+    repeat: Option<String>,
+    location: Option<String>,
+    meeting: Option<(&'static str, String)>,
+}
+
+impl Lines {
+    fn of(events: &[EventData], cx: &Context) -> Option<Lines> {
+        if events.is_empty() {
+            return None;
+        }
+        let master = events.iter().find(|e| e.recurrence_id.is_none());
+        let (e, span) = next(master, events, cx);
+        let (date, time) = when_parts(&span, cx);
+        Some(Lines {
+            date,
+            time,
+            repeat: repeat(master),
+            location: location(e),
+            meeting: e.meeting.as_ref().map(|m| (provider_name(m.provider), m.join_url.clone())),
+        })
+    }
+
+    fn when(&self) -> String {
+        match &self.date {
+            Some(d) => format!("{d} · {}", self.time),
+            None => self.time.clone(),
+        }
+    }
+}
+
+/// What changed from `before` to `now`, line by line. The time line keeps
+/// what both share: a new time on the same day strikes only the time.
+fn changes(before: &[EventData], now: &[EventData], cx: &Context) -> Changes {
+    let (Some(old), Some(new)) = (Lines::of(before, cx), Lines::of(now, cx)) else { return Changes::default() };
+    let when = match (&old.date, &new.date) {
+        _ if old.when() == new.when() => None,
+        (Some(a), Some(b)) if a == b => Some(Edit { lead: format!("{b} · "), old: old.time.clone(), new: new.time.clone(), tail: String::new() }),
+        (Some(a), Some(b)) if old.time == new.time => Some(Edit { lead: String::new(), old: a.clone(), new: b.clone(), tail: format!(" · {}", new.time) }),
+        _ => Some(Edit { old: old.when(), new: new.when(), ..Edit::default() }),
+    };
+    let text = |old: Option<String>, new: Option<String>| (old != new).then(|| Edit { old: old.unwrap_or_default(), new: new.unwrap_or_default(), ..Edit::default() });
+    let join = match (old.meeting, new.meeting) {
+        (Some((_, a)), Some((_, b))) if a == b => None,
+        (Some((a, _)), Some((b, _))) if a == b => Some(Edit { new: format!("New {b} link"), ..Edit::default() }),
+        (None, None) => None,
+        (a, b) => text(a.map(|(p, _)| p.to_string()), b.map(|(p, _)| p.to_string())),
+    };
+    Changes { when, repeat: text(old.repeat, new.repeat), location: text(old.location, new.location), join }
+}
+
+fn repeat(master: Option<&EventData>) -> Option<String> {
+    master.and_then(|m| m.recurrence.as_ref().map(|r| recur::describe(r, &m.span).unwrap_or_else(|| "Custom repeat".into())))
 }
 
 fn answered_there(conn: &Connection, copy: &store::StoredEvent) -> Result<bool> {
@@ -300,9 +455,10 @@ fn ends(bounds: Bounds, cx: &Context) -> DateTime<Utc> {
     }
 }
 
-fn label(method: Method, e: &EventData) -> &'static str {
+/// `updated` when the user has an earlier version.
+fn label(method: Method, e: &EventData, updated: bool) -> &'static str {
     match method {
-        Method::Request if e.sequence > 0 => "Updated invitation",
+        Method::Request if e.sequence > 0 || updated => "Updated invitation",
         Method::Request | Method::Add => "Invitation",
         Method::Publish => "Event",
         Method::Cancel => "Cancelled",
@@ -378,6 +534,30 @@ fn next<'a>(master: Option<&'a EventData>, events: &'a [EventData], cx: &Context
 /// "Thu 5 Nov · 16:00 to 16:45" here, and the event's own clock when it
 /// differs: "10:00 to 10:45 New York".
 fn when(span: &Span, e: &EventData, cx: &Context) -> (String, Option<String>) {
+    let text = match when_parts(span, cx) {
+        (Some(date), time) => format!("{date} · {time}"),
+        (None, text) => text,
+    };
+    match span.bounds(cx.here) {
+        Bounds::Days { .. } => (text, None),
+        Bounds::Utc { start, end } => {
+            let wall = |t: DateTime<Utc>, tz: Tz| t.with_timezone(&tz).naive_local();
+            let own = match e.span {
+                Span::Timed { start: own, .. } => match own.zone {
+                    Zone::Tz(tz) if !instant_only(tz) && offset(tz, start) != offset(cx.here, start) => Some(tz),
+                    _ => None,
+                },
+                Span::AllDay { .. } => None,
+            };
+            let elsewhere = own.map(|tz| format!("{} {}", range(wall(start, tz), wall(end, tz)), city(tz)));
+            (text, elsewhere)
+        }
+    }
+}
+
+/// The day and the time of a timed span within one day here, ("Thu 5 Nov",
+/// "16:00 to 16:45"); any other span as one text: ("Thu 5 Nov, all day").
+fn when_parts(span: &Span, cx: &Context) -> (Option<String>, String) {
     match span.bounds(cx.here) {
         Bounds::Days { start, end } => {
             let (first, last) = (day(start), day((end - 1).max(start)));
@@ -388,21 +568,11 @@ fn when(span: &Span, e: &EventData, cx: &Context) -> (String, Option<String>) {
             } else {
                 format!("{} to {}", date(first, cx), date(last, cx))
             };
-            (text, None)
+            (None, text)
         }
         Bounds::Utc { start, end } => {
-            let wall = |t: DateTime<Utc>, tz: Tz| t.with_timezone(&tz).naive_local();
-            let here = (wall(start, cx.here), wall(end, cx.here));
-            let text = if crosses_days(here.0, here.1) { range(here.0, here.1) } else { format!("{} · {}", date(here.0.date(), cx), range(here.0, here.1)) };
-            let own = match e.span {
-                Span::Timed { start: own, .. } => match own.zone {
-                    Zone::Tz(tz) if !instant_only(tz) && offset(tz, start) != offset(cx.here, start) => Some(tz),
-                    _ => None,
-                },
-                Span::AllDay { .. } => None,
-            };
-            let elsewhere = own.map(|tz| format!("{} {}", range(wall(start, tz), wall(end, tz)), city(tz)));
-            (text, elsewhere)
+            let here = (start.with_timezone(&cx.here).naive_local(), end.with_timezone(&cx.here).naive_local());
+            if crosses_days(here.0, here.1) { (None, range(here.0, here.1)) } else { (Some(date(here.0.date(), cx)), range(here.0, here.1)) }
         }
     }
 }
@@ -616,7 +786,7 @@ fn strip(start: DateTime<Utc>, end: DateTime<Utc>, title: &str, rows: &[store::O
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::TimeZone;
     use chrono_tz::Europe::Brussels;
 
@@ -631,7 +801,7 @@ mod tests {
     fn cards_of(j: &crate::Jolta, raw: &[u8]) -> Vec<Card> {
         let me = [ME.to_string()];
         let found = invitation::find(raw, &me);
-        let cx = Context { message: MessageId(1), account: AccountId(1), me: &me, sender: "sender@example.com", now: now(), here: Brussels };
+        let cx = Context { message: MessageId(1), account: AccountId(1), me: &me, sender: "sender@example.com", now: now(), here: Brussels, blobs: &j.blobs };
         j.store.read(|c| cards(c, &found, &cx)).unwrap()
     }
 
@@ -842,6 +1012,180 @@ mod tests {
         assert_eq!(c.location, None, "the Zoom link is the Join button");
         assert_eq!(c.join.unwrap().provider, "Zoom");
         assert_eq!(cards_of(&j, mail!("series.eml")).len(), 1, "a series and its changed occurrence are one card");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A REQUEST from Ann for `uid`, as a whole message with its own
+    /// Message-ID, at a SEQUENCE and DTSTAMP, with the VEVENT's other `lines`.
+    pub(crate) fn version(id: &str, uid: &str, method: &str, seq: i64, stamp: &str, lines: &str) -> String {
+        format!(
+            "From: ann@example.com\r\nTo: me@example.com\r\nSubject: s\r\nMessage-ID: <{id}@example.com>\r\n\
+             Content-Type: text/calendar; method={method}\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:{uid}\r\n\
+             SEQUENCE:{seq}\r\nDTSTAMP:{stamp}\r\nORGANIZER;CN=Ann Dupont:mailto:ann@example.com\r\n\
+             ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\n{lines}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    /// The card of a message stored in the data folder, which can see the
+    /// other versions next to it.
+    fn stored_card(j: &crate::Jolta, message: MessageId, raw: &str) -> EventCard {
+        let me = [ME.to_string()];
+        let found = invitation::find(raw.as_bytes(), &me);
+        let cx = Context { message, account: AccountId(1), me: &me, sender: "ann@example.com", now: now(), here: Brussels, blobs: &j.blobs };
+        match j.store.read(|c| cards(c, &found, &cx)).unwrap().remove(0) {
+            Card::Event(e) => e,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn edit(old: &str, new: &str) -> Option<Edit> {
+        Some(Edit { old: old.into(), new: new.into(), ..Edit::default() })
+    }
+
+    pub(crate) const V1: &str = "DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\nLOCATION:Room A\r\n\
+                      DESCRIPTION:Join https://us02web.zoom.us/j/81234567890\r\n";
+
+    #[test]
+    fn an_update_strikes_what_changed() {
+        let (j, _) = jolta("card-update");
+        let first = crate::calendar::invitation::tests::import(&j, version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1).as_bytes());
+        let moved = "DTSTART:20261112T130000Z\r\nDTEND:20261112T140000Z\r\nSUMMARY:Sync\r\nLOCATION:Room B\r\n\
+                     X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\n";
+        let v2 = version("v2", "sync", "REQUEST", 1, "20261104T090000Z", moved);
+        let second = crate::calendar::invitation::tests::import(&j, v2.as_bytes());
+
+        let c = stored_card(&j, second, &v2);
+        assert_eq!(c.label, "Updated invitation");
+        assert_eq!(c.when.as_deref(), Some("Thu 12 Nov · 14:00 to 15:00"));
+        assert_eq!(
+            c.changes.when,
+            Some(Edit { lead: "Thu 12 Nov · ".into(), old: "16:00 to 17:00".into(), new: "14:00 to 15:00".into(), tail: String::new() }),
+            "the same day: only the time is struck"
+        );
+        assert_eq!(c.changes.location, edit("Room A", "Room B"));
+        assert_eq!(c.changes.join, edit("Zoom", "Google Meet"));
+        assert_eq!(c.changes.repeat, None);
+        assert!(c.answering.is_some(), "the newest version is answered");
+
+        let old = stored_card(&j, first, &version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1));
+        assert_eq!(notes(&old), ["There's a newer version of this invitation", "You haven't written to this sender before"]);
+        assert_eq!((old.answering, old.availability, old.join, old.answer), (None, None, None, None), "no answers, conflicts or link on an old version");
+        assert!(old.changes.is_empty());
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn each_line_an_update_can_change() {
+        let (j, _) = jolta("card-update-lines");
+        crate::calendar::invitation::tests::import(&j, version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1).as_bytes());
+        let check = |n: i64, lines: &str| {
+            let raw = version(&format!("n{n}"), "sync", "REQUEST", n, "20261104T090000Z", lines);
+            let id = crate::calendar::invitation::tests::import(&j, raw.as_bytes());
+            let c = stored_card(&j, id, &raw);
+            j.store.write(|tx| Ok(tx.execute("DELETE FROM message WHERE id = ?1", [id]).map(|_| ())?)).unwrap();
+            c.changes
+        };
+        let zoom = "DESCRIPTION:Join https://us02web.zoom.us/j/81234567890\r\n";
+
+        let next_day = check(1, &format!("DTSTART:20261113T150000Z\r\nDTEND:20261113T160000Z\r\nSUMMARY:Sync\r\nLOCATION:Room A\r\n{zoom}"));
+        assert_eq!(
+            next_day.when,
+            Some(Edit { lead: String::new(), old: "Thu 12 Nov".into(), new: "Fri 13 Nov".into(), tail: " · 16:00 to 17:00".into() }),
+            "the same time: only the day is struck"
+        );
+        let both = check(2, &format!("DTSTART:20261113T080000Z\r\nDTEND:20261113T090000Z\r\nSUMMARY:Sync\r\nLOCATION:Room A\r\n{zoom}"));
+        assert_eq!(both.when, edit("Thu 12 Nov · 16:00 to 17:00", "Fri 13 Nov · 09:00 to 10:00"));
+
+        let weekly = check(3, &format!("DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Sync\r\nLOCATION:Room A\r\n{zoom}"));
+        assert_eq!(weekly.repeat, edit("", "Weekly on Thursday"), "a rule added has nothing to strike");
+        assert_eq!(weekly.when, None);
+
+        let no_place = check(4, &format!("DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\n{zoom}"));
+        assert_eq!(no_place.location, edit("Room A", ""), "a place taken away is only struck");
+        let other_zoom = check(5, "DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\nLOCATION:Room A\r\nDESCRIPTION:Join https://us02web.zoom.us/j/99999999999\r\n");
+        assert_eq!(other_zoom.join, edit("", "New Zoom link"));
+        let no_link = check(6, "DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\nLOCATION:Room A\r\n");
+        assert_eq!(no_link.join, edit("Zoom", ""));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_title_alone_is_a_note() {
+        let (j, _) = jolta("card-retitled");
+        crate::calendar::invitation::tests::import(&j, version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1).as_bytes());
+        let raw = version("v2", "sync", "REQUEST", 0, "20261104T090000Z", &V1.replace("SUMMARY:Sync", "SUMMARY:Weekly sync"));
+        let id = crate::calendar::invitation::tests::import(&j, raw.as_bytes());
+        let c = stored_card(&j, id, &raw);
+        assert!(c.changes.is_empty());
+        assert_eq!(c.label, "Updated invitation", "a later DTSTAMP at the same SEQUENCE");
+        assert_eq!(notes(&c)[0], "The organizer changed the title");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// RFC 5546 orders versions by SEQUENCE, then DTSTAMP.
+    #[test]
+    fn the_newest_version_by_sequence_then_dtstamp() {
+        let (j, _) = jolta("card-newest");
+        let raw = |id: &str, seq, stamp| version(id, "sync", "REQUEST", seq, stamp, V1);
+        let a = crate::calendar::invitation::tests::import(&j, raw("a", 1, "20261104T080000Z").as_bytes());
+        let b = crate::calendar::invitation::tests::import(&j, raw("b", 1, "20261104T100000Z").as_bytes());
+        let c = crate::calendar::invitation::tests::import(&j, raw("c", 0, "20261104T120000Z").as_bytes());
+        let newer = |id, raw: String| stored_card(&j, id, &raw).answering.is_none();
+        assert!(newer(a, raw("a", 1, "20261104T080000Z")), "b has the same SEQUENCE and a later DTSTAMP");
+        assert!(!newer(b, raw("b", 1, "20261104T100000Z")), "b is the newest");
+        assert!(newer(c, raw("c", 0, "20261104T120000Z")), "a later DTSTAMP doesn't beat a higher SEQUENCE");
+
+        let cancel = crate::calendar::invitation::tests::import(&j, version("x", "sync", "CANCEL", 2, "20261104T130000Z", V1).as_bytes());
+        assert_eq!(notes(&stored_card(&j, b, &raw("b", 1, "20261104T100000Z")))[0], "The organizer has since cancelled this meeting");
+        let cancelled = stored_card(&j, cancel, &version("x", "sync", "CANCEL", 2, "20261104T130000Z", V1));
+        assert_eq!(cancelled.changes, Changes::default(), "a cancellation strikes nothing");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The calendar's copy is the version before while it hasn't taken the
+    /// update yet, and a newer one when it holds a later SEQUENCE at
+    /// another time.
+    #[test]
+    fn the_calendars_copy_as_a_version() {
+        let (j, calendar) = jolta("card-copy-version");
+        let horizon = Horizon::around(now(), Brussels);
+        let store_copy = |seq: i64, lines: &str| {
+            let raw = version("copy", "sync", "REQUEST", seq, "20261104T080000Z", lines);
+            let mut e = invitation::find(raw.as_bytes(), &[ME.into()]).remove(0).event;
+            e.attendees.iter_mut().for_each(|a| a.response = Response::Accepted);
+            j.store.write(|tx| store::apply_item(tx, calendar, "sync.ics", None, &[e], None, &horizon)).unwrap();
+        };
+        store_copy(0, V1);
+        let moved = V1.replace("20261112T15", "20261112T13").replace("20261112T16", "20261112T14");
+        let raw = version("v2", "sync", "REQUEST", 1, "20261104T090000Z", &moved);
+        let id = crate::calendar::invitation::tests::import(&j, raw.as_bytes());
+        let c = stored_card(&j, id, &raw);
+        assert_eq!(c.changes.when.unwrap().old, "16:00 to 17:00", "the copy is the version before");
+        assert_eq!(c.answer, Some(Response::NeedsAction), "accepted at the old time: the move asks again");
+
+        store_copy(1, &moved);
+        let synced = stored_card(&j, id, &raw);
+        assert_eq!(synced.answer, Some(Response::Accepted), "the server's answer for this version");
+        assert_eq!(synced.changes.when, None, "the copy has this version: no other to compare with");
+
+        store_copy(2, V1);
+        assert_eq!(notes(&stored_card(&j, id, &raw))[0], "There's a newer version of this invitation", "the copy moved back since");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// One occurrence moved for the first time: the series said where it was.
+    #[test]
+    fn a_moved_occurrence_strikes_where_the_series_had_it() {
+        let (j, _) = jolta("card-occurrence-moved");
+        let series = "DTSTART;TZID=Europe/Brussels:20261110T093000\r\nDTEND;TZID=Europe/Brussels:20261110T094500\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n";
+        crate::calendar::invitation::tests::import(&j, version("s", "standup", "REQUEST", 0, "20261104T080000Z", series).as_bytes());
+        let moved = "RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\nDTSTART;TZID=Europe/Brussels:20261118T140000\r\n\
+                     DTEND;TZID=Europe/Brussels:20261118T141500\r\nSUMMARY:Standup\r\n";
+        let raw = version("o", "standup", "REQUEST", 1, "20261104T090000Z", moved);
+        let id = crate::calendar::invitation::tests::import(&j, raw.as_bytes());
+        let c = stored_card(&j, id, &raw);
+        assert_eq!(c.changes.when, edit("Tue 17 Nov · 09:30 to 09:45", "Wed 18 Nov · 14:00 to 14:15"));
+        assert_eq!(c.changes.repeat, None, "the occurrence isn't the series");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

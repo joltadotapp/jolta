@@ -556,6 +556,11 @@ enum ReaderStyle {
     .jolta-invite-note, .jolta-invite-free { margin-top: 10px; }
     .jolta-invite-note + .jolta-invite-note, .jolta-invite-note + .jolta-invite-free { margin-top: 2px; }
     .jolta-invite .jolta-warn { color: var(--acc); }
+    .jolta-invite del { color: var(--tx3); text-decoration: line-through; text-decoration-color: var(--tx3); }
+    .jolta-invite ins { padding: 0 3px; margin: 0 -1px; border-radius: 4px; text-decoration: none; color: var(--tx);
+      background: color-mix(in oklab, var(--acc) 15%, transparent); -webkit-box-decoration-break: clone; }
+    .jolta-invite-facts span.jolta-edit { display: inline; }
+    .jolta-invite-outdated .jolta-invite-title, .jolta-invite-outdated .jolta-invite-when { color: var(--tx2); }
     .jolta-strip { position: relative; margin-top: 8px; }
     .jolta-strip-hour { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line2); }
     .jolta-strip-hour i { position: absolute; top: 0; left: 4px; color: var(--tx3); font: 10.5px/14px ui-monospace, SFMono-Regular, monospace; }
