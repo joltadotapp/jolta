@@ -312,7 +312,7 @@ impl Protection {
             Protection::Encrypted => Some("This message is encrypted. Jolta can't open encrypted mail yet.".into()),
             Protection::Signed(s) => Some(match &s.verdict {
                 Verdict::Trusted => format!("Signed by {}. Certificate trusted by macOS.", s.signer()),
-                Verdict::Untrusted { reason } => format!("Signed by {}. Certificate not trusted: {reason}.", s.signer()),
+                Verdict::Untrusted { reason } => format!("Signed by {}. {}", s.signer(), s.untrusted(reason)),
                 Verdict::OtherSender => format!("Signed by {}, not the sender.", s.signer()),
                 Verdict::Altered => "The message changed after it was signed, or the signature is damaged.".into(),
             }),
@@ -328,6 +328,16 @@ impl Signature {
             (Some(n), None) => n.clone(),
             (None, None) => "a certificate without an address".into(),
         }
+    }
+
+    /// macOS says `“Name” certificate is revoked`; the name is the signer's
+    /// own certificate or one in its chain, such as a blocked intermediate.
+    fn untrusted(&self, reason: &str) -> String {
+        let Some((name, rest)) = reason.strip_prefix('“').and_then(|r| r.split_once("” certificate ")) else {
+            return format!("The certificate isn't trusted: {reason}.");
+        };
+        let own = [&self.signer_name, &self.signer_email].iter().any(|n| n.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)));
+        if own { format!("The certificate {rest}.") } else { format!("The certificate “{name}” in its chain {rest}.") }
     }
 }
 
@@ -425,6 +435,18 @@ mod tests {
         assert_eq!(inspect(PGP, "signer@example.com"), Protection::None);
         assert!(matches!(readable(PGP), Cow::Borrowed(b) if b == PGP));
         assert_eq!(names(PGP), ["signature.asc"]);
+    }
+
+    #[test]
+    fn untrusted_reasons_read_as_one_sentence() {
+        let s = untrusted(inspect(CLEAR, "signer@example.com"));
+        assert_eq!(
+            Protection::Signed(s.clone()).detail().unwrap(),
+            "Signed by Test Signer <signer@example.com>. The certificate is not trusted."
+        );
+        assert_eq!(s.untrusted("“Some CA” certificate is blocked"), "The certificate “Some CA” in its chain is blocked.");
+        assert_eq!(s.untrusted("“signer@example.com” certificate is revoked"), "The certificate is revoked.");
+        assert_eq!(s.untrusted("no certificate"), "The certificate isn't trusted: no certificate.");
     }
 
     #[test]
