@@ -426,13 +426,11 @@ fn availability(conn: &Connection, uid: &str, bounds: Bounds, title: &str, cx: &
 /// The hours around the event, from a whole hour before to a whole hour
 /// after, with the user's timed busy events placed in lanes.
 fn strip(start: DateTime<Utc>, end: DateTime<Utc>, title: &str, rows: &[store::OccurrenceRow], here: Tz) -> Strip {
-    let hour = |t: DateTime<Utc>, up: bool| {
-        let wall = t.with_timezone(&here).naive_local();
-        let floor = wall.date().and_hms_opt(wall.hour(), 0, 0).expect("a whole hour exists");
-        let wall = if up && floor < wall { floor + Duration::hours(1) } else { floor };
-        tz::instant(wall, here)
-    };
-    let (from, to) = (hour(start - Duration::hours(STRIP_MARGIN), false), hour(end + Duration::hours(STRIP_MARGIN), true));
+    // On the timeline, not the wall clock: the hour the clocks repeat in
+    // autumn would otherwise round back to its first pass, forever.
+    let floor = |t: DateTime<Utc>| t - Duration::seconds(i64::from(t.with_timezone(&here).num_seconds_from_midnight() % 3600));
+    let ceil = |t: DateTime<Utc>| if floor(t) < t { floor(t) + Duration::hours(1) } else { t };
+    let (from, to) = (floor(start - Duration::hours(STRIP_MARGIN)), ceil(end + Duration::hours(STRIP_MARGIN)));
     let width = (to - from).num_seconds().max(1) as f32;
     let at = |t: DateTime<Utc>| ((t - from).num_seconds() as f32 / width * 100.0).clamp(0.0, 100.0);
     let block = |s: DateTime<Utc>, e: DateTime<Utc>, title: &str, lane: u8, conflict: bool| Block {
@@ -447,7 +445,7 @@ fn strip(start: DateTime<Utc>, end: DateTime<Utc>, title: &str, rows: &[store::O
     let mut t = from;
     while t <= to {
         hours.push((at(t), t.with_timezone(&here).format("%H:%M").to_string()));
-        t = hour(t + Duration::minutes(90), false);
+        t = floor(t + Duration::hours(1));
     }
 
     let mut lane_ends: Vec<DateTime<Utc>> = Vec::new();
@@ -589,6 +587,20 @@ mod tests {
         let Card::Reply(r) = cards_of(&j, mail!("reply.eml")).remove(0) else { panic!("a reply") };
         assert_eq!(r, ReplyCard { line: "Bo Nilsson accepted".into(), comment: Some("See you there".into()), about: "Design crit · Fri 13 Nov".into() });
         std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn the_strip_across_the_autumn_clock_change() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = Utc.with_ymd_and_hms(2026, 10, 24, 23, 30, 0).unwrap();
+            let _ = tx.send(strip(start, start + Duration::hours(1), "Late call", &[], Brussels));
+        });
+        let s = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the strip finishes");
+        let hours: Vec<&str> = s.hours.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(hours, ["23:00", "00:00", "01:00", "02:00", "02:00", "03:00", "04:00"], "the repeated hour shows twice");
+        let lefts: Vec<f32> = s.hours.iter().map(|(l, _)| *l).collect();
+        assert!(lefts.windows(2).all(|w| (w[1] - w[0] - 100.0 / 6.0).abs() < 0.01), "an hour apart: {lefts:?}");
     }
 
     #[test]
