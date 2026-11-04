@@ -261,7 +261,9 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     // An older version only points to the newer one: its time, link and
     // answers are out of date.
     let current = history.newer.is_none();
-    let changes = if current { changes(&history.before, described, cx) } else { Changes::default() };
+    // What changed matters to an update, not to a cancellation.
+    let update = current && matches!(method, Method::Request | Method::Add);
+    let changes = if update { changes(&history.before, described, cx) } else { Changes::default() };
 
     let mut notes = Vec::new();
     match method {
@@ -275,7 +277,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     match history.newer {
         Some(Method::Cancel) => notes.push(Note { text: "The organizer has since cancelled this meeting".into(), warn: false }),
         Some(_) => notes.push(Note { text: "There's a newer version of this invitation".into(), warn: false }),
-        None if changes.is_empty() => notes.extend(retitled(&history.before, sent)),
+        None if update && changes.is_empty() => notes.extend(retitled(&history.before, sent)),
         None => {}
     }
     if method != Method::Cancel && stranger(conn, said, cx)? {
@@ -317,7 +319,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
 
     Ok(EventCard {
         label: label(method, !history.before.is_empty()),
-        title: if shown.title.trim().is_empty() { "(no title)".into() } else { shown.title.trim().to_string() },
+        title: title(method, shown, &history.before),
         cancelled: method == Method::Cancel || shown.status == EventStatus::Cancelled,
         when,
         elsewhere,
@@ -387,6 +389,19 @@ fn occurs(master: &EventData, rid: &Moment, here: Tz) -> bool {
     };
     let window = recur::Window { start: start - Duration::days(1), end: end + Duration::days(1) };
     series::place(Some(master), &[], &Horizon { window, here }).iter().any(|o| o.source == Source::Master && o.span.start().names(rid, here))
+}
+
+/// The event's title. Exchange writes its cancellation's as "Canceled:
+/// Design review", in the organizer's language; the request before it
+/// gives the title itself.
+fn title(method: Method, shown: &EventData, before: &[EventData]) -> String {
+    let own = shown.title.trim();
+    let earlier = before.iter().find(|e| e.recurrence_id == shown.recurrence_id).or(before.first()).map(|e| e.title.trim()).filter(|t| !t.is_empty());
+    match earlier {
+        Some(t) if method == Method::Cancel && own.len() > t.len() && own.ends_with(t) => t.to_string(),
+        _ if own.is_empty() => "(no title)".into(),
+        _ => own.to_string(),
+    }
 }
 
 /// The answer given from Jolta to this invitation, and the event its reply
@@ -1193,10 +1208,12 @@ pub(crate) mod tests {
         assert!(!newer(b, raw("b", 1, "20261104T100000Z")), "b is the newest");
         assert!(newer(c, raw("c", 0, "20261104T120000Z")), "a later DTSTAMP doesn't beat a higher SEQUENCE");
 
-        let cancel = crate::calendar::invitation::tests::import(&j, version("x", "sync", "CANCEL", 2, "20261104T130000Z", V1).as_bytes());
+        let cancel = crate::calendar::invitation::tests::import(&j, version("x", "sync", "CANCEL", 2, "20261104T130000Z", &V1.replace("SUMMARY:Sync", "SUMMARY:Canceled: Sync")).as_bytes());
         assert_eq!(notes(&stored_card(&j, b, &raw("b", 1, "20261104T100000Z")))[0], "The organizer has since cancelled this meeting");
-        let cancelled = stored_card(&j, cancel, &version("x", "sync", "CANCEL", 2, "20261104T130000Z", V1));
+        let cancelled = stored_card(&j, cancel, &version("x", "sync", "CANCEL", 2, "20261104T130000Z", &V1.replace("SUMMARY:Sync", "SUMMARY:Canceled: Sync")));
         assert_eq!(cancelled.changes, Changes::default(), "a cancellation strikes nothing");
+        assert_eq!(cancelled.title, "Sync", "Exchange's \"Canceled: \" goes: the label says it");
+        assert!(!notes(&cancelled).iter().any(|n| n.contains("changed")), "{:?}", cancelled.notes);
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
