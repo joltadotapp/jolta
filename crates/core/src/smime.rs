@@ -56,27 +56,45 @@ const SIGNED_DATA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x0
 const ENVELOPED_DATA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x03];
 const AUTH_ENVELOPED_DATA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x10, 0x01, 0x17];
 
-fn wrapping(raw: &[u8]) -> Option<Wrapping> {
+enum Outer {
+    Clear,
+    Opaque { smime_type: Option<String> },
+}
+
+/// What the top-level Content-Type says, read from the header block alone.
+fn outer(raw: &[u8]) -> Option<Outer> {
     let headers = MessageParser::new().parse_headers(raw)?;
     let ct = headers.root().content_type()?;
     let subtype = ct.subtype().unwrap_or_default().to_ascii_lowercase();
-    let clear = ct.ctype().eq_ignore_ascii_case("multipart")
+    if ct.ctype().eq_ignore_ascii_case("multipart")
         && subtype == "signed"
         && ct.attribute("protocol").is_some_and(|p| {
             p.eq_ignore_ascii_case("application/pkcs7-signature") || p.eq_ignore_ascii_case("application/x-pkcs7-signature")
-        });
-    let opaque = ct.ctype().eq_ignore_ascii_case("application") && (subtype == "pkcs7-mime" || subtype == "x-pkcs7-mime");
-    if !clear && !opaque {
-        return None;
+        })
+    {
+        return Some(Outer::Clear);
     }
-    let smime_type = ct.attribute("smime-type").map(str::to_ascii_lowercase);
+    (ct.ctype().eq_ignore_ascii_case("application") && (subtype == "pkcs7-mime" || subtype == "x-pkcs7-mime"))
+        .then(|| Outer::Opaque { smime_type: ct.attribute("smime-type").map(str::to_ascii_lowercase) })
+}
+
+/// Whether a message's header block says S/MIME, signed or encrypted.
+pub fn is_smime(header: &[u8]) -> bool {
+    outer(header).is_some()
+}
+
+fn wrapping(raw: &[u8]) -> Option<Wrapping> {
+    let outer = outer(raw)?;
     let msg = MessageParser::new().parse(raw)?;
     let root = msg.root().root_part();
-    if clear {
-        let mut parts = root.children();
-        let (content, signature) = (parts.next()?, parts.next()?);
-        return Some(Wrapping::Clear { content: crlf(content.raw()), signature: signature.decoded().into_owned() });
-    }
+    let smime_type = match outer {
+        Outer::Opaque { smime_type } => smime_type,
+        Outer::Clear => {
+            let mut parts = root.children();
+            let (content, signature) = (parts.next()?, parts.next()?);
+            return Some(Wrapping::Clear { content: crlf(content.raw()), signature: signature.decoded().into_owned() });
+        }
+    };
     match smime_type.as_deref() {
         Some("signed-data") => Some(Wrapping::Opaque(root.decoded().into_owned())),
         Some("enveloped-data" | "authenveloped-data") => Some(Wrapping::Encrypted),
@@ -145,7 +163,8 @@ pub fn readable(raw: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// The header block minus the fields that describe the outer body.
+/// The header block minus the fields that describe the outer body, such as
+/// an opaque message's `Content-Disposition: attachment; filename=smime.p7m`.
 fn outer_headers(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut keep = true;
@@ -156,7 +175,7 @@ fn outer_headers(raw: &[u8]) -> Vec<u8> {
         if !line.starts_with(b" ") && !line.starts_with(b"\t") {
             let name = line.split(|&b| b == b':').next().unwrap_or_default();
             let name = String::from_utf8_lossy(name).trim().to_ascii_lowercase();
-            keep = !matches!(name.as_str(), "content-type" | "content-transfer-encoding" | "mime-version");
+            keep = !name.starts_with("content-") && name != "mime-version";
         }
         if keep {
             out.extend_from_slice(line);
@@ -385,6 +404,7 @@ mod tests {
             let s = untrusted(inspect(&raw, "signer@example.com"));
             assert_eq!(s.signer_email.as_deref(), Some("signer@example.com"));
             assert_eq!(names(&raw), ["notes.txt"], "no smime.p7m");
+            assert!(!String::from_utf8_lossy(&readable(&raw)).contains("smime.p7m"), "the outer Content-Disposition is gone");
             let (envelope, body) = crate::mime::parse_full(&raw, String::new());
             assert_eq!(envelope.from_addr, "signer@example.com");
             assert!(body.text.contains("quarterly numbers"), "{}", body.text);

@@ -176,6 +176,19 @@ pub fn finish_header_scan(conn: &Connection, id: MessageId, list_id: Option<&str
     Ok(())
 }
 
+pub fn smime_scan_batch(conn: &Connection, limit: usize) -> Result<Vec<(MessageId, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.message_id, coalesce(m.blob, '') FROM smime_scan s LEFT JOIN message m ON m.id = s.message_id LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn finish_smime_scan(conn: &Connection, id: MessageId) -> Result<()> {
+    conn.execute("DELETE FROM smime_scan WHERE message_id = ?1", [id])?;
+    Ok(())
+}
+
 pub fn set_flags(conn: &Connection, id: MessageId, flags: Flags) -> Result<()> {
     conn.execute("UPDATE message SET flags = ?2 WHERE id = ?1", params![id, flags.0])?;
     Ok(())

@@ -106,6 +106,12 @@ impl Engine {
             Ok(_) => sink(Event::ListsChanged),
             Err(e) => tracing::warn!("list header scan stopped: {e}"),
         });
+        let (jolta, sink) = (engine.jolta.clone(), engine.sink.clone());
+        engine.runtime.spawn_blocking(move || match scan_smime(&jolta) {
+            Ok(0) => {}
+            Ok(_) => sink(Event::ListsChanged),
+            Err(e) => tracing::warn!("S/MIME scan stopped: {e}"),
+        });
         let jolta = engine.jolta.clone();
         engine.runtime.spawn(async move {
             tokio::time::sleep(Duration::from_secs(120)).await;
@@ -723,6 +729,35 @@ impl Backoff {
     fn next(&mut self) -> Duration {
         self.0 = (self.0 + 1).min(8);
         Duration::from_secs((1u64 << self.0).min(300))
+    }
+}
+
+/// Parses S/MIME bodies stored before Jolta read S/MIME again, so the list
+/// stops showing a paperclip for the signature file and search finds an
+/// opaque-signed message's text. Only the header block of each candidate is
+/// read to tell. Returns how many messages it parsed again.
+fn scan_smime(jolta: &Jolta) -> Result<usize> {
+    let mut done = 0;
+    loop {
+        let batch = jolta.store.read(|c| store::smime_scan_batch(c, 200))?;
+        if batch.is_empty() {
+            return Ok(done);
+        }
+        let bodies: Vec<_> = batch
+            .iter()
+            .filter(|(_, blob)| jolta.blobs.head(blob, 64 * 1024).is_ok_and(|h| crate::smime::is_smime(&h)))
+            .filter_map(|(id, blob)| jolta.blobs.get(blob).ok().map(|raw| (*id, crate::mime::parse_full(&raw, blob.clone()).1)))
+            .collect();
+        done += bodies.len();
+        jolta.store.write(|tx| {
+            for (id, body) in &bodies {
+                store::attach_body(tx, *id, body)?;
+            }
+            for (id, _) in &batch {
+                store::finish_smime_scan(tx, *id)?;
+            }
+            Ok(())
+        })?;
     }
 }
 

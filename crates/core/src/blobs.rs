@@ -38,6 +38,14 @@ impl Blobs {
         Ok(std::fs::read(self.path(hash))?)
     }
 
+    /// The first `len` bytes, or fewer for a smaller blob.
+    pub fn head(&self, hash: &str, len: u64) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        std::fs::File::open(self.path(hash))?.take(len).read_to_end(&mut out)?;
+        Ok(out)
+    }
+
     /// Deletes the blobs `keep` rejects, and leftover temporary files. Only
     /// files older than `min_age` go: sync writes a blob before the row that
     /// names it, so a young blob may be about to get its row.
