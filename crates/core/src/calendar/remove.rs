@@ -55,25 +55,36 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
     let here = tz::here();
     let rid = removing.occurrence.as_ref().map(|(rid, _)| *rid);
     let uid = removing.uid.clone();
-    let event = jolta
+    let (event, added) = jolta
         .store
-        .read_async(move |c| {
-            let changed = rid.map(|rid| store::stored_event(c, &uid, Some(&rid), Some(account), here)).transpose()?.flatten();
-            let copy = match changed {
-                Some(copy) => Some(copy),
-                None => store::stored_event(c, &uid, None, Some(account), here)?,
-            };
-            copy.map(|s| s.event_id).ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))
+        .read_async({
+            let uid = uid.clone();
+            move |c| {
+                let changed = rid.map(|rid| store::own_or_added(c, &uid, Some(&rid), account, here)).transpose()?.flatten();
+                let copy = match changed {
+                    Some(copy) => copy,
+                    None => store::own_or_added(c, &uid, None, account, here)?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?,
+                };
+                Ok((copy.event_id, added_to(c, account, &uid, copy.calendar_id)?))
+            }
         })
         .await?;
     let (calendar, target) = rsvp::target_of(jolta, event, &rid.map_or(Scope::Series, Scope::Occurrence)).await?;
 
     route(calendar.source)?;
-    guest_copy(&calendar, &target.event.data, std::slice::from_ref(&target.me))?;
+    match added {
+        true => added_copy(&calendar)?,
+        false => guest_copy(&calendar, &target.event.data, std::slice::from_ref(&target.me))?,
+    }
     let source = sync::calendar_source(jolta, &calendar).await?;
     // A CalDAV server knows aliases the copy may not show.
-    guest_copy(&calendar, &target.event.data, &source.addresses().await)?;
+    if !added {
+        guest_copy(&calendar, &target.event.data, &source.addresses().await)?;
+    }
     let gone = source.remove(&calendar, &target).await?;
+    if added && target.occurrence.is_none() && matches!(gone, Gone::Deleted(_) | Gone::Already) {
+        jolta.store.write_async(move |tx| store::forget_added(tx, account, &uid)).await?;
+    }
     let id = calendar.id;
     match &gone {
         Gone::Deleted(Some(Change::Upsert { remote_id, etag, events, raw })) => {
@@ -120,17 +131,38 @@ pub fn guest_copy(calendar: &Calendar, event: &EventData, mine: &[String]) -> Re
     Ok(())
 }
 
-/// Why the account's copy of the meeting `uid` isn't one to remove: its
-/// series or single event, else the occurrence `rid` stored alone. None
-/// when it is one, or when there is no copy.
+/// A copy the user put in the calendar with Add to calendar is theirs to
+/// remove, whoever the calendar says organizes it: on Microsoft 365 it is
+/// the user's own event without guests. It only has to stay writable.
+fn added_copy(calendar: &Calendar) -> Result<()> {
+    match calendar.access {
+        Access::Owner | Access::Write => Ok(()),
+        _ => Err(Error::Other("The calendar you added this meeting to is read-only now, so Jolta leaves it alone.".into())),
+    }
+}
+
+/// Whether the copy in `calendar` is the one the user added of the
+/// invitation `uid` to `account`.
+fn added_to(conn: &rusqlite::Connection, account: AccountId, uid: &str, calendar: CalendarId) -> Result<bool> {
+    Ok(store::added_copy(conn, account, uid)?.is_some_and(|a| a.calendar_id == calendar))
+}
+
+/// Why the account's copy of the meeting `uid`, its own or the one the
+/// user added, isn't one to remove: its series or single event, else the
+/// occurrence `rid` stored alone. None when it is one, or when there is no
+/// copy.
 pub(crate) fn refusal(conn: &rusqlite::Connection, uid: &str, rid: Option<&Moment>, account: AccountId, here: chrono_tz::Tz) -> Result<Option<Error>> {
-    let copy = match store::stored_event(conn, uid, None, Some(account), here)? {
-        None if rid.is_some() => store::stored_event(conn, uid, rid, Some(account), here)?,
+    let copy = match store::own_or_added(conn, uid, None, account, here)? {
+        None if rid.is_some() => store::own_or_added(conn, uid, rid, account, here)?,
         found => found,
     };
     let Some(copy) = copy else { return Ok(None) };
+    let calendar = store::calendar(conn, copy.calendar_id)?;
+    if added_to(conn, account, uid, copy.calendar_id)? {
+        return Ok(added_copy(&calendar).err());
+    }
     let address = store::account(conn, account)?.address;
-    Ok(guest_copy(&store::calendar(conn, copy.calendar_id)?, &copy.event, &[address]).err())
+    Ok(guest_copy(&calendar, &copy.event, &[address]).err())
 }
 
 /// "Removed from your calendar.", "Removed Thu 5 Nov from your calendar.",

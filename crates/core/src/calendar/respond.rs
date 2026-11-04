@@ -186,8 +186,17 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             store::remember_answer(tx, account, &uid, rid.as_ref(), &given, &version, reply)
         })
         .await?;
-    let calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
-    Ok(Outcome { text: told(req, &r, plan), mailed_from: plan.mail.then_some(r.account), calendar })
+    let mut calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
+    let mut text = told(req, &r, plan);
+    // A copy the user added elsewhere follows the answer, telling nobody.
+    if r.copy.is_none() {
+        match super::add::follow(jolta, r.account, &r.uid, rid, req.answer).await {
+            Ok(Some(id)) => calendar = Some(id),
+            Ok(None) => {}
+            Err(e) => text = format!("{text} The copy in your calendar didn't change: {e}"),
+        }
+    }
+    Ok(Outcome { text, mailed_from: plan.mail.then_some(r.account), calendar })
 }
 
 /// The answer kept, given again the same way, to an invitation that still

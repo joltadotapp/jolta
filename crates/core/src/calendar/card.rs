@@ -58,6 +58,9 @@ pub struct EventCard {
     /// Set on a cancellation whose meeting the calendar of the account it
     /// came to still holds.
     pub removing: Option<Removing>,
+    /// Add to calendar, and Update in your calendar for the copy added.
+    pub adding: Option<super::add::Adding>,
+    pub updating: Option<super::add::Updating>,
 }
 
 /// What Remove from calendar needs.
@@ -311,6 +314,10 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         }),
         organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, &[], true)),
     });
+    let (adding, updating) = match &answering {
+        Some(_) => super::add::offers(conn, invitation, cx)?,
+        None => (None, None),
+    };
     // An invitation the user answers is answered in the calendars of the
     // account it came to; another account's copy may be the organizer's own.
     let (remembered, answered) = match &answering {
@@ -355,14 +362,17 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         availability,
         answering,
         removing,
+        adding,
+        updating,
     })
 }
 
-/// Whether the account's calendar still holds the cancelled event, or the
-/// occurrence it cancels, and hasn't cancelled it there yet.
+/// Whether the account's calendar, or the copy the user added for it,
+/// still holds the cancelled event, or the occurrence it cancels, and
+/// hasn't cancelled it there yet.
 fn held(conn: &Connection, sent: &EventData, cx: &Context) -> Result<bool> {
     let live = |e: &EventData| e.status != EventStatus::Cancelled;
-    let copy = |rid: Option<&Moment>| store::stored_event(conn, &sent.uid, rid, Some(cx.account), cx.here);
+    let copy = |rid: Option<&Moment>| store::own_or_added(conn, &sent.uid, rid, cx.account, cx.here);
     Ok(match &sent.recurrence_id {
         None => copy(None)?.is_some_and(|s| live(&s.event)),
         Some(rid) => match copy(Some(rid))? {

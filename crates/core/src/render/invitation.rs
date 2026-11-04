@@ -296,6 +296,8 @@ mod tests {
             }),
             answering: None,
             removing: None,
+            adding: None,
+            updating: None,
         }
     }
 
