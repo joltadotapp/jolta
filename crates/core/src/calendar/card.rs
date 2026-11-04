@@ -341,7 +341,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
             // Jolta answers through these, so they hold the answer it gave.
             Some(s) if answered_there(conn, &s)? => {
                 let source = store::calendar(conn, s.calendar_id)?.source;
-                let holds = version_of(message, &s.event, cx).is_none_or(|now| update::answer_holds(&s.event, Some(source), now, cx.here));
+                let holds = holds(&s.event, Some(source), message, said, cx);
                 s.event.my_response().map(|r| if holds { r } else { Response::NeedsAction })
             }
             stored if current => match remembered {
@@ -429,21 +429,30 @@ fn remembered(conn: &Connection, a: &Answering, cx: &Context) -> Result<Option<(
     Ok(Some((answer, reply)))
 }
 
-/// Whether the answer `reply` sent holds for this message: for the event
-/// it answered, and when the card shows a changed occurrence and the reply
-/// answered its series, for the series' occurrence at that recurrence id.
+/// Whether the answer `reply` sent holds for this message, judged by the
+/// version of the event it answered.
 fn reply_holds(seen: &update::Seen, reply: &Invitation, message: &[EventData], said: &EventData, cx: &Context) -> Result<bool> {
-    let r = &reply.event;
-    let event = match version_of(message, r, cx) {
-        Some(now) => update::answer_holds(&update::answered_by(seen, reply, now)?, None, now, cx.here),
-        None => true,
+    let answered = match version_of(message, &reply.event, cx) {
+        Some(now) => update::answered_by(seen, reply, now)?,
+        None => reply.event.clone(),
     };
-    let occurrence = match (r.recurrence_id, said.recurrence_id) {
-        (None, Some(rid)) => series::occurrence_span(&r.span, &rid, cx.here)
-            .is_some_and(|span| update::answer_holds(&EventData { recurrence_id: Some(rid), recurrence: None, span, ..r.clone() }, None, said, cx.here)),
+    Ok(holds(&answered, None, message, said, cx))
+}
+
+/// Whether an answer given to `answered`, by a reply or in a copy from
+/// `source`, holds for this message: for the version of the same event it
+/// sends, and when the card shows an occurrence and the answer went to its
+/// series, for the series' occurrence at that recurrence id.
+fn holds(answered: &EventData, source: Option<CalendarSource>, message: &[EventData], said: &EventData, cx: &Context) -> bool {
+    let event = version_of(message, answered, cx).is_none_or(|now| update::answer_holds(answered, source, now, cx.here));
+    let occurrence = match (answered.recurrence_id, said.recurrence_id) {
+        (None, Some(rid)) => series::occurrence_span(&answered.span, &rid, cx.here).is_some_and(|span| {
+            let there = EventData { recurrence_id: Some(rid), recurrence: None, span, ..answered.clone() };
+            update::answer_holds(&there, source, said, cx.here)
+        }),
         _ => true,
     };
-    Ok(event && occurrence)
+    event && occurrence
 }
 
 /// The event in this message that `other`, a version of the same event or
@@ -1577,6 +1586,27 @@ pub(crate) mod tests {
         import(&j, version("o2", "standup", "REQUEST", 2, "20261104T090000Z", brussels).as_bytes());
         let old = stored_card(&j, m1, &first);
         assert!(old.outdated && old.answering.is_none(), "09:30 Brussels is 08:30 UTC: the later mail replaces it");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The calendar holds the series accepted and no copy of the occurrence
+    /// the card shows, which the organizer changed at SEQUENCE 1.
+    #[test]
+    fn a_series_accepted_in_the_calendar_covers_an_occurrence_only_where_the_series_has_it() {
+        let (j, calendar) = jolta("card-copy-series-answer");
+        let raw = String::from_utf8(mail!("series.eml").to_vec()).unwrap();
+        let mut master = invitation::find(raw.as_bytes(), &[ME.into()]).into_iter().find(|i| i.event.recurrence_id.is_none()).unwrap().event;
+        master.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = Response::Accepted);
+        j.store.write(|tx| store::apply_item(tx, calendar, "standup.ics", None, &[master], None, &Horizon::around(now(), Brussels))).unwrap();
+        let changed = |start: &str, end: &str| {
+            let at = raw.rfind("SEQUENCE:0").unwrap();
+            let mut r = raw.clone();
+            r.replace_range(at..at + 10, "SEQUENCE:1");
+            r.replace("DTSTART;TZID=Europe/Brussels:20261105T100000", &format!("DTSTART;TZID=Europe/Brussels:{start}"))
+                .replace("DTEND;TZID=Europe/Brussels:20261105T101500", &format!("DTEND;TZID=Europe/Brussels:{end}"))
+        };
+        assert_eq!(event_card(&j, changed("20261105T100000", "20261105T101500").as_bytes()).answer, Some(Response::NeedsAction), "moved half an hour");
+        assert_eq!(event_card(&j, changed("20261105T093000", "20261105T094500").as_bytes()).answer, Some(Response::Accepted), "where the series has it");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
