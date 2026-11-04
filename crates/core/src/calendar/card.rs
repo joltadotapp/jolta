@@ -330,8 +330,9 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         _ => None,
     };
 
-    // The answer the list shows, which holds only for the version of the
-    // meeting and the occurrence it was given to.
+    // The answer picked as for the list, which holds only for the version of
+    // the meeting and the occurrence it was given to; only the card reads
+    // the reply mail an answer from Jolta went out in.
     let answer = match store::shown_answer(answered.as_ref(), remembered.as_ref().map(|(r, _)| *r)) {
         _ if !current || method == Method::Cancel => None,
         Some((r, store::AnswerFrom::Calendar(s))) => Some((r, update::holds(&s.event, Some(s.source), message, said, cx.here))),
