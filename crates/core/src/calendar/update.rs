@@ -105,7 +105,9 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         let moved = !same_time(&copy.event, &sent.event, seen.here);
         if copy.event.sequence > this.sequence && moved {
             newer = newer.or(Some(Method::Request));
-        } else if older_copy(&copy.event, source, &sent.event, seen.here) && before.as_ref().is_none_or(|(v, _)| v.sequence < copy.event.sequence) {
+        // Behind a newer mail the copy may be that one: Graph keeps no
+        // SEQUENCE to tell.
+        } else if newer.is_none() && older_copy(&copy.event, source, &sent.event, seen.here) && before.as_ref().is_none_or(|(v, _)| v.sequence < copy.event.sequence) {
             let version = Version { sequence: copy.event.sequence, stamp: None };
             let events = match rid {
                 Some(_) => vec![copy.event.clone()],

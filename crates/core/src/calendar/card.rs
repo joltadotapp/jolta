@@ -316,7 +316,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     };
 
     Ok(EventCard {
-        label: label(method, said, !history.before.is_empty()),
+        label: label(method, !history.before.is_empty()),
         title: if shown.title.trim().is_empty() { "(no title)".into() } else { shown.title.trim().to_string() },
         cancelled: method == Method::Cancel || shown.status == EventStatus::Cancelled,
         when,
@@ -511,10 +511,11 @@ fn ends(bounds: Bounds, cx: &Context) -> DateTime<Utc> {
     }
 }
 
-/// `updated` when the user has an earlier version.
-fn label(method: Method, e: &EventData, updated: bool) -> &'static str {
+/// `updated` when the user has an earlier version. SEQUENCE alone doesn't
+/// say it: Exchange sends its first request at SEQUENCE 1.
+fn label(method: Method, updated: bool) -> &'static str {
     match method {
-        Method::Request if e.sequence > 0 || updated => "Updated invitation",
+        Method::Request if updated => "Updated invitation",
         Method::Request | Method::Add => "Invitation",
         Method::Publish => "Event",
         Method::Cancel => "Cancelled",
@@ -1125,6 +1126,7 @@ pub(crate) mod tests {
 
         let old = stored_card(&j, first, &version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1));
         assert_eq!(notes(&old), ["There's a newer version of this invitation", "You haven't written to this sender before"]);
+        assert_eq!(old.label, "Invitation", "the first version, though a newer one exists");
         assert_eq!((old.answering, old.availability, old.join, old.answer), (None, None, None, None), "no answers, conflicts or link on an old version");
         assert!(old.changes.is_empty());
         std::fs::remove_dir_all(&j.data_dir).unwrap();
@@ -1226,6 +1228,34 @@ pub(crate) mod tests {
 
         store_copy(2, V1);
         assert_eq!(notes(&stored_card(&j, id, &raw))[0], "There's a newer version of this invitation", "the copy moved back since");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Graph copies keep no SEQUENCE. Behind a newer mail, a copy at
+    /// another time is that newer version, not the one before.
+    #[test]
+    fn a_graph_copy_behind_a_newer_mail_is_no_earlier_version() {
+        let (j, _) = jolta("card-graph-copy");
+        let horizon = Horizon::around(now(), Brussels);
+        let moved = V1.replace("20261112T15", "20261113T15").replace("20261112T16", "20261113T16");
+        let graph = j
+            .store
+            .write(|tx| {
+                let remote = store::RemoteCalendar { remote_id: "AAMk".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                let calendar = store::sync_calendar_list(tx, AccountId(1), crate::calendar::CalendarSource::Graph, &[remote])?[0].id;
+                let mut copy = invitation::find(version("c", "sync", "REQUEST", 1, "20261104T090000Z", &moved).as_bytes(), &[ME.into()]).remove(0).event;
+                copy.sequence = 0;
+                store::apply_item(tx, calendar, "AAMkEvent", None, &[copy], None, &horizon)?;
+                Ok(calendar)
+            })
+            .unwrap();
+        assert!(graph.0 > 0);
+        let first = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        let m1 = crate::calendar::invitation::tests::import(&j, first.as_bytes());
+        crate::calendar::invitation::tests::import(&j, version("v2", "sync", "REQUEST", 1, "20261104T090000Z", &moved).as_bytes());
+        let old = stored_card(&j, m1, &first);
+        assert_eq!((old.label, old.outdated), ("Invitation", true));
+        assert!(old.changes.is_empty());
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
