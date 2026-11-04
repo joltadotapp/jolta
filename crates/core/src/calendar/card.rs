@@ -260,7 +260,8 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let history = update::history(&seen, invitation)?;
     // A series' message shows one occurrence; the account's calendar may
     // hold that occurrence cancelled, which the list counts as the card does.
-    let occurrence_cancelled = sent.recurrence_id.is_none()
+    let occurrence_cancelled = method != Method::Cancel
+        && sent.recurrence_id.is_none()
         && at.is_some()
         && store::stored_event(conn, &shown.uid, at.as_ref(), Some(cx.account), cx.here)?.is_some_and(|c| update::cancels(&c, sent.sequence));
     let newer = history.newer.or(occurrence_cancelled.then_some(Method::Cancel));
@@ -1276,6 +1277,24 @@ pub(crate) mod tests {
         let c = stored_card(&j, id, &raw);
         assert_eq!(c.changes.when, edit("Tue 17 Nov · 09:30 to 09:45", "Wed 18 Nov · 14:00 to 14:15"));
         assert_eq!(c.changes.repeat, None, "the occurrence isn't the series");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The organizer cancels a series whose next occurrence the calendar
+    /// already holds cancelled: the series is still there to remove.
+    #[test]
+    fn a_series_cancellation_stays_current_past_a_cancelled_occurrence() {
+        let (j, calendar) = jolta("card-cancel-series-past-occurrence");
+        let series = "DTSTART;TZID=Europe/Brussels:20261110T093000\r\nDTEND;TZID=Europe/Brussels:20261110T094500\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n";
+        let master = invitation::find(version("s", "weekly", "REQUEST", 1, "20261104T080000Z", series).as_bytes(), &[ME.into()]).remove(0).event;
+        let tuesday = Moment::Time(Local { wall: chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap().and_hms_opt(9, 30, 0).unwrap(), zone: Zone::Tz(Brussels) });
+        let gone = EventData { status: EventStatus::Cancelled, ..crate::calendar::series::occurrence(std::slice::from_ref(&master), &tuesday, Brussels).unwrap() };
+        j.store.write(|tx| store::apply_item(tx, calendar, "weekly.ics", None, &[master, gone], None, &Horizon::around(now(), Brussels))).unwrap();
+        let cancel = version("x", "weekly", "CANCEL", 1, "20261104T090000Z", series);
+        let id = crate::calendar::invitation::tests::import(&j, cancel.as_bytes());
+        let c = stored_card(&j, id, &cancel);
+        assert!(!c.outdated, "{:?}", notes(&c));
+        assert_eq!(c.removing, Some(Removing { message: id, uid: "weekly".into(), occurrence: None }));
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
