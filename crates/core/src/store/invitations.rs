@@ -12,6 +12,7 @@ use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::invitation::{Invitation, Method, end_of};
 use crate::calendar::recur::Source;
 use crate::calendar::series::{self, copy_rank};
+use crate::calendar::update::holds;
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response, tz};
 use crate::model::*;
 use crate::{Error, Result, compose};
@@ -371,8 +372,15 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>,
         return fixed(InvitationState::Cancelled);
     }
     let remembered = remembered_answer(conn, n.account, &n.uid, picked.occurrence.as_ref())?;
-    let state = match shown_answer(copy.as_ref(), remembered) {
-        Some((r, _)) if r != Response::NeedsAction => InvitationState::Answered(r),
+    // A calendar's copy holds only for the version and the occurrence the
+    // message sends, as on the card. An answer given from Jolta is judged
+    // there by its reply mail, which the list doesn't read.
+    let answer = shown_answer(copy.as_ref(), remembered).map(|(r, from)| match from {
+        AnswerFrom::Calendar(s) if picked.sent.as_ref().is_some_and(|(events, said)| !holds(&s.event, Some(s.source), events, &events[*said], here)) => Response::NeedsAction,
+        _ => r,
+    });
+    let state = match answer {
+        Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
         _ if n.ends > now.timestamp() => InvitationState::Unanswered,
         _ => InvitationState::Plain,
     };
@@ -389,6 +397,10 @@ struct Picked {
     occurrence: Option<Moment>,
     /// For a series, when the occurrence it shows ends, in unix seconds.
     ends: Option<i64>,
+    /// The events the message sends, as `timing` places them, and which of
+    /// them places the occurrence shown. None for a single event and for a
+    /// message that gives no time.
+    sent: Option<(Vec<EventData>, usize)>,
 }
 
 /// For a series, the occurrence `series::shown_occurrence` shows, either
@@ -396,21 +408,24 @@ struct Picked {
 fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<Picked> {
     let rid = moment_from_text(&n.recurrence_id);
     let parse = |n: &Named| serde_json::from_str::<EventData>(&n.timing).map_err(|e| Error::Other(format!("invitation timing of {}: {e}", n.uid)));
-    if rid.is_some() || n.timing.is_empty() {
-        return Ok(Picked { event: rid, occurrence: rid, ends: None });
+    if n.timing.is_empty() {
+        return Ok(Picked { event: rid, occurrence: rid, ends: None, sent: None });
     }
-    let master = parse(n)?;
+    let this = parse(n)?;
+    if rid.is_some() {
+        return Ok(Picked { event: rid, occurrence: rid, ends: None, sent: Some((vec![this], 0)) });
+    }
     let overrides = overrides.iter().filter(|o| !o.timing.is_empty()).map(|o| parse(o)).collect::<Result<Vec<_>>>()?;
-    let Some(o) = series::shown_occurrence(&master, &overrides, now, here) else {
-        return Ok(Picked { event: None, occurrence: Some(master.span.start()), ends: None });
-    };
-    let ends = Some(end_of(&o.span, here).timestamp());
-    Ok(match o.source {
-        Source::Override(i) => Picked { event: overrides[i].recurrence_id, occurrence: overrides[i].recurrence_id, ends },
+    let shown = series::shown_occurrence(&this, &overrides, now, here);
+    let ends = shown.map(|o| end_of(&o.span, here).timestamp());
+    let (event, occurrence, said) = match shown.map(|o| (o.source, o.span.start())) {
+        None => (None, Some(this.span.start()), 0),
+        Some((Source::Override(i), _)) => (overrides[i].recurrence_id, overrides[i].recurrence_id, 1 + i),
         // The calendar may hold this occurrence as an override the mail
         // doesn't have; the series' copy answers when it doesn't.
-        Source::Master => Picked { event: Some(o.span.start()), occurrence: Some(o.span.start()), ends },
-    })
+        Some((Source::Master, start)) => (Some(start), Some(start), 0),
+    };
+    Ok(Picked { event, occurrence, ends, sent: Some(([this].into_iter().chain(overrides).collect(), said)) })
 }
 
 /// The reply mail Jolta sent with the answer `remembered_answer` finds:
@@ -807,6 +822,102 @@ mod tests {
         assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_tuesday), declined, "the card: the series' answer for Thursday 12 November");
         assert_eq!(shown(&jolta, series, after_tuesday), Some(declined), "the list: the series' answer for Thursday 12 November");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    /// Every mix of a calendar copy, of the event or of the occurrence shown
+    /// or both, on CalDAV or Graph, and an answer given from Jolta to the
+    /// whole event or to that occurrence, for a single event, an unchanged
+    /// and a moved occurrence of a series and an occurrence invited to
+    /// alone: the card and the list say the same.
+    #[test]
+    fn the_card_and_the_list_show_the_same_answer() {
+        let brussels = chrono_tz::Europe::Brussels;
+        let at = |s: &str| {
+            let wall = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+            Moment::Time(crate::calendar::Local { wall, zone: crate::calendar::Zone::Tz(brussels) })
+        };
+        let series = mail!("series.eml").to_vec();
+        let text = String::from_utf8_lossy(&series);
+        let first = text.find("BEGIN:VEVENT").unwrap();
+        let master_part = &text[first..first + 1 + text[first + 1..].find("BEGIN:VEVENT").unwrap()];
+        let alone = text.replace(master_part, "").into_bytes();
+        let after_thursday = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap();
+        let me = ["me@example.com".to_string()];
+        // (what, mail, when, the occurrence the card shows)
+        let shapes: [(&str, Vec<u8>, DateTime<Utc>, Option<Moment>); 4] = [
+            ("a single event", mail!("google-request.eml").to_vec(), now(), None),
+            ("an unchanged occurrence", series.clone(), after_thursday, Some(at("2026-11-10 09:30"))),
+            ("a moved occurrence", series.clone(), now(), Some(at("2026-11-05 09:30"))),
+            ("an occurrence invited to alone", alone, now(), Some(at("2026-11-05 09:30"))),
+        ];
+        let series_master = crate::calendar::invitation::find(&series, &me).into_iter().map(|i| i.event).find(|e| e.recurrence_id.is_none()).unwrap();
+        let answer = |e: &mut EventData, r: Response| e.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = r);
+        let mut seen = std::collections::BTreeSet::new();
+        for (what, raw, now, occurrence) in shapes {
+            let (jolta, caldav) = jolta(&format!("same-answer-{}", what.replace(' ', "-")));
+            let graph = jolta
+                .store
+                .write(|tx| {
+                    let remote = crate::store::RemoteCalendar { remote_id: "graph".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                    Ok(crate::store::sync_calendar_list(tx, AccountId(1), CalendarSource::Graph, &[remote])?[0].id)
+                })
+                .unwrap();
+            let message = import(&jolta, &raw);
+            let sent: Vec<EventData> = crate::calendar::invitation::find(&raw, &me).into_iter().map(|i| i.event).collect();
+            let uid = sent[0].uid.clone();
+            let base = sent.iter().find(|e| e.recurrence_id.is_none()).cloned().unwrap_or_else(|| series_master.clone());
+            let mut whole = base.clone();
+            answer(&mut whole, Response::Declined);
+            let mut own = occurrence.map(|rid| {
+                let span = sent
+                    .iter()
+                    .find(|e| e.recurrence_id.is_some_and(|r| r.names(&rid, brussels)))
+                    .map(|e| e.span)
+                    .unwrap_or_else(|| crate::calendar::series::occurrence_span(&base.span, &rid, brussels).unwrap());
+                EventData { recurrence_id: Some(rid), recurrence: None, span, ..base.clone() }
+            });
+            if let Some(own) = &mut own {
+                answer(own, Response::Accepted);
+            }
+            let copies: Vec<(&str, Vec<EventData>)> = [
+                ("no copy", vec![]),
+                ("the event's copy", vec![whole.clone()]),
+                ("the occurrence's copy", own.iter().cloned().collect()),
+                ("both copies", [whole.clone()].into_iter().chain(own.clone()).collect()),
+            ]
+            .into_iter()
+            .filter(|(_, c)| occurrence.is_some() || c.len() < 2)
+            .collect();
+            let given = |r| GivenAnswer { answer: r, note: String::new(), notify: false };
+            for (calendar, source) in [(caldav, "CalDAV"), (graph, "Graph")] {
+                for (copy, events) in &copies {
+                    let answers = [("no answer from Jolta", None), ("the event answered from Jolta", Some(None)), ("the occurrence answered from Jolta", occurrence.map(Some))];
+                    for (remembered, rid) in answers.into_iter().filter(|(w, rid)| rid.is_some() || w.starts_with("no")) {
+                        let cell = format!("{what}, {copy} on {source}, {remembered}");
+                        jolta
+                            .store
+                            .write(|tx| {
+                                tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer;")?;
+                                if !events.is_empty() {
+                                    let horizon = Horizon::around(now, brussels);
+                                    crate::store::apply_item(tx, calendar, "c1", Some("1"), events, None, &horizon)?;
+                                }
+                                match rid {
+                                    Some(None) => remember_answer(tx, AccountId(1), &uid, None, &given(Response::Tentative), None),
+                                    Some(Some(rid)) => remember_answer(tx, AccountId(1), &uid, Some(&rid), &given(Response::Accepted), None),
+                                    None => Ok(()),
+                                }
+                            })
+                            .unwrap();
+                        let card = card_says(&jolta, message, &raw, now);
+                        assert_eq!(Some(card), shown(&jolta, message, now), "{cell}");
+                        seen.insert(format!("{card:?}"));
+                    }
+                }
+            }
+            std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+        }
+        assert_eq!(seen.len(), 4, "Not answered, Accepted, Maybe and Declined all turn up: {seen:?}");
     }
 
     #[test]
