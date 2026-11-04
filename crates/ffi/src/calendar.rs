@@ -217,7 +217,8 @@ impl From<InvitationAnswer> for rsvp::Answer {
 pub struct InvitationInfo {
     pub message_id: i64,
     pub answer: Option<EventResponse>,
-    /// For a series, the occurrence the card shows: "Thu 5 Nov".
+    /// For a series, the occurrence the card shows: "Thu 5 Nov". None for
+    /// an invitation to one occurrence, which has no scope to choose.
     pub occurrence_day: Option<String>,
     /// "Ann".
     pub organizer: String,
@@ -228,7 +229,7 @@ impl From<jolta_core::reader::OpenInvitation> for InvitationInfo {
         InvitationInfo {
             message_id: i.answering.message.0,
             answer: i.answer.map(Into::into),
-            occurrence_day: i.answering.occurrence.map(|o| o.day),
+            occurrence_day: i.answering.occurrence.filter(|o| !o.alone).map(|o| o.day),
             organizer: i.answering.organizer,
         }
     }

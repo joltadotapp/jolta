@@ -103,7 +103,7 @@ fn options(a: &Answering) -> String {
          <a class=\"jolta-rsvp-quiet\" href=\"x-rsvp:{id}/quiet\" title=\"Set your answer without telling {}\">{BOX}Don&apos;t send a reply</a>",
         escape(if a.organizer.is_empty() { "the organizer" } else { &a.organizer })
     );
-    if let Some(o) = &a.occurrence {
+    if let Some(o) = a.occurrence.as_ref().filter(|o| !o.alone) {
         let _ = write!(
             h,
             "<a class=\"jolta-rsvp-scope\" href=\"x-rsvp:{id}/scope\" title=\"Answer the whole series or only {}\"><span>Whole series</span>{CHEVRON}</a>",
@@ -295,11 +295,16 @@ mod tests {
         assert!(accepted.contains("<span>Accepted</span>") && !accepted.contains("<span>Accept</span>"), "the answer given reads as done");
 
         let series = Answering {
-            occurrence: Some(ShownOccurrence { recurrence_id: crate::calendar::Moment::Date(chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap()), day: "Thu 5 Nov".into() }),
-            ..answering
+            occurrence: Some(ShownOccurrence { recurrence_id: crate::calendar::Moment::Date(chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap()), day: "Thu 5 Nov".into(), alone: false }),
+            ..answering.clone()
         };
         let series = with(None, Some(series));
         assert!(series.contains("href=\"x-rsvp:7/scope\" title=\"Answer the whole series or only Thu&#32;5&#32;Nov\"><span>Whole series</span>"), "{series}");
+        let alone = Answering {
+            occurrence: Some(ShownOccurrence { recurrence_id: crate::calendar::Moment::Date(chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap()), day: "Thu 5 Nov".into(), alone: true }),
+            ..answering
+        };
+        assert!(!with(None, Some(alone)).contains("x-rsvp:7/scope"), "an invitation to one occurrence has no series to choose");
 
         let own = with(Some(Response::Accepted), None);
         assert!(!own.contains("x-rsvp:") && own.contains("<span class=\"jolta-invite-answer\">Accepted</span>"), "no buttons, the badge says it");

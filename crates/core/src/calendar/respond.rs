@@ -230,7 +230,7 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 uid: a.uid,
                 me,
                 copy,
-                occurrence: a.occurrence.filter(|_| occurrence_only).map(|o| (o.recurrence_id, o.day)),
+                occurrence: a.occurrence.filter(|o| o.alone || occurrence_only).map(|o| (o.recurrence_id, o.day)),
                 organizer: a.organizer,
             })
         })
@@ -410,6 +410,40 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept, [(String::new(), "accepted".to_string())], "the series answer replaces the occurrence's");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    fn kept_answers(j: &Jolta) -> Vec<(String, String)> {
+        j.store
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT recurrence_id, answer FROM invitation_answer ORDER BY recurrence_id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap()
+    }
+
+    fn reply_ics(raw: &[u8]) -> String {
+        let msg = MessageParser::default().parse(raw).unwrap();
+        String::from_utf8_lossy(&msg.parts().find(|p| p.is_content_type("text", "calendar")).unwrap().decoded()).into_owned()
+    }
+
+    /// An invitation to one occurrence of a series, without the series, is
+    /// answered for that occurrence whatever the scope menu says.
+    #[test]
+    fn an_invitation_to_one_occurrence_answers_only_it() {
+        let (j, _) = jolta("respond-one-occurrence");
+        let raw = "From: ann@example.com\r\nTo: me@example.com\r\nSubject: s\r\nMessage-ID: <one@example.com>\r\n\
+                   Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:weekly\r\n\
+                   RECURRENCE-ID:20261112T090000Z\r\nDTSTART:20261112T100000Z\r\nDTEND:20261112T110000Z\r\nSUMMARY:Weekly\r\n\
+                   ORGANIZER;CN=Ann:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let message = import(&j, raw.as_bytes());
+        let done = run(&j, request(message, Answer::Decline, None, true, false)).unwrap();
+        assert_eq!(done.text, "Declined for Thu 12 Nov. Jolta emailed Ann.");
+        let ics = reply_ics(&outbox(&j)[0].3);
+        assert!(ics.contains("RECURRENCE-ID:20261112T090000Z"), "{ics}");
+        assert_eq!(kept_answers(&j), [("20261112T090000 UTC".to_string(), "declined".to_string())], "kept for the occurrence, not the series");
+        assert_eq!(card_answer(&j, message, raw.as_bytes()), Some(Response::Declined));
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

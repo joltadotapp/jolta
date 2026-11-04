@@ -57,7 +57,8 @@ pub struct Answering {
     pub message: MessageId,
     pub uid: String,
     /// For a repeating event, the occurrence the card shows, which "This
-    /// occurrence only" answers.
+    /// occurrence only" answers; for an invitation to one occurrence of a
+    /// series, that occurrence.
     pub occurrence: Option<ShownOccurrence>,
     /// "Ann", whom the answer tells.
     pub organizer: String,
@@ -68,6 +69,9 @@ pub struct ShownOccurrence {
     pub recurrence_id: Moment,
     /// "Thu 5 Nov".
     pub day: String,
+    /// The invitation is for this occurrence only, without its series, so
+    /// it is answered alone and there is no scope to choose.
+    pub alone: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -219,15 +223,17 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
     }
 
     let receiver = store::account(conn, cx.account)?.address;
+    let alone = sent.recurrence_id.is_some();
     let answering = answerable(method, sent, &receiver).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
-        occurrence: occurrence.filter(|_| repeats).map(|(e, span)| ShownOccurrence {
+        occurrence: occurrence.filter(|_| repeats || alone).map(|(e, span)| ShownOccurrence {
             recurrence_id: e.recurrence_id.unwrap_or(span.start()),
             day: match span.bounds(cx.here) {
                 Bounds::Utc { start, .. } => date(start.with_timezone(&cx.here).date_naive(), cx),
                 Bounds::Days { start, .. } => date(day(start), cx),
             },
+            alone,
         }),
         organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, &[], true)),
     });
