@@ -12,7 +12,7 @@ use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::invitation::{Invitation, Method, end_of};
 use crate::calendar::recur::Source;
 use crate::calendar::series::{self, copy_rank};
-use crate::calendar::update::holds;
+use crate::calendar::update::{self, holds};
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response, tz};
 use crate::model::*;
 use crate::{Error, Result, compose};
@@ -258,6 +258,8 @@ struct Named {
     thread: ThreadId,
     account: AccountId,
     receiver: String,
+    /// The mail's From address.
+    from: String,
     uid: String,
     recurrence_id: String,
     sequence: i64,
@@ -267,7 +269,7 @@ struct Named {
     timing: String,
 }
 
-const NAMED: &str = "SELECT i.message_id, m.thread_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends, i.timing
+const NAMED: &str = "SELECT i.message_id, m.thread_id, m.account_id, a.address, m.from_addr, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends, i.timing
      FROM invitation i JOIN message m ON m.id = i.message_id JOIN account a ON a.id = m.account_id";
 
 fn named(r: &Row) -> rusqlite::Result<Named> {
@@ -276,13 +278,14 @@ fn named(r: &Row) -> rusqlite::Result<Named> {
         thread: r.get(1)?,
         account: r.get(2)?,
         receiver: r.get(3)?,
-        uid: r.get(4)?,
-        recurrence_id: r.get(5)?,
-        sequence: r.get(6)?,
-        method: r.get(7)?,
-        organizer: r.get(8)?,
-        ends: r.get(9)?,
-        timing: r.get(10)?,
+        from: r.get(4)?,
+        uid: r.get(5)?,
+        recurrence_id: r.get(6)?,
+        sequence: r.get(7)?,
+        method: r.get(8)?,
+        organizer: r.get(9)?,
+        ends: r.get(10)?,
+        timing: r.get(11)?,
     })
 }
 
@@ -290,7 +293,8 @@ fn named(r: &Row) -> rusqlite::Result<Named> {
 /// in the order that puts the one each conversation shows first: its newest
 /// message from the organizer, such as a request, an update or a
 /// cancellation, else its newest reply, and a message's whole event or
-/// series before its changed occurrences. One statement for the page: a
+/// series before its changed occurrences. `shown` passes over the messages
+/// that aren't the organizer's. One statement for the page: a
 /// statement per row cost 18 µs each, mostly with nothing to find.
 const PAGE: &str = "WHERE m.thread_id IN (SELECT value FROM json_each(?1))
      ORDER BY m.thread_id, i.method IN ('REPLY', 'COUNTER', 'REFRESH'), m.id DESC, i.recurrence_id != ''";
@@ -312,13 +316,23 @@ struct Shown {
 fn shown(conn: &Connection, threads: &[ThreadId], now: DateTime<Utc>, here: Tz) -> Result<HashMap<ThreadId, Shown>> {
     let ids = serde_json::to_string(&threads.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers");
     let rows = conn.prepare_cached(&format!("{NAMED} {PAGE}"))?.query_map([ids], named)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let me = conn.prepare_cached("SELECT address FROM account")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
     let mut out = HashMap::new();
     for (i, n) in rows.iter().enumerate() {
         if !out.contains_key(&n.thread) {
             // The same message's changed occurrences follow its series.
             let overrides: Vec<&Named> = rows[i + 1..].iter().take_while(|o| o.message == n.message).filter(|o| o.uid == n.uid).collect();
-            out.insert(n.thread, state(conn, n, &overrides, now, here)?);
+            if let Some(shown) = state(conn, n, &overrides, &me, now, here)? {
+                out.insert(n.thread, shown);
+            }
         }
+    }
+    // A conversation with nothing from the organizer has the mark alone.
+    for n in &rows {
+        out.entry(n.thread).or_insert(Shown { state: InvitationState::Plain, until: None });
     }
     Ok(out)
 }
@@ -350,24 +364,49 @@ fn to_come(conn: &Connection, now: DateTime<Utc>) -> Result<Vec<ThreadId>> {
 }
 
 /// A request is answered in the calendars of the account it came to, as
-/// its card answers it.
-fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<Shown> {
-    let fixed = |state| Ok(Shown { state, until: None });
+/// its card answers it. None for a request or a cancellation that isn't
+/// from the meeting's organizer, as `update::sent_by` decides for the card:
+/// it is no version of the meeting.
+fn state(conn: &Connection, n: &Named, overrides: &[&Named], me: &[String], now: DateTime<Utc>, here: Tz) -> Result<Option<Shown>> {
+    let fixed = |state| Ok(Some(Shown { state, until: None }));
+    // The user's own meeting has the mark alone, without asking who sent it.
     match n.method {
-        Method::Cancel => return fixed(InvitationState::Cancelled),
-        Method::Request if !n.organizer.trim().is_empty() && !n.organizer.trim().eq_ignore_ascii_case(&n.receiver) => {}
+        Method::Request if n.organizer.trim().eq_ignore_ascii_case(&n.receiver) => return fixed(InvitationState::Plain),
+        Method::Request | Method::Cancel => {}
         _ => return fixed(InvitationState::Plain),
+    }
+    let organizer = update::organizer(conn, n.account, me, &n.uid)?;
+    let organizers = |named: &str, from: &str| update::sent_by(me, organizer.as_deref(), named, from);
+    if !organizers(&n.organizer, &n.from) {
+        return Ok(None);
+    }
+    if n.method == Method::Cancel {
+        return fixed(InvitationState::Cancelled);
     }
     let picked = pick(n, overrides, now, here)?;
     let copy = match stored_event(conn, &n.uid, picked.event.as_ref(), Some(n.account), here)? {
         None if picked.event.is_some() && n.recurrence_id.is_empty() => stored_event(conn, &n.uid, None, Some(n.account), here)?,
         found => found,
     };
-    let cancelled: bool = conn
+    // The organizer's cancellation of this event, or of the series this
+    // occurrence is of, at the same SEQUENCE or later.
+    let rid = moment_from_text(&n.recurrence_id);
+    let cancelled = conn
         .prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM invitation WHERE uid = ?1 AND method = 'CANCEL' AND recurrence_id IN (?2, '') AND sequence >= ?3)",
+            "SELECT i.recurrence_id, i.organizer, m.from_addr FROM invitation i JOIN message m ON m.id = i.message_id
+             WHERE i.uid = ?1 AND i.method = 'CANCEL' AND i.sequence >= ?2 AND m.account_id = ?3 AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')",
         )?
-        .query_row(params![n.uid, n.recurrence_id, n.sequence], |r| r.get(0))?;
+        .query_map(params![n.uid, n.sequence, n.account], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|(cancels, named, from)| {
+            let event = match (moment_from_text(&cancels), &rid) {
+                (None, _) => true,
+                (Some(c), Some(rid)) => c.names(rid, here),
+                (Some(_), None) => false,
+            };
+            event && organizers(&named, &from)
+        });
     if cancelled || copy.as_ref().is_some_and(|c| c.event.status == EventStatus::Cancelled) {
         return fixed(InvitationState::Cancelled);
     }
@@ -386,7 +425,7 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>,
     };
     let unanswered = (state == InvitationState::Unanswered).then_some(n.ends);
     let until = picked.ends.into_iter().chain(unanswered).filter(|&t| t > now.timestamp()).min();
-    Ok(Shown { state, until })
+    Ok(Some(Shown { state, until }))
 }
 
 /// Where a request's answer is read from, as its card picks it.
@@ -743,16 +782,31 @@ mod tests {
     }
 
     /// The answer the card of this message shows at `now`, as the list would.
+    /// A message that isn't from the meeting's organizer has the mark alone.
     fn card_says(jolta: &crate::Jolta, message: MessageId, raw: &[u8], now: DateTime<Utc>) -> InvitationState {
+        let e = event_card(jolta, message, raw, now);
+        let says = |text: &str| e.notes.iter().any(|n| n.text == text);
+        if says("This isn't from the meeting's organizer") {
+            assert!(e.answering.is_none() && e.answer.is_none(), "no buttons and no answer on a stranger's card");
+            return InvitationState::Plain;
+        }
+        if e.cancelled || says("The organizer has since cancelled this meeting") {
+            return InvitationState::Cancelled;
+        }
+        match e.answer {
+            Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
+            _ => InvitationState::Unanswered,
+        }
+    }
+
+    fn event_card(jolta: &crate::Jolta, message: MessageId, raw: &[u8], now: DateTime<Utc>) -> crate::calendar::card::EventCard {
         use crate::calendar::card;
         let me = ["me@example.com".to_string()];
         let found = crate::calendar::invitation::find(raw, &me);
-        let cx = card::Context { message, account: AccountId(1), me: &me, sender: "ann@example.com", now, here: chrono_tz::Europe::Brussels, blobs: &jolta.blobs };
+        let sender: String = jolta.store.read(|c| Ok(c.query_row("SELECT from_addr FROM message WHERE id = ?1", [message], |r| r.get(0))?)).unwrap();
+        let cx = card::Context { message, account: AccountId(1), me: &me, sender: &sender, now, here: chrono_tz::Europe::Brussels, blobs: &jolta.blobs };
         match jolta.store.read(|c| card::cards(c, &found, &cx)).unwrap().remove(0) {
-            card::Card::Event(e) => match e.answer {
-                Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
-                _ => InvitationState::Unanswered,
-            },
+            card::Card::Event(e) => e,
             other => panic!("{other:?}"),
         }
     }
@@ -849,11 +903,52 @@ mod tests {
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 
+    /// `raw` with each line `edit` returns a new one for changed. A fixture
+    /// may end a line in a stray CR, which `edit` doesn't see.
+    fn edited(raw: &[u8], edit: impl Fn(&str) -> Option<String>) -> Vec<u8> {
+        let text = String::from_utf8_lossy(raw);
+        let line = |l: &str| {
+            let bare = l.trim_end_matches('\r');
+            edit(bare).map_or_else(|| l.to_string(), |new| new + &l[bare.len()..])
+        };
+        text.split("\r\n").map(line).collect::<Vec<_>>().join("\r\n").into_bytes()
+    }
+
+    /// Mallory's `method` for the event of `raw`, at SEQUENCE 100, in a
+    /// conversation of its own, naming Ann as the organizer or Mallory.
+    fn stranger(raw: &[u8], method: &str, names_self: bool) -> Vec<u8> {
+        edited(raw, |l| match l {
+            _ if l.starts_with("From:") => Some("From: Mallory <mallory@example.com>".into()),
+            _ if l.starts_with("Subject:") => Some("Subject: Urgent: meeting changed".into()),
+            _ if l.starts_with("Message-ID: <") => Some(l.replace('<', "<stranger-")),
+            _ if l.starts_with("Date:") => Some("Date: Wed, 04 Nov 2026 07:00:00 +0000".into()),
+            "SEQUENCE:0" => Some("SEQUENCE:100".into()),
+            "METHOD:REQUEST" => Some(format!("METHOD:{method}")),
+            _ if l.contains("method=REQUEST") => Some(l.replace("method=REQUEST", &format!("method={method}"))),
+            _ if names_self && l.starts_with("ORGANIZER") => Some(l.replace("ann@example.com", "mallory@example.com")),
+            _ => None,
+        })
+    }
+
+    /// The organizer's cancellation of the events of `raw`, at SEQUENCE 1.
+    fn cancelled(raw: &[u8]) -> Vec<u8> {
+        edited(raw, |l| match l {
+            _ if l.starts_with("Subject:") => Some("Subject: Cancelled".into()),
+            _ if l.starts_with("Message-ID: <") => Some(l.replace('<', "<cancel-")),
+            "SEQUENCE:0" => Some("SEQUENCE:1".into()),
+            "METHOD:REQUEST" => Some("METHOD:CANCEL".into()),
+            _ if l.contains("method=REQUEST") => Some(l.replace("method=REQUEST", "method=CANCEL")),
+            _ => None,
+        })
+    }
+
     /// Every mix of a calendar copy, of the event or of the occurrence shown
     /// or both, on CalDAV or Graph, and an answer given from Jolta to the
     /// whole event or to that occurrence, for a single event, an unchanged
-    /// and a moved occurrence of a series and an occurrence invited to
-    /// alone: the card and the list say the same.
+    /// and a moved occurrence of a series and an occurrence invited to alone;
+    /// then again after the organizer's cancellation of the whole series or
+    /// of Thursday's occurrence named in UTC, and after a stranger's CANCEL
+    /// or REQUEST for the same UID: the card and the list say the same.
     #[test]
     fn the_card_and_the_list_show_the_same_answer() {
         let brussels = chrono_tz::Europe::Brussels;
@@ -866,11 +961,13 @@ mod tests {
         let first = text.find("BEGIN:VEVENT").unwrap();
         let master_part = &text[first..first + 1 + text[first + 1..].find("BEGIN:VEVENT").unwrap()];
         let alone = text.replace(master_part, "").into_bytes();
+        let thursday_in_utc = String::from_utf8_lossy(&alone).replace("RECURRENCE-ID;TZID=Europe/Brussels:20261105T093000", "RECURRENCE-ID:20261105T083000Z");
+        let single = request("single@example.com", "", "single-1", "20261112T150000Z", "20261112T154500Z", 0);
         let after_thursday = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap();
         let me = ["me@example.com".to_string()];
         // (what, mail, when, the occurrence the card shows)
         let shapes: [(&str, Vec<u8>, DateTime<Utc>, Option<Moment>); 4] = [
-            ("a single event", mail!("google-request.eml").to_vec(), now(), None),
+            ("a single event", single, now(), None),
             ("an unchanged occurrence", series.clone(), after_thursday, Some(at("2026-11-10 09:30"))),
             ("a moved occurrence", series.clone(), now(), Some(at("2026-11-05 09:30"))),
             ("an occurrence invited to alone", alone, now(), Some(at("2026-11-05 09:30"))),
@@ -878,71 +975,127 @@ mod tests {
         let series_master = crate::calendar::invitation::find(&series, &me).into_iter().map(|i| i.event).find(|e| e.recurrence_id.is_none()).unwrap();
         let answer = |e: &mut EventData, r: Response| e.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = r);
         let mut seen = std::collections::BTreeSet::new();
+        let mut before = HashMap::new();
         for (what, raw, now, occurrence) in shapes {
-            let (jolta, caldav) = jolta(&format!("same-answer-{}", what.replace(' ', "-")));
-            let graph = jolta
-                .store
-                .write(|tx| {
-                    let remote = crate::store::RemoteCalendar { remote_id: "graph".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
-                    Ok(crate::store::sync_calendar_list(tx, AccountId(1), CalendarSource::Graph, &[remote])?[0].id)
-                })
-                .unwrap();
-            let message = import(&jolta, &raw);
-            let sent: Vec<EventData> = crate::calendar::invitation::find(&raw, &me).into_iter().map(|i| i.event).collect();
-            let uid = sent[0].uid.clone();
-            let base = sent.iter().find(|e| e.recurrence_id.is_none()).cloned().unwrap_or_else(|| series_master.clone());
-            let mut whole = base.clone();
-            answer(&mut whole, Response::Declined);
-            let mut own = occurrence.map(|rid| {
-                let span = sent
-                    .iter()
-                    .find(|e| e.recurrence_id.is_some_and(|r| r.names(&rid, brussels)))
-                    .map(|e| e.span)
-                    .unwrap_or_else(|| crate::calendar::series::occurrence_span(&base.span, &rid, brussels).unwrap());
-                EventData { recurrence_id: Some(rid), recurrence: None, span, ..base.clone() }
-            });
-            if let Some(own) = &mut own {
-                answer(own, Response::Accepted);
-            }
-            let copies: Vec<(&str, Vec<EventData>)> = [
-                ("no copy", vec![]),
-                ("the event's copy", vec![whole.clone()]),
-                ("the occurrence's copy", own.iter().cloned().collect()),
-                ("both copies", [whole.clone()].into_iter().chain(own.clone()).collect()),
-            ]
-            .into_iter()
-            .filter(|(_, c)| occurrence.is_some() || c.len() < 2)
-            .collect();
-            let given = |r| GivenAnswer { answer: r, note: String::new(), notify: false };
-            for (calendar, source) in [(caldav, "CalDAV"), (graph, "Graph")] {
-                for (copy, events) in &copies {
-                    let answers = [("no answer from Jolta", None), ("the event answered from Jolta", Some(None)), ("the occurrence answered from Jolta", occurrence.map(Some))];
-                    for (remembered, rid) in answers.into_iter().filter(|(w, rid)| rid.is_some() || w.starts_with("no")) {
-                        let cell = format!("{what}, {copy} on {source}, {remembered}");
-                        jolta
-                            .store
-                            .write(|tx| {
-                                tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer;")?;
-                                if !events.is_empty() {
-                                    let horizon = Horizon::around(now, brussels);
-                                    crate::store::apply_item(tx, calendar, "c1", Some("1"), events, None, &horizon)?;
+            let whole_event = if occurrence.is_some() { series.clone() } else { raw.clone() };
+            let arrivals: [(&str, Option<Vec<u8>>); 7] = [
+                ("nothing since", None),
+                ("the organizer's CANCEL of the whole event", Some(cancelled(&whole_event))),
+                ("the organizer's CANCEL of Thursday's occurrence", occurrence.map(|_| cancelled(thursday_in_utc.as_bytes()))),
+                ("a stranger's CANCEL naming the organizer", Some(stranger(&raw, "CANCEL", false))),
+                ("a stranger's CANCEL naming themselves", Some(stranger(&raw, "CANCEL", true))),
+                ("a stranger's REQUEST naming the organizer", Some(stranger(&raw, "REQUEST", false))),
+                ("a stranger's REQUEST naming themselves", Some(stranger(&raw, "REQUEST", true))),
+            ];
+            for (arrival, later) in arrivals.into_iter().filter(|(a, later)| later.is_some() || a.starts_with("nothing")) {
+                let (jolta, caldav) = jolta(&format!("same-answer-{what}-{arrival}").replace([' ', '\''], "-"));
+                let graph = jolta
+                    .store
+                    .write(|tx| {
+                        let remote = crate::store::RemoteCalendar { remote_id: "graph".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                        Ok(crate::store::sync_calendar_list(tx, AccountId(1), CalendarSource::Graph, &[remote])?[0].id)
+                    })
+                    .unwrap();
+                let message = import(&jolta, &raw);
+                let later = later.map(|r| (import(&jolta, &r), r));
+                // A cancellation's own card is Cancelled in both by its method
+                // alone.
+                let compared: Vec<(&str, MessageId, &[u8])> = match &later {
+                    Some((m, r)) if arrival.contains("stranger") => vec![("the request", message, raw.as_slice()), ("the stranger's mail", *m, r.as_slice())],
+                    _ => vec![("the request", message, raw.as_slice())],
+                };
+                let sent: Vec<EventData> = crate::calendar::invitation::find(&raw, &me).into_iter().map(|i| i.event).collect();
+                let uid = sent[0].uid.clone();
+                let base = sent.iter().find(|e| e.recurrence_id.is_none()).cloned().unwrap_or_else(|| series_master.clone());
+                let mut whole = base.clone();
+                answer(&mut whole, Response::Declined);
+                let mut own = occurrence.map(|rid| crate::calendar::series::occurrence(&sent, &rid, brussels).or_else(|| crate::calendar::series::occurrence(std::slice::from_ref(&base), &rid, brussels)).unwrap());
+                if let Some(own) = &mut own {
+                    answer(own, Response::Accepted);
+                }
+                let copies: Vec<(&str, Vec<EventData>)> = [
+                    ("no copy", vec![]),
+                    ("the event's copy", vec![whole.clone()]),
+                    ("the occurrence's copy", own.iter().cloned().collect()),
+                    ("both copies", [whole.clone()].into_iter().chain(own.clone()).collect()),
+                ]
+                .into_iter()
+                .filter(|(_, c)| occurrence.is_some() || c.len() < 2)
+                .collect();
+                for (calendar, source) in [(caldav, "CalDAV"), (graph, "Graph")] {
+                    for (copy, events) in &copies {
+                        let answers = [("no answer from Jolta", None), ("the event answered from Jolta", Some(None)), ("the occurrence answered from Jolta", occurrence.map(Some))];
+                        for (remembered, rid) in answers.into_iter().filter(|(w, rid)| rid.is_some() || w.starts_with("no")) {
+                            let cell = format!("{what}, {copy} on {source}, {remembered}");
+                            jolta
+                                .store
+                                .write(|tx| {
+                                    tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer;")?;
+                                    if !events.is_empty() {
+                                        let horizon = Horizon::around(now, brussels);
+                                        crate::store::apply_item(tx, calendar, "c1", Some("1"), events, None, &horizon)?;
+                                    }
+                                    let given = |r| GivenAnswer { answer: r, note: String::new(), notify: false };
+                                    match rid {
+                                        Some(None) => remember_answer(tx, AccountId(1), &uid, None, &given(Response::Tentative), None),
+                                        Some(Some(rid)) => remember_answer(tx, AccountId(1), &uid, Some(&rid), &given(Response::Accepted), None),
+                                        None => Ok(()),
+                                    }
+                                })
+                                .unwrap();
+                            for (which, m, r) in &compared {
+                                let card = card_says(&jolta, *m, r, now);
+                                assert_eq!(Some(card), shown(&jolta, *m, now), "{cell}, after {arrival}: {which}");
+                                seen.insert(format!("{card:?}"));
+                            }
+                            let card = |i: usize| card_says(&jolta, compared[i].1, compared[i].2, now);
+                            match arrival {
+                                "nothing since" => {
+                                    before.insert(cell, card(0));
                                 }
-                                match rid {
-                                    Some(None) => remember_answer(tx, AccountId(1), &uid, None, &given(Response::Tentative), None),
-                                    Some(Some(rid)) => remember_answer(tx, AccountId(1), &uid, Some(&rid), &given(Response::Accepted), None),
-                                    None => Ok(()),
+                                "the organizer's CANCEL of the whole event" => assert_eq!(card(0), InvitationState::Cancelled, "{cell}: {arrival}"),
+                                "the organizer's CANCEL of Thursday's occurrence" if what.ends_with("alone") => assert_eq!(card(0), InvitationState::Cancelled, "{cell}: {arrival}"),
+                                "the organizer's CANCEL of Thursday's occurrence" => {}
+                                _ => {
+                                    assert_eq!(card(0), before[&cell], "{cell}: the request after {arrival}");
+                                    assert_eq!(card(1), InvitationState::Plain, "{cell}: {arrival}");
                                 }
-                            })
-                            .unwrap();
-                        let card = card_says(&jolta, message, &raw, now);
-                        assert_eq!(Some(card), shown(&jolta, message, now), "{cell}");
-                        seen.insert(format!("{card:?}"));
+                            }
+                        }
                     }
                 }
+                std::fs::remove_dir_all(&jolta.data_dir).unwrap();
             }
-            std::fs::remove_dir_all(&jolta.data_dir).unwrap();
         }
-        assert_eq!(seen.len(), 4, "Not answered, Accepted, Maybe and Declined all turn up: {seen:?}");
+        assert_eq!(seen.len(), 6, "Not answered, Accepted, Maybe, Declined, Cancelled and the mark alone all turn up: {seen:?}");
+    }
+
+    /// The organizer is the one the account the mail came to knows: another
+    /// account's copy naming a stranger as organizer lets none of the
+    /// stranger's mail count.
+    #[test]
+    fn another_accounts_copy_makes_nobody_the_organizer() {
+        let (jolta, _) = jolta("organizer-account");
+        let raw = request("q9@example.com", "", "sync-9", "20991112T150000Z", "20991112T160000Z", 0);
+        let mut theirs = crate::calendar::invitation::find(&raw, &[]).remove(0).event;
+        theirs.organizer.as_mut().unwrap().address = "mallory@example.com".into();
+        jolta
+            .store
+            .write(|tx| {
+                tx.execute("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'imap', 'other@example.com', 'o', 'a2', 0, 1)", [])?;
+                let remote = crate::store::RemoteCalendar { remote_id: "/cal/other/".into(), name: "Other".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                let other = crate::store::sync_calendar_list(tx, AccountId(2), CalendarSource::CalDav, &[remote])?[0].id;
+                crate::store::apply_item(tx, other, "s9", Some("1"), &[theirs], None, &Horizon::around(now(), chrono_tz::Europe::Brussels)).map(|_| ())
+            })
+            .unwrap();
+        let mine = import(&jolta, &raw);
+        let cancel = stranger(&raw, "CANCEL", true);
+        let cancel = (import(&jolta, &cancel), cancel);
+        for (which, m, r, expected) in [("the request", mine, raw.as_slice(), InvitationState::Unanswered), ("the stranger's CANCEL", cancel.0, cancel.1.as_slice(), InvitationState::Plain)] {
+            assert_eq!(card_says(&jolta, m, r, now()), expected, "the card of {which}");
+            assert_eq!(shown(&jolta, m, now()), Some(expected), "the list of {which}");
+        }
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 
     #[test]

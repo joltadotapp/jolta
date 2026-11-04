@@ -325,9 +325,10 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
 
     // The answer picked as for the list, which holds only for the version of
     // the meeting and the occurrence it was given to; only the card reads
-    // the reply mail an answer from Jolta went out in.
+    // the reply mail an answer from Jolta went out in. A message that isn't
+    // the organizer's says nothing about it.
     let answer = match store::shown_answer(answered.as_ref(), remembered.as_ref().map(|(r, _)| *r)) {
-        _ if !current || method == Method::Cancel => None,
+        _ if !current || !trusted || method == Method::Cancel => None,
         Some((r, store::AnswerFrom::Calendar(s))) => Some((r, update::holds(&s.event, Some(s.source), message, said, cx.here))),
         Some((r, store::AnswerFrom::Jolta)) => match remembered.as_ref().and_then(|(_, reply)| reply.as_ref()) {
             Some(reply) => Some((r, reply_holds(&seen, reply, message, said, cx)?)),

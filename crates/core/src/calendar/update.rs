@@ -81,7 +81,7 @@ pub fn answered_by(seen: &Seen, reply: &Invitation, now: &EventData) -> Result<E
         None => {
             let at = Version { sequence: r.sequence, stamp: None };
             let before_reply = |v: &Version| v.sequence == r.sequence && reply.stamp.is_none_or(|sent| v.stamp.is_none_or(|s| s <= sent));
-            let request = mails(seen, organizer(seen, &r.uid)?.as_deref(), &r.uid, None, at)?
+            let request = mails(seen, organizer(seen.conn, seen.account, seen.me, &r.uid)?.as_deref(), &r.uid, None, at)?
                 .into_iter()
                 .filter(|(method, _, v)| *method == Method::Request && before_reply(v))
                 .max_by_key(|(_, _, v)| *v)
@@ -141,15 +141,16 @@ pub struct Seen<'a> {
 /// 2026-11-04).
 const SENDS_FOR_ORGANIZERS: &[&str] = &["calendar-notification@google.com", "noreply@email.apple.com"];
 
-/// The meeting's organizer as the account knows it: on its calendar's
-/// copy, else on the earliest request for the UID that its own organizer
-/// sent. None for a meeting the account has no request or copy of.
-fn organizer(seen: &Seen, uid: &str) -> Result<Option<String>> {
-    let copy = store::stored_series(seen.conn, uid, Some(seen.account))?;
+/// The meeting's organizer as `account` knows it: on its calendar's copy,
+/// else on the earliest request for the UID that its own organizer sent.
+/// None for a meeting the account has no request or copy of. The card and
+/// the list both take it, with `sent_by`, for who may change the meeting.
+pub fn organizer(conn: &Connection, account: AccountId, me: &[String], uid: &str) -> Result<Option<String>> {
+    let copy = store::stored_series(conn, uid, Some(account))?;
     if let Some(o) = copy.iter().find_map(|e| e.organizer.as_ref()).filter(|o| !o.address.trim().is_empty()) {
         return Ok(Some(o.address.clone()));
     }
-    let first = store::request_senders(seen.conn, seen.account, uid)?.into_iter().find(|(o, from)| sent_by(seen.me, None, o, from));
+    let first = store::request_senders(conn, account, uid)?.into_iter().find(|(o, from)| sent_by(me, None, o, from));
     Ok(first.map(|(o, _)| o))
 }
 
@@ -157,7 +158,7 @@ fn organizer(seen: &Seen, uid: &str) -> Result<Option<String>> {
 /// it names the meeting's organizer, when there is one, and comes from that
 /// address, from a provider sending for it, or for the user's own meeting
 /// from another of the user's addresses.
-fn sent_by(me: &[String], meeting: Option<&str>, organizer: &str, from: &str) -> bool {
+pub fn sent_by(me: &[String], meeting: Option<&str>, organizer: &str, from: &str) -> bool {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     let mine = |a: &str| me.iter().any(|m| same(m, a));
     if organizer.trim().is_empty() || meeting.is_some_and(|m| !same(m, organizer)) {
@@ -173,7 +174,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
     let this = Version::of(sent);
     let uid = &sent.event.uid;
     let rid = sent.event.recurrence_id;
-    let organizer = organizer(seen, uid)?;
+    let organizer = organizer(seen.conn, seen.account, seen.me, uid)?;
     let organizers = matches!(sent.method, Method::Request | Method::Add | Method::Cancel | Method::DeclineCounter);
     // Without an ORGANIZER nobody vouches for the message.
     if organizers && !sent.event.organizer.as_ref().is_some_and(|named| sent_by(seen.me, organizer.as_deref(), &named.address, seen.sender)) {
