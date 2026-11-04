@@ -19,7 +19,6 @@ pub enum EntryKind {
 pub struct Entry {
     pub kind: EntryKind,
     pub uri: String,
-    pub provider: Option<MeetingProvider>,
     pub meeting_id: Option<String>,
     pub passcode: Option<String>,
 }
@@ -342,15 +341,13 @@ pub fn detect(entries: &[Entry], url: Option<&str>, location: &str, description:
 }
 
 /// The first video entry with a known provider, else the first video entry.
+/// The link alone names the provider: a property that calls any link Google
+/// Meet would otherwise lend it a trusted Join button.
 fn from_entries(entries: &[Entry]) -> Option<(Hit, Option<&Entry>)> {
     let videos: Vec<(Hit, &Entry)> = entries
         .iter()
         .filter(|e| e.kind == EntryKind::Video)
-        .filter_map(|e| {
-            let mut h = hit(&e.uri)?;
-            h.provider = h.provider.or(e.provider.filter(|p| *p != P::Other));
-            Some((h, e))
-        })
+        .filter_map(|e| Some((hit(&e.uri)?, e)))
         .collect();
     let best = videos.iter().position(|(h, _)| h.provider.is_some()).unwrap_or(0);
     videos.into_iter().nth(best).map(|(h, e)| (h, Some(e)))
@@ -468,8 +465,8 @@ mod tests {
         detect(&[], None, "", description)
     }
 
-    fn video(uri: &str, provider: Option<MeetingProvider>) -> Entry {
-        Entry { kind: EntryKind::Video, uri: uri.into(), provider, meeting_id: None, passcode: None }
+    fn video(uri: &str) -> Entry {
+        Entry { kind: EntryKind::Video, uri: uri.into(), meeting_id: None, passcode: None }
     }
 
     #[test]
@@ -585,11 +582,10 @@ mod tests {
     #[test]
     fn google_meet_entry_with_phone_and_pin() {
         let entries = [
-            video("https://meet.google.com/abc-defg-hij", Some(P::Meet)),
+            video("https://meet.google.com/abc-defg-hij"),
             Entry {
                 kind: EntryKind::Phone,
                 uri: "tel:+1-650-555-0100".into(),
-                provider: Some(P::Meet),
                 meeting_id: None,
                 passcode: Some("123 456 789".into()),
             },
@@ -601,14 +597,14 @@ mod tests {
 
     #[test]
     fn known_entry_beats_unknown_entry() {
-        let entries = [video("https://jitsi.acme.example/standup", None), video("https://meet.google.com/abc-defg-hij", None)];
+        let entries = [video("https://jitsi.acme.example/standup"), video("https://meet.google.com/abc-defg-hij")];
         let m = detect(&entries, None, "", "").unwrap();
         assert_eq!((m.provider, m.join_url.as_str()), (P::Meet, "https://meet.google.com/abc-defg-hij"));
     }
 
     #[test]
     fn unknown_entry_or_bare_location_url_is_other() {
-        let m = detect(&[video("https://jitsi.acme.example/standup", None)], None, "", "").unwrap();
+        let m = detect(&[video("https://jitsi.acme.example/standup")], None, "", "").unwrap();
         assert_eq!((m.provider, m.join_url.as_str()), (P::Other, "https://jitsi.acme.example/standup"));
 
         let m = detect(&[], None, " https://jitsi.acme.example/standup ", "").unwrap();

@@ -147,16 +147,16 @@ fn when(span: &Span, at: Bounds, here: Tz) -> When {
 
 /// UTC marks an instant, not a zone the organizer chose: many apps write
 /// every time that way, so it gets no "UTC (… here)".
-fn instant_only(tz: Tz) -> bool {
+pub(super) fn instant_only(tz: Tz) -> bool {
     matches!(tz, Tz::UTC | Tz::Etc__UTC | Tz::Etc__GMT | Tz::GMT | Tz::Etc__Zulu | Tz::Zulu | Tz::Etc__UCT | Tz::UCT | Tz::Universal | Tz::Etc__Universal)
 }
 
-fn offset(tz: Tz, at: DateTime<Utc>) -> i32 {
+pub(super) fn offset(tz: Tz, at: DateTime<Utc>) -> i32 {
     tz.offset_from_utc_datetime(&at.naive_utc()).fix().local_minus_utc()
 }
 
 /// "10:00 to 11:00", with days when it ends on another day than it starts.
-fn range(start: NaiveDateTime, end: NaiveDateTime) -> String {
+pub(super) fn range(start: NaiveDateTime, end: NaiveDateTime) -> String {
     let next_midnight = (start.date() + Duration::days(1)).and_time(chrono::NaiveTime::MIN);
     if end.date() == start.date() || end == next_midnight {
         format!("{} to {}", start.format("%H:%M"), end.format("%H:%M"))
@@ -166,7 +166,7 @@ fn range(start: NaiveDateTime, end: NaiveDateTime) -> String {
 }
 
 /// "America/New_York" as "New York".
-fn city(tz: Tz) -> String {
+pub(super) fn city(tz: Tz) -> String {
     tz.name().rsplit('/').next().unwrap_or(tz.name()).replace('_', " ")
 }
 

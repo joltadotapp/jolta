@@ -86,6 +86,7 @@ pub fn parse_full(raw: &[u8], blob: String) -> (Envelope, BodyInfo) {
         text,
         list_id: envelope.list_id.clone(),
         list_unsubscribe: envelope.list_unsubscribe.clone(),
+        invitations: crate::calendar::invitation::in_message(&root, &[]),
     };
     (envelope, body)
 }

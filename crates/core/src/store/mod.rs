@@ -6,6 +6,7 @@
 mod accounts;
 mod agents;
 mod calendar;
+mod invitations;
 mod messages;
 mod ops;
 mod outbox;
@@ -23,13 +24,14 @@ use crate::Result;
 pub use accounts::*;
 pub use agents::*;
 pub use calendar::*;
+pub use invitations::*;
 pub use messages::*;
 pub use ops::*;
 pub use outbox::*;
 pub use reminders::*;
 pub use sections::*;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql"), include_str!("schema16.sql"), include_str!("schema17.sql"), include_str!("schema18.sql"), include_str!("schema19.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql"), include_str!("schema16.sql"), include_str!("schema17.sql"), include_str!("schema18.sql"), include_str!("schema19.sql"), include_str!("schema20.sql")];
 const READERS: usize = 4;
 const MMAP_BYTES: i64 = 2 << 30;
 const WRITER_CACHE_KIB: i64 = 8_000;

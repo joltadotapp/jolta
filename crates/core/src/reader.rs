@@ -2,6 +2,8 @@
 
 use rusqlite::Connection;
 
+use crate::calendar::card::{self, Card};
+use crate::calendar::{invitation, tz};
 use crate::model::*;
 use crate::render::{self, MessageView, Rendered};
 use crate::smime::{self, Protection};
@@ -108,6 +110,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
         })
         .collect();
     let protections: Vec<Protection> = messages.iter().zip(&raws).map(|(m, raw)| smime::inspect(raw, &m.from_addr)).collect();
+    let cards = invitation_cards(jolta, &messages, &raws).await?;
     let last = messages.len().saturating_sub(1);
     let views: Vec<MessageView> = messages
         .iter()
@@ -122,6 +125,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             open: i == last || !m.flags.has(Flags::SEEN),
             vip: m.vip,
             protection: &protections[i],
+            cards: &cards[i],
         })
         .collect();
     let rendered = render::render_thread(&views, app_css);
@@ -141,4 +145,24 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             .await?;
     let image_sender = (senders.len() == 1).then(|| senders.remove(0));
     Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted })
+}
+
+/// The invitation cards of each message, empty for most.
+async fn invitation_cards(jolta: &Jolta, messages: &[ThreadMessage], raws: &[Vec<u8>]) -> Result<Vec<Vec<Card>>> {
+    let me: Vec<String> = jolta.store.read_async(|c| Ok(store::accounts(c)?.into_iter().map(|a| a.address).collect())).await?;
+    let found: Vec<(String, Vec<invitation::Invitation>)> =
+        messages.iter().zip(raws).map(|(m, raw)| (m.from_addr.clone(), invitation::find(raw, &me))).collect();
+    if found.iter().all(|(_, i)| i.is_empty()) {
+        return Ok(vec![Vec::new(); messages.len()]);
+    }
+    jolta
+        .store
+        .read_async(move |c| {
+            let (now, here) = (chrono::Utc::now(), tz::here());
+            found
+                .iter()
+                .map(|(sender, invitations)| card::cards(c, invitations, &card::Context { me: &me, sender, now, here }))
+                .collect()
+        })
+        .await
 }

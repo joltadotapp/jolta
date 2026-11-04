@@ -1,0 +1,60 @@
+From: Pat Morgan <pat@example.com>
+Content-Type: multipart/mixed; boundary="Apple-Mail=_1F2E3D4C"
+Mime-Version: 1.0 (Mac OS X Mail 16.0)
+Subject: Invitation: Lunch at the market @ Fri 6 Nov 2026 12:00
+Date: Tue, 3 Nov 2026 10:15:00 +0100
+To: me@example.com
+Message-Id: <icloud-request@example.com>
+
+--Apple-Mail=_1F2E3D4C
+Content-Transfer-Encoding: 7bit
+Content-Type: text/plain; charset=us-ascii
+
+Lunch on Friday?
+
+--Apple-Mail=_1F2E3D4C
+Content-Disposition: attachment; filename=iCal-20261103-101500.ics
+Content-Type: text/calendar; name=iCal-20261103-101500.ics; method=REQUEST; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+BEGIN:VCALENDAR
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+PRODID:-//Apple Inc.//macOS 15.1//EN
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:Europe/Brussels
+BEGIN:DAYLIGHT
+DTSTART:19810329T020000
+RRULE:FREQ=3DYEARLY;BYMONTH=3D3;BYDAY=3D-1SU
+TZNAME:CEST
+TZOFFSETFROM:+0100
+TZOFFSETTO:+0200
+END:DAYLIGHT
+BEGIN:STANDARD
+DTSTART:19961027T030000
+RRULE:FREQ=3DYEARLY;BYMONTH=3D10;BYDAY=3D-1SU
+TZNAME:CET
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+ATTENDEE;CN=3D"Pat Morgan";CUTYPE=3DINDIVIDUAL;EMAIL=3D"pat@example.com";PARTSTAT
+ =3DACCEPTED;ROLE=3DCHAIR:urn:uuid:1A2B3C4D-0000-4000-8000-00000000AAAA
+ATTENDEE;CN=3D"me@example.com";CUTYPE=3DINDIVIDUAL;EMAIL=3D"me@example.com";PARTS
+ TAT=3DNEEDS-ACTION;ROLE=3DREQ-PARTICIPANT;RSVP=3DTRUE:mailto:me@example.com
+DTEND;TZID=3DEurope/Brussels:20261106T130000
+DTSTAMP:20261103T091500Z
+DTSTART;TZID=3DEurope/Brussels:20261106T120000
+LOCATION:Grote Markt\nGrote Markt 1, 1000 Brussel, Belgium
+ORGANIZER;CN=3D"Pat Morgan";EMAIL=3D"pat@example.com":urn:uuid:1A2B3C4D-0000-40
+ 00-8000-00000000AAAA
+SEQUENCE:0
+SUMMARY:Lunch at the market
+UID:5B0C9A7E-1D2F-4A3B-9C8D-7E6F5A4B3C2D
+URL;VALUE=3DURI:https://example.com/lunch
+END:VEVENT
+END:VCALENDAR
+
+--Apple-Mail=_1F2E3D4C--

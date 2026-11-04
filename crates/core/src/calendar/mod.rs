@@ -1,9 +1,11 @@
 //! Calendars: sync from Graph, Google, CalDAV and webcal feeds, time zones,
 //! repeating events, invitations and meeting links.
 
+pub mod card;
 pub mod detail;
 pub mod ical;
 pub mod ical_edit;
+pub mod invitation;
 pub mod meeting;
 mod model;
 pub mod recur;

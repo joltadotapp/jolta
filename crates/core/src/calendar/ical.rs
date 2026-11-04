@@ -27,6 +27,14 @@ pub fn read(text: &str, me: &[String]) -> Result<Vec<EventData>> {
     read_with(text, me, meeting::detect)
 }
 
+/// Every VEVENT in an invitation in mail, with whether it has a start. An
+/// iTIP message may name its event by UID alone: RFC 5546 leaves DTSTART
+/// out of REFRESH and lets CANCEL, REPLY and DECLINECOUNTER omit it. Such
+/// an event's span is a stand-in that says nothing about its time.
+pub fn read_invitation(text: &str, me: &[String]) -> Result<Vec<(EventData, bool)>> {
+    read_all(text, me, meeting::detect)
+}
+
 /// The VCALENDAR's METHOD (`REQUEST`, `REPLY`, `CANCEL`, `COUNTER`, …), as
 /// an invitation in mail carries it.
 pub fn method(text: &str) -> Option<String> {
@@ -36,6 +44,10 @@ pub fn method(text: &str) -> Option<String> {
 type Detect = fn(&[Conference], Option<&str>, &str, &str) -> Option<Meeting>;
 
 pub(super) fn read_with(text: &str, me: &[String], detect: Detect) -> Result<Vec<EventData>> {
+    Ok(read_all(text, me, detect)?.into_iter().filter_map(|(e, dated)| dated.then_some(e)).collect())
+}
+
+fn read_all(text: &str, me: &[String], detect: Detect) -> Result<Vec<(EventData, bool)>> {
     let calendars = calendars(text);
     if calendars.is_empty() {
         return Err(Error::Other("no iCalendar data found".into()));
@@ -101,10 +113,13 @@ fn event(
     method: Option<&str>,
     zones: &mut Zones<'_>,
     detect: Detect,
-) -> Option<EventData> {
+) -> Option<(EventData, bool)> {
     let uid = comp.property(&Prop::Uid).and_then(text).filter(|u| !u.is_empty())?;
-    let start = comp.property(&Prop::Dtstart).and_then(|e| first_moment(e, zones))?;
-    let span = span(comp, start, zones);
+    let start = comp.property(&Prop::Dtstart).and_then(|e| first_moment(e, zones));
+    let span = match start {
+        Some(start) => span(comp, start, zones),
+        None => Span::AllDay { start: NaiveDate::default(), end: NaiveDate::default() + Duration::days(1) },
+    };
 
     let rid = comp.property(&Prop::RecurrenceId);
     let recurrence_id = rid.and_then(|e| first_moment(e, zones));
@@ -185,7 +200,7 @@ fn event(
         None => (plain, false),
     };
 
-    Some(EventData {
+    let event = EventData {
         uid,
         recurrence_id,
         this_and_future,
@@ -206,7 +221,8 @@ fn event(
         meeting,
         categories,
         color,
-    })
+    };
+    Some((event, start.is_some()))
 }
 
 fn span(comp: &ICalendarComponent, start: Moment, zones: &mut Zones<'_>) -> Span {
@@ -351,23 +367,22 @@ fn conference_entries(comp: &ICalendarComponent) -> Vec<Conference> {
         let Some(uri) = text(e).map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) else {
             continue;
         };
-        let (kind, provider) = match &e.name {
+        let kind = match &e.name {
             Prop::Conference => {
                 let features: Vec<String> =
                     e.parameters(&Param::Feature).filter_map(|v| v.as_text()).map(str::to_ascii_uppercase).collect();
                 let phone = uri.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("tel:"))
                     || (features.iter().any(|f| f == "PHONE") && !features.iter().any(|f| f == "VIDEO"));
-                (if phone { EntryKind::Phone } else { EntryKind::Video }, None)
+                if phone { EntryKind::Phone } else { EntryKind::Video }
             }
-            Prop::Other(n) if n.eq_ignore_ascii_case("X-MICROSOFT-SKYPETEAMSMEETINGURL") => {
-                (EntryKind::Video, Some(MeetingProvider::Teams))
-            }
-            Prop::Other(n) if n.eq_ignore_ascii_case("X-GOOGLE-CONFERENCE") => {
-                (EntryKind::Video, Some(MeetingProvider::Meet))
+            Prop::Other(n)
+                if n.eq_ignore_ascii_case("X-MICROSOFT-SKYPETEAMSMEETINGURL") || n.eq_ignore_ascii_case("X-GOOGLE-CONFERENCE") =>
+            {
+                EntryKind::Video
             }
             _ => continue,
         };
-        entries.push(Conference { kind, uri, provider, meeting_id: None, passcode: None });
+        entries.push(Conference { kind, uri, meeting_id: None, passcode: None });
     }
     entries
 }
@@ -757,7 +772,6 @@ pub(super) mod tests {
         let teams = entries(text);
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].kind, EntryKind::Video);
-        assert_eq!(teams[0].provider, Some(MeetingProvider::Teams));
         assert!(teams[0].uri.starts_with("https://teams.microsoft.com/l/meetup-join/"));
     }
 
@@ -800,7 +814,6 @@ pub(super) mod tests {
         let meet = entries(text);
         assert_eq!(meet.len(), 1);
         assert_eq!(meet[0].uri, "https://meet.google.com/abc-defg-hij");
-        assert_eq!(meet[0].provider, Some(MeetingProvider::Meet));
     }
 
     #[test]

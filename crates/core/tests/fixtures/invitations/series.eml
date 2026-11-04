@@ -1,0 +1,49 @@
+From: Ann Dupont <ann@example.com>
+To: me@example.com
+Subject: Invitation: Team standup
+Date: Mon, 02 Nov 2026 08:00:00 +0000
+Message-ID: <series@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset="UTF-8"
+
+Twice a week, short.
+
+--alt
+Content-Type: text/calendar; charset="UTF-8"; method=REQUEST
+
+BEGIN:VCALENDAR
+PRODID:-//Example//Calendar//EN
+VERSION:2.0
+METHOD:REQUEST
+BEGIN:VEVENT
+DTSTART;TZID=Europe/Brussels:20261103T093000
+DTEND;TZID=Europe/Brussels:20261103T094500
+RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261217T225959Z
+DTSTAMP:20261102T080000Z
+ORGANIZER;CN=Ann Dupont:mailto:ann@example.com
+UID:standup-series@example.com
+ATTENDEE;PARTSTAT=ACCEPTED;CN=Ann Dupont:mailto:ann@example.com
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.com
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Bo Nilsson:mailto:bo@example.co
+ m
+LOCATION:https://us02web.zoom.us/j/81234567890?pwd=abc123
+SEQUENCE:0
+SUMMARY:Team standup
+END:VEVENT
+BEGIN:VEVENT
+RECURRENCE-ID;TZID=Europe/Brussels:20261105T093000
+DTSTART;TZID=Europe/Brussels:20261105T100000
+DTEND;TZID=Europe/Brussels:20261105T101500
+DTSTAMP:20261102T080000Z
+ORGANIZER;CN=Ann Dupont:mailto:ann@example.com
+UID:standup-series@example.com
+LOCATION:https://us02web.zoom.us/j/81234567890?pwd=abc123
+SEQUENCE:0
+SUMMARY:Team standup
+END:VEVENT
+END:VCALENDAR
+
+--alt--

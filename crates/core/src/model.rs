@@ -285,6 +285,8 @@ pub struct BodyInfo {
     /// message has them.
     pub list_id: Option<String>,
     pub list_unsubscribe: Option<String>,
+    /// The events its calendar parts name.
+    pub invitations: Vec<crate::calendar::invitation::Invitation>,
 }
 
 #[derive(Clone, Debug)]

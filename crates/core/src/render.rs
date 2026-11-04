@@ -12,7 +12,10 @@ use std::collections::HashSet;
 
 use mail_parser::{MessageParser, PartKind};
 
+use crate::calendar::card::Card;
 use crate::smime::{Protection, Verdict};
+
+mod invitation;
 
 pub const REMOTE_SCHEME: &str = "x-remote";
 
@@ -500,6 +503,8 @@ pub struct MessageView<'a> {
     pub open: bool,
     pub vip: bool,
     pub protection: &'a Protection,
+    /// The invitations its calendar parts carry, shown above the text.
+    pub cards: &'a [Card],
 }
 
 fn human_size(bytes: u64) -> String {
@@ -564,10 +569,12 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
             css.push_str(&filter_css(s, &scope));
         }
         css.push_str(&dark_attribute_rules(&clean, &scope));
+        // Outside the body, so the message's own styles never reach it.
+        let cards: String = m.cards.iter().map(invitation::card).collect();
         body.push_str(&format!(
             "<details class=\"jolta-message\"{open}><summary><span class=\"jolta-from\">{from}</span>{vip}{chip}\
              <span class=\"jolta-snippet\">{snippet}</span>{clip}<span class=\"jolta-date\">{date}</span>\
-             <div class=\"jolta-to\">to {to}</div>{sigline}</summary><div class=\"jolta-body{layout}\" id=\"m{id}\">{clean}</div></details>",
+             <div class=\"jolta-to\">to {to}</div>{sigline}</summary>{cards}<div class=\"jolta-body{layout}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
             vip = if m.vip { "<span class=\"jolta-vip\">VIP</span>" } else { "" },
@@ -615,11 +622,16 @@ const CLIP: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"11\" heigh
 stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\"/></svg>";
 
 /// The attachments the reader lists for a message: every one except images
-/// its text already shows inline. `clean` is the sanitised body.
+/// its text already shows inline, and calendar parts that aren't `.ics`
+/// files, which the invitation card stands for. `clean` is the sanitised body.
 fn listed(raw: &[u8], clean: &str, id: i64) -> Vec<Attachment> {
     attachments(raw)
         .into_iter()
         .filter(|f| !f.content_id.as_ref().is_some_and(|c| clean.contains(&format!("cid:{id}/{c}"))))
+        .filter(|f| {
+            let calendar = matches!(f.mime_type.as_str(), "text/calendar" | "application/ics");
+            !calendar || f.name.to_ascii_lowercase().ends_with(".ics")
+        })
         .collect()
 }
 
@@ -719,7 +731,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     fn message(id: i64, raw: &[u8], open: bool) -> MessageView<'_> {
-        MessageView { id, from: "a", to: "b", date: "d", snippet: "s", raw, open, vip: false, protection: &Protection::None }
+        MessageView { id, from: "a", to: "b", date: "d", snippet: "s", raw, open, vip: false, protection: &Protection::None, cards: &[] }
     }
 
     #[test]
@@ -863,6 +875,6 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     fn view(raw: &[u8]) -> MessageView<'_> {
-        MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false, protection: &Protection::None }
+        MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false, protection: &Protection::None, cards: &[] }
     }
 }

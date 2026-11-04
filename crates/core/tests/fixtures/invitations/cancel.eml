@@ -1,0 +1,35 @@
+From: Ann Dupont <ann@example.com>
+To: me@example.com
+Subject: Canceled event: Roadmap review @ Thu 12 Nov 2026 16:00 - 16:45 (CET)
+Date: Wed, 04 Nov 2026 08:00:00 +0000
+Message-ID: <cancel@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset="UTF-8"
+
+This event has been canceled.
+
+--alt
+Content-Type: text/calendar; charset="UTF-8"; method=CANCEL
+
+BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+METHOD:CANCEL
+BEGIN:VEVENT
+DTSTART:20261112T150000Z
+DTEND:20261112T154500Z
+DTSTAMP:20261104T080000Z
+ORGANIZER;CN=Ann Dupont:mailto:ann@example.com
+UID:7kq2m4p9r1s3t5v7x9z0b2d4f6@google.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;CN=me
+ @example.com:mailto:me@example.com
+SEQUENCE:1
+STATUS:CANCELLED
+SUMMARY:Roadmap review
+END:VEVENT
+END:VCALENDAR
+
+--alt--

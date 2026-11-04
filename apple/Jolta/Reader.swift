@@ -194,10 +194,26 @@ private struct Decider: WebPage.NavigationDeciding {
             }
             return .cancel
         }
+        if action.navigationType == .linkActivated, let url, url.scheme == "x-join" {
+            Self.join(url)
+            return .cancel
+        }
         if action.navigationType == .linkActivated, let url, ["http", "https", "mailto"].contains(url.scheme ?? "") {
             Self.confirmOpen(url)
         }
         return .cancel
+    }
+
+    /// `x-join:open?url=…&app=…` from an invitation card: the meeting's app
+    /// when it is installed, else its https link, as the calendar's Join.
+    static func join(_ url: URL) {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let link = { (name: String) in items.first { $0.name == name }?.value.flatMap(URL.init(string:)) }
+        if let app = link("app"), NSWorkspace.shared.urlForApplication(toOpen: app) != nil {
+            NSWorkspace.shared.open(app)
+        } else if let web = link("url"), web.scheme == "https" {
+            NSWorkspace.shared.open(web)
+        }
     }
 
     static func confirmOpen(_ url: URL) {
@@ -406,5 +422,44 @@ enum ReaderStyle {
     .jolta-save-all:hover, .jolta-file:hover { background: var(--fill); }
     .jolta-clip { display: inline-flex; align-items: center; gap: 3px; color: var(--tx3); font-size: 11.5px; margin-right: 10px; }
     .jolta-message[open] .jolta-clip { display: none; }
+    .jolta-invite { margin: 14px 0 0; width: min(100%, 520px); box-sizing: border-box; padding: 14px 16px; border-radius: 10px;
+      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx2); font-size: 12.5px; line-height: 18px; }
+    .jolta-invite + .jolta-invite { margin-top: 8px; }
+    .jolta-invite svg { flex: none; color: var(--tx3); }
+    .jolta-invite-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+    .jolta-invite-label { display: inline-flex; align-items: center; gap: 6px; color: var(--tx3); font-size: 11px; font-weight: 600;
+      letter-spacing: .01em; }
+    .jolta-invite-answer { padding: 0 6px; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--line2); font-size: 11px; line-height: 16px; }
+    .jolta-invite-title { color: var(--tx); font-size: 15px; line-height: 21px; font-weight: 600; letter-spacing: -.01em; }
+    .jolta-invite-cancelled .jolta-invite-title { color: var(--tx2); text-decoration: line-through; text-decoration-color: var(--tx3); }
+    .jolta-invite-when { margin-top: 2px; color: var(--tx); font-size: 13px; font-variant-numeric: tabular-nums; }
+    .jolta-invite-elsewhere { color: var(--tx3); font-variant-numeric: tabular-nums; }
+    .jolta-invite-facts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 10px; }
+    .jolta-invite-facts span { display: inline-flex; align-items: center; gap: 6px; }
+    .jolta-invite-people { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+    .jolta-invite-facts + .jolta-invite-people { margin-top: 2px; }
+    .jolta-invite-when + .jolta-invite-people, .jolta-invite-elsewhere + .jolta-invite-people { margin-top: 10px; }
+    .jolta-invite-people b { color: var(--tx); font-weight: 500; }
+    .jolta-invite-note, .jolta-invite-free { margin-top: 10px; }
+    .jolta-invite-note + .jolta-invite-note, .jolta-invite-note + .jolta-invite-free { margin-top: 2px; }
+    .jolta-invite .jolta-warn { color: var(--acc); }
+    .jolta-strip { position: relative; margin-top: 8px; }
+    .jolta-strip-hour { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line2); }
+    .jolta-strip-hour i { position: absolute; top: 0; left: 4px; color: var(--tx3); font: 10.5px/14px ui-monospace, SFMono-Regular, monospace; }
+    .jolta-strip-busy, .jolta-strip-this { position: absolute; height: 18px; box-sizing: border-box; padding: 0 6px; border-radius: 4px;
+      font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .jolta-strip-busy { background: var(--fill); color: var(--tx2); box-shadow: inset 0 0 0 1px var(--line2); }
+    .jolta-strip-busy.jolta-conflict { color: var(--tx); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 75%, transparent); }
+    .jolta-strip-this { background: color-mix(in oklab, var(--tx) 13%, var(--bg)); color: var(--tx); font-weight: 600;
+      box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 35%, transparent); }
+    .jolta-strip .jolta-strip-beside { width: max-content; background: var(--bg); box-shadow: none; padding: 0 4px 0 5px; border-radius: 0; }
+    .jolta-invite-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .jolta-join { padding: 3px 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
+      text-decoration: none; cursor: default; }
+    .jolta-join:hover { background: var(--fill); }
+    .jolta-join.jolta-live { background: var(--acc); color: #fff; box-shadow: none; }
+    .jolta-invite-reply { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 10px 14px; }
+    .jolta-invite-reply b { color: var(--tx); font-weight: 600; }
+    .jolta-invite-about { margin-left: auto; color: var(--tx3); }
     """
 }

@@ -183,7 +183,7 @@ pub fn known_items(conn: &Connection, calendar: CalendarId) -> Result<BTreeMap<S
 }
 
 /// How a recurrence id is stored: the same moment always gives the same text.
-fn moment_text(m: &Moment) -> String {
+pub(super) fn moment_text(m: &Moment) -> String {
     match m {
         Moment::Date(d) => d.format("%Y%m%d").to_string(),
         Moment::Time(t) => match t.zone {

@@ -17,7 +17,7 @@ use super::{Change, Known, SyncBatch, encode, http_client, http_error, provider_
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingProvider, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::RemoteCalendar;
@@ -141,7 +141,6 @@ struct Reminder {
 #[serde(rename_all = "camelCase", default)]
 struct ConferenceData {
     entry_points: Vec<EntryPoint>,
-    conference_solution: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -585,11 +584,6 @@ fn moment(w: &When, fallback: Zone) -> Option<Moment> {
 }
 
 fn entries(g: &GoogleEvent) -> Vec<Entry> {
-    let meet = g
-        .conference_data
-        .as_ref()
-        .and_then(|c| c.conference_solution.as_ref())
-        .is_some_and(|s| s["key"]["type"] == "hangoutsMeet");
     let mut out: Vec<Entry> = g
         .conference_data
         .iter()
@@ -603,7 +597,6 @@ fn entries(g: &GoogleEvent) -> Vec<Entry> {
             Some(Entry {
                 kind,
                 uri: e.uri.clone(),
-                provider: (meet && kind == EntryKind::Video).then_some(MeetingProvider::Meet),
                 meeting_id: e.meeting_code.clone(),
                 passcode: e.passcode.clone().or_else(|| e.password.clone()).or_else(|| e.pin.clone()).or_else(|| e.access_code.clone()),
             })
@@ -612,7 +605,7 @@ fn entries(g: &GoogleEvent) -> Vec<Entry> {
     if !out.iter().any(|e| e.kind == EntryKind::Video)
         && let Some(link) = &g.hangout_link
     {
-        out.insert(0, Entry { kind: EntryKind::Video, uri: link.clone(), provider: Some(MeetingProvider::Meet), meeting_id: None, passcode: None });
+        out.insert(0, Entry { kind: EntryKind::Video, uri: link.clone(), meeting_id: None, passcode: None });
     }
     out
 }
@@ -709,6 +702,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::calendar::MeetingProvider;
     use crate::calendar::recur::{self, Window};
     use crate::calendar::rsvp::{Answer, Scope};
 
