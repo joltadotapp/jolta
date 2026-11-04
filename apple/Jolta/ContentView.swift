@@ -413,6 +413,11 @@ struct SyncFooter: View {
     let model: AppModel
 
     private var status: String {
+        if let (id, error) = model.syncErrors.min(by: { $0.key < $1.key }) {
+            let name = model.accounts.first { $0.account.id == id }?.account.address ?? "An account"
+            let more = model.syncErrors.count > 1 ? " (and \(model.syncErrors.count - 1) more)" : ""
+            return "\(name): \(error)\(more)"
+        }
         if let error = model.lastError { return error }
         if !model.syncing.isEmpty { return "Syncing…" }
         if let date = model.lastSynced { return "All accounts synced, \(date.formatted(date: .omitted, time: .shortened))" }
@@ -421,7 +426,7 @@ struct SyncFooter: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(Color(model.lastError == nil ? Theme.text2 : Theme.accent)).frame(width: 6, height: 6)
+            Circle().fill(Color(model.lastError == nil && model.syncErrors.isEmpty ? Theme.text2 : Theme.accent)).frame(width: 6, height: 6)
             Text(status).lineLimit(2)
         }
         .font(.system(size: 11.5))

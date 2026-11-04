@@ -127,8 +127,11 @@ struct AccountPage: View {
                 }
             } else {
                 SettingsSection("Sign-in") {
+                    let failure = model.syncErrors[section.id]
                     SettingsRow(title: "Signed in with \(section.account.provider)",
-                                detail: "Sign in again when Jolta reports that the account's access ran out or was revoked. \(section.account.provider) manages the servers and their security.") {
+                                detail: failure.map { "This account can't sync: \($0). Sign in again to fix it." }
+                                    ?? "Sign in again when Jolta reports that the account's access ran out or was revoked. \(section.account.provider) manages the servers and their security.",
+                                detailColor: failure == nil ? Color(Theme.text3) : .orange) {
                         Button("Sign In Again…", action: signInAgain).disabled(signingIn)
                     }
                 }

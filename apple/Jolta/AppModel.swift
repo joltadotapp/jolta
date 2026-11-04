@@ -98,6 +98,8 @@ final class AppModel {
     private(set) var syncing: Set<Int64> = []
     private(set) var lastSynced: Date?
     private(set) var lastError: String?
+    /// Each account's last sync failure, until that account syncs again.
+    private(set) var syncErrors: [Int64: String] = [:]
     var openThread: ThreadView?
     var selectedThreadID: Int64?
     /// Threads selected in the list, in list order. With more than one,
@@ -502,9 +504,10 @@ final class AppModel {
             syncing.remove(id)
             lastSynced = .now
             lastError = nil
+            syncErrors[id] = nil
         case .syncFailed(let id, let message):
             syncing.remove(id)
-            lastError = message
+            syncErrors[id] = message
         case .newMail(_, let threadID, let from, let subject, let vip):
             if NewMailBanners.current.shows(vip: vip) {
                 notifier.post(threadID: threadID, from: from, subject: subject)
