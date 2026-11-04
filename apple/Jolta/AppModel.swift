@@ -506,6 +506,8 @@ final class AppModel {
         case .modelChanged(let id, let state):
             if let i = localModels.firstIndex(where: { $0.id == id }) { localModels[i].state = state }
             if case .ready = state, ai.provider == .local, ai.localModel == id { reloadAI() }
+        case .calendarChanged, .calendarSynced:
+            break
         }
     }
 
