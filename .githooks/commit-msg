@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuses a commit message that names anything in .git/info/private-strings,
+# as pre-commit does for the changes: the repository is public.
+PRIVATE="$(git rev-parse --git-common-dir)/info/private-strings"
+if [ -s "$PRIVATE" ] && grep -v '^#' "$1" | grep -i -F -q -f "$PRIVATE"; then
+    echo "commit-msg: the message contains a string from $PRIVATE." >&2
+    exit 1
+fi

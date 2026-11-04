@@ -362,9 +362,9 @@ mod tests {
     #[test]
     fn signatures_follow_the_sender() {
         let quoted = "On 1 Nov 2026, 10:00, Ann wrote:\n> hi";
-        let reply = opening("Koen\n**example**", quoted);
-        assert_eq!(reply, "\n\nKoen\n**example**\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
-        let swapped = swap_signature(&format!("Thanks!{reply}"), "Koen\n**example**", "K.");
+        let reply = opening("Koen\n**Example Ltd**", quoted);
+        assert_eq!(reply, "\n\nKoen\n**Example Ltd**\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
+        let swapped = swap_signature(&format!("Thanks!{reply}"), "Koen\n**Example Ltd**", "K.");
         assert_eq!(swapped, "Thanks!\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
         assert_eq!(swap_signature(&swapped, "K.", ""), "Thanks!\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
         let no_signature = format!("Thanks!{}", opening("", quoted));
