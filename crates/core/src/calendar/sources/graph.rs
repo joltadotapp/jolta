@@ -284,7 +284,7 @@ impl GraphCalendar {
         let complete = round.complete;
         let delta_link = round.delta_link.clone();
         let instances = parse_items(round.items);
-        let wanted = masters_to_fetch(&instances, &earlier, known, complete);
+        let wanted = masters_to_fetch(&instances, &earlier, complete);
         let masters = self.masters(&calendar.remote_id, &wanted).await?;
         let (changes, masters) = batch(instances, masters, known, complete, std::slice::from_ref(&self.account.address), self.here, &earlier);
         let cursor = match delta_link {
@@ -447,9 +447,12 @@ fn parse_items(items: Vec<Value>) -> Vec<(GraphEvent, Vec<u8>)> {
 
 /// The masters a round needs: every series with an instance in it, and
 /// after a deletion delta can't place, every series the window held.
-fn masters_to_fetch(instances: &[(GraphEvent, Vec<u8>)], earlier: &BTreeSet<String>, known: &Known, complete: bool) -> BTreeSet<String> {
+fn masters_to_fetch(instances: &[(GraphEvent, Vec<u8>)], earlier: &BTreeSet<String>, complete: bool) -> BTreeSet<String> {
     let mut wanted: BTreeSet<String> = instances.iter().filter_map(|(g, _)| g.series_master_id.clone()).collect();
-    let lost_occurrence = instances.iter().any(|(g, _)| g.removed.is_some() && !known.contains_key(&g.id));
+    // A removed exception has to bring its master back too: the master's
+    // cancelledOccurrences now holds that date, and without it the original
+    // occurrence returns.
+    let lost_occurrence = instances.iter().any(|(g, _)| g.removed.is_some());
     if !complete && lost_occurrence {
         wanted.extend(earlier.iter().cloned());
     }
@@ -726,6 +729,11 @@ pub fn rrule(p: &PatternedRecurrence, all_day: bool, until_zone: Tz) -> Option<S
             }
             v
         }
+        // Exchange moves a day the month lacks to its last day; RFC 5545
+        // skips the month, so the 29th to 31st fall back to -1.
+        "absoluteMonthly" if pattern.day_of_month >= 29 => {
+            vec!["FREQ=MONTHLY".into(), format!("BYMONTHDAY={},-1", pattern.day_of_month), "BYSETPOS=1".into()]
+        }
         "absoluteMonthly" => vec!["FREQ=MONTHLY".into(), format!("BYMONTHDAY={}", pattern.day_of_month)],
         "relativeMonthly" => vec!["FREQ=MONTHLY".into(), format!("BYDAY={}", days()), format!("BYSETPOS={}", setpos())],
         "absoluteYearly" => {
@@ -792,7 +800,8 @@ mod tests {
         let cases = [
             (json!({"type": "daily", "interval": 2}), "FREQ=DAILY;INTERVAL=2"),
             (json!({"type": "weekly", "interval": 1, "daysOfWeek": ["monday", "wednesday"], "firstDayOfWeek": "sunday"}), "FREQ=WEEKLY;BYDAY=MO,WE;WKST=SU"),
-            (json!({"type": "absoluteMonthly", "interval": 3, "dayOfMonth": 31}), "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=31"),
+            (json!({"type": "absoluteMonthly", "interval": 3, "dayOfMonth": 31}), "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=31,-1;BYSETPOS=1"),
+            (json!({"type": "absoluteMonthly", "interval": 1, "dayOfMonth": 15}), "FREQ=MONTHLY;BYMONTHDAY=15"),
             (json!({"type": "relativeMonthly", "interval": 1, "daysOfWeek": ["friday"], "index": "last"}), "FREQ=MONTHLY;BYDAY=FR;BYSETPOS=-1"),
             (
                 json!({"type": "relativeMonthly", "interval": 1, "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"], "index": "first"}),
@@ -805,6 +814,20 @@ mod tests {
             assert_eq!(rule(json!({"pattern": p, "range": no_end})), want, "{p}");
         }
         assert_eq!(rrule(&pattern(json!({"pattern": {"type": "hourly"}, "range": no_end})), false, Europe::Brussels), None);
+    }
+
+    #[test]
+    fn a_monthly_day_the_month_lacks_falls_on_its_last_day_as_in_exchange() {
+        let master = mapped(master_json(json!({"type": "absoluteMonthly", "interval": 1, "dayOfMonth": 31}), json!({"type": "noEnd"})));
+        let master = EventData { span: Span::Timed { start: Local { wall: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap().and_hms_opt(9, 0, 0).unwrap(), zone: Zone::Tz(Europe::Brussels) }, end: Local { wall: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap().and_hms_opt(10, 0, 0).unwrap(), zone: Zone::Tz(Europe::Brussels) } }, ..master };
+        assert_eq!(starts(&master, &[], (2026, 10), 5), ["2026-10-31 09:00", "2026-11-30 09:00", "2026-12-31 09:00", "2027-01-31 09:00", "2027-02-28 09:00"]);
+    }
+
+    #[test]
+    fn a_removed_exception_fetches_its_master_again() {
+        let earlier = BTreeSet::from(["M1".to_string()]);
+        let instances = vec![graph(json!({"@removed": {"reason": "deleted"}, "id": "X1"}))];
+        assert_eq!(masters_to_fetch(&instances, &earlier, false), earlier, "the master now cancels that occurrence");
     }
 
     #[test]
@@ -976,7 +999,7 @@ mod tests {
                          "end": {"dateTime": "2026-12-02T08:30:00.0000000", "timeZone": "UTC"}})),
         ];
         let (m1, raw) = graph(master_json(json!({"type": "daily", "interval": 1}), json!({"type": "noEnd"})));
-        let wanted = masters_to_fetch(&instances, &earlier, &known, false);
+        let wanted = masters_to_fetch(&instances, &earlier, false);
         assert_eq!(wanted, BTreeSet::from(["M1".to_string(), "M2".to_string(), "M9".to_string()]), "an unplaceable deletion fetches every series again");
         let masters: Masters = [("M1".into(), Some((m1, raw))), ("M2".into(), None), ("M9".into(), None)].into();
         let (changes, holding) = batch(instances, masters, &known, false, &[], Europe::Brussels, &earlier);

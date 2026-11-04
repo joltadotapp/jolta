@@ -333,7 +333,10 @@ impl CalDav {
                     out.push(Change::Remove { remote_id });
                     continue;
                 }
-                let Some(data) = r.prop(CALDAV, "calendar-data").map(|p| p.text.as_str()) else { continue };
+                // Skipping it would let the new sync token pass it by for good.
+                let Some(data) = r.prop(CALDAV, "calendar-data").map(|p| p.text.as_str()) else {
+                    return Err(Error::Other(format!("CalDAV multiget on {url}: no data for {remote_id} ({:?})", r.status)));
+                };
                 match ical::read(data, &self.me) {
                     Ok(events) => out.push(Change::Upsert {
                         remote_id,
