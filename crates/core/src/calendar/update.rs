@@ -43,34 +43,26 @@ pub fn answer_holds(answered: &EventData, source: Option<CalendarSource>, now: &
 }
 
 /// Whether an answer given to `answered`, from Jolta or in a copy from
-/// `source`, holds for a message that sends `message`, where `said` is the
-/// event that places the occurrence shown: for the version of the same
-/// event the message sends, and when the answer went to the series of an
-/// occurrence the message sends on its own, for the series' occurrence at
-/// that recurrence id. `answered` is the event or occurrence answered, or a
-/// series with its changed occurrences, of which the one `said` names
-/// counts. The card and the list both judge by this.
-pub fn holds(answered: &[EventData], source: Option<CalendarSource>, message: &[EventData], said: &EventData, here: Tz) -> bool {
-    let Some(answered) = version_of(answered, said, here).or(answered.iter().find(|e| e.recurrence_id.is_none())).or(answered.first()) else { return true };
-    let event = version_of(message, answered, here).is_none_or(|now| answer_holds(answered, source, now, here));
-    let occurrence = match (answered.recurrence_id, said.recurrence_id) {
-        (None, Some(rid)) => series::occurrence_span(&answered.span, &rid, here).is_some_and(|span| {
-            let there = EventData { recurrence_id: Some(rid), recurrence: None, span, ..answered.clone() };
-            answer_holds(&there, source, said, here)
-        }),
+/// `source`, holds for a message that sends `message` and shows its
+/// occurrence at `at`: for the whole event or series when both versions
+/// have it, and for that occurrence as each version places it, at its
+/// changed occurrence where the version has one, else at its master moved
+/// there. `answered` is the event or occurrence answered, or a series with
+/// its changed occurrences. The card and the list both judge by this.
+pub fn holds(answered: &[EventData], source: Option<CalendarSource>, message: &[EventData], at: Option<&Moment>, here: Tz) -> bool {
+    fn whole(events: &[EventData]) -> Option<&EventData> {
+        events.iter().find(|e| e.recurrence_id.is_none())
+    }
+    let event = match (whole(answered), whole(message)) {
+        (Some(answered), Some(now)) => answer_holds(answered, source, now, here),
         _ => true,
     };
+    let occurrence = at.is_none_or(|rid| match (series::occurrence(answered, rid, here), series::occurrence(message, rid, here)) {
+        (Some(answered), Some(now)) => answer_holds(&answered, source, &now, here),
+        (None, Some(_)) => false,
+        (_, None) => true,
+    });
     event && occurrence
-}
-
-/// The event in `message` that `other`, a version of the same event or
-/// occurrence, compares with.
-fn version_of<'a>(message: &'a [EventData], other: &EventData, here: Tz) -> Option<&'a EventData> {
-    message.iter().find(|e| match (&e.recurrence_id, &other.recurrence_id) {
-        (None, None) => true,
-        (Some(a), Some(b)) => a.names(b, here),
-        _ => false,
-    })
 }
 
 /// The same start, end and repeat rule. EXDATEs don't count: an

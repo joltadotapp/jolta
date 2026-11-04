@@ -235,15 +235,15 @@ pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recur
 /// The user's answer to an invitation on the account it came to, as its
 /// card and the list show it: `copy` is that account's copy of the event,
 /// `remembered` the answer given from Jolta, and `sent` the events the
-/// message sends with the one that places the occurrence shown, None for a
+/// message sends with the recurrence id of the occurrence shown, None for a
 /// message that gives no time. Jolta answers through a provider's or a
 /// CalDAV copy, so that one holds the answer it gave. Its answer, or the one
 /// given from Jolta, holds only for the version and the occurrence it went
 /// to, and reads Not answered after that. A feed's or this Mac's copy only
 /// says what it was imported with.
-pub fn shown_answer(copy: Option<&StoredEvent>, remembered: Option<&Remembered>, sent: Option<(&[EventData], &EventData)>, here: Tz) -> Option<Response> {
+pub fn shown_answer(copy: Option<&StoredEvent>, remembered: Option<&Remembered>, sent: Option<(&[EventData], Option<&Moment>)>, here: Tz) -> Option<Response> {
     let judged = |answer: Response, answered: &[EventData], source: Option<CalendarSource>| match sent {
-        Some((events, said)) if !holds(answered, source, events, said, here) => Response::NeedsAction,
+        Some((events, at)) if !holds(answered, source, events, at, here) => Response::NeedsAction,
         _ => answer,
     };
     match copy {
@@ -434,7 +434,7 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], me: &[String], now:
         return fixed(InvitationState::Cancelled);
     }
     let remembered = remembered_answer(conn, n.account, &n.uid, picked.occurrence.as_ref())?;
-    let sent = picked.sent.as_ref().map(|(events, said)| (events.as_slice(), &events[*said]));
+    let sent = picked.sent.as_deref().map(|events| (events, picked.occurrence.as_ref()));
     let answer = shown_answer(copy.as_ref(), remembered.as_ref(), sent, here);
     let state = match answer {
         Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
@@ -454,10 +454,9 @@ struct Picked {
     occurrence: Option<Moment>,
     /// For a series, when the occurrence it shows ends, in unix seconds.
     ends: Option<i64>,
-    /// The events the message sends, as `timing` places them, and which of
-    /// them places the occurrence shown. None for a message that gives no
-    /// time.
-    sent: Option<(Vec<EventData>, usize)>,
+    /// The events the message sends, as `timing` places them. None for a
+    /// message that gives no time.
+    sent: Option<Vec<EventData>>,
 }
 
 /// For a series, the occurrence `series::shown_occurrence` shows, either
@@ -470,19 +469,19 @@ fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result
     }
     let this = parse(n)?;
     if rid.is_some() || this.recurrence.is_none() {
-        return Ok(Picked { event: rid, occurrence: rid, ends: None, sent: Some((vec![this], 0)) });
+        return Ok(Picked { event: rid, occurrence: rid, ends: None, sent: Some(vec![this]) });
     }
     let overrides = overrides.iter().filter(|o| !o.timing.is_empty()).map(|o| parse(o)).collect::<Result<Vec<_>>>()?;
     let shown = series::shown_occurrence(&this, &overrides, now, here);
     let ends = shown.map(|o| end_of(&o.span, here).timestamp());
-    let (event, occurrence, said) = match shown.map(|o| (o.source, o.span.start())) {
-        None => (None, Some(this.span.start()), 0),
-        Some((Source::Override(i), _)) => (overrides[i].recurrence_id, overrides[i].recurrence_id, 1 + i),
+    let (event, occurrence) = match shown.map(|o| (o.source, o.span.start())) {
+        None => (None, Some(this.span.start())),
+        Some((Source::Override(i), _)) => (overrides[i].recurrence_id, overrides[i].recurrence_id),
         // The calendar may hold this occurrence as an override the mail
         // doesn't have; the series' copy answers when it doesn't.
-        Some((Source::Master, start)) => (Some(start), Some(start), 0),
+        Some((Source::Master, start)) => (Some(start), Some(start)),
     };
-    Ok(Picked { event, occurrence, ends, sent: Some(([this].into_iter().chain(overrides).collect(), said)) })
+    Ok(Picked { event, occurrence, ends, sent: Some([this].into_iter().chain(overrides).collect()) })
 }
 
 /// One message on an account that carries a version of an event.
@@ -972,7 +971,7 @@ mod tests {
     /// whole event or to that occurrence, with or without a reply mail, for a
     /// single event, an unchanged and a moved occurrence of a series and an
     /// occurrence invited to alone; then again after the organizer's update
-    /// that moves it or only retitles it, the organizer's cancellation of the
+    /// that moves it, only retitles it or leaves out the moved occurrence, the organizer's cancellation of the
     /// whole series or of Thursday's occurrence named in UTC, and a
     /// stranger's CANCEL or REQUEST for the same UID: the card and the list
     /// say the same.
@@ -990,6 +989,9 @@ mod tests {
         let master_part = &text[first..first + 1 + text[first + 1..].find("BEGIN:VEVENT").unwrap()];
         let alone = text.replace(master_part, "").into_bytes();
         let thursday_in_utc = String::from_utf8_lossy(&alone).replace("RECURRENCE-ID;TZID=Europe/Brussels:20261105T093000", "RECURRENCE-ID:20261105T083000Z");
+        let moved_part = &text[first + master_part.len()..];
+        let moved_part = &moved_part[..moved_part.find("END:VEVENT").unwrap() + "END:VEVENT\r\n".len()];
+        let without_move = text.replace(moved_part, "").into_bytes();
         let single = request("single@example.com", "", "single-1", "20261112T150000Z", "20261112T154500Z", 0);
         let after_thursday = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap();
         let me = ["me@example.com".to_string()];
@@ -1007,10 +1009,11 @@ mod tests {
         let mut before = HashMap::new();
         for (what, raw, now, occurrence) in shapes {
             let whole_event = if occurrence.is_some() { series.clone() } else { raw.clone() };
-            let arrivals: [(&str, Option<Vec<u8>>); 9] = [
+            let arrivals: [(&str, Option<Vec<u8>>); 10] = [
                 ("nothing since", None),
                 ("an update that moved it", Some(update(&raw, true))),
                 ("an update that kept its time", Some(update(&raw, false))),
+                ("an update that puts the moved occurrence back", (what == "a moved occurrence").then(|| update(&without_move, false))),
                 ("the organizer's CANCEL of the whole event", Some(cancelled(&whole_event))),
                 ("the organizer's CANCEL of Thursday's occurrence", occurrence.map(|_| cancelled(thursday_in_utc.as_bytes()))),
                 ("a stranger's CANCEL naming the organizer", Some(stranger(&raw, "CANCEL", false))),
@@ -1112,6 +1115,11 @@ mod tests {
                                         }
                                         before.insert(cell, card(0));
                                     }
+                                    // Only the series' copy places Thursday where the update does.
+                                    "an update that puts the moved occurrence back" if *copy == "the event's copy" => {
+                                        assert_eq!(card(0), InvitationState::Answered(Response::Declined), "{cell}: {arrival}")
+                                    }
+                                    "an update that puts the moved occurrence back" => assert_eq!(card(0), unanswered, "{cell}: answered at 10:00, now at 09:30"),
                                     "an update that moved it" => {
                                         assert_eq!(card(0), unanswered, "{cell}: answered before the move");
                                         if *copy == "no copy" && let (Some(rid), Some((m, r))) = (rid, &later) {
