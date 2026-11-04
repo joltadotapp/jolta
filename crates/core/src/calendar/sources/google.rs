@@ -234,8 +234,8 @@ impl Google {
 
     pub async fn sync(&self, calendar: &Calendar, known: &Known) -> Result<SyncBatch> {
         let id = calendar.remote_id.as_str();
-        let listing = listing(calendar.cursor.clone(), async |sync_token: Option<&str>, page_token: Option<&str>| {
-            self.events_page(id, sync_token, page_token).await
+        let listing = listing(calendar.cursor.clone(), |sync_token: Option<String>, page_token: Option<String>| async move {
+            self.events_page(id, sync_token.as_deref(), page_token.as_deref()).await
         })
         .await?;
         let uids = self.master_uids(id, &listing.items).await?;
@@ -296,13 +296,16 @@ impl Google {
 }
 
 /// Pages through one sync. A refused token starts again without one.
-async fn listing(token: Option<String>, mut fetch: impl AsyncFnMut(Option<&str>, Option<&str>) -> Result<Page>) -> Result<Listing> {
+/// `fetch` is a plain closure returning a future over owned tokens: an
+/// `AsyncFnMut` borrows itself for each call, and that higher-ranked borrow
+/// makes the sync future fail rustc's Send check when the scheduler spawns it.
+async fn listing<F: Future<Output = Result<Page>>>(token: Option<String>, mut fetch: impl FnMut(Option<String>, Option<String>) -> F) -> Result<Listing> {
     let mut token = token;
     'listing: loop {
         let mut listing = Listing { items: Vec::new(), default_reminders: Vec::new(), zone: None, sync_token: None, full: token.is_none() };
         let mut page_token: Option<String> = None;
         loop {
-            match fetch(token.as_deref(), page_token.as_deref()).await? {
+            match fetch(token.clone(), page_token.clone()).await? {
                 Page::Gone if token.is_some() => {
                     tracing::info!("Google refused the sync token; listing the calendar again");
                     token = None;
@@ -773,9 +776,9 @@ mod tests {
     fn an_expired_sync_token_lists_everything_again_and_drops_what_is_gone() {
         let known: Known = [("kept", "\"1\""), ("gone", "\"2\"")].into_iter().map(|(k, v)| (k.to_string(), Some(v.to_string()))).collect();
         let mut calls: Vec<(Option<String>, Option<String>)> = Vec::new();
-        let listing = block_on(listing(Some("old".into()), async |sync: Option<&str>, page_token: Option<&str>| {
-            calls.push((sync.map(str::to_string), page_token.map(str::to_string)));
-            Ok(match (sync, page_token) {
+        let listing = block_on(listing(Some("old".into()), |sync: Option<String>, page_token: Option<String>| {
+            calls.push((sync.clone(), page_token.clone()));
+            std::future::ready(Ok(match (sync, page_token) {
                 (Some(_), _) => Page::Gone,
                 (None, None) => Page::Events(EventsPage {
                     next_page_token: Some("p2".into()),
@@ -786,7 +789,7 @@ mod tests {
                     next_sync_token: Some("fresh".into()),
                     ..page(vec![json!({"id": "new", "iCalUID": "n", "start": {"date": "2026-11-12"}, "end": {"date": "2026-11-13"}})])
                 }),
-            })
+            }))
         }))
         .unwrap();
         assert_eq!(
