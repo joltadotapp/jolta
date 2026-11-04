@@ -1425,6 +1425,22 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// iCloud mails its invitations from its own address, naming the
+    /// organizer by a relay address.
+    #[test]
+    fn icloud_sends_for_its_organizers() {
+        let (j, _) = jolta("card-icloud-sender");
+        let relay = "2_abcdefgh@imip.me.com";
+        let first = sent_as(&version("i1", "trip", "REQUEST", 0, "20261104T080000Z", V1), "noreply@email.apple.com", relay);
+        let m1 = import(&j, first.as_bytes());
+        let c = stored_card(&j, m1, &first);
+        assert!(c.answering.is_some() && !notes(&c).contains(&"This isn't from the meeting's organizer"), "{:?}", c.notes);
+        let moved = sent_as(&version("i2", "trip", "REQUEST", 1, "20261104T090000Z", V1), "noreply@email.apple.com", relay);
+        import(&j, moved.as_bytes());
+        assert!(stored_card(&j, m1, &first).outdated);
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// Deleting the organizer's copy cancels the meeting for its guests, and
     /// a shared calendar's copy is someone else's.
     #[test]

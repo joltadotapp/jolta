@@ -107,9 +107,11 @@ pub struct Seen<'a> {
 }
 
 /// Addresses that send invitations on an organizer's behalf. Google sends
-/// from the organizer's own address with this one as Sender, and from this
-/// one when it can't.
-const SENDS_FOR_ORGANIZERS: &[&str] = &["calendar-notification@google.com"];
+/// from the organizer's own address with its own as Sender, and from its
+/// own when it can't. iCloud sends from its own, naming the organizer by an
+/// `imip.me.com` relay address (seen on the iCloud test account's mail,
+/// 2026-11-04).
+const SENDS_FOR_ORGANIZERS: &[&str] = &["calendar-notification@google.com", "noreply@email.apple.com"];
 
 /// The meeting's organizer as the account knows it: on its calendar's
 /// copy, else on the earliest request for the UID that its own organizer
