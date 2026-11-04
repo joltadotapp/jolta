@@ -1430,6 +1430,23 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    #[test]
+    fn a_cancellation_without_an_organizer_is_nobodys() {
+        let (j, calendar) = jolta("card-no-organizer");
+        let real = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        let m1 = import(&j, real.as_bytes());
+        let copy = invitation::find(real.as_bytes(), &[ME.into()]).remove(0).event;
+        j.store.write(|tx| store::apply_item(tx, calendar, "sync.ics", None, &[copy], None, &Horizon::around(now(), Brussels))).unwrap();
+        let cancel = version("x", "sync", "CANCEL", 1, "20261104T090000Z", V1).replace("From: ann@example.com", "From: eve@example.net").replace("ORGANIZER;CN=Ann Dupont:mailto:ann@example.com\r\n", "");
+        let x = import(&j, cancel.as_bytes());
+        let fake = stored_card(&j, x, &cancel);
+        assert_eq!(fake.removing, None);
+        assert!(notes(&fake).contains(&"This isn't from the meeting's organizer"), "{:?}", fake.notes);
+        let c = stored_card(&j, m1, &real);
+        assert!(!c.outdated && c.answering.is_some(), "Ann's invitation still stands");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// iCloud mails its invitations from its own address, naming the
     /// organizer by a relay address.
     #[test]

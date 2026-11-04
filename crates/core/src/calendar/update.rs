@@ -147,9 +147,8 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
     let rid = sent.event.recurrence_id;
     let organizer = organizer(seen, uid)?;
     let organizers = matches!(sent.method, Method::Request | Method::Add | Method::Cancel | Method::DeclineCounter);
-    if let (true, Some(named)) = (organizers, &sent.event.organizer)
-        && !sent_by(seen.me, organizer.as_deref(), &named.address, seen.sender)
-    {
+    // Without an ORGANIZER nobody vouches for the message.
+    if organizers && !sent.event.organizer.as_ref().is_some_and(|named| sent_by(seen.me, organizer.as_deref(), &named.address, seen.sender)) {
         return Ok(History { not_from_organizer: true, ..History::default() });
     }
 
