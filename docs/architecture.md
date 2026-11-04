@@ -45,13 +45,15 @@ crates/
                         and generate a synthetic mailbox for timing
   mcp-bridge/           bin `jolta-mcp`: copies stdio to the app's Unix socket, nothing else
   ai-helper/            bin `jolta-ai`: runs a local model with llama.cpp, one request at a time
+  uniffi-bindgen/       bin `uniffi-bindgen-swift`: writes the Swift bindings from the compiled library
 vendor/llama-cpp-2/     llama-cpp-2 0.1.160 with a lazy-mode setter (see vendor/README.md)
 apple/
   JoltaFFI/              Swift package: binary XCFramework + generated Swift (Swift 5 mode)
   Jolta.xcodeproj        hand-made project with buildable folders, no XcodeGen or Tuist
   Jolta/                 SwiftUI + AppKit sources (Swift 6 mode)
 scripts/
-  build-core.sh         cargo build for arm64 and x86_64, uniffi-bindgen-swift, xcframework
+  build-core.sh         cargo build (arm64; x86_64 too with JOLTA_INTEL=1), uniffi-bindgen-swift, xcframework;
+                        copies only changed files, so Xcode rebuilds only what the change touched
 docs/
 ```
 

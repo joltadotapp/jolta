@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds a universal Release Jolta.app signed with the Developer ID certificate,
+# Builds a Release Jolta.app (Apple silicon, or universal with JOLTA_INTEL=1) signed with the Developer ID certificate,
 # zips it into the update folder and regenerates the Sparkle appcast there.
 #
 #   scripts/release.sh 0.1.1
@@ -30,12 +30,15 @@ IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID A
 # A published version is never rebuilt: its appcast entry is signed for the old zip.
 [ ! -e "$UPDATES/Jolta-$VERSION.zip" ] || { echo "Jolta $VERSION is already published; pick a new version."; exit 1; }
 
+# Apple silicon only while iterating; JOLTA_INTEL=1 builds the universal app.
+ARCHS=arm64
+[ "${JOLTA_INTEL:-0}" = 1 ] && ARCHS="arm64 x86_64"
 scripts/build-core.sh --release
 
 DERIVED="$ROOT/target/xcode-release"
 xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Release \
     -derivedDataPath "$DERIVED" \
-    ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+    ARCHS="$ARCHS" ONLY_ACTIVE_ARCH=NO \
     MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" JOLTA_FEED_URL="${FEED_PREFIX}appcast.xml" \
     CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM=RWQLHW7V7V \
     OTHER_CODE_SIGN_FLAGS=--timestamp CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \

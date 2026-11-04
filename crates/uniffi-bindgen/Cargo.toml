@@ -1,0 +1,11 @@
+[package]
+name = "uniffi-bindgen-swift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Its own crate, so a change to the core doesn't rebuild it: it reads the
+# compiled library, not the source.
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }
