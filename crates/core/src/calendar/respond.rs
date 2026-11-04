@@ -170,7 +170,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     let rid = r.occurrence.as_ref().map(|(rid, _)| *rid);
 
     let (account, uid) = (r.account, r.uid.clone());
-    let given = store::GivenAnswer { answer: req.answer.response(), note: req.note.clone().unwrap_or_default(), notify: req.notify };
+    let given = store::GivenAnswer { answer: req.answer.response(), note: req.note.clone().unwrap_or_default(), notify: req.notify, proposal: req.proposal };
     let before = jolta.store.read_async(move |c| store::given_answer(c, account, &uid, rid.as_ref())).await?;
 
     let mail = if plan.mail {
@@ -183,11 +183,11 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     } else {
         None
     };
-    // A new time the provider sends goes out each time it is asked for; a
-    // mailed one goes out once, and the answer only when it changed.
-    let carries = proposing && !plan.mail;
+    // The provider tells the organizer the answer, and the new time when
+    // Jolta doesn't mail it, only when they changed.
+    let carried = store::GivenAnswer { proposal: given.proposal.filter(|_| !plan.mail), ..given.clone() };
     if let (Some(notify), Some(copy)) = (plan.provider, r.copy)
-        && (carries || !again(&given, r.shown, before.as_ref()))
+        && !again(&carried, r.shown, before.as_ref())
     {
         let scope = rid.map_or(Scope::Series, Scope::Occurrence);
         rsvp::answer(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
@@ -203,6 +203,8 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             // Read again where the outbox can't change underneath.
             let before = store::given_answer(tx, account, &uid, rid.as_ref())?;
             let again = !proposing && again(&given, shown, before.as_ref());
+            // An answer that tells nothing new keeps the new time it repeats.
+            let proposal = given.proposal.or(before.as_ref().and_then(|(b, _)| b.proposal).filter(|_| again));
             let kept = before.and_then(|(_, reply)| reply);
             // A proposal is the same mail each time it is built.
             let same = match mail.as_ref().filter(|_| proposing) {
@@ -238,7 +240,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
                     }
                 }
             };
-            store::remember_answer(tx, account, &uid, rid.as_ref(), &given, &version, reply)
+            store::remember_answer(tx, account, &uid, rid.as_ref(), &store::GivenAnswer { proposal, ..given }, &version, reply)
         })
         .await?;
     let calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
@@ -246,9 +248,12 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
 }
 
 /// The answer kept, given again the same way, to an invitation that still
-/// shows it: an answer changed elsewhere since isn't the same.
+/// shows it: an answer changed elsewhere since isn't the same. A new time
+/// is the same only as the new time kept; an answer without one repeats
+/// the answer a new time went with.
 fn again(given: &store::GivenAnswer, shown: Option<Response>, before: Option<&(store::GivenAnswer, Option<store::ReplyMail>)>) -> bool {
-    shown == Some(given.answer) && before.is_some_and(|(b, _)| b == given)
+    let same = |b: &store::GivenAnswer| (b.answer, &b.note, b.notify) == (given.answer, &given.note, given.notify) && given.proposal.is_none_or(|p| b.proposal == Some(p));
+    shown == Some(given.answer) && before.is_some_and(|(b, _)| same(b))
 }
 
 /// The reply goes out at once: there is no undo for an answer yet.
@@ -945,6 +950,50 @@ mod tests {
         run(&j, request(message, Answer::Accept, None, true, false)).unwrap();
         assert_eq!(outbox(&j).len(), 2, "a new answer after a proposal is a reply of its own");
         assert_eq!(counter_of(&outbox(&j)[1].3).0, "REPLY");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Microsoft 365 sends a new time with the answer. Once Exchange took a
+    /// proposal, the same one again sends nothing; a changed time or answer
+    /// goes to Exchange again. Exchange can't be reached from a test, so
+    /// everything that goes to it fails here.
+    #[test]
+    fn the_same_proposal_goes_to_microsoft_365_once() {
+        use crate::calendar::invitation::tests::ME;
+        let (j, calendar) = jolta("respond-propose-graph");
+        let message = import(&j, mail!("google-request.eml"));
+        let mut copy = invitation::find(mail!("google-request.eml"), &[ME.into()]).remove(0).event;
+        let store_copy = |copy: &EventData| {
+            let blob = j.blobs.put(br#"{"id":"AAMk"}"#).unwrap();
+            j.store.write(|tx| store::apply_item(tx, calendar, "AAMk", None, std::slice::from_ref(copy), Some(&blob), &series::Horizon::around(now(), tz::here()))).unwrap();
+        };
+        j.store.write(|tx| Ok(tx.execute_batch("UPDATE account SET kind = 'graph'; UPDATE calendar SET source = 'graph'")?)).unwrap();
+        store_copy(&copy);
+
+        let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap().and_utc();
+        let friday = || proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45");
+        assert!(run(&j, friday()).is_err(), "the proposal goes to Exchange");
+        assert!(kept_answers(&j).is_empty(), "one Exchange didn't take isn't kept");
+
+        // What Exchange taking the proposal leaves: the copy answered maybe,
+        // and the answer kept with its new time.
+        copy.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = Response::Tentative);
+        store_copy(&copy);
+        let given = store::GivenAnswer {
+            answer: Response::Tentative,
+            note: String::new(),
+            notify: true,
+            proposal: Some(Proposal { start: at("2026-11-13 15:00"), end: at("2026-11-13 15:45") }),
+        };
+        j.store.write(|tx| store::remember_answer(tx, AccountId(1), &copy.uid, None, &given, std::slice::from_ref(&copy), None)).unwrap();
+
+        let again = run(&j, friday()).expect("the same proposal sends nothing");
+        assert!(again.text.ends_with("Microsoft 365 told Ann."), "{}", again.text);
+        assert!(run(&j, proposing(message, Answer::Maybe, "2026-11-13 16:00", "2026-11-13 16:45")).is_err(), "a changed time goes to Exchange");
+        assert!(run(&j, proposing(message, Answer::Decline, "2026-11-13 15:00", "2026-11-13 15:45")).is_err(), "so does a changed answer");
+        run(&j, request(message, Answer::Maybe, None, true, false)).expect("Exchange has this maybe, sent with the proposal");
+        run(&j, friday()).expect("and still has the proposal");
+        assert!(outbox(&j).is_empty(), "Exchange tells the organizer, not Jolta");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

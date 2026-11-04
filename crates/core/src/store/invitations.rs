@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::invitation::{Invitation, Method, end_of};
 use crate::calendar::recur::Source;
+use crate::calendar::rsvp::Proposal;
 use crate::calendar::series::{self, copy_rank};
 use crate::calendar::update::{self, holds};
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response, tz};
@@ -151,6 +152,8 @@ pub struct GivenAnswer {
     pub note: String,
     /// False for "Don't send a reply".
     pub notify: bool,
+    /// The new time proposed with the answer.
+    pub proposal: Option<Proposal>,
 }
 
 /// The reply mail an answer queued, while the outbox still means to send
@@ -194,10 +197,23 @@ pub fn calendar_answer_to(conn: &Connection, message: MessageId) -> Result<Optio
 /// occurrences) and the outbox row of its reply mail.
 pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, given: &GivenAnswer, version: &[EventData], reply: Option<i64>) -> Result<()> {
     conn.execute(
-        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer, note, notify, reply, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer, note, notify, reply, version, proposed_start, proposed_end)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT (account_id, uid, recurrence_id) DO UPDATE SET answer = excluded.answer, note = excluded.note,
-           notify = excluded.notify, reply = excluded.reply, version = excluded.version",
-        params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), given.answer, given.note, given.notify, reply, serde_json::to_string(&version.iter().map(placed).collect::<Vec<_>>()).expect("events serialize")],
+           notify = excluded.notify, reply = excluded.reply, version = excluded.version,
+           proposed_start = excluded.proposed_start, proposed_end = excluded.proposed_end",
+        params![
+            account,
+            uid,
+            recurrence_id.map(moment_text).unwrap_or_default(),
+            given.answer,
+            given.note,
+            given.notify,
+            reply,
+            serde_json::to_string(&version.iter().map(placed).collect::<Vec<_>>()).expect("events serialize"),
+            given.proposal.map(|p| p.start.timestamp()),
+            given.proposal.map(|p| p.end.timestamp()),
+        ],
     )?;
     // A whole series answered again replaces what was said for single
     // occurrences, and takes back their replies still waiting.
@@ -219,7 +235,7 @@ pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurre
 pub fn given_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<(GivenAnswer, Option<ReplyMail>)>> {
     Ok(conn
         .query_row(
-            "SELECT a.answer, a.note, a.notify, o.id, o.state FROM invitation_answer a LEFT JOIN outbox o ON o.id = a.reply
+            "SELECT a.answer, a.note, a.notify, o.id, o.state, a.proposed_start, a.proposed_end FROM invitation_answer a LEFT JOIN outbox o ON o.id = a.reply
              WHERE a.account_id = ?1 AND a.uid = ?2 AND a.recurrence_id = ?3",
             params![account, uid, recurrence_id.map(moment_text).unwrap_or_default()],
             |r| {
@@ -228,7 +244,12 @@ pub fn given_answer(conn: &Connection, account: AccountId, uid: &str, recurrence
                     (Some(id), Some("sent")) => Some(ReplyMail::Sent(id)),
                     _ => None,
                 };
-                Ok((GivenAnswer { answer: r.get(0)?, note: r.get(1)?, notify: r.get(2)? }, reply))
+                let at = |i| r.get::<_, Option<i64>>(i).map(|t| t.and_then(|t| DateTime::from_timestamp(t, 0)));
+                let proposal = match (at(5)?, at(6)?) {
+                    (Some(start), Some(end)) => Some(Proposal { start, end }),
+                    _ => None,
+                };
+                Ok((GivenAnswer { answer: r.get(0)?, note: r.get(1)?, notify: r.get(2)?, proposal }, reply))
             },
         )
         .optional()?)
@@ -752,7 +773,7 @@ mod tests {
         assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Unanswered));
         assert_eq!(open(&jolta, now()), [request]);
 
-        let given = GivenAnswer { answer: Response::Tentative, note: String::new(), notify: true };
+        let given = GivenAnswer { answer: Response::Tentative, note: String::new(), notify: true, proposal: None };
         let version = crate::calendar::invitation::find(mail!("google-request.eml"), &[]).remove(0).event;
         jolta.store.write(|tx| remember_answer(tx, AccountId(1), &version.uid, None, &given, std::slice::from_ref(&version), None)).unwrap();
         assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Answered(Response::Tentative)), "the answer given from Jolta");
@@ -851,7 +872,7 @@ mod tests {
         let uid = "standup-series@example.com";
         let sent: Vec<EventData> = crate::calendar::invitation::find(mail!("series.eml"), &[]).into_iter().map(|i| i.event).collect();
         for (occurrence, answer) in [("2026-11-05 09:30", Response::Accepted), ("2026-11-10 09:30", Response::Declined)] {
-            let given = GivenAnswer { answer, note: String::new(), notify: true };
+            let given = GivenAnswer { answer, note: String::new(), notify: true, proposal: None };
             let version = series::occurrence(&sent, &at(occurrence), chrono_tz::Europe::Brussels).unwrap();
             jolta.store.write(|tx| remember_answer(tx, AccountId(1), uid, Some(&at(occurrence)), &given, std::slice::from_ref(&version), None)).unwrap();
         }
@@ -1113,7 +1134,7 @@ mod tests {
                                             None => ((Answer::Maybe, Response::Tentative), whole_version.clone()),
                                             Some(_) => ((Answer::Accept, Response::Accepted), own_version.clone().into_iter().collect()),
                                         };
-                                        let given = GivenAnswer { answer: said.1, note: String::new(), notify: reply };
+                                        let given = GivenAnswer { answer: said.1, note: String::new(), notify: reply, proposal: None };
                                         let reply = match reply {
                                             true => {
                                                 let built = rsvp::imip_reply(&ImipReply { invitation: &text, from: "me@example.com", me: &me, answer: said.0, note: None, occurrence: rid }, brussels)?;
@@ -1166,7 +1187,7 @@ mod tests {
                                                 Some(at) => vec![crate::calendar::series::occurrence(&moved, at, brussels).unwrap()],
                                                 None => moved.clone(),
                                             };
-                                            let given = GivenAnswer { answer: Response::Declined, note: String::new(), notify: false };
+                                            let given = GivenAnswer { answer: Response::Declined, note: String::new(), notify: false, proposal: None };
                                             jolta.store.write(|tx| remember_answer(tx, AccountId(1), &uid, shown_at.as_ref(), &given, &version, None)).unwrap();
                                             let card = card_says(&jolta, *m, r, now);
                                             assert_eq!(Some(card), shown(&jolta, *m, now), "{cell}, answered again after the move");
