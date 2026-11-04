@@ -116,7 +116,7 @@ const SENDS_FOR_ORGANIZERS: &[&str] = &["calendar-notification@google.com", "nor
 /// The meeting's organizer as the account knows it: on its calendar's
 /// copy, else on the earliest request for the UID that its own organizer
 /// sent. None for a meeting the account has no request or copy of.
-pub fn organizer(seen: &Seen, uid: &str) -> Result<Option<String>> {
+fn organizer(seen: &Seen, uid: &str) -> Result<Option<String>> {
     let copy = store::stored_series(seen.conn, uid, Some(seen.account))?;
     if let Some(o) = copy.iter().find_map(|e| e.organizer.as_ref()).filter(|o| !o.address.trim().is_empty()) {
         return Ok(Some(o.address.clone()));
@@ -129,7 +129,7 @@ pub fn organizer(seen: &Seen, uid: &str) -> Result<Option<String>> {
 /// it names the meeting's organizer, when there is one, and comes from that
 /// address, from a provider sending for it, or for the user's own meeting
 /// from another of the user's addresses.
-pub fn sent_by(me: &[String], meeting: Option<&str>, organizer: &str, from: &str) -> bool {
+fn sent_by(me: &[String], meeting: Option<&str>, organizer: &str, from: &str) -> bool {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     let mine = |a: &str| me.iter().any(|m| same(m, a));
     if organizer.trim().is_empty() || meeting.is_some_and(|m| !same(m, organizer)) {
