@@ -872,6 +872,7 @@ final class AppModel {
                 }
             } catch {
                 lastError = "\(error)"
+                Self.timing("open thread \(threadID) failed: \(error)")
             }
         }
     }

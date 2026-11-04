@@ -11,6 +11,7 @@ use jolta_core::Jolta;
 use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
+use jolta_core::calendar::respond;
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
@@ -90,6 +91,28 @@ pub enum CalCommand {
         /// Answer one occurrence of a series: its day (2026-11-12) or recurrence id (20261112T100000).
         #[arg(long)]
         occurrence: Option<String>,
+    },
+    /// Answer the invitation on a message as the reader's card does: through
+    /// the calendar's provider, the CalDAV copy and a reply mail, or the
+    /// reply mail alone. Waits until a reply mail has left.
+    #[command(group = clap::ArgGroup::new("reply").required(true))]
+    Answer {
+        /// The message's id.
+        message: i64,
+        #[arg(long, group = "reply")]
+        accept: bool,
+        #[arg(long, group = "reply")]
+        maybe: bool,
+        #[arg(long, group = "reply")]
+        decline: bool,
+        #[arg(long)]
+        note: Option<String>,
+        /// Keep the answer without telling the organizer.
+        #[arg(long)]
+        no_reply: bool,
+        /// Only the occurrence the card shows.
+        #[arg(long)]
+        occurrence: bool,
     },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
@@ -322,6 +345,47 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 Ok(items.len())
             })?;
             println!("{count} events in the local calendar {name}.");
+            Ok(())
+        }
+        CalCommand::Answer { message, accept, maybe, decline: _, note, no_reply, occurrence } => {
+            let answer = if accept {
+                Answer::Accept
+            } else if maybe {
+                Answer::Maybe
+            } else {
+                Answer::Decline
+            };
+            let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sink: jolta_core::engine::Sink = std::sync::Arc::new(move |e| {
+                let _ = events.send(e);
+            });
+            let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+            let request = respond::Request {
+                subject: respond::Subject::Message(jolta_core::MessageId(message)),
+                answer,
+                note,
+                notify: !no_reply,
+                occurrence_only: occurrence,
+            };
+            let t = Instant::now();
+            let done = respond::answer(jolta, &request).await?;
+            println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            let Some(account) = done.mailed_from else { return Ok(()) };
+            engine.wake(account);
+            let wait = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+                while let Some(e) = rx.recv().await {
+                    match e {
+                        jolta_core::engine::Event::Sent { subject, .. } => return Ok(subject),
+                        jolta_core::engine::Event::SendFailed(m) => bail!("the reply mail failed: {m}"),
+                        _ => {}
+                    }
+                }
+                bail!("the engine stopped")
+            });
+            let subject = wait.await.context("the reply mail didn't leave within two minutes")??;
+            println!("sent {subject:?} after {:.1} s", t.elapsed().as_secs_f64());
+            // Lets the engine file the Sent copy.
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             Ok(())
         }
         CalCommand::Rsvp { event, accept, maybe, decline: _, note, no_reply, occurrence } => {
