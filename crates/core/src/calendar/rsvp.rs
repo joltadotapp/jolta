@@ -371,9 +371,10 @@ fn is_me(p: &Prop, me: &str) -> bool {
 /// the X-RESPONSE-COMMENT Jolta reads and the comment Apple's servers pass
 /// to the organizer. Answering a series (no `recurrence_id`) answers every
 /// override the user is on too. An occurrence without an override gets one,
-/// copied from the master. Not notifying sets SCHEDULE-AGENT=CLIENT on the
-/// ORGANIZER line, which tells a scheduling server not to send the reply
-/// (RFC 6638 section 7.1). Every other line stays byte for byte.
+/// copied from the master. Not notifying sets SCHEDULE-AGENT=CLIENT on every
+/// ORGANIZER line of the resource, which tells a scheduling server not to
+/// send the reply; RFC 6638 section 7.1 asks for the same value on all of
+/// them. Every other line stays byte for byte.
 pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Moment>, me: &str, rsvp: &Rsvp, here: Tz) -> Result<String> {
     let mut obj = Object::parse(text);
     let written = match recurrence_id {
@@ -396,6 +397,13 @@ pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Momen
     let note = rsvp.note.as_deref().map(|n| n.replace(['\r', '\n'], " "));
     let mut answered = false;
     for ev in obj.events_mut(uid) {
+        ev.update("ORGANIZER", |_| true, |p| {
+            if !rsvp.notify {
+                p.set_param("SCHEDULE-AGENT", "CLIENT");
+            } else if p.param("SCHEDULE-AGENT").is_some_and(|a| a.eq_ignore_ascii_case("CLIENT")) {
+                p.remove_param("SCHEDULE-AGENT");
+            }
+        });
         let target = ev.prop("RECURRENCE-ID").map(|p| p.value().trim()) == written.as_deref().map(str::trim);
         if !target && written.is_some() {
             continue;
@@ -416,15 +424,6 @@ pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Momen
             None => {
                 ev.remove("X-CALENDARSERVER-PRIVATE-COMMENT");
             }
-        }
-        if target {
-            ev.update("ORGANIZER", |_| true, |p| {
-                if !rsvp.notify {
-                    p.set_param("SCHEDULE-AGENT", "CLIENT");
-                } else if p.param("SCHEDULE-AGENT").is_some_and(|a| a.eq_ignore_ascii_case("CLIENT")) {
-                    p.remove_param("SCHEDULE-AGENT");
-                }
-            });
         }
     }
     if !answered {
@@ -658,7 +657,7 @@ mod tests {
         let text = fixture!("outlook-series.ics");
         let out = answer_in_ical(text, OUTLOOK_UID, None, ME, &rsvp(Answer::Maybe, Some("Wat later,\nsorry"), false), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &out);
-        assert_eq!(removed.len(), 3, "both of my lines and the master's ORGANIZER: {removed:?}");
+        assert_eq!(removed.len(), 4, "both of my lines and both ORGANIZER lines: {removed:?}");
         assert!(added.contains(&"ORGANIZER;CN=Sofie Janssens;SCHEDULE-AGENT=CLIENT:mailto:sofie.janssens@example.com".to_string()), "{added:?}");
         assert!(added.contains(&"X-CALENDARSERVER-PRIVATE-COMMENT:Wat later\\,\\nsorry".to_string()), "{added:?}");
         assert_eq!(mine(&read_events(&out), None), (Response::Tentative, "Wat later, sorry".into()));
@@ -692,6 +691,24 @@ mod tests {
         let (removed, added) = changed(text, &moved);
         assert_eq!((removed.len(), added.len()), (1, 1), "the stored override is answered, not copied again");
         assert_eq!(mine(&read_events(&moved), Some(rid)).0, Response::Accepted);
+    }
+
+    #[test]
+    fn no_reply_for_one_occurrence_holds_for_every_organizer_line() {
+        let text = fixture!("outlook-series.ics");
+        let rid = Moment::Time(at("2026-12-01 10:00", Zone::Tz(Tz::Europe__Paris)));
+        let organizers = |t: &str| -> Vec<Option<String>> {
+            let obj = Object::parse(t);
+            let events: Vec<&Component> = obj.calendar().unwrap().components().filter(|c| c.name() == "VEVENT").collect();
+            events.iter().map(|e| e.prop("ORGANIZER").unwrap().param("SCHEDULE-AGENT").map(str::to_string)).collect()
+        };
+        let quiet = answer_in_ical(text, OUTLOOK_UID, Some(&rid), ME, &rsvp(Answer::Decline, None, false), Europe::Brussels).unwrap();
+        assert_eq!(organizers(&quiet), [Some("CLIENT".to_string()), Some("CLIENT".to_string()), Some("CLIENT".to_string())], "master, new override, moved one");
+        let answers: Vec<Option<Response>> = read_events(&quiet).iter().map(EventData::my_response).collect();
+        assert_eq!(answers, [Some(Response::NeedsAction), Some(Response::Declined), Some(Response::NeedsAction)], "only the occurrence is answered");
+
+        let loud = answer_in_ical(&quiet, OUTLOOK_UID, Some(&rid), ME, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
+        assert_eq!(organizers(&loud), [None, None, None]);
     }
 
     #[test]
