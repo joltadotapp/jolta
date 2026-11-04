@@ -203,6 +203,7 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
     }
     let uid = o.sent.event.uid.clone();
     let organizer = o.sent.event.organizer.as_ref().map(|p| p.address.clone());
+    let established = organizer.clone().ok_or_else(|| Error::Other("Jolta adds an invitation only from its organizer.".into()))?;
     let calendar = jolta
         .store
         .read_async({
@@ -231,7 +232,7 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
             if let Some(Change::Upsert { remote_id, etag, events, .. }) = &change {
                 store::apply_item(tx, id, remote_id, etag.as_deref(), events, blob.as_deref(), &Horizon::around(Utc::now(), tz::here()))?;
             }
-            store::remember_added(tx, account, &uid, &AddedCopy { calendar_id: id, remote_id, written })?;
+            store::remember_added(tx, account, &uid, &AddedCopy { calendar_id: id, remote_id, organizer: established, written })?;
             store::set_last_added_calendar(tx, id)
         })
         .await?;
@@ -422,7 +423,8 @@ mod tests {
 
     fn added(j: &crate::Jolta, calendar: CalendarId, uid: &str, remote: &str, raw: &str) {
         let sent = invitation::find(raw.as_bytes(), &[ME.into()]).remove(0);
-        let copy = AddedCopy { calendar_id: calendar, remote_id: remote.into(), written: written_after(&[], &sent, Brussels) };
+        let organizer = sent.event.organizer.as_ref().expect("an organizer").address.clone();
+        let copy = AddedCopy { calendar_id: calendar, remote_id: remote.into(), organizer, written: written_after(&[], &sent, Brussels) };
         j.store.write(|tx| store::remember_added(tx, AccountId(1), uid, &copy)).unwrap();
     }
 
@@ -525,6 +527,34 @@ mod tests {
         let id = import(&j, one.as_bytes());
         let (rid, day) = card_of(&j, id, &one).removing.expect("the added series holds 17 November").occurrence.unwrap();
         assert_eq!((rid, day.as_str()), (at(17), "Tue 17 Nov"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The organizer the copy was added from stays the meeting's, also once
+    /// the mail it came in is gone: a stranger reusing the UID at a higher
+    /// SEQUENCE changes and removes nothing.
+    #[test]
+    fn the_added_copy_keeps_the_organizer_it_was_added_from() {
+        let (j, personal, _team, _side) = folder("add-organizer");
+        let v1 = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        let first = import(&j, v1.as_bytes());
+        hold(&j, personal, "theirs", &events_of(&v1));
+        added(&j, personal, "sync", "theirs", &v1);
+        j.store.write(|tx| store::delete_messages(tx, &[first])).unwrap();
+
+        let mallory = |raw: String| raw.replace("ann@example.com", "mallory@example.com").replace("Ann Dupont", "Mallory");
+        let moved = V1.replace("T150000Z", "T130000Z").replace("T160000Z", "T140000Z");
+        let fake = mallory(version("f", "sync", "REQUEST", 5, "20261104T090000Z", &moved));
+        let fake_id = import(&j, fake.as_bytes());
+        let c = card_of(&j, fake_id, &fake);
+        assert_eq!((c.answering.is_some(), c.updating), (false, None), "not the organizer the copy was added from");
+        let cancel = mallory(version("x", "sync", "CANCEL", 6, "20261104T091000Z", V1));
+        let cancel_id = import(&j, cancel.as_bytes());
+        assert_eq!(card_of(&j, cancel_id, &cancel).removing, None);
+
+        let v2 = version("v2", "sync", "REQUEST", 1, "20261104T092000Z", &moved);
+        let v2_id = import(&j, v2.as_bytes());
+        assert!(card_of(&j, v2_id, &v2).updating.is_some(), "the organizer's own update still is one");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

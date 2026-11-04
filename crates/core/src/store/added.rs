@@ -26,28 +26,30 @@ pub struct AddedCopy {
     /// The object Jolta created: Google's event id, Graph's, or the CalDAV
     /// resource's path.
     pub remote_id: String,
+    /// The address of the meeting's organizer the copy was added from.
+    pub organizer: String,
     pub written: Vec<WrittenVersion>,
 }
 
 /// The copy the user added of the invitation `uid` that came to `account`.
 pub fn added_copy(conn: &Connection, account: AccountId, uid: &str) -> Result<Option<AddedCopy>> {
-    let row: Option<(CalendarId, String, String)> = conn
+    let row: Option<(CalendarId, String, String, String)> = conn
         .query_row(
-            "SELECT calendar_id, remote_id, written FROM added_copy WHERE account_id = ?1 AND uid = ?2",
+            "SELECT calendar_id, remote_id, organizer, written FROM added_copy WHERE account_id = ?1 AND uid = ?2",
             params![account, uid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let Some((calendar_id, remote_id, written)) = row else { return Ok(None) };
+    let Some((calendar_id, remote_id, organizer, written)) = row else { return Ok(None) };
     let written = serde_json::from_str(&written).map_err(|e| Error::Other(format!("added copy of {uid}: {e}")))?;
-    Ok(Some(AddedCopy { calendar_id, remote_id, written }))
+    Ok(Some(AddedCopy { calendar_id, remote_id, organizer, written }))
 }
 
 pub fn remember_added(conn: &Connection, account: AccountId, uid: &str, copy: &AddedCopy) -> Result<()> {
     conn.execute(
-        "INSERT INTO added_copy (account_id, uid, calendar_id, remote_id, written) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT (account_id, uid) DO UPDATE SET calendar_id = excluded.calendar_id, remote_id = excluded.remote_id, written = excluded.written",
-        params![account, uid, copy.calendar_id, copy.remote_id, serde_json::to_string(&copy.written).expect("versions serialize")],
+        "INSERT INTO added_copy (account_id, uid, calendar_id, remote_id, organizer, written) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (account_id, uid) DO UPDATE SET calendar_id = excluded.calendar_id, remote_id = excluded.remote_id, organizer = excluded.organizer, written = excluded.written",
+        params![account, uid, copy.calendar_id, copy.remote_id, copy.organizer, serde_json::to_string(&copy.written).expect("versions serialize")],
     )?;
     Ok(())
 }

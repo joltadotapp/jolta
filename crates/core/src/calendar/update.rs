@@ -111,11 +111,15 @@ pub struct Seen<'a> {
 /// 2026-11-04).
 const SENDS_FOR_ORGANIZERS: &[&str] = &["calendar-notification@google.com", "noreply@email.apple.com"];
 
-/// The meeting's organizer as `account` knows it: on its calendar's copy,
-/// else on the earliest request for the UID that its own organizer sent.
-/// None for a meeting the account has no request or copy of. The card and
-/// the list both take it, with `sent_by`, for who may change the meeting.
+/// The meeting's organizer as `account` knows it: the one the user added
+/// a copy from, else on its calendar's copy, else on the earliest request
+/// for the UID that its own organizer sent. None for a meeting the account
+/// has no request or copy of. The card and the list both take it, with
+/// `sent_by`, for who may change the meeting.
 pub fn organizer(conn: &Connection, account: AccountId, me: &[String], uid: &str) -> Result<Option<String>> {
+    if let Some(added) = store::added_copy(conn, account, uid)? {
+        return Ok(Some(added.organizer));
+    }
     let copy = store::stored_series(conn, uid, Some(account))?;
     if let Some(o) = copy.iter().find_map(|e| e.organizer.as_ref()).filter(|o| !o.address.trim().is_empty()) {
         return Ok(Some(o.address.clone()));
