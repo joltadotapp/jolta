@@ -23,7 +23,7 @@ use super::rsvp::{self, Answer, Rsvp, Scope};
 use super::series::Horizon;
 use super::sources::{Change, NewCopy, Replaced};
 use super::update::Version;
-use super::{Access, CalendarId, CalendarSource, EventData, Moment, Response, sync, tz};
+use super::{Access, CalendarId, CalendarSource, EventData, EventId, Moment, Response, sync, tz};
 use crate::model::{AccountId, MessageId};
 use crate::store::{self, AddedCopy, WrittenVersion};
 use crate::{Error, Jolta, Result, imap};
@@ -119,6 +119,18 @@ fn copied(conn: &Connection, account: AccountId, uid: &str, rid: Option<&Moment>
         Some(e) => Ok(Some(e)),
         None => store::added_event(conn, account, uid, None, here),
     }
+}
+
+/// The added copy's event that an answer or an update for `rid` goes to,
+/// with its scope: that occurrence of a series, also one stored changed or
+/// without its master, else the event itself.
+fn copy_target(conn: &Connection, account: AccountId, uid: &str, rid: Option<&Moment>, here: Tz) -> Result<Option<(EventId, Scope)>> {
+    let Some(event) = copied(conn, account, uid, rid, here)? else { return Ok(None) };
+    let scope = match rid {
+        Some(rid) if event.event.recurrence.is_some() || event.event.recurrence_id.is_some() => Scope::Occurrence(*rid),
+        _ => Scope::Series,
+    };
+    Ok(Some((event.event_id, scope)))
 }
 
 /// Whether `version` of the event or occurrence `rid` is newer than what
@@ -287,18 +299,14 @@ pub(crate) async fn follow(jolta: &Jolta, account: AccountId, uid: &str, rid: Op
         .store
         .read_async({
             let uid = uid.to_string();
-            move |c| Ok((copied(c, account, &uid, None, here)?, store::account(c, account)?.address))
+            move |c| Ok((copy_target(c, account, &uid, rid.as_ref(), here)?, store::account(c, account)?.address))
         })
         .await?;
-    let Some(event) = found else { return Ok(None) };
-    let scope = match rid {
-        Some(rid) if event.event.recurrence.is_some() => Scope::Occurrence(rid),
-        _ => Scope::Series,
-    };
-    let (calendar, mut target) = rsvp::target_of(jolta, event.event_id, &scope).await?;
+    let Some((event, scope)) = found else { return Ok(None) };
+    let (calendar, mut target) = rsvp::target_of(jolta, event, &scope).await?;
     target.me = receiver;
     let source = sync::calendar_source(jolta, &calendar).await?;
-    let rsvp = Rsvp { event: event.event_id, answer, note: None, notify: false, scope };
+    let rsvp = Rsvp { event, answer, note: None, notify: false, scope };
     let id = calendar.id;
     match source.follow(&calendar, &target, &rsvp).await? {
         Some(Change::Upsert { remote_id, etag, events, raw }) => {
@@ -517,6 +525,34 @@ mod tests {
         let id = import(&j, one.as_bytes());
         let (rid, day) = card_of(&j, id, &one).removing.expect("the added series holds 17 November").occurrence.unwrap();
         assert_eq!((rid, day.as_str()), (at(17), "Tue 17 Nov"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// An answer by mail follows into the copy as the invitation scoped it.
+    #[test]
+    fn an_answer_follows_into_the_added_occurrence_or_series() {
+        let (j, personal, _team, _side) = folder("add-follow");
+        let series = "DTSTART;TZID=Europe/Brussels:20261110T093000\r\nDTEND;TZID=Europe/Brussels:20261110T094500\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n";
+        let target = |uid: &str, rid: Option<Moment>| j.store.read(|c| copy_target(c, AccountId(1), uid, rid.as_ref(), Brussels)).unwrap().map(|(_, scope)| scope);
+
+        // CalDAV keeps an invitation to one occurrence as that occurrence
+        // alone, without a master.
+        let lines = format!("RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\n{series}").replace("RRULE:FREQ=WEEKLY\r\n", "");
+        let one = version("o", "one", "REQUEST", 0, "20261104T080000Z", &lines);
+        hold(&j, personal, "one.ics", &events_of(&one));
+        added(&j, personal, "one", "one.ics", &one);
+        assert_eq!(target("one", Some(at(17))), Some(Scope::Occurrence(at(17))), "the occurrence the copy holds alone");
+
+        let request = version("s", "standup", "REQUEST", 0, "20261104T080000Z", series);
+        let mut events = events_of(&request);
+        let mut moved = events[0].clone();
+        (moved.recurrence, moved.recurrence_id) = (None, Some(at(17)));
+        events.push(moved);
+        hold(&j, personal, "standup", &events);
+        added(&j, personal, "standup", "standup", &request);
+        assert_eq!(target("standup", Some(at(17))), Some(Scope::Occurrence(at(17))), "a changed occurrence answered alone stays alone");
+        assert_eq!(target("standup", Some(at(24))), Some(Scope::Occurrence(at(24))));
+        assert_eq!(target("standup", None), Some(Scope::Series));
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
