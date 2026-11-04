@@ -65,7 +65,8 @@ pub fn header_date(raw: &[u8]) -> Option<i64> {
 
 /// Envelope plus body facts from a full message.
 pub fn parse_full(raw: &[u8], blob: String) -> (Envelope, BodyInfo) {
-    let Some(msg) = MessageParser::new().parse(raw) else {
+    let raw = crate::smime::readable(raw);
+    let Some(msg) = MessageParser::new().parse(&raw[..]) else {
         return (Envelope::default(), BodyInfo { blob, ..Default::default() });
     };
     let root = msg.root();

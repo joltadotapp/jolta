@@ -55,7 +55,8 @@ pub fn newest_message(conn: &Connection, thread: ThreadId) -> Result<Option<Mess
 /// A message's own words: quoted replies, reply headers and the signature
 /// cut, blank runs squeezed.
 pub fn message_text(raw: &[u8]) -> String {
-    let Some(msg) = MessageParser::new().parse(raw) else { return String::new() };
+    let raw = crate::smime::readable(raw);
+    let Some(msg) = MessageParser::new().parse(&raw[..]) else { return String::new() };
     let body = msg.body_text(0).map(|t| t.into_owned()).unwrap_or_default();
     let mut out = String::new();
     let mut blank = 0;

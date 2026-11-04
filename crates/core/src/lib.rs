@@ -19,6 +19,7 @@ pub mod rich;
 pub mod render;
 pub mod search;
 pub mod secrets;
+pub mod smime;
 pub mod smtp;
 pub mod store;
 pub mod synth;

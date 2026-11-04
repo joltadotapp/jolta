@@ -1,0 +1,64 @@
+From: Test Signer <signer@example.com>
+To: reader@example.com
+Subject: Clear-signed numbers
+Date: Tue, 03 Nov 2026 10:00:00 +0100
+Message-ID: <clear@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/x-pkcs7-signature"; micalg="sha-256"; boundary="----7BF30C0E84E23792EC219F2A141C5156"
+
+This is an S/MIME signed message
+
+------7BF30C0E84E23792EC219F2A141C5156
+Content-Type: multipart/mixed; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset=utf-8
+
+The quarterly numbers are in the attached notes.
+
+--inner
+Content-Type: text/plain; name="notes.txt"
+Content-Disposition: attachment; filename="notes.txt"
+
+Revenue up, costs flat.
+--inner--
+
+------7BF30C0E84E23792EC219F2A141C5156
+Content-Type: application/x-pkcs7-signature; name="smime.p7s"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="smime.p7s"
+
+MIIFyQYJKoZIhvcNAQcCoIIFujCCBbYCAQExDzANBglghkgBZQMEAgEFADALBgkq
+hkiG9w0BBwGgggMmMIIDIjCCAgqgAwIBAgIJAID+w9rrupCSMA0GCSqGSIb3DQEB
+CwUAMBgxFjAUBgNVBAMMDUpvbHRhIFRlc3QgQ0EwHhcNMjYxMTA0MTQwNDM4WhcN
+MzYxMTAxMTQwNDM4WjA5MRQwEgYDVQQDDAtUZXN0IFNpZ25lcjEhMB8GCSqGSIb3
+DQEJARYSc2lnbmVyQGV4YW1wbGUuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A
+MIIBCgKCAQEA0K3F0XrMBBeel0tFBD8vLDT2yyhLrKMvkJ25pKyDL6e+ds7WYlNa
+CCc2P0xtt86j8PPlWfrPZpfsaD3lwX/8+MqpTZ9ENSs6o0ZLWfqY+pc8ZTE4RI2r
+IfYj3ma55+VsKnDjP2RACsgSuGl+46ryVbQq+rxU/VdFv45WBVH/EjSxhkXwxydG
+XND91Wrs5FL5tA60cmvdNcmXkHLSe9mXpZc5oxo6PH9UYFkJPvRLh45lAQnDytW/
+XUEfmQG7nfWMOHjbxnT6xc1V4Mmogr6NweCLKlqpFPYGS/aTXrr/cViJUx/8klwJ
+8gMBsgYvM9U9BcyvhGW3MeasI6hSjCymGwIDAQABo04wTDAJBgNVHRMEAjAAMAsG
+A1UdDwQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDBDAdBgNVHREEFjAUgRJzaWdu
+ZXJAZXhhbXBsZS5jb20wDQYJKoZIhvcNAQELBQADggEBACR0vdqazCnyWvhkxytc
+f+hD6H7wQ+PbmP8D3j3ZY5ugxdYVBavk6Wc+srViujUPW8bXO2CoOPa7xoWBomSh
+sp5r1aEBT5mbTnqMl2hX2zqpSX6rNFoSgtR+xFLgYo32vp8CcnRlX9zRkTDbnI9u
+p1B8kF5QC8OOf7Cftz8gfX6vHwinpgOHCRfyZqVt6lH7mQif+e74xCwrl3KQrDed
+tIPui0t+hZ+4SyATbVL3J8cBOgqPz3zI2AUrpvKT6RQo+mFdbNJdrJGnOLQ6nfuv
+5sJBhEUWm/bRZe5ZD7bQcQnWEOSyTrbn/YnRqIYjS5o8AYhrmRvf6nKygxFi41+c
+RGkxggJnMIICYwIBATAlMBgxFjAUBgNVBAMMDUpvbHRhIFRlc3QgQ0ECCQCA/sPa
+67qQkjANBglghkgBZQMEAgEFAKCCARMwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEH
+ATAcBgkqhkiG9w0BCQUxDxcNMjYxMTA0MTQwNDM4WjAvBgkqhkiG9w0BCQQxIgQg
+wnynZgkX5RXTWzPMueS6EYpAQSPAhzzBDA9EBEzUnpswgacGCSqGSIb3DQEJDzGB
+mTCBljALBglghkgBZQMEASowCAYGKoUDAgIJMAoGCCqFAwcBAQICMAoGCCqFAwcB
+AQIDMAgGBiqFAwICFTALBglghkgBZQMEARYwCwYJYIZIAWUDBAECMAoGCCqGSIb3
+DQMHMA4GCCqGSIb3DQMCAgIAgDANBggqhkiG9w0DAgIBQDAHBgUrDgMCBzANBggq
+hkiG9w0DAgIBKDANBgkqhkiG9w0BAQEFAASCAQBeHZ8vX1p9x/7NDgxa6aq8Asfn
+qtFN/FGR4V8HPOW1i9r8MVJ0+j3zY+x+rqJ8ZAjS9ZwVJw3pyGHPfR9bYXIoqZD+
+WEEs+XDCev5uwcgaNivVYFTs2m889baj1zI4teZ2rHU3o4lhj9B7oO+rc0UFwrBW
+52tnfYYhKf/R8tmigLshZd2hAyiEyvDFWuVCPS3DTn0Ak8F2OK94GtI5zwHuyMmb
+FmKeaBZOox7tCnuTfMGMNK/vy4fZDF18/8u4+nQzWAtdCiEiw/Kifb/BZG4HuBc9
+oqohMNhX1O6cgUwgUlhSUmyua3FV/Ijg3+YrtOd8tFlx3cMKuCMBlG6uHqjD
+
+------7BF30C0E84E23792EC219F2A141C5156--
+

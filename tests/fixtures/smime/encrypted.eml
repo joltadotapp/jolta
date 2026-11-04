@@ -1,0 +1,26 @@
+From: Test Signer <signer@example.com>
+To: reader@example.com
+Subject: Encrypted numbers
+Date: Tue, 03 Nov 2026 10:00:00 +0100
+Message-ID: <encrypted@example.com>
+MIME-Version: 1.0
+Content-Disposition: attachment; filename="smime.p7m"
+Content-Type: application/x-pkcs7-mime; smime-type=enveloped-data; name="smime.p7m"
+Content-Transfer-Encoding: base64
+
+MIICvQYJKoZIhvcNAQcDoIICrjCCAqoCAQAxggFBMIIBPQIBADAlMBgxFjAUBgNV
+BAMMDUpvbHRhIFRlc3QgQ0ECCQCA/sPa67qQkjANBgkqhkiG9w0BAQEFAASCAQAy
+1aUSKAo7vmMWi0/GtJeHQt6zOsw0x5CI+f+BstCq2tKCtKmRpaPWMdZgYhlzPZW/
+YLmRg4CA1lEJQjtlPi01lgp7J1WhJ56RT2peS2uOBQg41FAXIBJqU2z37YZ5Q9Pj
+zMZst7vrmFuChDOKY7IRe/8bzB2GhE2aE3Abbf25EPXfPBNHjZARKSw+XEtGe1K6
+EAO5//SevjYW/BhGbrBJwi7MjpwE00xcbr+XXnvlnFRZFT6jOkvcQXMVdFr8l7z5
+jt4PH4xNfEQpxoRwkgMilKrNL/6V63va1PkMFMAdklfSzt/JDQgkqeUonNytjJL6
+IsKePhV8MgYJkiPt2sNcMIIBXgYJKoZIhvcNAQcBMB0GCWCGSAFlAwQBKgQQmsTm
+RM3VBosHQwr4HWBHCICCATCyQ2+m7QaKZVpShSrpj5tP/D1D/QwyL3+uQiwS765a
+qHV4btHq6Z6RrcSdc5ogCxbQRqjsF05e8eV8+u+YdySoz6tZOUMNUf6HQV50E6yU
+T1IU3qAC3a8gX6vDb8AK1zTqdEz/1q8ouKzoNSS39QBPETWq1ExYOJWCtoBjmeRN
+Pw+HKzrEkJNiWLw1e9DI4fqkiy3WrYW4ALHV/P43WnOQi0Sso6hdRzltSpbcUiJ1
+Pm95eAjbCirUe346FNrKrNGCdwpHg7AWIf6kxfZ/pIwpWA2bcbQUMJEQZ6osA+pi
+eJi4SFdbWVcu33xSgNnfOcT8Ivp69MQFLb+il+2IpkY6RUA9CQc8NyCzwWJ4K9DY
+qoeDC/qjqfb+cq/QkW9ib0mJffk1/sawchSA+pXuPJFz
+

@@ -215,7 +215,8 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
 /// forward can carry them. Images its HTML shows inline stay behind: the
 /// forward is plain text, and they are mostly logos.
 pub fn forward_attachments(raw: &[u8], dir: &Path) -> Result<Vec<AttachmentFile>> {
-    let Some(msg) = MessageParser::new().parse(raw) else { return Ok(Vec::new()) };
+    let raw = crate::smime::readable(raw);
+    let Some(msg) = MessageParser::new().parse(&raw[..]) else { return Ok(Vec::new()) };
     let html = msg.body_html(0).unwrap_or_default().to_lowercase();
     let _ = std::fs::remove_dir_all(dir);
     let mut used = HashSet::new();

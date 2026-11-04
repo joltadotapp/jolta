@@ -1,0 +1,22 @@
+From: Test Signer <signer@example.com>
+To: reader@example.com
+Subject: PGP-signed numbers
+Date: Tue, 03 Nov 2026 10:00:00 +0100
+Message-ID: <pgp@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/signed; micalg=pgp-sha256; protocol="application/pgp-signature"; boundary="pgp"
+
+--pgp
+Content-Type: text/plain; charset=utf-8
+
+The quarterly numbers, signed with PGP.
+--pgp
+Content-Type: application/pgp-signature; name="signature.asc"
+Content-Disposition: attachment; filename="signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+
+iQEzBAEBCAAdFiEEAAAAAAAAAAAAAAAAAAAAAAAAAAAFAmkAAAAACgkQAAAAAAAA
+=AAAA
+-----END PGP SIGNATURE-----
+--pgp--

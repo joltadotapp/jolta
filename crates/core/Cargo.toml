@@ -16,6 +16,9 @@ rustls-platform-verifier.workspace = true
 mail-parser.workspace = true
 keyring-core.workspace = true
 apple-native-keyring-store = { workspace = true, features = ["keychain"] }
+security-framework.workspace = true
+security-framework-sys.workspace = true
+core-foundation.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true

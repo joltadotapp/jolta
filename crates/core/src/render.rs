@@ -39,8 +39,9 @@ pub struct Attachment {
 
 /// The message's HTML body, or its text body converted to HTML.
 fn body_html(raw: &[u8]) -> String {
-    let Some(msg) = MessageParser::new().parse(raw) else {
-        return text_to_html(&String::from_utf8_lossy(raw));
+    let raw = crate::smime::readable(raw);
+    let Some(msg) = MessageParser::new().parse(&raw[..]) else {
+        return text_to_html(&String::from_utf8_lossy(&raw));
     };
     let root = msg.root();
     if let Some(part) = root.html_body().next() {
@@ -72,7 +73,8 @@ pub fn text_to_html(text: &str) -> String {
 
 /// Name, MIME type and decoded bytes of attachment `index`.
 pub fn attachment_bytes(raw: &[u8], index: usize) -> Option<(String, String, Vec<u8>)> {
-    let msg = MessageParser::new().parse(raw)?;
+    let raw = crate::smime::readable(raw);
+    let msg = MessageParser::new().parse(&raw[..])?;
     let part = msg.root().attachments().nth(index)?;
     let mime = part
         .content_type()
@@ -89,7 +91,8 @@ pub fn inline_part(raw: &[u8], content_id: &str) -> Option<(String, Vec<u8>)> {
 }
 
 pub fn attachments(raw: &[u8]) -> Vec<Attachment> {
-    let Some(msg) = MessageParser::new().parse(raw) else { return Vec::new() };
+    let raw = crate::smime::readable(raw);
+    let Some(msg) = MessageParser::new().parse(&raw[..]) else { return Vec::new() };
     msg.root()
         .attachments()
         .enumerate()
