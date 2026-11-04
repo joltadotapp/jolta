@@ -3,7 +3,7 @@ import SwiftUI
 
 /// One page of the settings window.
 enum SettingsPage: Hashable {
-    case general, account(Int64), calendar, sections, vips, snippets, ai, agents, activity, about
+    case general, appearance, account(Int64), calendar, sections, vips, snippets, ai, agents, activity, about
 }
 
 /// The settings window: pages in a searchable sidebar on the left, the
@@ -32,8 +32,12 @@ struct SettingsView: View {
                  keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove")
         }
         return [
-            (nil, [Item(page: .general, title: "General", icon: "gearshape",
-                        keywords: "notifications banners new mail vip contacts address suggestions autocomplete")]),
+            (nil, [
+                Item(page: .general, title: "General", icon: "gearshape",
+                     keywords: "notifications banners new mail vip contacts address suggestions autocomplete"),
+                Item(page: .appearance, title: "Appearance", icon: "paintpalette",
+                     keywords: "theme themes dark light mode macos graphite omarchy colors always match"),
+            ]),
             ("Accounts", accounts),
             ("Calendar", [Item(page: .calendar, title: "Calendar", icon: "calendar",
                                keywords: "calendars google microsoft caldav icloud subscription webcal feed holidays color busy reminders notifications")]),
@@ -116,6 +120,7 @@ struct SettingsView: View {
         if let model {
             switch page {
             case .general: GeneralSettings(model: model)
+            case .appearance: AppearanceSettings()
             case .account(let id):
                 if let section = model.accounts.first(where: { $0.id == id }) {
                     AccountPage(model: model, section: section) { page = .general }.id(id)

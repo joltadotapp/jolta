@@ -138,6 +138,9 @@ struct PaletteView: View {
             model.palette = .themes
         })
         if let match = matchMacOSItem { out.append(match) }
+        out.append(PaletteItem(id: "appearance-settings", title: "Appearance Settings…", icon: "gearshape") { [model] in
+            model.openSettings(.appearance)
+        })
         return out
     }
 
