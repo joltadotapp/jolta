@@ -66,6 +66,28 @@ final class Journeys: XCTestCase {
         }
     }
 
+    /// Y, M and N answer the invitation in the open conversation. The test
+    /// account has no calendar and no server, so each answer is a reply
+    /// mail that waits in the outbox, and the card shows the answer given.
+    func testAnswerInvitationWithKeys() throws {
+        let app = try launch()
+        text(app, "Invitation: Design crit").click()
+        app.typeKey(.return, modifierFlags: [])
+        let reader = app.webViews.firstMatch
+        let body = reader.staticTexts.matching(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@", "Shall we go", "Shall we go")).firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 15), "the reader shows the invitation")
+        let link = { (label: String) in reader.links.matching(NSPredicate(format: "title BEGINSWITH %@ OR label BEGINSWITH %@", label, label)).firstMatch }
+        XCTAssertTrue(link("Accept").waitForExistence(timeout: 10), "the card offers the answers")
+        app.typeKey("y", modifierFlags: [])
+        XCTAssertTrue(link("Accepted").waitForExistence(timeout: 5), "y accepts")
+        XCTAssertTrue(text(app, "Accepted. Jolta emailed Ann.").waitForExistence(timeout: 5), "the toast says who was told")
+        app.typeKey("m", modifierFlags: [])
+        XCTAssertTrue(text(app, "Answered maybe. Jolta emailed Ann.").waitForExistence(timeout: 5), "m answers maybe")
+        XCTAssertTrue(link("Accept").waitForExistence(timeout: 5) && !link("Accepted").exists)
+        app.typeKey("n", modifierFlags: [])
+        XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "n declines")
+    }
+
     /// Keys typed while the palette is open go to the palette, never to the
     /// list: an `e` there used to archive mail (fixed 2026-11-02).
     func testPaletteKeepsTheKeyboard() throws {

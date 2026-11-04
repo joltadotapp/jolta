@@ -1,0 +1,31 @@
+From: Ann Organizer <ann@test.invalid>
+To: Me <me@test.invalid>
+Subject: Invitation: Design crit
+Date: Sun, 25 Oct 2026 09:00:00 +0100
+Message-ID: <design-crit-invitation@test.invalid>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="crit"
+
+--crit
+Content-Type: text/plain; charset=utf-8
+
+Shall we go through the designs together?
+--crit
+Content-Type: text/calendar; charset=utf-8; method=REQUEST
+
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Jolta//UI test//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:design-crit@test.invalid
+DTSTAMP:20261025T080000Z
+DTSTART:20271207T140000Z
+DTEND:20271207T150000Z
+SUMMARY:Design crit
+ORGANIZER;CN=Ann Organizer:mailto:ann@test.invalid
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@test.invalid
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:bo@test.invalid
+END:VEVENT
+END:VCALENDAR
+--crit--
