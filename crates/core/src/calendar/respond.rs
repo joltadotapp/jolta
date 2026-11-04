@@ -95,6 +95,8 @@ struct Copy {
 struct Resolved {
     account: AccountId,
     from: String,
+    /// The addresses the reply answers as: the account's, and those its
+    /// calendar's copy marks as the user's, never another account's.
     me: Vec<String>,
     uid: String,
     /// The calendar's copy: the series or single event, and its calendar.
@@ -198,10 +200,10 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
     jolta
         .store
         .read_async(move |c| {
-            let me: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
+            let every: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
             let from = store::account(c, account)?.address;
-            let invitations = invitation::find(&raw, &me);
-            let cx = card::Context { message, account, me: &me, sender: &sender, now, here };
+            let invitations = invitation::find(&raw, &every);
+            let cx = card::Context { message, account, me: &every, sender: &sender, now, here };
             let a = card::cards(c, &invitations, &cx)?
                 .into_iter()
                 .find_map(|card| match card {
@@ -220,6 +222,7 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                     .flatten(),
                 found => found,
             };
+            let me = addresses(&from, copy.as_ref().map(|s| &s.event));
             let copy = copy
                 .map(|s| Ok::<_, Error>(Copy { event: s.event_id, calendar: s.calendar_id, source: store::calendar(c, s.calendar_id)?.source }))
                 .transpose()?;
@@ -247,7 +250,8 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
     let data: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {event}: {e}")))?;
     let calendar = store::calendar(conn, calendar)?;
     let account = calendar.account_id.ok_or_else(|| Error::Other("This calendar belongs to no account, so Jolta has nowhere to answer from.".into()))?;
-    let me: Vec<String> = store::accounts(conn)?.into_iter().map(|a| a.address).collect();
+    let from = store::account(conn, account)?.address;
+    let me = addresses(&from, Some(&data));
     let repeats = data.recurrence.is_some() || data.recurrence_id.is_some();
     let occurrence = match at.filter(|_| repeats) {
         Some(at) => {
@@ -258,7 +262,7 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
     };
     Ok(Resolved {
         account,
-        from: store::account(conn, account)?.address,
+        from,
         me,
         uid: data.uid,
         copy: Some(Copy { event, calendar: calendar.id, source: calendar.source }),
@@ -266,6 +270,19 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
         occurrence,
         organizer: data.organizer.as_ref().map(short_name).unwrap_or_default(),
     })
+}
+
+/// The account's address, then the aliases its calendar's copy of the
+/// event marks as the user's: each sync marks only its own account's.
+fn addresses(account: &str, copy: Option<&EventData>) -> Vec<String> {
+    let aliases = copy.into_iter().flat_map(|e| &e.attendees).filter(|a| a.is_me).map(|a| &a.person.address);
+    let mut me = vec![account.to_string()];
+    for alias in aliases {
+        if !me.iter().any(|m| m.eq_ignore_ascii_case(alias)) {
+            me.push(alias.clone());
+        }
+    }
+    me
 }
 
 /// "Thu 5 Nov" in the Mac's zone.
@@ -445,6 +462,44 @@ mod tests {
         assert_eq!(kept_answers(&j), [("20261112T090000 UTC".to_string(), "declined".to_string())], "kept for the occurrence, not the series");
         assert_eq!(card_answer(&j, message, raw.as_bytes()), Some(Response::Declined));
         std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Two of the user's accounts are invited, the other one listed first.
+    /// The reply comes from the account the invitation came to and answers
+    /// for that account alone.
+    #[test]
+    fn the_reply_answers_for_the_receiving_account_only() {
+        let (j, _) = jolta("respond-two-invited");
+        j.store
+            .write(|tx| Ok(tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (2, 'imap', 'me2@example.net', 'me2', 'a2', 0)")?))
+            .unwrap();
+        let raw = "From: ann@example.com\r\nTo: me2@example.net, me@example.com\r\nSubject: s\r\nMessage-ID: <both@example.com>\r\n\
+                   Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:both\r\n\
+                   DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Planning\r\nORGANIZER;CN=Ann:mailto:ann@example.com\r\n\
+                   ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me2@example.net\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\n\
+                   END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let message = import(&j, raw.as_bytes());
+        run(&j, request(message, Answer::Accept, None, true, false)).unwrap();
+        let (sender, ..) = &outbox(&j)[0];
+        let ics = reply_ics(&outbox(&j)[0].3);
+        assert_eq!(sender, "me@example.com");
+        let attendees: Vec<&str> = ics.lines().filter(|l| l.starts_with("ATTENDEE")).collect();
+        assert_eq!(attendees, ["ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com"], "{ics}");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The account's copy, synced with the aliases its server knows, lets
+    /// the reply answer as an alias of that account.
+    #[test]
+    fn the_reply_may_answer_as_an_alias_the_accounts_copy_knows() {
+        let raw = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:alias\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\n\
+                   ORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me2@example.net\r\nATTENDEE:mailto:alias@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let copy = crate::calendar::ical::read_invitation(raw, &["alias@example.com".to_string()]).unwrap().remove(0).0;
+        let me = addresses("me@example.com", Some(&copy));
+        assert_eq!(me, ["me@example.com", "alias@example.com"], "the other account isn't one of this account's addresses");
+        let reply = rsvp::imip_reply(&ImipReply { invitation: raw, from: "me@example.com", me: &me, answer: Answer::Accept, note: None, occurrence: None }, tz::here()).unwrap();
+        let ics = reply_ics(&reply.raw);
+        assert!(ics.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:alias@example.com") && !ics.contains("me2@"), "{ics}");
     }
 
     /// One of the user's accounts invites another. The organizer's copy is

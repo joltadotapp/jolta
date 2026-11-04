@@ -529,8 +529,9 @@ pub struct ImipReply<'a> {
     pub invitation: &'a str,
     /// The account that sends the reply: its From address.
     pub from: &'a str,
-    /// Every address of the user. The ATTENDEE line the invitation has for
-    /// one of them is the one answered, so an invitation to an alias is
+    /// The sending account's addresses: its own and the aliases Jolta knows
+    /// for it, never another account's. The ATTENDEE line the invitation has
+    /// for one of them is the one answered, so an invitation to an alias is
     /// answered as that alias.
     pub me: &'a [String],
     pub answer: Answer,
