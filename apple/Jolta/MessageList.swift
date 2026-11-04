@@ -317,6 +317,8 @@ final class ThreadCell: NSTableCellView {
     private let date = NSTextField(labelWithString: "")
     private let clip = NSImageView()
     private let keys = NSStackView()
+    private var clipBesideDate: NSLayoutConstraint!
+    private var clipBesideKeys: NSLayoutConstraint!
     private var row: ThreadRow?
 
     enum Mark { case none, selected, cursor }
@@ -328,7 +330,9 @@ final class ThreadCell: NSTableCellView {
             guard mark != oldValue else { return }
             keys.isHidden = mark != .cursor
             date.isHidden = mark == .cursor
-            clip.isHidden = mark == .cursor || !(row?.hasAttachments ?? false)
+            // The paperclip stays, left of the key hints on the cursor row.
+            clipBesideDate.isActive = mark != .cursor
+            clipBesideKeys.isActive = mark == .cursor
         }
     }
 
@@ -363,7 +367,6 @@ final class ThreadCell: NSTableCellView {
             subject.leadingAnchor.constraint(equalTo: sender.trailingAnchor, constant: 12),
             subject.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.trailingAnchor.constraint(lessThanOrEqualTo: clip.leadingAnchor, constant: -8),
-            clip.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10),
             clip.centerYAnchor.constraint(equalTo: centerYAnchor),
             clip.widthAnchor.constraint(equalToConstant: 14),
             date.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
@@ -372,6 +375,9 @@ final class ThreadCell: NSTableCellView {
             keys.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
             keys.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        clipBesideDate = clip.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10)
+        clipBesideKeys = clip.trailingAnchor.constraint(equalTo: keys.leadingAnchor, constant: -10)
+        clipBesideDate.isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -441,7 +447,7 @@ final class ThreadCell: NSTableCellView {
         date.attributedStringValue = NSAttributedString(string: Theme.shortDate(r.date), attributes: [
             .font: Theme.timeFont, .foregroundColor: Theme.text3,
         ])
-        clip.isHidden = mark == .cursor || !r.hasAttachments
+        clip.isHidden = !r.hasAttachments
     }
 }
 
