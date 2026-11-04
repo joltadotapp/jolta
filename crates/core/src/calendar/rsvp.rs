@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 use super::ical_edit::{Component, Object, Prop};
 use super::series::{self, Horizon};
+use super::sources::Change;
 use super::{Attendee, Calendar, CalendarSource, EventData, EventId, EventStatus, Local, Moment, Person, Response, Role, Span, Zone, sync, tz};
 use crate::compose::Built;
 use crate::{Error, Jolta, Result, store};
@@ -145,10 +146,32 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
     }
 
     let source = sync::calendar_source(jolta, &calendar).await?;
-    let landed = source.answer(&calendar, &target, rsvp).await?;
+    let (landed, written) = source.answer(&calendar, &target, rsvp).await?;
 
     let (rsvp, calendar_id) = (rsvp.clone(), calendar.id);
-    jolta.store.write_async(move |tx| record(tx, calendar_id, &target, &rsvp, &landed, here)).await
+    let written = match written {
+        Some(Change::Upsert { etag, events, raw, .. }) => Some(Written { etag, events, blob: raw.map(|r| jolta.blobs.put(&r)).transpose()? }),
+        _ => None,
+    };
+    jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
+}
+
+/// A resource as the answer wrote it to the server, read with every address
+/// of the user.
+struct Written {
+    etag: Option<String>,
+    events: Vec<EventData>,
+    blob: Option<String>,
+}
+
+/// Stores the answer. CalDAV hands back the resource it wrote, which is
+/// stored as a sync would, so aliases an earlier sync didn't know count;
+/// the other providers' answers are set on the stored events.
+fn store_answer(conn: &Connection, calendar: super::CalendarId, target: &Target, rsvp: &Rsvp, landed: &str, written: Option<Written>, here: Tz) -> Result<()> {
+    match written {
+        Some(w) => store::apply_item(conn, calendar, landed, w.etag.as_deref(), &w.events, w.blob.as_deref(), &Horizon::around(Utc::now(), here)).map(|_| ()),
+        None => record(conn, calendar, target, rsvp, landed, here),
+    }
 }
 
 /// One stored row of a series.
@@ -651,6 +674,61 @@ mod tests {
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(stored, on_server);
+    }
+
+    /// A sync that couldn't learn the user's aliases stored an invitation to
+    /// one as someone else's. The answer, sent once the aliases are known,
+    /// stores the written resource read with them, as the next sync would.
+    #[test]
+    fn an_answer_to_an_alias_is_stored_with_the_aliases_the_answer_knew() {
+        let alias = "koen@icloud.example";
+        let text = fixture!("outlook-series.ics").replace("mailto:koen@example.org", &format!("mailto:{alias}"));
+        let here = Europe::Brussels;
+        let stale = super::super::ical::read(&text, &[ME.to_string()]).unwrap();
+        assert!(stale.iter().all(|e| e.my_response().is_none()), "the account address alone doesn't find the alias");
+
+        let me = [ME, alias];
+        let written = answer_in_ical(&text, OUTLOOK_UID, None, &me, &rsvp(Answer::Accept, None, true), here).unwrap();
+        let dir = std::env::temp_dir().join(format!("jolta-rsvp-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store::Store::open(&dir.join("jolta.sqlite")).unwrap();
+        let stored = store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account (id, kind, address, username, secret_ref, created, calendar)
+                     VALUES (1, 'imap', 'koen@example.org', 'koen', 'a1', 0, 1)",
+                )?;
+                let remote = store::RemoteCalendar {
+                    remote_id: "/cal/work/".into(),
+                    name: "Work".into(),
+                    color: None,
+                    zone: None,
+                    access: super::super::Access::Owner,
+                    primary: true,
+                    refresh: None,
+                };
+                let calendar = store::sync_calendar_list(tx, crate::AccountId(1), CalendarSource::CalDav, &[remote])?[0].id;
+                let horizon = Horizon::around(Utc::now(), here);
+                store::apply_item(tx, calendar, "/cal/work/plan.ics", Some("\"1\""), &stale, None, &horizon)?;
+                let master: EventId = tx.query_row("SELECT id FROM event WHERE recurrence_id = ''", [], |r| r.get(0))?;
+                let (_, rows, account) = series_of(tx, master)?;
+                let target = target(rows, master, &Scope::Series, here, account)?;
+                let events = super::super::ical::read(&written, &me.map(String::from))?;
+                let written = Written { etag: None, events, blob: None };
+                store_answer(tx, calendar, &target, &rsvp(Answer::Accept, None, true), &target.event.remote_id, Some(written), here)?;
+                let mut stmt = tx.prepare("SELECT data FROM event ORDER BY recurrence_id")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows.iter().map(|d| serde_json::from_str::<EventData>(d).unwrap()).collect::<Vec<_>>())
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let answers: Vec<Option<Response>> = stored.iter().map(EventData::my_response).collect();
+        assert_eq!(answers, [Some(Response::Accepted), Some(Response::Accepted)], "the master and the moved occurrence");
+        assert!(
+            stored.iter().flat_map(|e| &e.attendees).all(|a| !a.person.address.eq_ignore_ascii_case(ME)),
+            "no made-up attendee for the account address"
+        );
     }
 
     #[test]

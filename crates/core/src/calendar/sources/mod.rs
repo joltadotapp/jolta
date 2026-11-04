@@ -74,11 +74,16 @@ impl Source {
 
     /// Sends an answer to an invitation. Returns the remote id of the
     /// object it landed on: the event, or the occurrence answered alone.
-    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<String> {
+    /// The remote id the answer landed on, and for CalDAV the resource as
+    /// written, read with every address of the user, to store as a sync would.
+    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<(String, Option<Change>)> {
         match self {
-            Source::CalDav(s) => s.answer(calendar, target, rsvp).await,
-            Source::Google(s) => s.answer(calendar, target, rsvp).await,
-            Source::Graph(s) => s.answer(target, rsvp).await,
+            Source::CalDav(s) => s.answer(calendar, target, rsvp).await.map(|c| match &c {
+                Change::Upsert { remote_id, .. } => (remote_id.clone(), Some(c)),
+                Change::Remove { remote_id } => (remote_id.clone(), None),
+            }),
+            Source::Google(s) => s.answer(calendar, target, rsvp).await.map(|r| (r, None)),
+            Source::Graph(s) => s.answer(target, rsvp).await.map(|r| (r, None)),
             Source::Webcal(_) => Err(Error::Other("This event is in a subscribed calendar, which is read-only, so it can't be answered.".into())),
         }
     }

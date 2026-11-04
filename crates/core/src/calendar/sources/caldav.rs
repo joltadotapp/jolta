@@ -388,7 +388,7 @@ impl CalDav {
     /// `If-Match`; the server's scheduling (RFC 6638) sends the organizer the
     /// reply. The stored copy is edited first; when the server has a newer
     /// one (412), that one is fetched and edited instead.
-    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<String> {
+    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<Change> {
         let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
         let url = join(&collection, &path_escape(&target.event.remote_id))?;
         let rid = target.recurrence_id();
@@ -413,7 +413,14 @@ impl CalDav {
             }
             let reply = self.exchange("PUT", &url, &headers, &edited).await?;
             match reply.status {
-                200..300 => return Ok(target.event.remote_id.clone()),
+                200..300 => {
+                    return Ok(Change::Upsert {
+                        remote_id: target.event.remote_id.clone(),
+                        etag: reply.etag,
+                        events: ical::read(&edited, &me)?,
+                        raw: Some(edited.into_bytes()),
+                    });
+                }
                 412 if attempt == 0 => continue,
                 status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
             }

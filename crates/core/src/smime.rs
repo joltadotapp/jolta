@@ -222,7 +222,7 @@ fn signature(decoder: &CMSDecoder, from_addr: &str) -> Option<Signature> {
     }
     let (status, trust) = signer_status(decoder);
     let cert = signer_cert(decoder);
-    let mut addresses: Vec<String> = cert.as_ref().and_then(|c| c.email_addresses().ok()).unwrap_or_default();
+    let addresses: Vec<String> = cert.as_ref().and_then(|c| c.email_addresses().ok()).unwrap_or_default();
     let signer_email = addresses
         .iter()
         .find(|a| a.eq_ignore_ascii_case(from_addr))
