@@ -530,6 +530,34 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// The copy is the object Jolta created. Once it is gone, another event
+    /// with the same UID in that calendar is no copy the user added.
+    #[test]
+    fn another_event_with_the_uid_is_not_the_added_copy() {
+        let (j, personal, _team, side) = folder("add-replaced");
+        let v1 = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        import(&j, v1.as_bytes());
+        let mut other = events_of(&v1);
+        other[0].status = EventStatus::Cancelled;
+        hold(&j, personal, "other", &other);
+        hold(&j, personal, "theirs", &events_of(&v1));
+        added(&j, personal, "sync", "theirs", &v1);
+        let cancel = version("x", "sync", "CANCEL", 1, "20261104T090000Z", V1);
+        let cancel_id = import(&j, cancel.as_bytes());
+        assert!(card_of(&j, cancel_id, &cancel).removing.is_some(), "the copy Jolta made holds it, whatever the other event says");
+
+        j.store.write(|tx| store::remove_item(tx, personal, "theirs", &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
+        hold(&j, personal, "other", &events_of(&v1));
+        assert_eq!(card_of(&j, cancel_id, &cancel).removing, None, "nothing the user added is left to remove");
+        let v2 = version("v2", "sync", "REQUEST", 1, "20261104T091000Z", &V1.replace("T150000Z", "T130000Z"));
+        let v2_id = import(&j, v2.as_bytes());
+        let c = card_of(&j, v2_id, &v2);
+        assert_eq!((c.updating, c.adding), (None, None), "Personal holds the UID, Team is read-only and Side hidden");
+        j.store.write(|tx| store::set_calendar_shown(tx, side, true)).unwrap();
+        assert!(card_of(&j, v2_id, &v2).adding.is_some(), "the user can add it again");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// A copy added to a calendar of the account the invitation came to, as
     /// Microsoft 365 holds one: the user's own event without guests. It is
     /// no copy of the account's own: Ann stays the organizer, the answer goes

@@ -61,19 +61,22 @@ pub fn forget_added(conn: &Connection, account: AccountId, uid: &str) -> Result<
 
 /// The event an added copy holds in its calendar, while that calendar is
 /// shown: its series or single event, or with `recurrence_id` that changed
-/// occurrence, by the moment it names. The copy's UID is the one the
-/// object Jolta created has, which every provider keeps as the invitation's.
+/// occurrence, by the moment it names. The copy is the object Jolta created,
+/// with the occurrences filed under its UID, which Google and Microsoft 365
+/// keep as objects of their own. Once that object is gone, so is the copy,
+/// whatever else in the calendar has the UID; Add to calendar makes a new
+/// one when the user asks.
 pub fn added_event(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, here: Tz) -> Result<Option<StoredEvent>> {
     let Some(copy) = added_copy(conn, account, uid)? else { return Ok(None) };
     let own_uid: Option<String> = conn
         .query_row("SELECT uid FROM event WHERE calendar_id = ?1 AND remote_id = ?2 LIMIT 1", params![copy.calendar_id, copy.remote_id], |r| r.get(0))
         .optional()?;
-    let own_uid = own_uid.unwrap_or_else(|| uid.to_string());
+    let Some(own_uid) = own_uid else { return Ok(None) };
     let mut stmt = conn.prepare_cached(
         "SELECT e.id, c.source, e.data FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.calendar_id = ?1 AND e.uid = ?2 AND (e.recurrence_id = '') = ?3 AND c.shown",
+         WHERE e.calendar_id = ?1 AND e.uid = ?2 AND (e.recurrence_id = '') = ?3 AND (?3 = 0 OR e.remote_id = ?4) AND c.shown",
     )?;
-    let rows = stmt.query_map(params![copy.calendar_id, own_uid, recurrence_id.is_none()], |r| {
+    let rows = stmt.query_map(params![copy.calendar_id, own_uid, recurrence_id.is_none(), copy.remote_id], |r| {
         Ok((r.get::<_, EventId>(0)?, r.get::<_, CalendarSource>(1)?, r.get::<_, String>(2)?))
     })?;
     for row in rows {
