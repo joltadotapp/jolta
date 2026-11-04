@@ -360,7 +360,9 @@ impl Core {
 
     /// The occurrences in shown calendars on the days from the one holding
     /// `from` through the one holding `to - 1` (unix seconds, days in this
-    /// Mac's zone), ordered by start with all-day events first.
+    /// Mac's zone), ordered by start with all-day events first. Pass the
+    /// midnights the Mac's calendar gives: a week is not always 7 × 86,400
+    /// seconds, and an end an hour past midnight adds a day.
     pub fn calendar_occurrences(&self, from: i64, to: i64) -> Result<Vec<OccurrenceRecord>> {
         if to <= from {
             return Ok(Vec::new());

@@ -140,8 +140,8 @@ fn at(day: NaiveDate, time: &str, zone: Tz) -> DateTime<Utc> {
 }
 
 fn week(app: &App, monday: NaiveDate, here: Tz) -> Vec<OccurrenceRecord> {
-    let start = at(monday, "00:00", here).timestamp();
-    app.core.calendar_occurrences(start, start + 7 * 86_400).unwrap()
+    let midnight = |d: NaiveDate| at(d, "00:00", here).timestamp();
+    app.core.calendar_occurrences(midnight(monday), midnight(monday + chrono::Duration::days(7))).unwrap()
 }
 
 fn titles(rows: &[OccurrenceRecord]) -> Vec<&str> {
@@ -251,7 +251,7 @@ fn a_feed_from_subscription_to_removal() {
     eventually("the scheduler rebuilds in this Mac's zone", || start_of(&week(&app, monday, here), "Focus") == focus);
     assert_eq!(start_of(&week(&app, monday, here), "Board call"), at(day(1), "10:00", chrono_tz::America::New_York).timestamp());
 
-    let (from, to) = (at(monday, "00:00", here).timestamp(), at(monday, "00:00", here).timestamp() + 7 * 86_400);
+    let (from, to) = (at(monday, "00:00", here).timestamp(), at(day(7), "00:00", here).timestamp());
     let reminders = app.core.calendar_reminders(from, to).unwrap();
     let brussels = chrono_tz::Europe::Brussels;
     let fired: Vec<(i64, &str)> = reminders.iter().map(|r| (r.fire_at, r.title.as_str())).collect();
@@ -304,4 +304,47 @@ fn account_calendars_stay_with_their_account() {
     assert!(app.core.calendar_event(999_999, None, String::new()).is_err());
     let bad = OccurrenceTime::AllDay { first_day: "next friday".into(), last_day: "2026-11-09".into() };
     assert!(app.core.calendar_event(1, Some(bad), String::new()).is_err());
+}
+
+/// The week query the views make, timed through `Core` on the synthetic
+/// calendar `jolta cal gen` builds, with UniFFI writing the records into the
+/// buffer Swift reads. Run with
+/// `cargo test --release -p jolta-ffi --test regression -- --ignored --nocapture week_query`.
+#[test]
+#[ignore]
+fn week_query_through_the_bridge() {
+    use uniffi::Lower;
+
+    let app = App::unstarted();
+    let built = jolta_core::calendar::synth::generate(&app.jolta, Utc::now()).unwrap();
+    let here = tz::here();
+    let this_monday = next_monday(here) - chrono::Duration::weeks(1);
+    let runs = 200;
+    let fresh = jolta_core::Jolta::open(&app.dir).unwrap();
+    let (mut store_only, mut query, mut total, mut rows) = (Vec::new(), Vec::new(), Vec::new(), 0);
+    for i in 0..runs {
+        let offset = if i == 0 { 0 } else { (i as i64 * 7_919) % 156 - 52 };
+        let monday = this_monday + chrono::Duration::weeks(offset);
+        let (from, to) = (at(monday, "00:00", here).timestamp(), at(monday + chrono::Duration::days(7), "00:00", here).timestamp());
+        let t = Instant::now();
+        let found = app.core.calendar_occurrences(from, to).unwrap();
+        query.push(t.elapsed().as_secs_f64() * 1000.0);
+        let count = found.len();
+        rows += count;
+        let buffer = <Vec<OccurrenceRecord> as Lower<jolta_ffi::UniFfiTag>>::lower(found);
+        total.push(t.elapsed().as_secs_f64() * 1000.0);
+        drop(buffer.destroy_into_vec());
+        let t = Instant::now();
+        let bare = fresh.store.read(|c| jolta_core::store::occurrences(c, monday, monday + chrono::Duration::days(7), here)).unwrap();
+        store_only.push(t.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(bare.len(), count, "week of {monday}");
+    }
+    let pct = |v: &mut Vec<f64>, p: f64| {
+        v.sort_by(f64::total_cmp);
+        v[((v.len() as f64 - 1.0) * p).round() as usize]
+    };
+    println!("{} occurrences stored; {runs} one-week calls, {:.0} occurrences a week on average.", built.occurrences, rows as f64 / runs as f64);
+    println!("then the store query alone, on a second handle: p50 {:.2} ms, p95 {:.2} ms", pct(&mut store_only, 0.5), pct(&mut store_only, 0.95));
+    println!("calendar_occurrences p50 {:.2} ms, p95 {:.2} ms", pct(&mut query, 0.5), pct(&mut query, 0.95));
+    println!("with UniFFI lowering p50 {:.2} ms, p95 {:.2} ms (budget 5 ms)", pct(&mut total, 0.5), pct(&mut total, 0.95));
 }
