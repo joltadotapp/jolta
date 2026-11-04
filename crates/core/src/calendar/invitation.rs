@@ -82,7 +82,7 @@ pub fn may_hold(raw: &[u8]) -> bool {
 fn is_calendar(part: &MessagePart) -> bool {
     part.is_content_type("text", "calendar")
         || part.is_content_type("application", "ics")
-        || part.attachment_name().is_some_and(|n| n.len() > 4 && n[n.len() - 4..].eq_ignore_ascii_case(".ics"))
+        || part.attachment_name().is_some_and(|n| n.len() > 4 && n.as_bytes()[n.len() - 4..].eq_ignore_ascii_case(b".ics"))
 }
 
 #[cfg(test)]
@@ -204,5 +204,12 @@ pub(crate) mod tests {
             assert!(may_hold(raw));
         }
         assert!(!may_hold(b"Subject: hi\r\nContent-Type: text/plain\r\n\r\nNothing.\r\n"));
+    }
+
+    #[test]
+    fn an_attachment_name_ending_inside_a_character() {
+        let raw = "Subject: s\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n\
+            --b\r\nContent-Type: application/gzip\r\nContent-Disposition: attachment; filename=\"café.gz\"\r\n\r\nx\r\n--b--\r\n";
+        assert!(find(raw.as_bytes(), &[]).is_empty());
     }
 }
