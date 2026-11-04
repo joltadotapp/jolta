@@ -120,11 +120,8 @@ impl CalDav {
         })
     }
 
-    /// The password goes to the hosts discovery started from, and across
-    /// iCloud's own servers, which redirect each user to their own host.
-    fn trusted(&self, url: &Url) -> bool {
-        let icloud = |u: &Url| u.host_str().is_some_and(|h| h == "icloud.com" || h.ends_with(".icloud.com"));
-        self.starts.iter().any(|s| s.host_str() == url.host_str() || (icloud(s) && icloud(url)))
+    pub(super) fn trusted(&self, url: &Url) -> bool {
+        trusts(&self.starts, url)
     }
 
     /// A WebDAV request with an XML body.
@@ -404,6 +401,14 @@ fn path_escape(path: &str) -> String {
         .collect()
 }
 
+/// The password goes to the hosts discovery started from, on the scheme it
+/// started with, and across iCloud's own HTTPS servers, which redirect each
+/// user to their own host.
+fn trusts(starts: &[Url], url: &Url) -> bool {
+    let icloud = |u: &Url| u.scheme() == "https" && u.host_str().is_some_and(|h| h == "icloud.com" || h.ends_with(".icloud.com"));
+    starts.iter().any(|s| (s.scheme() == url.scheme() && s.host_str() == url.host_str()) || (icloud(s) && icloud(url)))
+}
+
 fn no_server(address: &str) -> Error {
     let domain = address.rsplit_once('@').map_or(address, |(_, d)| d);
     Error::Other(format!("No CalDAV server answered for {domain}. Enter its CalDAV address under Advanced."))
@@ -550,6 +555,21 @@ mod tests {
 
     fn names(list: &[RemoteCalendar]) -> Vec<(&str, &str, Option<&str>, Access, bool)> {
         list.iter().map(|c| (c.remote_id.as_str(), c.name.as_str(), c.color.as_deref(), c.access, c.primary)).collect()
+    }
+
+    #[test]
+    fn the_password_goes_only_to_the_accounts_own_servers() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let icloud = [url("https://caldav.icloud.com/")];
+        assert!(trusts(&icloud, &url("https://caldav.icloud.com/1234567890/calendars/")));
+        assert!(trusts(&icloud, &url("https://p42-caldav.icloud.com:443/1234567890/calendars/")), "iCloud sends each user to their own host");
+        assert!(!trusts(&icloud, &url("http://caldav.icloud.com/1234567890/calendars/")), "not over plain HTTP");
+        assert!(!trusts(&icloud, &url("http://p42-caldav.icloud.com/1234567890/calendars/")));
+        assert!(!trusts(&icloud, &url("https://attacker.example/")));
+        assert!(!trusts(&icloud, &url("https://caldav.icloud.com.attacker.example/")));
+        let typed = [url("http://nas.example:5232/")];
+        assert!(trusts(&typed, &url("http://nas.example:5232/me/calendar/")), "an address typed under Advanced keeps working");
+        assert!(!trusts(&typed, &url("http://other.example:5232/")));
     }
 
     #[test]

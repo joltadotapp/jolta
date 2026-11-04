@@ -19,7 +19,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Change, Known, SyncBatch, encode, http_client, http_error, vanished};
+use super::{Change, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
@@ -214,10 +214,11 @@ impl GraphCalendar {
     /// the mail engine does; every other status goes back to the caller.
     pub async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)> {
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| Error::Other(format!("HTTP method {method}: {e}")))?;
-        let url = if url.starts_with("https://") { url.to_string() } else { format!("{BASE}{url}") };
+        let url = if url.starts_with('/') { format!("{BASE}{url}") } else { url.to_string() };
+        let url = provider_url(&url, "graph.microsoft.com")?;
         for attempt in 0..5u32 {
             let token = oauth::access_token(&self.account).await?;
-            let mut req = self.http.request(method.clone(), &url).bearer_auth(&token).header("Prefer", PREFER);
+            let mut req = self.http.request(method.clone(), url.clone()).bearer_auth(&token).header("Prefer", PREFER);
             for (k, v) in headers {
                 req = req.header(*k, *v);
             }

@@ -85,8 +85,9 @@ impl Source {
 }
 
 /// One request with an account's calendar sign-in, for `jolta dev http`:
-/// the OAuth token for Google and Microsoft accounts, the password for
-/// CalDAV, which goes only to the servers discovery would start from.
+/// the OAuth token for Google and Microsoft accounts, which goes only to
+/// their HTTPS APIs, the password for CalDAV, which goes only to the
+/// servers discovery would start from. Any other address is refused.
 /// Returns the status, the ETag and the body.
 pub async fn signed_request(
     account: &Account,
@@ -114,10 +115,24 @@ pub async fn signed_request(
         }
         AccountKind::Imap => {
             let url = reqwest::Url::parse(url).map_err(|e| Error::Other(format!("{url}: {e}")))?;
-            let reply = caldav::CalDav::new(account, caldav_url)?.exchange(method, &url, headers, body).await?;
+            let caldav = caldav::CalDav::new(account, caldav_url)?;
+            if !caldav.trusted(&url) {
+                return Err(Error::Other(format!("Jolta sends this account's password only to its own CalDAV server, not to {url}.")));
+            }
+            let reply = caldav.exchange(method, &url, headers, body).await?;
             Ok((reply.status, reply.etag, reply.body))
         }
     }
+}
+
+/// `url` when it is HTTPS on `host` itself, the only place the account's
+/// OAuth token may go. Checked before the token is fetched.
+fn provider_url(url: &str, host: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| Error::Other(format!("{url}: {e}")))?;
+    if parsed.scheme() == "https" && parsed.host_str() == Some(host) && parsed.port().is_none() {
+        return Ok(parsed);
+    }
+    Err(Error::Other(format!("Jolta sends this account's sign-in only to https://{host}, not to {url}.")))
 }
 
 /// Removals for what `known` holds and the server no longer lists.
@@ -154,4 +169,28 @@ fn encode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_goes_only_to_its_providers_https_api() {
+        let ok = |url: &str, host: &str| provider_url(url, host).map(|u| u.to_string());
+        assert_eq!(ok("https://graph.microsoft.com/v1.0/me/events", "graph.microsoft.com").unwrap(), "https://graph.microsoft.com/v1.0/me/events");
+        assert!(ok("https://graph.microsoft.com:443/v1.0/me", "graph.microsoft.com").is_ok(), "the default port written out");
+        assert!(ok("https://www.googleapis.com/calendar/v3/users/me/calendarList", "www.googleapis.com").is_ok());
+        for refused in [
+            "https://attacker.example/collect",
+            "http://graph.microsoft.com/v1.0/me",
+            "https://graph.microsoft.com.attacker.example/v1.0/me",
+            "https://graph.microsoft.com@attacker.example/v1.0/me",
+            "https://graph.microsoft.com:8443/v1.0/me",
+            "https://www.googleapis.com/calendar/v3/users/me",
+            "/me/events",
+        ] {
+            assert!(ok(refused, "graph.microsoft.com").is_err(), "{refused}");
+        }
+    }
 }

@@ -13,7 +13,7 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Change, Known, SyncBatch, encode, http_client, http_error, vanished};
+use super::{Change, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
@@ -190,9 +190,10 @@ impl Google {
     /// A request with the account's token. Rate limits and brief outages
     /// are retried; the caller reads every other status.
     pub(super) async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
+        let url = provider_url(url, "www.googleapis.com")?;
         for attempt in 0..5u32 {
             let token = oauth::access_token(&self.account).await?;
-            let mut req = self.http.request(method.clone(), url).bearer_auth(&token);
+            let mut req = self.http.request(method.clone(), url.clone()).bearer_auth(&token);
             if let Some(body) = body {
                 req = req.header("Content-Type", "application/json").body(body.to_string());
             }
