@@ -745,7 +745,7 @@ fn scan_smime(jolta: &Jolta) -> Result<usize> {
         }
         let bodies: Vec<_> = batch
             .iter()
-            .filter(|(_, blob)| jolta.blobs.head(blob, 64 * 1024).is_ok_and(|h| crate::smime::is_smime(&h)))
+            .filter(|(_, blob)| !blob.is_empty() && jolta.blobs.head(blob, 64 * 1024).is_ok_and(|h| crate::smime::is_smime(&h)))
             .filter_map(|(id, blob)| jolta.blobs.get(blob).ok().map(|raw| (*id, crate::mime::parse_full(&raw, blob.clone()).1)))
             .collect();
         done += bodies.len();

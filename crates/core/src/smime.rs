@@ -190,6 +190,9 @@ pub fn inspect(raw: &[u8], from_addr: &str) -> Protection {
     let decoder = match wrapping(raw) {
         None => return Protection::None,
         Some(Wrapping::Encrypted) => return Protection::Encrypted,
+        // A signature that carries its own content would be checked against
+        // that content, not the text beside it that the reader shows.
+        Some(Wrapping::Clear { signature, .. }) if decode(&signature, None).is_some_and(|d| d.get_content().is_ok_and(|c| !c.is_empty())) => None,
         Some(Wrapping::Clear { content, signature }) => decode(&signature, Some(&content)),
         Some(Wrapping::Opaque(der)) => decode(&der, None),
     };
@@ -220,7 +223,6 @@ fn signature(decoder: &CMSDecoder, from_addr: &str) -> Option<Signature> {
     let (status, trust) = signer_status(decoder);
     let cert = signer_cert(decoder);
     let mut addresses: Vec<String> = cert.as_ref().and_then(|c| c.email_addresses().ok()).unwrap_or_default();
-    addresses.extend(decoder.get_signer_email_address(0).ok().filter(|a| !a.is_empty()));
     let signer_email = addresses
         .iter()
         .find(|a| a.eq_ignore_ascii_case(from_addr))
@@ -435,6 +437,25 @@ mod tests {
         assert_eq!(inspect(PGP, "signer@example.com"), Protection::None);
         assert!(matches!(readable(PGP), Cow::Borrowed(b) if b == PGP));
         assert_eq!(names(PGP), ["signature.asc"]);
+    }
+
+    /// The body of a message's last base64 part: its signature.
+    fn signature_body(raw: &str) -> &str {
+        let part = raw.rsplit_once("Content-Transfer-Encoding: base64").unwrap().1;
+        let body = part.split_once("\n\n").unwrap().1;
+        body.split("\n------").next().unwrap()
+    }
+
+    #[test]
+    fn a_signature_carrying_its_own_content_does_not_vouch_for_the_text_beside_it() {
+        let (clear, opaque) = (String::from_utf8_lossy(CLEAR), String::from_utf8_lossy(OPAQUE));
+        let replay = clear.replace(signature_body(&clear), signature_body(&opaque)).replace("costs flat", "costs down");
+        assert_ne!(replay, clear);
+        assert!(
+            matches!(inspect(replay.as_bytes(), "signer@example.com"), Protection::Signed(Signature { verdict: Verdict::Altered, .. })),
+            "{:?}",
+            inspect(replay.as_bytes(), "signer@example.com")
+        );
     }
 
     #[test]
