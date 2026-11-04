@@ -821,6 +821,31 @@ mod tests {
         let declined = InvitationState::Answered(Response::Declined);
         assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_tuesday), declined, "the card: the series' answer for Thursday 12 November");
         assert_eq!(shown(&jolta, series, after_tuesday), Some(declined), "the list: the series' answer for Thursday 12 November");
+
+        // Tuesday's recurrence id written in UTC names the same occurrence.
+        let Moment::Time(local) = rid else { unreachable!() };
+        let utc = Moment::Time(crate::calendar::Local { wall: local.instant(chrono_tz::UTC).naive_utc(), zone: crate::calendar::Zone::Tz(chrono_tz::UTC) });
+        events.iter_mut().filter(|e| e.recurrence_id.is_some()).for_each(|e| e.recurrence_id = Some(utc));
+        jolta.store.write(|tx| crate::store::apply_item(tx, calendar, "s1", Some("3"), &events, None, &horizon).map(|_| ())).unwrap();
+        assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_thursday), accepted, "the card: Tuesday's copy, written in UTC");
+        assert_eq!(shown(&jolta, series, after_thursday), Some(accepted), "the list: Tuesday's copy, written in UTC");
+
+        // The same copies in another account's calendar aren't the user's
+        // answer on the account the invitation came to.
+        let other = jolta
+            .store
+            .write(|tx| {
+                tx.execute("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'imap', 'other@example.com', 'o', 'a2', 0, 1)", [])?;
+                let remote = crate::store::RemoteCalendar { remote_id: "/cal/other/".into(), name: "Other".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                let other = crate::store::sync_calendar_list(tx, AccountId(2), CalendarSource::CalDav, &[remote])?[0].id;
+                tx.execute("DELETE FROM event", [])?;
+                crate::store::apply_item(tx, other, "s1", Some("1"), &events, None, &horizon)?;
+                Ok(other)
+            })
+            .unwrap();
+        assert_ne!(other, calendar);
+        assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_thursday), InvitationState::Unanswered, "the card: another account's copy");
+        assert_eq!(shown(&jolta, series, after_thursday), Some(InvitationState::Unanswered), "the list: another account's copy");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 
