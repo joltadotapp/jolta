@@ -41,6 +41,11 @@ final class Journeys: XCTestCase {
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", string)).firstMatch
     }
 
+    /// A list row's invitation state, by its whole label.
+    private func chip(_ app: XCUIApplication, _ state: String) -> XCUIElement {
+        app.tables.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", state, state)).firstMatch
+    }
+
     private func visible(_ app: XCUIApplication, _ subject: String) -> Bool {
         text(app, subject).exists
     }
@@ -70,9 +75,11 @@ final class Journeys: XCTestCase {
     /// account has no calendar and no server, so each answer is a reply
     /// mail that waits in the outbox, and the card shows the answer given.
     /// With the invitation's message collapsed, its card is off screen, and
-    /// the keys and the palette leave it alone.
+    /// the keys and the palette leave it alone. The list row shows each
+    /// answer beside the calendar mark.
     func testAnswerInvitationWithKeys() throws {
         let app = try launch()
+        XCTAssertTrue(chip(app, "Not answered").waitForExistence(timeout: 5), "the list marks the invitation still to answer")
         text(app, "Re: Invitation: Design crit").click()
         app.typeKey(.return, modifierFlags: [])
         let reader = app.webViews.firstMatch
@@ -83,11 +90,14 @@ final class Journeys: XCTestCase {
         app.typeKey("y", modifierFlags: [])
         XCTAssertTrue(link("Accepted").waitForExistence(timeout: 5), "y accepts")
         XCTAssertTrue(text(app, "Accepted. Jolta emailed Ann.").waitForExistence(timeout: 5), "the toast says who was told")
+        XCTAssertTrue(chip(app, "Accepted").waitForExistence(timeout: 5), "the list row shows the answer")
+        XCTAssertFalse(chip(app, "Not answered").exists)
         app.typeKey("m", modifierFlags: [])
         XCTAssertTrue(text(app, "Answered maybe. Jolta emailed Ann.").waitForExistence(timeout: 5), "m answers maybe")
         XCTAssertTrue(link("Accept").waitForExistence(timeout: 5) && !link("Accepted").exists)
         app.typeKey("n", modifierFlags: [])
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "n declines")
+        XCTAssertTrue(chip(app, "Declined").waitForExistence(timeout: 5), "the list row follows")
 
         let header = reader.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", "Ann Organizer", "Ann Organizer")).firstMatch
         header.click()

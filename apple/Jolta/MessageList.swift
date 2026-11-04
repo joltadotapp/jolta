@@ -323,9 +323,13 @@ final class ThreadCell: NSTableCellView {
     private let subject = NSTextField(labelWithString: "")
     private let date = NSTextField(labelWithString: "")
     private let clip = NSImageView()
+    private let invitation = NSImageView()
+    private let answer = ChipView()
+    /// The paperclip, the calendar mark and the answer, right of the subject.
+    private let badges = NSStackView()
     private let keys = NSStackView()
-    private var clipBesideDate: NSLayoutConstraint!
-    private var clipBesideKeys: NSLayoutConstraint!
+    private var badgesBesideDate: NSLayoutConstraint!
+    private var badgesBesideKeys: NSLayoutConstraint!
     private var row: ThreadRow?
 
     enum Mark { case none, selected, cursor }
@@ -337,9 +341,9 @@ final class ThreadCell: NSTableCellView {
             guard mark != oldValue else { return }
             keys.isHidden = mark != .cursor
             date.isHidden = mark == .cursor
-            // The paperclip stays, left of the key hints on the cursor row.
-            clipBesideDate.isActive = mark != .cursor
-            clipBesideKeys.isActive = mark == .cursor
+            // The paperclip and the invitation stay, left of the key hints on the cursor row.
+            badgesBesideDate.isActive = mark != .cursor
+            badgesBesideKeys.isActive = mark == .cursor
         }
     }
 
@@ -353,13 +357,20 @@ final class ThreadCell: NSTableCellView {
             addSubview(f)
         }
         clip.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Has attachments")
-        clip.symbolConfiguration = .init(pointSize: 11, weight: .regular)
-        clip.contentTintColor = Theme.text3
+        invitation.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: "Invitation")
+        for icon in [clip, invitation] {
+            icon.symbolConfiguration = .init(pointSize: 11, weight: .regular)
+            icon.contentTintColor = Theme.text3
+            icon.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        }
+        badges.orientation = .horizontal
+        badges.spacing = 6
+        for v in [clip, invitation, answer] as [NSView] { badges.addArrangedSubview(v) }
         keys.orientation = .horizontal
         keys.spacing = 4
         for k in ["E", "H", "R"] { keys.addArrangedSubview(KeyCapView(key: k)) }
         keys.isHidden = true
-        for v in [clip, keys] as [NSView] {
+        for v in [badges, keys] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -373,18 +384,17 @@ final class ThreadCell: NSTableCellView {
             sender.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.leadingAnchor.constraint(equalTo: sender.trailingAnchor, constant: 12),
             subject.centerYAnchor.constraint(equalTo: centerYAnchor),
-            subject.trailingAnchor.constraint(lessThanOrEqualTo: clip.leadingAnchor, constant: -8),
-            clip.centerYAnchor.constraint(equalTo: centerYAnchor),
-            clip.widthAnchor.constraint(equalToConstant: 14),
+            subject.trailingAnchor.constraint(lessThanOrEqualTo: badges.leadingAnchor, constant: -8),
+            badges.centerYAnchor.constraint(equalTo: centerYAnchor),
             date.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             date.widthAnchor.constraint(equalToConstant: 52),
             date.centerYAnchor.constraint(equalTo: centerYAnchor),
             keys.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
             keys.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        clipBesideDate = clip.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10)
-        clipBesideKeys = clip.trailingAnchor.constraint(equalTo: keys.leadingAnchor, constant: -10)
-        clipBesideDate.isActive = true
+        badgesBesideDate = badges.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10)
+        badgesBesideKeys = badges.trailingAnchor.constraint(equalTo: keys.leadingAnchor, constant: -10)
+        badgesBesideDate.isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -454,7 +464,67 @@ final class ThreadCell: NSTableCellView {
         date.attributedStringValue = NSAttributedString(string: Theme.shortDate(r.date), attributes: [
             .font: Theme.timeFont, .foregroundColor: Theme.text3,
         ])
-        clip.isHidden = !r.hasAttachments
+        // An invitation's .ics part counts as an attachment; the calendar mark says it better.
+        clip.isHidden = !r.hasAttachments || r.invitation != nil
+        invitation.isHidden = r.invitation == nil
+        answer.text = r.invitation.flatMap(Self.words) ?? ""
+        answer.waiting = r.invitation == .unanswered
+        answer.isHidden = answer.text.isEmpty
+    }
+
+    private static func words(_ state: InvitationState) -> String? {
+        switch state {
+        case .unanswered: "Not answered"
+        case .answered(.accepted): "Accepted"
+        case .answered(.tentative): "Maybe"
+        case .answered(.declined): "Declined"
+        case .answered(.delegated): "Delegated"
+        case .answered(.needsAction): "Not answered"
+        case .cancelled: "Cancelled"
+        case .plain: nil
+        }
+    }
+}
+
+/// Graphite's chip: a short label in a hairline box. One still waiting for
+/// the user reads a step stronger than one that is done.
+final class ChipView: NSView {
+    var text = "" {
+        didSet {
+            guard text != oldValue else { return }
+            invalidateIntrinsicContentSize()
+            needsDisplay = true
+            setAccessibilityLabel(text)
+        }
+    }
+    var waiting = false { didSet { if waiting != oldValue { needsDisplay = true } } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private var label: NSAttributedString {
+        NSAttributedString(string: text, attributes: [.font: Theme.font(11), .foregroundColor: waiting ? Theme.text2 : Theme.text3])
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: ceil(label.size().width) + 12, height: 16)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.line.setStroke()
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        box.lineWidth = 1
+        box.stroke()
+        let label = label
+        let size = label.size()
+        label.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
     }
 }
 

@@ -558,6 +558,8 @@ final class AppModel {
         case .calendarChanged:
             calendar.reloadCalendars()
             calendar.refresh()
+            // List rows show invitation answers, which an answer or a sync changes.
+            listChanged()
         case .calendarSynced:
             calendar.reloadCalendars()
         }
