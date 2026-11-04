@@ -388,7 +388,8 @@ impl CalDav {
     /// Writes the user's PARTSTAT into the resource and PUTs it back with
     /// `If-Match`; the server's scheduling (RFC 6638) sends the organizer the
     /// reply. The stored copy is edited first; when the server has a newer
-    /// one (412), that one is fetched and edited instead.
+    /// one (412), that one is fetched and edited instead. Every write
+    /// carries an ETag; a copy fetched without one is left alone.
     pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<Change> {
         let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
         let url = join(&collection, &path_escape(&target.event.remote_id))?;
@@ -399,19 +400,10 @@ impl CalDav {
         for attempt in 0..2 {
             let (text, etag) = match current.take() {
                 Some(stored) => stored,
-                None => {
-                    let reply = self.exchange("GET", &url, &[], "").await?;
-                    if reply.status != 200 {
-                        return Err(Error::Other(format!("CalDAV GET {url}: {}", reply.status)));
-                    }
-                    (reply.body, reply.etag)
-                }
+                None => self.versioned(&url, "Answer it").await?.ok_or_else(|| Error::Other("The meeting is no longer in your calendar.".into()))?,
             };
             let edited = rsvp::answer_in_ical(&text, &target.event.data.uid, rid.as_ref(), &me, rsvp, here)?;
-            let mut headers = vec![("Content-Type", "text/calendar; charset=utf-8")];
-            if let Some(etag) = &etag {
-                headers.push(("If-Match", etag));
-            }
+            let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag.as_str())];
             let reply = self.exchange("PUT", &url, &headers, &edited).await?;
             match reply.status {
                 200..300 => {
@@ -444,8 +436,8 @@ impl CalDav {
         let known = &target.event.data;
         let here = crate::calendar::tz::here();
         let (text, etag) = match cached(&target.event) {
-            Some((text, Some(etag))) => (text, etag),
-            _ => match self.versioned(&url).await? {
+            Some(found) => found,
+            None => match self.versioned(&url, "Remove it").await? {
                 None => return Ok(Gone::Already),
                 Some((text, _)) if !same_version(known, &text, here) => return Ok(Gone::Changed),
                 Some(found) => found,
@@ -476,7 +468,7 @@ impl CalDav {
         // ETag (RFC 4791 section 5.3.4), and someone may write in between.
         let etag = match reply.etag {
             Some(etag) => etag,
-            None => match self.versioned(&url).await? {
+            None => match self.versioned(&url, "Remove it").await? {
                 None => return Ok(Gone::Already),
                 // Still quiet too, or the DELETE could tell the organizer.
                 Some((text, _)) if !same_version(known, &text, here) || remove::quiet(&text, &known.uid).is_some() => return Ok(Gone::Changed),
@@ -487,12 +479,16 @@ impl CalDav {
     }
 
     /// The resource and its ETag, None when it is gone. A server that gives
-    /// no ETag leaves Jolta no way to write only over this version.
-    async fn versioned(&self, url: &Url) -> Result<Option<(String, String)>> {
+    /// no ETag leaves Jolta no way to write only over this version; the
+    /// error then says what to do instead, `instead` ("Remove it") in
+    /// another calendar app.
+    async fn versioned(&self, url: &Url, instead: &str) -> Result<Option<(String, String)>> {
         let reply = self.exchange("GET", url, &[], "").await?;
         match (reply.status, reply.etag) {
             (200, Some(etag)) => Ok(Some((reply.body, etag))),
-            (200, None) => Err(Error::Other("Your calendar server gives this meeting no version tag (ETag), so Jolta can't tell whether it changed and leaves it alone. Remove it in another calendar app.".into())),
+            (200, None) => Err(Error::Other(format!(
+                "Your calendar server gives this meeting no version tag (ETag), so Jolta can't tell whether it changed and leaves it alone. {instead} in another calendar app."
+            ))),
             (404 | 410, _) => Ok(None),
             (status, _) => Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
         }
@@ -647,23 +643,23 @@ fn access(r: &dav::Response, principal: &Url) -> Access {
     }
 }
 
-/// The stored text of an event to answer on, with the ETag that guards the
-/// PUT. Text without an ETag (a server may leave it out of a PUT reply) is
-/// fetched again, so an answer never overwrites a newer version unguarded.
-fn cached(event: &rsvp::Stored) -> Option<(String, Option<String>)> {
+/// The stored text of an event to write over, with the ETag that guards
+/// the write. Text without an ETag (a server may leave it out of a PUT
+/// reply) is fetched again, so no write overwrites a newer version.
+fn cached(event: &rsvp::Stored) -> Option<(String, String)> {
     let etag = event.etag.clone()?;
-    event.raw.as_ref().map(|raw| (String::from_utf8_lossy(raw).into_owned(), Some(etag)))
+    event.raw.as_ref().map(|raw| (String::from_utf8_lossy(raw).into_owned(), etag))
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// Meeting `a` at a SEQUENCE, as the server stores it.
     /// Meeting `a` as the attendee's copy holds it after Jolta quieted it.
     fn quiet_meeting(sequence: i64) -> String {
         meeting(sequence).replace("ORGANIZER:", "ORGANIZER;SCHEDULE-AGENT=CLIENT:")
     }
 
+    /// Meeting `a` at a SEQUENCE, as the server stores it.
     fn meeting(sequence: i64) -> String {
         format!(
             "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSEQUENCE:{sequence}\r\n\
@@ -699,6 +695,8 @@ mod tests {
             seen
         });
         let start = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        // The account's addresses, known, so no request asks for them.
+        KNOWN_ADDRESSES.lock().unwrap().insert(format!("me {start}"), vec!["me@example.com".into()]);
         let dav = CalDav { http: http_client(false).unwrap(), username: "me".into(), password: "pw".into(), starts: vec![start], address: "me@example.com".into(), fastmail: false, guessed: false };
         let calendar = Calendar {
             id: crate::calendar::CalendarId(1),
@@ -768,6 +766,26 @@ mod tests {
         assert_eq!(server.await.unwrap(), ["GET /cal/a.ics"]);
     }
 
+    /// An answer is a write too: it goes over the version Jolta read, by
+    /// its ETag, or not at all.
+    #[tokio::test]
+    async fn an_answer_writes_only_with_an_etag() {
+        let accept = Rsvp { event: crate::calendar::EventId(1), answer: rsvp::Answer::Accept, note: None, notify: true, scope: rsvp::Scope::Series };
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", None, Some(meeting(0))), ("204 No Content", None, None)]).await;
+        let err = dav.answer(&calendar, &stored(None), &accept).await.unwrap_err();
+        assert!(err.to_string().contains("no version tag (ETag)"), "{err}");
+        assert_eq!(server.await.unwrap(), ["GET /cal/a.ics"], "no PUT without an ETag");
+
+        let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", None, None), ("200 OK", None, Some(meeting(1))), ("204 No Content", None, None)]).await;
+        assert!(dav.answer(&calendar, &stored(Some("\"1\"")), &accept).await.is_err());
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics"], "the newer copy came without an ETag");
+
+        let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", None, None), ("200 OK", Some("\"2\""), Some(meeting(1))), ("204 No Content", Some("\"3\""), None)]).await;
+        let Change::Upsert { etag, events, .. } = dav.answer(&calendar, &stored(Some("\"1\"")), &accept).await.unwrap() else { panic!("an upsert") };
+        assert_eq!((etag.as_deref(), events[0].sequence, events[0].my_response()), (Some("\"3\""), 1, Some(crate::calendar::Response::Accepted)));
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics", "PUT /cal/a.ics If-Match \"2\""], "the newer copy, answered over its own ETag");
+    }
+
     #[test]
     fn stored_text_without_an_etag_is_fetched_again() {
         let event = |etag: Option<&str>| rsvp::Stored {
@@ -778,7 +796,7 @@ mod tests {
             data: crate::calendar::EventData::new("a", crate::calendar::Span::AllDay { start: chrono::NaiveDate::MIN, end: chrono::NaiveDate::MIN }),
         };
         assert_eq!(cached(&event(None)), None, "no ETag to guard the PUT with");
-        assert_eq!(cached(&event(Some("\"7\""))), Some(("BEGIN:VCALENDAR".into(), Some("\"7\"".into()))));
+        assert_eq!(cached(&event(Some("\"7\""))), Some(("BEGIN:VCALENDAR".into(), "\"7\"".into())));
     }
     use super::*;
 
