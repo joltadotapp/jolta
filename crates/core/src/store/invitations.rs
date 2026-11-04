@@ -89,6 +89,27 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
     Ok(best.map(|(_, e)| e))
 }
 
+/// Every stored event of the series with this UID, the master and its
+/// overrides, from the one calendar the views show it from.
+pub fn stored_series(conn: &Connection, uid: &str) -> Result<Vec<EventData>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
+         FROM event e JOIN calendar c ON c.id = e.calendar_id
+         WHERE e.uid = ?1 AND c.shown",
+    )?;
+    let rows = stmt
+        .query_map([uid], |r| {
+            let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+            Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(best) = rows.iter().map(|(rank, _, calendar, _)| (*rank, *calendar)).min() else { return Ok(Vec::new()) };
+    rows.into_iter()
+        .filter(|(_, _, calendar, _)| *calendar == best.1)
+        .map(|(_, id, _, data)| serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}"))))
+        .collect()
+}
+
 /// Mail from the address that the user answered, through the partial
 /// index `message_answered`, which needs this exact `flags & 4` term.
 const REPLIED: &str = "SELECT EXISTS (SELECT 1 FROM message WHERE from_addr = ?1 COLLATE NOCASE AND (flags & 4) != 0)";

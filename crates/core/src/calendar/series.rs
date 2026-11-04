@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 
 use super::recur::{self, Occurrence, Source, Window};
-use super::{CalendarId, CalendarSource, EventData, EventStatus, Response, ShowAs};
+use super::{CalendarId, CalendarSource, EventData, EventStatus, Local, Moment, Response, ShowAs, Span};
 
 /// How far the occurrence table reaches, and the zone floating times and
 /// all-day events are placed in.
@@ -113,5 +113,20 @@ mod copy_tests {
         let unknown = [(CalendarSource::Graph, false, 1), (CalendarSource::Google, true, 6)];
         assert_eq!(pick("5F1A2B3C-ICLOUD", &unknown), 6, "neither: the default calendar");
         assert_eq!(pick("5F1A2B3C-ICLOUD", &both), 1, "then the calendar added first");
+    }
+}
+
+/// The span of the unchanged occurrence `recurrence_id` names in a series
+/// whose master spans `master`: the master's, moved to start there on the
+/// master's own clock. None when one is all-day and the other isn't.
+pub fn occurrence_span(master: &Span, recurrence_id: &Moment, here: Tz) -> Option<Span> {
+    match (master, recurrence_id) {
+        (Span::Timed { start, end }, Moment::Time(at)) => {
+            let wall = super::tz::wall(at.instant(here), start.zone, here);
+            let shift = wall - start.wall;
+            Some(Span::Timed { start: Local { wall, zone: start.zone }, end: Local { wall: end.wall + shift, zone: end.zone } })
+        }
+        (Span::AllDay { start, end }, Moment::Date(day)) => Some(Span::AllDay { start: *day, end: *day + (*end - *start) }),
+        _ => None,
     }
 }

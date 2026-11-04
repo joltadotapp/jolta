@@ -122,15 +122,31 @@ pub fn cards(conn: &Connection, invitations: &[Invitation], cx: &Context) -> Res
         let described: &[EventData] = if i.dated {
             &events
         } else {
-            copy = store::stored_event(conn, &sent.uid, sent.recurrence_id.as_ref(), cx.here)?;
-            copy.as_ref().map_or(&[], |c| std::slice::from_ref(&c.event))
+            copy = stored_copy(conn, sent, cx)?;
+            &copy
         };
         out.push(match i.method {
-            Method::Reply => Card::Reply(reply(sent, described.first(), cx)),
+            Method::Reply => Card::Reply(reply(sent, described.iter().find(|e| e.recurrence_id.is_none()).or(described.first()), cx)),
             method => Card::Event(event(conn, method, &events, described, cx)?),
         });
     }
     Ok(out)
+}
+
+/// What the calendar says about the event an undated message names: the
+/// whole series, so the next occurrence is chosen as for a dated message,
+/// or for one named occurrence its override, else the master moved to it.
+fn stored_copy(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Vec<EventData>> {
+    let series = store::stored_series(conn, &sent.uid)?;
+    let Some(rid) = sent.recurrence_id else { return Ok(series) };
+    if let Some(o) = series.iter().find(|e| e.recurrence_id.is_some_and(|stored| rid.names(&stored, cx.here))) {
+        return Ok(vec![o.clone()]);
+    }
+    let master = series.iter().find(|e| e.recurrence_id.is_none() && e.recurrence.is_some());
+    Ok(master
+        .and_then(|m| series::occurrence_span(&m.span, &rid, cx.here).map(|span| EventData { recurrence_id: Some(rid), recurrence: None, span, ..m.clone() }))
+        .into_iter()
+        .collect())
 }
 
 /// `message` holds the events the mail sends, which say who asked and which
@@ -675,6 +691,23 @@ mod tests {
             panic!("a reply")
         };
         assert_eq!((reply.line.as_str(), reply.about.as_str()), ("Bo Nilsson declined", "Roadmap <review> & budget · Thu 12 Nov"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_message_without_a_start_takes_the_whole_series_from_the_calendar() {
+        let (j, calendar) = jolta("card-undated-series");
+        let copy: Vec<EventData> = invitation::find(mail!("series.eml"), &[ME.into()]).into_iter().map(|i| i.event).collect();
+        assert_eq!(copy.len(), 2, "the series and its moved Thursday");
+        let uid = copy[0].uid.clone();
+        j.store.write(|tx| store::apply_item(tx, calendar, "s1", None, &copy, None, &Horizon::around(now(), Brussels))).unwrap();
+
+        let refresh = event_card(&j, undated("REFRESH", &uid, "ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\n").as_bytes());
+        assert_eq!(refresh.when.as_deref(), Some("Thu 5 Nov · 10:00 to 10:15"), "the next occurrence is the moved one");
+
+        let named = "RECURRENCE-ID;TZID=Europe/Brussels:20261110T093000\r\nATTENDEE;PARTSTAT=ACCEPTED;CN=Bo Nilsson:mailto:bo@example.com\r\n";
+        let Card::Reply(reply) = cards_of(&j, undated("REPLY", &uid, named).as_bytes()).remove(0) else { panic!("a reply") };
+        assert_eq!(reply.about, "Team standup · Tue 10 Nov", "an occurrence the series makes, without an override");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
