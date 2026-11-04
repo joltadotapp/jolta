@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate};
 use jolta_core::calendar::scheduler::Scheduler;
-use jolta_core::calendar::{self as cal, Bounds, CalendarId, EventId, detail, remind, sync, tz};
+use jolta_core::calendar::{self as cal, Bounds, CalendarId, EventId, detail, remind, respond, rsvp, sync, tz};
 use jolta_core::{AccountId, store};
 
 use crate::{AccountInfo, Core, CoreError, CoreEvent, Result};
@@ -182,6 +182,9 @@ pub struct EventDetail {
     pub show_as: ShowAs,
     pub visibility: EventVisibility,
     pub my_response: Option<EventResponse>,
+    /// Accept, Maybe and Decline apply: an invitation from someone else in a
+    /// calendar Jolta answers through.
+    pub can_answer: bool,
     pub organizer: Option<PersonRecord>,
     /// Accepted, maybe, no answer, declined, delegated; empty groups left out.
     pub attendees: Vec<AttendeeGroup>,
@@ -190,6 +193,56 @@ pub struct EventDetail {
     pub responses: String,
     pub meeting: Option<MeetingInfo>,
     pub alarms: Vec<AlarmInfo>,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationAnswer {
+    Accept,
+    Maybe,
+    Decline,
+}
+
+impl From<InvitationAnswer> for rsvp::Answer {
+    fn from(a: InvitationAnswer) -> Self {
+        match a {
+            InvitationAnswer::Accept => rsvp::Answer::Accept,
+            InvitationAnswer::Maybe => rsvp::Answer::Maybe,
+            InvitationAnswer::Decline => rsvp::Answer::Decline,
+        }
+    }
+}
+
+/// The invitation the open conversation's keys answer.
+#[derive(uniffi::Record)]
+pub struct InvitationInfo {
+    pub message_id: i64,
+    pub answer: Option<EventResponse>,
+    /// For a series, the occurrence the card shows: "Thu 5 Nov".
+    pub occurrence_day: Option<String>,
+    /// "Ann".
+    pub organizer: String,
+}
+
+impl From<jolta_core::reader::OpenInvitation> for InvitationInfo {
+    fn from(i: jolta_core::reader::OpenInvitation) -> Self {
+        InvitationInfo {
+            message_id: i.answering.message.0,
+            answer: i.answer.map(Into::into),
+            occurrence_day: i.answering.occurrence.map(|o| o.day),
+            organizer: i.answering.organizer,
+        }
+    }
+}
+
+/// How the next answer goes out.
+#[derive(uniffi::Record)]
+pub struct AnswerOptions {
+    /// Goes with the answer; empty for none.
+    pub note: String,
+    /// False for "Don't send a reply".
+    pub notify: bool,
+    /// Only the occurrence on screen; a single event ignores it.
+    pub occurrence_only: bool,
 }
 
 /// One notification to schedule. Replace pending notifications by `id`, and
@@ -216,6 +269,24 @@ pub struct NextMeetingRecord {
     pub start: i64,
     pub end: i64,
     pub meeting: MeetingInfo,
+}
+
+impl Core {
+    async fn respond(&self, subject: respond::Subject, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
+        let note = Some(options.note.trim().to_string()).filter(|n| !n.is_empty());
+        let request = respond::Request { subject, answer: answer.into(), note, notify: options.notify, occurrence_only: options.occurrence_only };
+        let jolta = self.jolta.clone();
+        let outcome = self
+            .runtime
+            .spawn(async move { respond::answer(&jolta, &request).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        if let Some(account) = outcome.mailed_from {
+            self.running_engine()?.wake(account);
+        }
+        self.calendar_changed(outcome.calendar);
+        Ok(outcome.text)
+    }
 }
 
 #[uniffi::export]
@@ -409,7 +480,11 @@ impl Core {
     /// description document, as for `open_thread`.
     pub fn calendar_event(&self, event_id: i64, time: Option<OccurrenceTime>, app_css: String) -> Result<EventDetail> {
         let at = time.map(Bounds::try_from).transpose()?;
-        let d = self.jolta.store.read(|c| detail::open(c, EventId(event_id), at, tz::here(), &app_css))?;
+        let (d, me) = self.jolta.store.read(|c| {
+            let me: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
+            Ok((detail::open(c, EventId(event_id), at, tz::here(), &app_css)?, me))
+        })?;
+        let can_answer = respond::can_answer(&me, &d.calendar, &d.event);
         let person = |p: cal::Person| PersonRecord { name: p.name, address: p.address };
         let e = d.event;
         Ok(EventDetail {
@@ -436,6 +511,7 @@ impl Core {
             show_as: e.show_as.into(),
             visibility: e.visibility.into(),
             my_response: e.attendees.iter().find(|a| a.is_me).map(|a| a.response.into()),
+            can_answer,
             organizer: e.organizer.map(person),
             attendees: d
                 .attendees
@@ -513,6 +589,19 @@ impl Core {
 }
 
 impl Core {
+    /// Answers the invitation on a message's card. Returns the words for the
+    /// toast: "Accepted. Jolta emailed Ann."
+    pub async fn answer_invitation(&self, message_id: i64, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
+        self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options).await
+    }
+
+    /// Answers an event from its detail; `time` names the occurrence, as
+    /// for `calendar_event`.
+    pub async fn answer_event(&self, event_id: i64, time: Option<OccurrenceTime>, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
+        let at = time.map(Bounds::try_from).transpose()?;
+        self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options).await
+    }
+
     fn scheduler(&self) -> Option<Arc<Scheduler>> {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.calendars().clone())
     }

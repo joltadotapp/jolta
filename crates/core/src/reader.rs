@@ -33,6 +33,14 @@ pub struct ThreadDetail {
     pub image_sender: Option<String>,
     /// Whether every message with remote images comes from a trusted sender.
     pub images_trusted: bool,
+    /// The newest invitation the user can answer, which Y, M and N answer.
+    pub invitation: Option<OpenInvitation>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenInvitation {
+    pub answering: card::Answering,
+    pub answer: Option<crate::calendar::Response>,
 }
 
 pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, Vec<ThreadMessage>)> {
@@ -113,6 +121,10 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
         .collect();
     let protections: Vec<Protection> = messages.iter().zip(&raws).map(|(m, raw)| smime::inspect(raw, &m.from_addr)).collect();
     let cards = invitation_cards(jolta, &messages, &raws).await?;
+    let invitation = cards.iter().rev().flatten().find_map(|c| match c {
+        Card::Event(e) => e.answering.clone().map(|answering| OpenInvitation { answering, answer: e.answer }),
+        Card::Reply(_) => None,
+    });
     let last = messages.len().saturating_sub(1);
     let views: Vec<MessageView> = messages
         .iter()
@@ -146,7 +158,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
             .await?;
     let image_sender = (senders.len() == 1).then(|| senders.remove(0));
-    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted })
+    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitation })
 }
 
 /// The invitation cards of each message, empty for most.

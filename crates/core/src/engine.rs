@@ -186,7 +186,9 @@ impl Engine {
         (self.sink)(Event::ListsChanged);
     }
 
-    fn wake(&self, account: AccountId) {
+    /// Asks an account's worker to run now, for an outbox message queued
+    /// outside `send`.
+    pub fn wake(&self, account: AccountId) {
         if let Some(w) = self.wakes.lock().unwrap_or_else(|e| e.into_inner()).get(&account) {
             w.poke();
         }

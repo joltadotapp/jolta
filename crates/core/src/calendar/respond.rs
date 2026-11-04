@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::card::{self, Card};
 use super::rsvp::{self, Answer, ImipReply, Rsvp, Scope};
-use super::{Bounds, CalendarSource, EventData, EventId, Moment, Person, invitation, tz};
+use super::{Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Person, invitation, tz};
 use crate::compose::Built;
 use crate::model::{AccountId, MessageId};
 use crate::{Error, Jolta, Result, imap, store};
@@ -72,6 +72,22 @@ pub struct Outcome {
     pub text: String,
     /// The account whose outbox holds the reply mail; its engine sends it.
     pub mailed_from: Option<AccountId>,
+    /// The calendar whose copy changed.
+    pub calendar: Option<CalendarId>,
+}
+
+/// Whether an event's detail offers answers: an invitation to the user
+/// from someone else, in a calendar Jolta answers through.
+pub fn can_answer(me: &[String], calendar: &Calendar, e: &EventData) -> bool {
+    let theirs = e.organizer.as_ref().is_some_and(|o| !me.iter().any(|m| m.eq_ignore_ascii_case(&o.address)));
+    theirs && e.my_response().is_some() && plan(Some(calendar.source), true).is_ok_and(|p| p.provider.is_some())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Copy {
+    event: EventId,
+    calendar: CalendarId,
+    source: CalendarSource,
 }
 
 /// Everything an answer needs, read before anything is sent.
@@ -80,8 +96,8 @@ struct Resolved {
     from: String,
     me: Vec<String>,
     uid: String,
-    /// The calendar's copy: the series or single event, and its calendar's source.
-    copy: Option<(EventId, CalendarSource)>,
+    /// The calendar's copy: the series or single event, and its calendar.
+    copy: Option<Copy>,
     /// The invitation as sent, or the CalDAV resource, for the reply mail.
     text: Option<String>,
     /// The occurrence answered alone, and its day: "Thu 5 Nov".
@@ -110,7 +126,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             r
         }
     };
-    let plan = plan(r.copy.map(|(_, source)| source), req.notify)?;
+    let plan = plan(r.copy.map(|c| c.source), req.notify)?;
     let rid = r.occurrence.as_ref().map(|(rid, _)| *rid);
 
     let mail = if plan.mail {
@@ -120,9 +136,9 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     } else {
         None
     };
-    if let (Some(notify), Some((event, _))) = (plan.provider, r.copy) {
+    if let (Some(notify), Some(copy)) = (plan.provider, r.copy) {
         let scope = rid.map_or(Scope::Series, Scope::Occurrence);
-        rsvp::answer(jolta, &Rsvp { event, answer: req.answer, note: req.note.clone(), notify, scope }).await?;
+        rsvp::answer(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope }).await?;
     }
 
     let blob = mail.as_ref().map(|m| jolta.blobs.put(&m.raw)).transpose()?;
@@ -137,7 +153,8 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             Ok(())
         })
         .await?;
-    Ok(Outcome { text: told(req, &r, plan), mailed_from: plan.mail.then_some(r.account) })
+    let calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
+    Ok(Outcome { text: told(req, &r, plan), mailed_from: plan.mail.then_some(r.account), calendar })
 }
 
 /// The reply goes out at once: there is no undo for an answer yet.
@@ -157,9 +174,9 @@ fn told(req: &Request, r: &Resolved, plan: Plan) -> String {
         done = format!("{done} for {day}");
     }
     let who = if r.organizer.is_empty() { "the organizer" } else { &r.organizer };
-    match (plan.provider, r.copy) {
-        (Some(true), Some((_, CalendarSource::Google))) => format!("{done}. Google told {who}."),
-        (Some(true), Some((_, CalendarSource::Graph))) => format!("{done}. Microsoft 365 told {who}."),
+    match (plan.provider, r.copy.map(|c| c.source)) {
+        (Some(true), Some(CalendarSource::Google)) => format!("{done}. Google told {who}."),
+        (Some(true), Some(CalendarSource::Graph)) => format!("{done}. Microsoft 365 told {who}."),
         _ if plan.mail => format!("{done}. Jolta emailed {who}."),
         _ => format!("{done} without telling {who}."),
     }
@@ -196,7 +213,9 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 None => sent.and_then(|i| i.event.recurrence_id).map(|rid| store::stored_event(c, &a.uid, Some(&rid), here)).transpose()?.flatten(),
                 found => found,
             };
-            let copy = copy.map(|s| Ok::<_, Error>((s.event_id, store::calendar(c, s.calendar_id)?.source))).transpose()?;
+            let copy = copy
+                .map(|s| Ok::<_, Error>(Copy { event: s.event_id, calendar: s.calendar_id, source: store::calendar(c, s.calendar_id)?.source }))
+                .transpose()?;
             Ok(Resolved {
                 account,
                 from,
@@ -235,7 +254,7 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
         from: store::account(conn, account)?.address,
         me,
         uid: data.uid,
-        copy: Some((event, calendar.source)),
+        copy: Some(Copy { event, calendar: calendar.id, source: calendar.source }),
         text: None,
         occurrence,
         organizer: data.organizer.as_ref().map(short_name).unwrap_or_default(),
@@ -326,7 +345,7 @@ mod tests {
         let (j, _) = jolta("respond-mail");
         let message = import(&j, mail!("google-request.eml"));
         let done = run(&j, request(message, Answer::Maybe, Some("Ten minutes late"), true, false)).unwrap();
-        assert_eq!(done, Outcome { text: "Answered maybe. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)) });
+        assert_eq!(done, Outcome { text: "Answered maybe. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None });
 
         let sent = outbox(&j);
         assert_eq!(sent.len(), 1, "exactly one reply");
@@ -351,7 +370,7 @@ mod tests {
         let (j, _) = jolta("respond-quiet");
         let message = import(&j, mail!("google-request.eml"));
         let done = run(&j, request(message, Answer::Decline, None, false, false)).unwrap();
-        assert_eq!(done, Outcome { text: "Declined without telling Ann.".into(), mailed_from: None });
+        assert_eq!(done, Outcome { text: "Declined without telling Ann.".into(), mailed_from: None, calendar: None });
         assert!(outbox(&j).is_empty(), "no mail");
         assert_eq!(card_answer(&j, message, mail!("google-request.eml")), Some(Response::Declined));
 

@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use jolta_core::calendar::{scheduler, tz};
-use jolta_ffi::calendar::{CalendarKind, EventResponse, EventTime, MeetingProvider, OccurrenceRecord, OccurrenceTime};
+use jolta_core::MailboxRole;
+use jolta_ffi::calendar::{AnswerOptions, CalendarKind, EventResponse, EventTime, InvitationAnswer, MeetingProvider, OccurrenceRecord, OccurrenceTime};
 
-use crate::fixture::{App, block_on};
+use crate::fixture::{App, Mail, block_on};
 
 /// Serves whatever `body` holds at any path, one connection per request.
 struct Feed {
@@ -295,6 +296,49 @@ fn a_feed_from_subscription_to_removal() {
         .read(|c| Ok(c.query_row("SELECT (SELECT count(*) FROM calendar) + (SELECT count(*) FROM event) + (SELECT count(*) FROM occurrence)", [], |r| r.get(0))?))
         .unwrap();
     assert_eq!(left, 0, "nothing of the calendar remains");
+}
+
+/// Answering an invitation in the reader of an account whose calendar is
+/// off: the card offers the answers, Accept sends one reply mail to the
+/// organizer, and the conversation opened again shows the answer.
+#[test]
+fn an_invitation_answered_from_the_reader() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let monday = next_monday(tz::here());
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:review@test.invalid\r\nDTSTAMP:20261101T000000Z\r\n\
+         DTSTART:{}Z\r\nDTEND:{}Z\r\nSUMMARY:Design review\r\nORGANIZER;CN=Ann Organizer:mailto:ann@test.invalid\r\n\
+         ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@test.invalid\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:bo@test.invalid\r\n\
+         END:VEVENT\r\nEND:VCALENDAR\r\n",
+        stamp(monday, "14:00"),
+        stamp(monday, "15:00")
+    );
+    let mail = Mail::new("ann@test.invalid", "me@test.invalid", "Invitation: Design review", "Join us.").attach("invite.ics", &ics);
+    let message = app.deliver(&me, MailboxRole::Inbox, &mail);
+    let thread = app.thread_of(message);
+
+    let before = app.open(thread);
+    let invitation = before.invitation.expect("an invitation to answer");
+    assert_eq!((invitation.message_id, invitation.answer, invitation.organizer.as_str()), (message.0, None, "Ann"));
+    assert!(before.html.contains(&format!("href=\"x-rsvp:{}/accept\"", message.0)), "the card has the buttons");
+    assert!(!before.html.contains("jolta-chosen"));
+
+    let options = AnswerOptions { note: "  ".into(), notify: true, occurrence_only: false };
+    let toast = block_on(app.core.answer_invitation(message.0, InvitationAnswer::Accept, options)).expect("the answer goes out");
+    assert_eq!(toast, "Accepted. Jolta emailed Ann.");
+    assert_eq!(app.count("SELECT count(*) FROM outbox WHERE recipients = 'ann@test.invalid' AND sender = 'me@test.invalid'"), 1);
+    assert_eq!(app.count("SELECT count(*) FROM outbox"), 1, "one reply, to the organizer only");
+
+    let after = app.open(thread);
+    assert_eq!(after.invitation.and_then(|i| i.answer), Some(EventResponse::Accepted));
+    assert!(after.html.contains("jolta-rsvp-accept jolta-chosen"), "the card shows the answer given");
+
+    let quiet = AnswerOptions { note: String::new(), notify: false, occurrence_only: false };
+    let toast = block_on(app.core.answer_invitation(message.0, InvitationAnswer::Decline, quiet)).unwrap();
+    assert_eq!(toast, "Declined without telling Ann.");
+    assert_eq!(app.count("SELECT count(*) FROM outbox"), 1, "Don't send a reply sends nothing");
+    assert_eq!(app.open(thread).invitation.and_then(|i| i.answer), Some(EventResponse::Declined));
 }
 
 #[test]
