@@ -67,22 +67,9 @@ private struct ProviderPicker: View {
     var body: some View {
         HStack(spacing: 8) {
             ForEach(choices) { choice in
-                let selected = model.ai.provider == choice.provider
-                Button { model.saveAI { $0.provider = choice.provider; $0.sortMail = nil } } label: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Image(systemName: choice.icon).font(.system(size: 14))
-                        Text(choice.title).font(.system(size: 12.5, weight: .semibold))
-                        Text(choice.detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(selected ? Theme.fill : Theme.bg)))
-                    .overlay(RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color(selected ? Theme.text3 : Theme.line), lineWidth: selected ? 1.5 : 1))
-                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                ChoiceCard(title: choice.title, detail: choice.detail, icon: choice.icon, selected: model.ai.provider == choice.provider) {
+                    model.saveAI { $0.provider = choice.provider; $0.sortMail = nil }
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
     }

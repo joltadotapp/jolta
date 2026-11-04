@@ -293,6 +293,33 @@ extension SettingsSection {
     }
 }
 
+/// One of a few choices side by side, as a card; the chosen one is filled.
+struct ChoiceCard: View {
+    let title: String
+    let detail: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                Image(systemName: icon).font(.system(size: 14))
+                Text(title).font(.system(size: 12.5, weight: .semibold))
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(selected ? Theme.fill : Theme.bg)))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color(selected ? Theme.text3 : Theme.line), lineWidth: selected ? 1.5 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
 /// Rows on one rounded card, with a hairline between them.
 struct SettingsCard<Content: View>: View {
     @ViewBuilder let content: Content
