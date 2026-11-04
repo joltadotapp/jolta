@@ -188,7 +188,15 @@ mod tests {
     };
     use crate::store::{self, RemoteCalendar, Store};
 
-    fn store(name: &str) -> (Store, CalendarId) {
+    struct Folder(std::path::PathBuf);
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn store(name: &str) -> (Store, CalendarId, Folder) {
         let dir = std::env::temp_dir().join(format!("jolta-remind-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -203,7 +211,7 @@ mod tests {
             refresh: None,
         };
         let id = s.write(|tx| Ok(store::add_calendar(tx, CalendarSource::Local, &remote)?.id)).unwrap();
-        (s, id)
+        (s, id, Folder(dir))
     }
 
     fn at(s: &str) -> DateTime<Utc> {
@@ -249,7 +257,7 @@ mod tests {
 
     #[test]
     fn reminders_between_two_instants() {
-        let (s, cal) = store("between");
+        let (s, cal, _folder) = store("between");
         let standup = EventData {
             title: "Standup".into(),
             recurrence: Some(Recurrence { rules: vec!["FREQ=DAILY;COUNT=5".into()], ..Recurrence::default() }),
@@ -306,7 +314,7 @@ mod tests {
 
     #[test]
     fn next_meeting_prefers_one_about_to_start() {
-        let (s, cal) = store("next");
+        let (s, cal, _folder) = store("next");
         let meeting = |uid: &str, title: &str, start: &str, minutes: i64| EventData {
             title: title.into(),
             meeting: Some(zoom()),
