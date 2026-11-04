@@ -656,7 +656,7 @@ fn cached(event: &rsvp::Stored) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// Meeting `a` as the attendee's copy holds it after Jolta quieted it.
     fn quiet_meeting(sequence: i64) -> String {
@@ -675,7 +675,7 @@ mod tests {
     /// a status, an ETag or none, and a body.
     /// It returns each request's first line, with its If-Match or
     /// If-None-Match when it has one.
-    pub(super) async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<String>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
+    pub(crate) async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<String>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

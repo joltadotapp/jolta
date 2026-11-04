@@ -19,11 +19,11 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::card::{self, Card, EventCard};
 use super::invitation::{self, Invitation, Method};
-use super::rsvp::{self, Answer, Rsvp, Scope};
+use super::rsvp::{self, Answer, Rsvp, Scope, Target};
 use super::series::Horizon;
 use super::sources::{Change, NewCopy, Replaced};
 use super::update::Version;
-use super::{Access, CalendarId, CalendarSource, EventData, EventId, Moment, Response, sync, tz};
+use super::{Access, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Response, sync, tz};
 use crate::model::{AccountId, MessageId};
 use crate::store::{self, AddedCopy, WrittenVersion};
 use crate::{Error, Jolta, Result, imap};
@@ -123,14 +123,27 @@ fn copied(conn: &Connection, account: AccountId, uid: &str, rid: Option<&Moment>
 
 /// The added copy's event that an answer or an update for `rid` goes to,
 /// with its scope: that occurrence of a series, also one stored changed or
-/// without its master, else the event itself.
-fn copy_target(conn: &Connection, account: AccountId, uid: &str, rid: Option<&Moment>, here: Tz) -> Result<Option<(EventId, Scope)>> {
+/// without its master, else the event itself. Also the remote id of the
+/// object Jolta created.
+fn copy_target(conn: &Connection, account: AccountId, uid: &str, rid: Option<&Moment>, here: Tz) -> Result<Option<(EventId, Scope, String)>> {
+    let Some(copy) = store::added_copy(conn, account, uid)? else { return Ok(None) };
     let Some(event) = copied(conn, account, uid, rid, here)? else { return Ok(None) };
     let scope = match rid {
         Some(rid) if event.event.recurrence.is_some() || event.event.recurrence_id.is_some() => Scope::Occurrence(*rid),
         _ => Scope::Series,
     };
-    Ok(Some((event.event_id, scope)))
+    Ok(Some((event.event_id, scope, copy.remote_id)))
+}
+
+/// What an answer or an update for `rid` goes to in the copy the user
+/// added of the invitation `uid` to `account`, with its event and scope:
+/// the object Jolta created, never another event with its UID.
+async fn added_target(jolta: &Jolta, account: AccountId, uid: &str, rid: Option<Moment>) -> Result<Option<(Calendar, Target, EventId, Scope)>> {
+    let here = tz::here();
+    let uid = uid.to_string();
+    let Some((event, scope, object)) = jolta.store.read_async(move |c| copy_target(c, account, &uid, rid.as_ref(), here)).await? else { return Ok(None) };
+    let (calendar, target) = rsvp::target_of(jolta, event, &scope, Some(object)).await?;
+    Ok(Some((calendar, target, event, scope)))
 }
 
 /// Whether `version` of the event or occurrence `rid` is newer than what
@@ -250,19 +263,13 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
         return Err(Error::Other("Your calendar's copy already has this version of the meeting.".into()));
     }
     let (account, uid, here) = (o.account, o.sent.event.uid.clone(), tz::here());
-    let rid = o.sent.event.recurrence_id;
-    let ((event, scope), before) = jolta
-        .store
-        .read_async({
-            let uid = uid.clone();
-            move |c| {
-                let found = copy_target(c, account, &uid, rid.as_ref(), here)?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?;
-                let written = store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default();
-                Ok((found, written))
-            }
-        })
-        .await?;
-    let (calendar, mut target) = rsvp::target_of(jolta, event, &scope).await?;
+    let (calendar, mut target, _, _) =
+        added_target(jolta, account, &uid, o.sent.event.recurrence_id).await?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?;
+    let before = jolta.store.read_async({
+        let uid = uid.clone();
+        move |c| Ok(store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default())
+    })
+    .await?;
     target.me = o.receiver.clone();
     let source = sync::calendar_source(jolta, &calendar).await?;
     let id = calendar.id;
@@ -296,16 +303,8 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
 /// occurrence `rid`. Returns the calendar that changed, None without a copy.
 pub(crate) async fn follow(jolta: &Jolta, account: AccountId, uid: &str, rid: Option<Moment>, answer: Answer) -> Result<Option<CalendarId>> {
     let here = tz::here();
-    let (found, receiver) = jolta
-        .store
-        .read_async({
-            let uid = uid.to_string();
-            move |c| Ok((copy_target(c, account, &uid, rid.as_ref(), here)?, store::account(c, account)?.address))
-        })
-        .await?;
-    let Some((event, scope)) = found else { return Ok(None) };
-    let (calendar, mut target) = rsvp::target_of(jolta, event, &scope).await?;
-    target.me = receiver;
+    let Some((calendar, mut target, event, scope)) = added_target(jolta, account, uid, rid).await? else { return Ok(None) };
+    target.me = jolta.store.read_async(move |c| store::account(c, account)).await?.address;
     let source = sync::calendar_source(jolta, &calendar).await?;
     let rsvp = Rsvp { event, answer, note: None, notify: false, scope };
     let id = calendar.id;
@@ -620,7 +619,7 @@ mod tests {
     fn an_answer_follows_into_the_added_occurrence_or_series() {
         let (j, personal, _team, _side) = folder("add-follow");
         let series = "DTSTART;TZID=Europe/Brussels:20261110T093000\r\nDTEND;TZID=Europe/Brussels:20261110T094500\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n";
-        let target = |uid: &str, rid: Option<Moment>| j.store.read(|c| copy_target(c, AccountId(1), uid, rid.as_ref(), Brussels)).unwrap().map(|(_, scope)| scope);
+        let target = |uid: &str, rid: Option<Moment>| j.store.read(|c| copy_target(c, AccountId(1), uid, rid.as_ref(), Brussels)).unwrap().map(|(_, scope, _)| scope);
 
         // CalDAV keeps an invitation to one occurrence as that occurrence
         // alone, without a master.
@@ -640,6 +639,44 @@ mod tests {
         assert_eq!(target("standup", Some(at(17))), Some(Scope::Occurrence(at(17))), "a changed occurrence answered alone stays alone");
         assert_eq!(target("standup", Some(at(24))), Some(Scope::Occurrence(at(24))));
         assert_eq!(target("standup", None), Some(Scope::Series));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Update, an answer that follows and Remove from calendar go to the
+    /// object Jolta created, also while another event in that calendar has
+    /// its UID and was stored first.
+    #[tokio::test]
+    async fn the_copy_is_written_only_through_the_object_jolta_created() {
+        use crate::calendar::sources::Source;
+        use crate::calendar::sources::caldav::tests::caldav_server;
+        let (j, personal, _team, _side) = folder("add-object");
+        let v1 = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        import(&j, v1.as_bytes());
+        let text = invitation::calendar_text(v1.as_bytes(), "sync").unwrap();
+        let blob = j.blobs.put(text.as_bytes()).unwrap();
+        let events = events_of(&v1);
+        for remote in ["other", "theirs"] {
+            j.store.write(|tx| store::apply_item(tx, personal, remote, Some("\"1\""), &events, Some(&blob), &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
+        }
+        added(&j, personal, "sync", "theirs", &v1);
+        let copy = NewCopy { uid: "sync", text: &text, events: &events, me: ME, answer: None };
+
+        let (_, mut target, event, scope) = added_target(&j, AccountId(1), "sync", None).await.unwrap().expect("the copy");
+        target.me = ME.into();
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
+        assert!(matches!(Source::CalDav(dav).replace(&calendar, &target, &copy).await.unwrap(), Replaced::Written(_)));
+        assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "Update");
+
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
+        let rsvp = Rsvp { event, answer: Answer::Accept, note: None, notify: false, scope };
+        Source::CalDav(dav).follow(&calendar, &target, &rsvp).await.unwrap();
+        assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "an answer that follows");
+
+        let (_, target, added) = super::super::remove::target(&j, AccountId(1), "sync", None).await.unwrap();
+        assert!(added);
+        let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", None, None)]).await;
+        Source::CalDav(dav).remove(&calendar, &target).await.unwrap();
+        assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "Remove from calendar");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

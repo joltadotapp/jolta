@@ -119,7 +119,7 @@ impl Target {
 /// next sync replaces the stored event with the server's version.
 pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
     let here = tz::here();
-    let (calendar, target) = target_of(jolta, rsvp.event, &rsvp.scope).await?;
+    let (calendar, target) = target_of(jolta, rsvp.event, &rsvp.scope, None).await?;
     match calendar.source {
         CalendarSource::Local => return Err(Error::Other("This event is in a calendar on this Mac only. Answering it by mail isn't built yet.".into())),
         CalendarSource::EventKit => {
@@ -147,10 +147,12 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
 }
 
 /// The calendar of `event`, and what a change in `scope` goes to, with the
-/// objects as the server last gave them.
-pub(crate) async fn target_of(jolta: &Jolta, event: EventId, scope: &Scope) -> Result<(Calendar, Target)> {
+/// objects as the server last gave them. For a copy the user added,
+/// `object` is the remote id of the object Jolta created, which is then the
+/// series or single event, whatever else in the calendar has its UID.
+pub(crate) async fn target_of(jolta: &Jolta, event: EventId, scope: &Scope, object: Option<String>) -> Result<(Calendar, Target)> {
     let here = tz::here();
-    let (calendar, rows, me) = jolta.store.read_async(move |c| series_of(c, event)).await?;
+    let (calendar, rows, me) = jolta.store.read_async(move |c| series_of(c, event, object.as_deref())).await?;
     let mut target = target(rows, event, scope, here, me)?;
     for stored in std::iter::once(&mut target.event).chain(target.occurrence.as_mut().and_then(|o| o.stored.as_mut())) {
         stored.raw = jolta.store.read_async({
@@ -193,9 +195,10 @@ struct Row {
     is_master: bool,
 }
 
-/// The calendar of `event`, every stored event of its series, and the
-/// user's address on the calendar's account.
-fn series_of(conn: &Connection, event: EventId) -> Result<(Calendar, Vec<Row>, String)> {
+/// The calendar of `event`, every stored event of its series, with only
+/// `object` as its series or single event when given, and the user's
+/// address on the calendar's account.
+fn series_of(conn: &Connection, event: EventId, object: Option<&str>) -> Result<(Calendar, Vec<Row>, String)> {
     let (calendar_id, uid): (super::CalendarId, String) = conn
         .query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?
@@ -206,10 +209,11 @@ fn series_of(conn: &Connection, event: EventId) -> Result<(Calendar, Vec<Row>, S
         None => String::new(),
     };
     let mut stmt = conn.prepare(
-        "SELECT id, remote_id, etag, recurrence_id = '', data FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY id",
+        "SELECT id, remote_id, etag, recurrence_id = '', data FROM event
+         WHERE calendar_id = ?1 AND uid = ?2 AND (?3 IS NULL OR recurrence_id <> '' OR remote_id = ?3) ORDER BY id",
     )?;
     let rows = stmt
-        .query_map(params![calendar_id, uid], |r| {
+        .query_map(params![calendar_id, uid, object], |r| {
             Ok((r.get::<_, EventId>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, bool>(3)?, r.get::<_, String>(4)?))
         })?
         .map(|row| {
@@ -357,7 +361,7 @@ pub fn occurrence_at(conn: &Connection, event: EventId, at: Bounds, here: Tz) ->
 
 /// The master and the overrides of `event`'s series.
 fn series_parts(conn: &Connection, event: EventId) -> Result<(Option<EventData>, Vec<EventData>)> {
-    let (_, rows, _) = series_of(conn, event)?;
+    let (_, rows, _) = series_of(conn, event, None)?;
     let (masters, overrides): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.is_master);
     Ok((masters.into_iter().next().map(|r| r.stored.data), overrides.into_iter().map(|r| r.stored.data).collect()))
 }
@@ -728,7 +732,7 @@ mod tests {
                 let calendar = store::sync_calendar_list(tx, crate::AccountId(1), CalendarSource::CalDav, &[remote])?[0].id;
                 store::apply_item(tx, calendar, "/cal/work/plan.ics", Some("\"1\""), &read_events(&text), None, &Horizon::around(Utc::now(), here))?;
                 let master: EventId = tx.query_row("SELECT id FROM event WHERE recurrence_id = ''", [], |r| r.get(0))?;
-                let (_, rows, me) = series_of(tx, master)?;
+                let (_, rows, me) = series_of(tx, master, None)?;
                 let target = target(rows, master, &Scope::Series, here, me)?;
                 record(tx, calendar, &target, &rsvp, &target.event.remote_id, here)?;
                 let mut stmt = tx.prepare("SELECT data FROM event ORDER BY recurrence_id")?;
@@ -776,7 +780,7 @@ mod tests {
                 let horizon = Horizon::around(Utc::now(), here);
                 store::apply_item(tx, calendar, "/cal/work/plan.ics", Some("\"1\""), &stale, None, &horizon)?;
                 let master: EventId = tx.query_row("SELECT id FROM event WHERE recurrence_id = ''", [], |r| r.get(0))?;
-                let (_, rows, account) = series_of(tx, master)?;
+                let (_, rows, account) = series_of(tx, master, None)?;
                 let target = target(rows, master, &Scope::Series, here, account)?;
                 let events = super::super::ical::read(&written, &me.map(String::from))?;
                 // Answering as already answered leaves the server's ETag as it was.

@@ -55,21 +55,7 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
     let here = tz::here();
     let rid = removing.occurrence.as_ref().map(|(rid, _)| *rid);
     let uid = removing.uid.clone();
-    let (event, added) = jolta
-        .store
-        .read_async({
-            let uid = uid.clone();
-            move |c| {
-                let changed = rid.map(|rid| store::own_or_added(c, &uid, Some(&rid), account, here)).transpose()?.flatten();
-                let copy = match changed {
-                    Some(copy) => copy,
-                    None => store::own_or_added(c, &uid, None, account, here)?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?,
-                };
-                Ok((copy.event_id, added_to(c, account, &uid, copy.calendar_id)?))
-            }
-        })
-        .await?;
-    let (calendar, target) = rsvp::target_of(jolta, event, &rid.map_or(Scope::Series, Scope::Occurrence)).await?;
+    let (calendar, target, added) = target(jolta, account, &uid, rid).await?;
 
     route(calendar.source)?;
     match added {
@@ -141,10 +127,35 @@ fn added_copy(calendar: &Calendar) -> Result<()> {
     }
 }
 
-/// Whether the copy in `calendar` is the one the user added of the
-/// invitation `uid` to `account`.
-fn added_to(conn: &rusqlite::Connection, account: AccountId, uid: &str, calendar: CalendarId) -> Result<bool> {
-    Ok(store::added_copy(conn, account, uid)?.is_some_and(|a| a.calendar_id == calendar))
+/// The remote id of the object Jolta created when the copy in `calendar`
+/// is the one the user added of the invitation `uid` to `account`.
+fn added_to(conn: &rusqlite::Connection, account: AccountId, uid: &str, calendar: CalendarId) -> Result<Option<String>> {
+    Ok(store::added_copy(conn, account, uid)?.filter(|a| a.calendar_id == calendar).map(|a| a.remote_id))
+}
+
+/// The calendar and what removing the meeting `uid`, or its occurrence
+/// `rid`, from the calendar of `account` goes to: the account's own copy,
+/// else the one the user added, which is the object Jolta created. True
+/// for the one added.
+pub(super) async fn target(jolta: &Jolta, account: AccountId, uid: &str, rid: Option<Moment>) -> Result<(Calendar, rsvp::Target, bool)> {
+    let here = tz::here();
+    let (event, object) = jolta
+        .store
+        .read_async({
+            let uid = uid.to_string();
+            move |c| {
+                let changed = rid.map(|rid| store::own_or_added(c, &uid, Some(&rid), account, here)).transpose()?.flatten();
+                let copy = match changed {
+                    Some(copy) => copy,
+                    None => store::own_or_added(c, &uid, None, account, here)?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?,
+                };
+                Ok((copy.event_id, added_to(c, account, &uid, copy.calendar_id)?))
+            }
+        })
+        .await?;
+    let added = object.is_some();
+    let (calendar, target) = rsvp::target_of(jolta, event, &rid.map_or(Scope::Series, Scope::Occurrence), object).await?;
+    Ok((calendar, target, added))
 }
 
 /// Why the account's copy of the meeting `uid`, its own or the one the
@@ -158,7 +169,7 @@ pub(crate) fn refusal(conn: &rusqlite::Connection, uid: &str, rid: Option<&Momen
     };
     let Some(copy) = copy else { return Ok(None) };
     let calendar = store::calendar(conn, copy.calendar_id)?;
-    if added_to(conn, account, uid, copy.calendar_id)? {
+    if added_to(conn, account, uid, copy.calendar_id)?.is_some() {
         return Ok(added_copy(&calendar).err());
     }
     let address = store::account(conn, account)?.address;
