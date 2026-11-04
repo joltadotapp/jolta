@@ -71,7 +71,8 @@ fn event(c: &EventCard) -> String {
 }
 
 /// Accept, Maybe and Decline as `x-rsvp:<message>/<answer>` links with
-/// their keys; the answer given reads as done ("Accepted").
+/// their keys; the answer given reads as done ("Accepted"). The data
+/// attributes let the app mark an answer while it goes out.
 fn answers(a: &Answering, given: Option<Response>) -> String {
     let mut h = String::from("<span class=\"jolta-rsvp\" role=\"group\" aria-label=\"Your answer\">");
     for (name, label, done, key, response) in [
@@ -82,10 +83,10 @@ fn answers(a: &Answering, given: Option<Response>) -> String {
         let chosen = given == Some(response);
         let _ = write!(
             h,
-            "<a class=\"jolta-rsvp-{name}{}\" href=\"x-rsvp:{}/{name}\" title=\"{label} ({key})\" aria-pressed=\"{chosen}\">{}<span>{}</span><kbd>{key}</kbd></a>",
+            "<a class=\"jolta-rsvp-{name}{}\" href=\"x-rsvp:{}/{name}\" title=\"{label} ({key})\" aria-pressed=\"{chosen}\" \
+             data-answer=\"{name}\" data-label=\"{label}\" data-done=\"{done}\">{CHECK}<span>{}</span><kbd>{key}</kbd></a>",
             if chosen { " jolta-chosen" } else { "" },
             a.message.0,
-            if chosen { CHECK } else { "" },
             if chosen { done } else { label }
         );
     }
@@ -288,7 +289,7 @@ mod tests {
 
         let maybe = with(Some(Response::Tentative), Some(answering.clone()));
         assert_eq!(chosen(&maybe), 1);
-        assert!(maybe.contains("<a class=\"jolta-rsvp-maybe jolta-chosen\" href=\"x-rsvp:7/maybe\" title=\"Maybe (M)\" aria-pressed=\"true\">"), "{maybe}");
+        assert!(maybe.contains("<a class=\"jolta-rsvp-maybe jolta-chosen\" href=\"x-rsvp:7/maybe\" title=\"Maybe (M)\" aria-pressed=\"true\""), "{maybe}");
         assert!(maybe.contains("<span>Accept</span>") && maybe.contains("<span>Decline</span>"));
         let accepted = with(Some(Response::Accepted), Some(answering.clone()));
         assert!(accepted.contains("<span>Accepted</span>") && !accepted.contains("<span>Accept</span>"), "the answer given reads as done");

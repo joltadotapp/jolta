@@ -225,6 +225,13 @@ struct MessageList: NSViewRepresentable {
                 if event.keyCode == 53 { model.palette = nil; model.showsHelp = false }
                 return true
             }
+            if case .scope = model.rsvpPanel {
+                switch event.keyCode {
+                case 125, 126: model.answerChoices.occurrenceOnly.toggle()
+                default: model.rsvpPanel = nil
+                }
+                return true
+            }
             switch event.keyCode {
             case 36, 76: openSelected(); return true
             case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true

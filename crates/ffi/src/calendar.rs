@@ -291,6 +291,19 @@ impl Core {
 
 #[uniffi::export]
 impl Core {
+    /// Answers the invitation on a message's card. Returns the words for the
+    /// toast: "Accepted. Jolta emailed Ann."
+    pub async fn answer_invitation(&self, message_id: i64, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
+        self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options).await
+    }
+
+    /// Answers an event from its detail; `time` names the occurrence, as
+    /// for `calendar_event`.
+    pub async fn answer_event(&self, event_id: i64, time: Option<OccurrenceTime>, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
+        let at = time.map(Bounds::try_from).transpose()?;
+        self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options).await
+    }
+
     /// Every account with its calendar switch and calendars, then the
     /// calendars of no account.
     pub fn calendars(&self) -> Result<CalendarList> {
@@ -589,19 +602,6 @@ impl Core {
 }
 
 impl Core {
-    /// Answers the invitation on a message's card. Returns the words for the
-    /// toast: "Accepted. Jolta emailed Ann."
-    pub async fn answer_invitation(&self, message_id: i64, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
-        self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options).await
-    }
-
-    /// Answers an event from its detail; `time` names the occurrence, as
-    /// for `calendar_event`.
-    pub async fn answer_event(&self, event_id: i64, time: Option<OccurrenceTime>, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
-        let at = time.map(Bounds::try_from).transpose()?;
-        self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options).await
-    }
-
     fn scheduler(&self) -> Option<Arc<Scheduler>> {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.calendars().clone())
     }

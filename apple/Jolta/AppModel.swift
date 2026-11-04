@@ -103,6 +103,11 @@ final class AppModel {
     /// Each account's last sync failure, until that account syncs again.
     private(set) var syncErrors: [Int64: String] = [:]
     var openThread: ThreadView?
+    /// How the open card's next answer goes out, and the answer going out now.
+    var answerChoices = AnswerChoices()
+    var pendingAnswer: InvitationAnswer?
+    /// The note field or the scope menu under the open card, when one is up.
+    var rsvpPanel: RsvpPanel?
     var selectedThreadID: Int64?
     /// Threads selected in the list, in list order. With more than one,
     /// actions apply to all of them and the reader shows how many.
@@ -841,6 +846,10 @@ final class AppModel {
     }
 
     func open(threadID: Int64) {
+        if selectedThreadID != threadID {
+            answerChoices = AnswerChoices()
+            rsvpPanel = nil
+        }
         selectedThreadID = threadID
         selectedThreads = [threadID]
         showSummary(for: threadID)

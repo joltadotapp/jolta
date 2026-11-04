@@ -1,3 +1,4 @@
+@preconcurrency import JoltaFFI
 import AppKit
 
 /// Every single-key command, in one table: the list's key handler, the
@@ -8,6 +9,7 @@ enum Command: String, CaseIterable, Identifiable {
     case archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
     case toggleVIP, unsubscribe, summarize, saveAttachments, nextSection, help
+    case accept, maybe, decline
     case goInbox, goStarred, goSnoozed, goSent, goDrafts, goArchive
 
     var id: String { rawValue }
@@ -37,6 +39,9 @@ enum Command: String, CaseIterable, Identifiable {
         case .saveAttachments: "d"
         case .nextSection: "⇥"
         case .help: "?"
+        case .accept: "y"
+        case .maybe: "m"
+        case .decline: "n"
         case .goInbox: "g i"
         case .goStarred: "g s"
         case .goSnoozed: "g h"
@@ -70,6 +75,9 @@ enum Command: String, CaseIterable, Identifiable {
         case .saveAttachments: "Save attachments…"
         case .nextSection: "Next inbox section"
         case .help: "Keyboard shortcuts"
+        case .accept: "Accept invitation"
+        case .maybe: "Answer invitation maybe"
+        case .decline: "Decline invitation"
         case .goInbox: "Go to Inbox"
         case .goStarred: "Go to Starred"
         case .goSnoozed: "Go to Snoozed"
@@ -103,6 +111,9 @@ enum Command: String, CaseIterable, Identifiable {
         case .saveAttachments: "arrow.down.doc"
         case .nextSection: "rectangle.split.3x1"
         case .help: "keyboard"
+        case .accept: "checkmark.circle"
+        case .maybe: "questionmark.circle"
+        case .decline: "xmark.circle"
         case .goInbox: "tray"
         case .goStarred: "star"
         case .goSnoozed: "clock"
@@ -116,7 +127,18 @@ enum Command: String, CaseIterable, Identifiable {
     var needsThread: Bool {
         switch self {
         case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
+        case .accept, .maybe, .decline: true
         default: false
+        }
+    }
+
+    /// Answers the invitation card in the open conversation.
+    var answer: InvitationAnswer? {
+        switch self {
+        case .accept: .accept
+        case .maybe: .maybe
+        case .decline: .decline
+        default: nil
         }
     }
 
@@ -152,6 +174,7 @@ extension AppModel {
         case .saveAttachments:
             if let message = openThread?.filesMessageId { saveAttachments(message: message) } else { notify("No attachments in this conversation") }
         case .help: showsHelp.toggle()
+        case .accept, .maybe, .decline: if let answer = command.answer { answerInvitation(answer) }
         case .goInbox: source = .unifiedInbox
         case .goStarred: source = .starred
         case .goSnoozed: source = .role("snoozed")

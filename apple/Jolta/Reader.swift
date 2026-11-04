@@ -23,6 +23,11 @@ final class ReaderPage {
         get { links.onSaveAll }
         set { links.onSaveAll = newValue }
     }
+    /// Called for an invitation card's `x-rsvp:<message>/<action>` links.
+    var onRsvp: ((Int64, String) -> Void)? {
+        get { links.onRsvp }
+        set { links.onRsvp = newValue }
+    }
     private let links = LinkActions()
     private static var ruleList: WKContentRuleList?
 
@@ -168,6 +173,7 @@ private struct RemoteImages: URLSchemeHandler {
 private final class LinkActions {
     var onAttachment: ((Int64, UInt32) -> Void)?
     var onSaveAll: ((Int64) -> Void)?
+    var onRsvp: ((Int64, String) -> Void)?
 }
 
 @MainActor
@@ -191,6 +197,13 @@ private struct Decider: WebPage.NavigationDeciding {
                 } else if let index = UInt32(parts[1]) {
                     links.onAttachment?(message, index)
                 }
+            }
+            return .cancel
+        }
+        if action.navigationType == .linkActivated, let url, url.scheme == "x-rsvp" {
+            let parts = url.absoluteString.dropFirst("x-rsvp:".count).split(separator: "/")
+            if parts.count == 2, let message = Int64(parts[0]) {
+                links.onRsvp?(message, String(parts[1]))
             }
             return .cancel
         }
@@ -230,7 +243,8 @@ private struct Decider: WebPage.NavigationDeciding {
 
 struct ReaderView: View {
     let thread: ThreadView
-    let core: Core
+    let model: AppModel
+    var core: Core { model.core }
     let onAttachment: (Int64, UInt32) -> Void
     var onSaveAll: (Int64) -> Void = { _ in }
     var onUnsubscribe: () -> Void = {}
@@ -251,6 +265,53 @@ struct ReaderView: View {
         }
         reader.images.allowsRemote = imagesLoaded || trusted
         reader.show(html: thread.html)
+        if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil {
+            Task {
+                try? await Task.sleep(for: .milliseconds(150))
+                reflect()
+            }
+        }
+    }
+
+    /// The open card's choices and pending answer, marked on the page.
+    private func reflect() {
+        guard let invitation = thread.invitation else { return }
+        let chosen = model.pendingAnswer ?? invitation.answer?.invitationAnswer
+        reader.reflect(message: invitation.messageId, chosen: chosen, sending: model.pendingAnswer != nil,
+                       choices: model.answerChoices, day: invitation.occurrenceDay)
+    }
+
+    private func rsvp(_ message: Int64, _ action: String) {
+        if let answer = InvitationAnswer(name: action) {
+            return model.answerInvitation(answer, message: message)
+        }
+        switch action {
+        case "quiet":
+            model.rsvpPanel = nil
+            model.answerChoices.quiet.toggle()
+        case "note", "scope":
+            if case .note = model.rsvpPanel, action == "note" { model.rsvpPanel = nil; return }
+            if case .scope = model.rsvpPanel, action == "scope" { model.rsvpPanel = nil; return }
+            Task {
+                guard let frame = await reader.frame(of: ".jolta-rsvp-\(action)", message: message) else { return }
+                model.rsvpPanel = action == "note" ? .note(frame) : .scope(frame)
+            }
+        default: break
+        }
+    }
+
+    @ViewBuilder private var rsvpPanel: some View {
+        if let panel = model.rsvpPanel, let invitation = thread.invitation {
+            let anchor = panel.anchor
+            Group {
+                switch panel {
+                case .note: RsvpNotePanel(model: model, invitation: invitation)
+                case .scope: RsvpScopePanel(model: model, day: invitation.occurrenceDay ?? "this one")
+                }
+            }
+            .offset(x: max(8, anchor.minX - 6), y: anchor.maxY + 6)
+            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .topLeading)))
+        }
     }
 
     private func loadImages() {
@@ -325,6 +386,7 @@ struct ReaderView: View {
                 .webViewBackForwardNavigationGestures(.disabled)
                 .webViewMagnificationGestures(.disabled)
                 .webViewLinkPreviews(.disabled)
+                .overlay(alignment: .topLeading) { rsvpPanel }
                 .webViewContextMenu { element in
                     if let link = element.linkURL {
                         Button("Open Link…") { Decider.confirmOpen(link) }
@@ -345,9 +407,13 @@ struct ReaderView: View {
                     }
                 }
         }
+        .animation(.snappy(duration: 0.16), value: model.rsvpPanel)
+        .onChange(of: model.answerChoices) { reflect() }
+        .onChange(of: model.pendingAnswer) { reflect() }
         .onAppear {
             reader.onAttachment = onAttachment
             reader.onSaveAll = onSaveAll
+            reader.onRsvp = { rsvp($0, $1) }
             reader.images.core = core
             render()
             // `-JoltaLoadImages YES` loads remote images at once, for checking from scripts.
@@ -453,9 +519,31 @@ enum ReaderStyle {
     .jolta-strip-this { background: color-mix(in oklab, var(--tx) 13%, var(--bg)); color: var(--tx); font-weight: 600;
       box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 35%, transparent); }
     .jolta-strip .jolta-strip-beside { width: max-content; background: var(--bg); box-shadow: none; padding: 0 4px 0 5px; border-radius: 0; }
-    .jolta-invite-actions { display: flex; gap: 8px; margin-top: 12px; }
-    .jolta-join { padding: 3px 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
-      text-decoration: none; cursor: default; }
+    .jolta-invite-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+    .jolta-join { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
+      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
+    .jolta-rsvp + .jolta-join { margin-left: auto; }
+    .jolta-rsvp { display: inline-flex; gap: 6px; }
+    .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
+      border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
+      cursor: default; transition: background-color .16s ease, box-shadow .16s ease; }
+    .jolta-rsvp a:hover { background: var(--fill); }
+    .jolta-rsvp kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px; border-radius: 4px; text-align: center;
+      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3); font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
+    .jolta-rsvp svg { display: none; }
+    .jolta-rsvp a.jolta-chosen { padding-left: 8px; font-weight: 600; background: color-mix(in oklab, var(--tx) 11%, var(--bg));
+      box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 40%, transparent); }
+    .jolta-rsvp a.jolta-chosen svg { display: block; color: var(--tx); }
+    .jolta-sending .jolta-rsvp a.jolta-chosen { animation: jolta-sending .7s ease-in-out infinite alternate; }
+    @keyframes jolta-sending { to { opacity: .45; } }
+    .jolta-rsvp-options { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 8px; font-size: 12px; }
+    .jolta-rsvp-options a { display: inline-flex; align-items: center; gap: 5px; max-width: 240px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; color: var(--tx3); text-decoration: none; cursor: default; }
+    .jolta-rsvp-options a:hover { color: var(--tx2); }
+    .jolta-rsvp-options a.jolta-on { color: var(--tx); }
+    .jolta-rsvp-options .jolta-rsvp-note { display: block; }
+    .jolta-rsvp-quiet .jolta-tick { opacity: 0; }
+    .jolta-rsvp-quiet.jolta-on .jolta-tick { opacity: 1; }
     .jolta-join:hover { background: var(--fill); }
     .jolta-join.jolta-live { background: var(--acc); color: #fff; box-shadow: none; }
     .jolta-invite-reply { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 10px 14px; }

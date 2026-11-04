@@ -7,6 +7,7 @@ import WebKit
 /// place, people, calendar and reminders, and the description in the
 /// reader's locked-down web view.
 struct EventDetailCard: View {
+    let model: AppModel
     let cal: CalendarModel
     let detail: EventDetail
     let event: CalEvent
@@ -118,6 +119,9 @@ struct EventDetailCard: View {
                 row("Calendar", ([detail.calendarName] + [others, Self.reminders(detail.alarms)].compactMap { $0 }).joined(separator: " · "))
             }
             .padding(.top, 8)
+            if detail.canAnswer {
+                EventAnswerRow(model: model, detail: detail, event: event)
+            }
             if !detail.descriptionHtml.isEmpty {
                 WebView(reader.page)
                     .webViewBackForwardNavigationGestures(.disabled)

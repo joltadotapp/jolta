@@ -34,7 +34,7 @@ struct CalendarModeView: View {
                         let anchor = frame ?? CGRect(x: geo.size.width - 380, y: 60, width: 0, height: 0)
                         let x = anchor.maxX + 12 + 340 <= geo.size.width ? anchor.maxX + 12 : max(12, anchor.minX - 352)
                         let y = min(max(anchor.minY - 8, 56), max(56, geo.size.height - cardHeight - 12))
-                        EventDetailCard(cal: cal, detail: detail, event: event)
+                        EventDetailCard(model: model, cal: cal, detail: detail, event: event)
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
                             .offset(x: x, y: y)
                             .transition(.opacity)
