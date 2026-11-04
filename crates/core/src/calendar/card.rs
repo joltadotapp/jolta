@@ -1324,6 +1324,35 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// A calendar of `source` on account 1, shown.
+    fn calendar_of(j: &crate::Jolta, source: CalendarSource, access: crate::calendar::Access) -> CalendarId {
+        j.store
+            .write(|tx| {
+                let remote = store::RemoteCalendar { remote_id: "remote".into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None };
+                Ok(store::sync_calendar_list(tx, AccountId(1), source, &[remote])?[0].id)
+            })
+            .unwrap()
+    }
+
+    /// Graph writes no INTERVAL=1 where Exchange's invitation mail does.
+    #[test]
+    fn a_graph_series_with_the_same_rule_written_otherwise_keeps_its_answer() {
+        let (j, _) = jolta("card-graph-rule");
+        let graph = calendar_of(&j, CalendarSource::Graph, crate::calendar::Access::Owner);
+        let series = "DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\n";
+        let raw = version("v1", "sync", "REQUEST", 1, "20261104T080000Z", &format!("{series}RRULE:FREQ=WEEKLY;UNTIL=20261217T150000Z;INTERVAL=1;BYDAY=TH;WKST=SU\r\n"));
+        let id = import(&j, raw.as_bytes());
+        let mut copy = invitation::find(version("c", "sync", "REQUEST", 0, "20261104T080000Z", &format!("{series}RRULE:FREQ=WEEKLY;BYDAY=TH;WKST=SU;UNTIL=20261217T225959Z\r\n")).as_bytes(), &[ME.into()])
+            .remove(0)
+            .event;
+        copy.attendees.iter_mut().for_each(|a| a.response = Response::Accepted);
+        j.store.write(|tx| store::apply_item(tx, graph, "AAMk", None, &[copy], None, &Horizon::around(now(), Brussels))).unwrap();
+        let c = stored_card(&j, id, &raw);
+        assert_eq!((c.label, c.answer), ("Invitation", Some(Response::Accepted)), "the copy is this version, not an earlier one");
+        assert!(c.changes.is_empty());
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     #[test]
     fn an_occurrence_named_in_another_zone_is_the_same_occurrence() {
         let (j, _) = jolta("card-occurrence-zones");

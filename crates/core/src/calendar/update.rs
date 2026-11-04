@@ -12,7 +12,7 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 
 use super::invitation::{self, Invitation, Method};
-use super::{CalendarSource, EventData, Moment, series};
+use super::{CalendarSource, EventData, Moment, recur, series};
 use crate::blobs::Blobs;
 use crate::model::{AccountId, MessageId};
 use crate::{Result, store};
@@ -52,8 +52,7 @@ pub fn reply_holds(reply: &EventData, now: &EventData, here: Tz) -> bool {
 /// The same start, end and repeat rule. EXDATEs don't count: an
 /// occurrence cancelled doesn't move the others.
 pub fn same_time(a: &EventData, b: &EventData, here: Tz) -> bool {
-    let rule = |e: &EventData| e.recurrence.as_ref().map(|r| (r.rules.clone(), r.rdates.clone()));
-    a.span.bounds(here) == b.span.bounds(here) && rule(a) == rule(b)
+    a.span.bounds(here) == b.span.bounds(here) && recur::same_repeat(a.recurrence.as_ref(), &a.span, b.recurrence.as_ref(), &b.span, here)
 }
 
 /// What the user has of an invitation's other versions.
