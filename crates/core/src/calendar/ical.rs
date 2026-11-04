@@ -351,23 +351,22 @@ fn conference_entries(comp: &ICalendarComponent) -> Vec<Conference> {
         let Some(uri) = text(e).map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) else {
             continue;
         };
-        let (kind, provider) = match &e.name {
+        let kind = match &e.name {
             Prop::Conference => {
                 let features: Vec<String> =
                     e.parameters(&Param::Feature).filter_map(|v| v.as_text()).map(str::to_ascii_uppercase).collect();
                 let phone = uri.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("tel:"))
                     || (features.iter().any(|f| f == "PHONE") && !features.iter().any(|f| f == "VIDEO"));
-                (if phone { EntryKind::Phone } else { EntryKind::Video }, None)
+                if phone { EntryKind::Phone } else { EntryKind::Video }
             }
-            Prop::Other(n) if n.eq_ignore_ascii_case("X-MICROSOFT-SKYPETEAMSMEETINGURL") => {
-                (EntryKind::Video, Some(MeetingProvider::Teams))
-            }
-            Prop::Other(n) if n.eq_ignore_ascii_case("X-GOOGLE-CONFERENCE") => {
-                (EntryKind::Video, Some(MeetingProvider::Meet))
+            Prop::Other(n)
+                if n.eq_ignore_ascii_case("X-MICROSOFT-SKYPETEAMSMEETINGURL") || n.eq_ignore_ascii_case("X-GOOGLE-CONFERENCE") =>
+            {
+                EntryKind::Video
             }
             _ => continue,
         };
-        entries.push(Conference { kind, uri, provider, meeting_id: None, passcode: None });
+        entries.push(Conference { kind, uri, meeting_id: None, passcode: None });
     }
     entries
 }
@@ -757,7 +756,6 @@ pub(super) mod tests {
         let teams = entries(text);
         assert_eq!(teams.len(), 1);
         assert_eq!(teams[0].kind, EntryKind::Video);
-        assert_eq!(teams[0].provider, Some(MeetingProvider::Teams));
         assert!(teams[0].uri.starts_with("https://teams.microsoft.com/l/meetup-join/"));
     }
 
@@ -800,7 +798,6 @@ pub(super) mod tests {
         let meet = entries(text);
         assert_eq!(meet.len(), 1);
         assert_eq!(meet[0].uri, "https://meet.google.com/abc-defg-hij");
-        assert_eq!(meet[0].provider, Some(MeetingProvider::Meet));
     }
 
     #[test]

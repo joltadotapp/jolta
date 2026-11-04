@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use super::{Change, Known, SyncBatch, encode, http_client, http_error, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingProvider, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::RemoteCalendar;
@@ -31,7 +31,7 @@ const BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = r#"outlook.timezone="UTC", IdType="ImmutableId", odata.maxpagesize=200"#;
 const FIELDS: &str = "id,changeKey,type,seriesMasterId,iCalUId,subject,body,location,start,end,isAllDay,originalStart,\
 originalStartTimeZone,originalEndTimeZone,recurrence,showAs,sensitivity,responseStatus,attendees,organizer,isOrganizer,\
-isReminderOn,reminderMinutesBeforeStart,onlineMeeting,onlineMeetingProvider,categories,isCancelled";
+isReminderOn,reminderMinutesBeforeStart,onlineMeeting,categories,isCancelled";
 /// Requests per JSON batch, Graph's limit.
 const BATCH: usize = 20;
 
@@ -89,7 +89,6 @@ struct GraphEvent {
     is_reminder_on: bool,
     reminder_minutes_before_start: i64,
     online_meeting: Option<OnlineMeeting>,
-    online_meeting_provider: Option<String>,
     categories: Vec<String>,
     is_cancelled: bool,
     cancelled_occurrences: Vec<String>,
@@ -709,16 +708,11 @@ fn cancelled(ids: &[String]) -> Vec<Moment> {
 
 fn entries(g: &GraphEvent) -> Vec<Entry> {
     let Some(m) = &g.online_meeting else { return Vec::new() };
-    let provider = match g.online_meeting_provider.as_deref() {
-        Some("teamsForBusiness") => Some(MeetingProvider::Teams),
-        _ => None,
-    };
-    let video = m.join_url.iter().map(|uri| Entry { kind: EntryKind::Video, uri: uri.clone(), provider, meeting_id: None, passcode: None });
+    let video = m.join_url.iter().map(|uri| Entry { kind: EntryKind::Video, uri: uri.clone(), meeting_id: None, passcode: None });
     let numbers = m.toll_number.iter().chain(m.phones.iter().map(|p| &p.number)).filter(|n| !n.is_empty());
     let phones = numbers.map(|n| Entry {
         kind: EntryKind::Phone,
         uri: format!("tel:{}", n.replace(' ', "")),
-        provider,
         meeting_id: None,
         passcode: m.conference_id.clone(),
     });
@@ -799,6 +793,7 @@ mod tests {
     use chrono_tz::{America, Europe};
 
     use super::*;
+    use crate::calendar::MeetingProvider;
     use crate::calendar::recur::{self, Window};
 
     /// Where CLDR places Windows' `Romance Standard Time`.

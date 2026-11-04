@@ -589,6 +589,26 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// A one-event REQUEST mail whose VEVENT carries `lines`.
+    fn request(lines: &str) -> String {
+        format!(
+            "Subject: s\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n\
+             UID:u1\r\nSUMMARY:Sync\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\n{lines}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    #[test]
+    fn join_only_for_a_link_the_provider_table_knows() {
+        let (j, _) = jolta("card-join");
+        let claimed = event_card(&j, request("X-GOOGLE-CONFERENCE:https://evil.example/phish\r\n").as_bytes());
+        assert_eq!(claimed.join, None, "the property names Meet, the link doesn't");
+        let teams = event_card(&j, request("X-MICROSOFT-SKYPETEAMSMEETINGURL:https://evil.example/l/meetup-join/1\r\n").as_bytes());
+        assert_eq!(teams.join, None);
+        let real = event_card(&j, request("X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\n").as_bytes());
+        assert_eq!(real.join.unwrap().provider, "Google Meet");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     #[test]
     fn the_strip_across_the_autumn_clock_change() {
         let (tx, rx) = std::sync::mpsc::channel();
