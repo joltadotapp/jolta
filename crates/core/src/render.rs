@@ -12,6 +12,8 @@ use std::collections::HashSet;
 
 use mail_parser::{MessageParser, PartKind};
 
+use crate::smime::{Protection, Verdict};
+
 pub const REMOTE_SCHEME: &str = "x-remote";
 
 const CSP: &str = "default-src 'none'; img-src cid: data: x-remote:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
@@ -497,6 +499,7 @@ pub struct MessageView<'a> {
     /// Open messages show their body; others collapse to one line.
     pub open: bool,
     pub vip: bool,
+    pub protection: &'a Protection,
 }
 
 fn human_size(bytes: u64) -> String {
@@ -523,6 +526,10 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     for m in messages {
         let (html, styles) = extract_styles(&body_html(m.raw));
         let mut clean = clean_builder.clean(&html).to_string().replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
+        if let (Protection::Encrypted, Some(notice)) = (m.protection, m.protection.detail()) {
+            clean.insert_str(0, &format!("<p class=\"jolta-notice\">{}</p>", escape(&notice)));
+        }
+        let (chip, sigline) = protection_html(m.protection);
         let wide = has_layout(&clean);
         let files = listed(m.raw, &clean, m.id);
         if !files.is_empty() {
@@ -558,9 +565,9 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
         }
         css.push_str(&dark_attribute_rules(&clean, &scope));
         body.push_str(&format!(
-            "<details class=\"jolta-message\"{open}><summary><span class=\"jolta-from\">{from}</span>{vip}\
+            "<details class=\"jolta-message\"{open}><summary><span class=\"jolta-from\">{from}</span>{vip}{chip}\
              <span class=\"jolta-snippet\">{snippet}</span>{clip}<span class=\"jolta-date\">{date}</span>\
-             <div class=\"jolta-to\">to {to}</div></summary><div class=\"jolta-body{layout}\" id=\"m{id}\">{clean}</div></details>",
+             <div class=\"jolta-to\">to {to}</div>{sigline}</summary><div class=\"jolta-body{layout}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
             vip = if m.vip { "<span class=\"jolta-vip\">VIP</span>" } else { "" },
@@ -573,6 +580,34 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     }
     Rendered { html: document(app_css, &css, &body), remote_images: remote_by_message.iter().sum(), remote_by_message, files_message }
 }
+
+/// The summary row's chip and the open message's line under "to" for a
+/// signed or encrypted message. Encrypted mail says why in its body instead.
+fn protection_html(protection: &Protection) -> (String, String) {
+    let (label, tone, seal) = match protection {
+        Protection::None => return (String::new(), String::new()),
+        Protection::Encrypted => ("Encrypted", "", ""),
+        Protection::Signed(s) => match s.verdict {
+            Verdict::Trusted => ("Signed", "", SEAL),
+            Verdict::Untrusted { .. } => ("Signed", " jolta-muted", ""),
+            Verdict::OtherSender => ("Signed by other address", " jolta-warn", ""),
+            Verdict::Altered => ("Signature broken", " jolta-warn", ""),
+        },
+    };
+    let detail = escape(&protection.detail().unwrap_or_default());
+    let chip = format!("<span class=\"jolta-sig{tone}\" title=\"{detail}\">{seal}{label}</span>");
+    let line = match protection {
+        Protection::Encrypted => String::new(),
+        _ => format!("<div class=\"jolta-sigline{tone}\">{detail}</div>"),
+    };
+    (chip, line)
+}
+
+/// A seal with a check, for a signature macOS trusts.
+const SEAL: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\" viewBox=\"0 0 16 16\" aria-hidden=\"true\">\
+<path d=\"M8 1.2 9.8 2.6l2.3-.1.7 2.2 1.9 1.3-.8 2.1.8 2.1-1.9 1.3-.7 2.2-2.3-.1L8 14.8l-1.8-1.4-2.3.1-.7-2.2-1.9-1.3.8-2.1-.8-2.1 1.9-1.3.7-2.2 2.3.1z\" \
+fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linejoin=\"round\"/>\
+<path d=\"m5.5 8.2 1.7 1.7 3.3-3.6\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>";
 
 /// A paperclip for a collapsed message's summary line.
 const CLIP: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"11\" height=\"11\" viewBox=\"0 0 16 16\" aria-hidden=\"true\">\
@@ -684,7 +719,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     fn message(id: i64, raw: &[u8], open: bool) -> MessageView<'_> {
-        MessageView { id, from: "a", to: "b", date: "d", snippet: "s", raw, open, vip: false }
+        MessageView { id, from: "a", to: "b", date: "d", snippet: "s", raw, open, vip: false, protection: &Protection::None }
     }
 
     #[test]
@@ -703,6 +738,30 @@ input[value^="a"] { background: url(http://evil.test/5) }
         assert!(!body(2).contains("Save all"), "one file needs no Save all");
         assert!(r.html.contains("title=\"2 attachments\""), "the collapsed message counts its files");
         assert_eq!(r.files_message, Some(2), "the last message with files");
+    }
+
+    #[test]
+    fn a_signed_message_shows_its_chip_and_no_signature_file() {
+        let raw = include_bytes!("../../../tests/fixtures/smime/clear-signed.eml");
+        let signed = Protection::Signed(crate::smime::Signature {
+            signer_email: Some("signer@example.com".into()),
+            signer_name: Some("Test <Signer>".into()),
+            verdict: Verdict::Trusted,
+        });
+        let html = render_thread(&[MessageView { protection: &signed, ..message(1, raw, true) }], "").html;
+        assert!(html.contains("<span class=\"jolta-sig\" title=\"Signed"), "{html}");
+        assert!(html.contains("</svg>Signed</span>"), "a trusted signature has a seal");
+        assert!(html.contains("<div class=\"jolta-sigline\">Signed&#32;by&#32;Test&#32;&lt;Signer&gt;"), "{html}");
+        assert!(html.contains("notes.txt") && !html.contains("smime.p7s"));
+
+        let altered = Protection::Signed(crate::smime::Signature { signer_email: None, signer_name: None, verdict: Verdict::Altered });
+        let html = render_thread(&[MessageView { protection: &altered, ..message(1, raw, false) }], "").html;
+        assert!(html.contains("jolta-sig jolta-warn") && html.contains(">Signature broken</span>"));
+
+        let encrypted = include_bytes!("../../../tests/fixtures/smime/encrypted.eml");
+        let html = render_thread(&[MessageView { protection: &Protection::Encrypted, ..message(1, encrypted, true) }], "").html;
+        assert!(html.contains(">Encrypted</span>") && html.contains("jolta-notice") && html.contains("smime.p7m"));
+        assert!(!html.contains("jolta-sigline"), "the body says it instead");
     }
 
     #[test]
@@ -804,6 +863,6 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     fn view(raw: &[u8]) -> MessageView<'_> {
-        MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false }
+        MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false, protection: &Protection::None }
     }
 }

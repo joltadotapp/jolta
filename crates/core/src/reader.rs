@@ -4,6 +4,7 @@ use rusqlite::Connection;
 
 use crate::model::*;
 use crate::render::{self, MessageView, Rendered};
+use crate::smime::{self, Protection};
 use crate::{Jolta, Result, imap, store};
 
 #[derive(Clone, Debug)]
@@ -106,6 +107,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             (from, format_date(m.date, utc_offset))
         })
         .collect();
+    let protections: Vec<Protection> = messages.iter().zip(&raws).map(|(m, raw)| smime::inspect(raw, &m.from_addr)).collect();
     let last = messages.len().saturating_sub(1);
     let views: Vec<MessageView> = messages
         .iter()
@@ -119,6 +121,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             raw: &raws[i],
             open: i == last || !m.flags.has(Flags::SEEN),
             vip: m.vip,
+            protection: &protections[i],
         })
         .collect();
     let rendered = render::render_thread(&views, app_css);

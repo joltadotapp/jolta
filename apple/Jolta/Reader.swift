@@ -370,6 +370,11 @@ enum ReaderStyle {
     .jolta-from { font-weight: 600; width: 120px; flex: none; overflow: hidden; text-overflow: ellipsis; }
     .jolta-vip { flex: none; margin-left: -8px; padding: 0 5px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--tx3);
       color: var(--tx2); font-size: 9.5px; font-weight: 600; letter-spacing: .05em; line-height: 15px; }
+    .jolta-sig { flex: none; margin-left: -8px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px;
+      border-radius: 4px; box-shadow: inset 0 0 0 1px var(--tx3); color: var(--tx2); font-size: 9.5px; font-weight: 600;
+      letter-spacing: .05em; line-height: 15px; }
+    .jolta-sig.jolta-muted { color: var(--tx3); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx3) 55%, transparent); }
+    .jolta-sig.jolta-warn { color: var(--acc); box-shadow: inset 0 0 0 1px var(--acc); }
     .jolta-snippet { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--tx3); }
     .jolta-date { color: var(--tx3); font: 11.5px ui-monospace, SFMono-Regular, monospace; }
     .jolta-to { display: none; }
@@ -378,6 +383,11 @@ enum ReaderStyle {
     .jolta-message[open] .jolta-snippet { visibility: hidden; }
     .jolta-message[open] .jolta-to { display: block; flex-basis: 100%; color: var(--tx3); font-size: 12.5px;
       overflow: hidden; text-overflow: ellipsis; }
+    .jolta-sigline { display: none; }
+    .jolta-message[open] .jolta-sigline { display: block; flex-basis: 100%; color: var(--tx3); font-size: 12.5px;
+      overflow: hidden; text-overflow: ellipsis; }
+    .jolta-message[open] .jolta-sigline.jolta-warn { color: var(--acc); }
+    .jolta-notice { margin: 0 0 18px; color: var(--tx2); }
     .jolta-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
     .jolta-body img { max-width: 100%; height: auto; }
     body:not(.jolta-images):not(#jolta-a):not(#jolta-b) .jolta-body img[src^="x-remote:"] { display: none !important; }
