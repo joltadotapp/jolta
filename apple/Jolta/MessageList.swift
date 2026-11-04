@@ -95,8 +95,11 @@ struct MessageList: NSViewRepresentable {
             DispatchQueue.main.async { [model] in if model.listCount != rows { model.listCount = rows } }
             if full {
                 table.reloadData()
-                table.scrollRowToVisible(0)
-                if count > 0 { table.selectRowIndexes([0], byExtendingSelection: false) }
+                // A thread opened before the list was built, such as from a
+                // notification while calendar mode showed, keeps its row.
+                let row = model.selectedThreadID.flatMap { model.rows(of: [$0]).first } ?? 0
+                table.scrollRowToVisible(row)
+                if count > 0 { table.selectRowIndexes([row], byExtendingSelection: false) }
                 if !reportedLaunch, count > 0 {
                     reportedLaunch = true
                     DispatchQueue.main.async {
