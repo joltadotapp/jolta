@@ -156,3 +156,71 @@ extension AppModel {
         }
     }
 }
+
+/// Calendar mode's keys, in one table for the key handler and the help sheet.
+enum CalendarCommand: String, CaseIterable, Identifiable {
+    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, dayPanel, mail, calendar, joinNext
+
+    var id: String { rawValue }
+
+    var keys: String {
+        switch self {
+        case .today: "t"
+        case .next: "j"
+        case .previous: "k"
+        case .day: "d"
+        case .workWeek: "x"
+        case .week: "w"
+        case .month: "m"
+        case .agenda: "a"
+        case .toggleCalendar: "1–9"
+        case .move: "↑↓←→"
+        case .open: "↩"
+        case .close: "esc"
+        case .dayPanel: "⇧C"
+        case .mail: "⌘1"
+        case .calendar: "⌘2"
+        case .joinNext: "⇧⌘J"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .today: "Today"
+        case .next: "Next period"
+        case .previous: "Previous period"
+        case .day: "Day"
+        case .workWeek: "Work week"
+        case .week: "Week"
+        case .month: "Month"
+        case .agenda: "Agenda"
+        case .toggleCalendar: "Show or hide calendar 1 to 9"
+        case .move: "Move between events"
+        case .open: "Open event"
+        case .close: "Close event"
+        case .dayPanel: "Today beside mail"
+        case .mail: "Mail"
+        case .calendar: "Calendar"
+        case .joinNext: "Join next meeting"
+        }
+    }
+
+    /// The command a key typed in calendar mode runs.
+    static func forKey(_ event: NSEvent) -> CalendarCommand? {
+        switch event.keyCode {
+        case 123, 124, 125, 126: return .move
+        case 36, 76: return .open
+        case 53: return .close
+        default: break
+        }
+        if digit(event) != nil { return .toggleCalendar }
+        guard let typed = event.charactersIgnoringModifiers?.lowercased(), typed.count == 1 else { return nil }
+        if typed == "c", event.modifierFlags.contains(.shift) { return .dayPanel }
+        return allCases.first { $0.keys == typed }
+    }
+
+    /// 1 to 9 by the key's place on the top row, so AZERTY's unshifted & é " work too.
+    static func digit(_ event: NSEvent) -> Int? {
+        [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9][event.keyCode]
+    }
+}

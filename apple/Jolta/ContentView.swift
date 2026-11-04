@@ -7,29 +7,25 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        HStack(spacing: 0) {
-            Sidebar(model: model)
-                .frame(width: Theme.sidebarWidth)
-                .background(Color(Theme.side))
-                .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
-            // The chosen width, sized before the reader (which keeps its 480 pt
-            // minimum): a narrow window takes width from the list first.
-            ListColumn(model: model)
-                .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
-                .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
-                .layoutPriority(1)
-                .zIndex(1)
-            ReaderColumn(model: model)
-                .frame(minWidth: 480, maxWidth: .infinity)
-                .background(Color(Theme.reader))
+        Group {
+            if model.mode == .calendar {
+                CalendarModeView(model: model)
+            } else {
+                mail
+            }
+        }
+        .sheet(isPresented: Binding(get: { model.showsCalendarIntro }, set: { if !$0 { model.finishCalendarIntro() } })) {
+            CalendarIntroSheet(model: model)
         }
         .overlay(alignment: .trailing) {
             // Over the list and reader; the list stays underneath for the keys.
-            if model.isInboxZero {
+            if model.isInboxZero, model.mode == .mail {
                 GeometryReader { geo in
+                    let panel: CGFloat = model.showsDayPanel ? 300 : 0
                     InboxZero(compose: model.startCompose)
-                        .frame(width: geo.size.width - Theme.sidebarWidth)
+                        .frame(width: geo.size.width - Theme.sidebarWidth - panel)
                         .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.trailing, panel)
                 }
                 .transition(.opacity)
             }
@@ -122,6 +118,31 @@ struct ColumnResizer: NSViewRepresentable {
 }
 
 extension ContentView {
+    private var mail: some View {
+        HStack(spacing: 0) {
+            Sidebar(model: model)
+                .frame(width: Theme.sidebarWidth)
+                .background(Color(Theme.side))
+                .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+            // The chosen width, sized before the reader (which keeps its 480 pt
+            // minimum): a narrow window takes width from the list first.
+            ListColumn(model: model)
+                .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
+                .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
+                .layoutPriority(1)
+                .zIndex(1)
+            ReaderColumn(model: model)
+                .frame(minWidth: model.showsDayPanel ? 360 : 480, maxWidth: .infinity)
+                .background(Color(Theme.reader))
+            if model.showsDayPanel {
+                DayPanel(model: model)
+                    .frame(width: 300)
+                    .transition(.move(edge: .trailing))
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: model.showsDayPanel)
+    }
+
     private func emptyTrash(_ list: ListSource) -> Confirmation {
         let accounts = model.trashFolders(list).compactMap { box in model.accounts.first { $0.id == box.accountId }?.title }
         return Confirmation(

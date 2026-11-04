@@ -36,6 +36,8 @@ for t in $TESTS; do
 		"$FIXTURES/01-numbers.eml" "$FIXTURES/03-numbers-thanks.eml" "$FIXTURES/04-lunch.eml" \
 		"$FIXTURES/05-deals.eml" "$FIXTURES/06-invoice.eml" >/dev/null
 	"$JOLTA" --data-dir "$dir" import me@test.invalid sent "$FIXTURES/02-numbers-reply.eml" >/dev/null
+	"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-work.ics" --name Work --color '#4f6fae' >/dev/null
+	"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-personal.ics" --name Personal --color '#9a5a8a' >/dev/null
 	ONLY+=("-only-testing:JoltaUITests/Journeys/$t")
 done
 

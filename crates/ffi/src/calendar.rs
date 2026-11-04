@@ -64,6 +64,9 @@ pub struct CalendarInfo {
 pub struct CalendarAccount {
     pub account: AccountInfo,
     pub calendar_on: bool,
+    /// Turning calendar on needs the browser sign-in from
+    /// `begin_calendar_consent` first (Google and Microsoft).
+    pub needs_consent: bool,
     pub calendars: Vec<CalendarInfo>,
 }
 
@@ -247,6 +250,7 @@ impl Core {
                 .into_iter()
                 .map(|a| CalendarAccount {
                     calendar_on: on.get(&a.id).copied().unwrap_or(false),
+                    needs_consent: sync::needs_consent(&a),
                     calendars: by_account.remove(&Some(a.id)).unwrap_or_default(),
                     account: a.into(),
                 })

@@ -18,6 +18,13 @@ final class Journeys: XCTestCase {
         app.launchArguments = ["-JoltaTestData", name]
         app.launch()
         addTeardownBlock { @MainActor in app.terminate() }
+        // With another Jolta running (the one installed on this Mac) the test
+        // instance starts in the background and SwiftUI never presents the
+        // main window; the menu bar item's Open Jolta does.
+        if !app.windows.firstMatch.waitForExistence(timeout: 3) {
+            app.statusItems.firstMatch.click()
+            app.menuItems["Open Jolta"].click()
+        }
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 15), "the inbox shows the seeded mail")
         return app
     }
@@ -161,5 +168,48 @@ final class Journeys: XCTestCase {
         search.typeText("from:bob\n")
         XCTAssertTrue(text(app, "Weekly deals").waitForNonExistence(timeout: 5), "other senders leave the list")
         XCTAssertTrue(visible(app, "Lunch on Friday"))
+    }
+
+    /// ⌘2 opens the calendar on this week; J and K move a week and back;
+    /// an event opens with Return; its calendar's number hides it.
+    func testCalendarKeys() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        let week = title.label
+        XCTAssertTrue(week.contains("Week"), "the week view is the default: \(week)")
+
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label != week }, "J moves to the next week")
+        app.typeKey("k", modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label == week }, "K comes back")
+
+        let climbing = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Climbing, 10:00 to 12:30")).firstMatch
+        XCTAssertTrue(climbing.waitForExistence(timeout: 5), "the week shows the fixture's Saturday event with its full label")
+        climbing.click()
+        app.typeKey(.return, modifierFlags: [])
+        let detail = app.staticTexts.matching(identifier: "event-detail-title").firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "Return opens the selected event")
+        XCTAssertEqual(detail.value as? String ?? detail.label, "Climbing", "the detail shows the event's title")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(detail.waitForNonExistence(timeout: 5), "Esc closes the detail")
+
+        let personal = app.descendants(matching: .any).matching(identifier: "calendar-Personal").firstMatch
+        XCTAssertTrue(personal.waitForExistence(timeout: 5), "the sidebar lists the Personal calendar")
+        let key = try XCTUnwrap((personal.value as? String)?.split(separator: " ").last.map(String.init), "Personal has a number key")
+        app.typeKey(key, modifierFlags: [])
+        XCTAssertTrue(climbing.waitForNonExistence(timeout: 5), "\(key) hides the Personal calendar's events")
+        app.typeKey(key, modifierFlags: [])
+        XCTAssertTrue(climbing.waitForExistence(timeout: 5), "\(key) again shows them")
+    }
+
+    private func waitUntil(_ done: () -> Bool) -> Bool {
+        let deadline = Date() + 5
+        while Date() < deadline {
+            if done() { return true }
+            RunLoop.current.run(until: Date() + 0.1)
+        }
+        return done()
     }
 }

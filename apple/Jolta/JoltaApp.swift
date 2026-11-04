@@ -1,3 +1,4 @@
+@preconcurrency import JoltaFFI
 import SwiftUI
 
 @main
@@ -19,6 +20,7 @@ struct JoltaApp: App {
             }
             .frame(minWidth: 1140, minHeight: 600)
             .background(WindowFrameMemory(name: "Jolta main window"))
+            .onOpenURL { url in model?.subscribe(link: url) }
             .task {
                 guard model == nil else { return }
                 await ReaderPage.prepare()
@@ -50,6 +52,15 @@ struct JoltaApp: App {
                     .disabled(model?.compose != nil || (model?.openThread == nil && model?.searchFocused != true))
             }
             CommandMenu("Go") {
+                Button("Mail") { model?.mode = .mail }
+                    .keyboardShortcut("1")
+                Button("Calendar") { model?.mode = .calendar }
+                    .keyboardShortcut("2")
+                Button(model?.showsDayPanel == true ? "Hide Today Beside Mail" : "Show Today Beside Mail") { model?.showsDayPanel.toggle() }
+                    .disabled(model?.mode != .mail)
+                Button("Join Next Meeting") { model?.joinNextMeeting() }
+                    .keyboardShortcut("j", modifiers: [.command, .shift])
+                Divider()
                 Button("Command Palette") { model?.palette = .commands }
                     .keyboardShortcut("k")
                 Button("Keyboard Shortcuts") { model?.showsHelp.toggle() }
@@ -107,7 +118,19 @@ struct MenuBarLabel: View {
     var body: some View {
         let unread = model.map { _ = $0.listRevision; return $0.unreadCount("in:inbox") } ?? 0
         Image(systemName: unread > 0 ? "envelope.badge" : "envelope")
-        if unread > 0 { Text("\(unread)") }
+        if let model, let next = model.calendar.nextMeeting, let text = Self.soon(next, now: model.calendar.now) {
+            Text(text)
+        } else if unread > 0 {
+            Text("\(unread)")
+        }
+    }
+
+    /// "Standup in 12 min" or "Standup now", within the hour before it starts and while it runs.
+    static func soon(_ next: NextMeetingRecord, now: Date) -> String? {
+        let t = Int64(now.timeIntervalSince1970)
+        guard next.start - t <= 3600, t < next.end else { return nil }
+        let title = next.title.count > 24 ? String(next.title.prefix(23)) + "…" : next.title
+        return "\(title) \(CalendarModel.countdown(start: next.start, end: next.end, now: now))"
     }
 }
 
@@ -121,6 +144,18 @@ struct MenuBarContent: View {
             NSApp.activate()
         }
         .keyboardShortcut("o")
+        if let model, let next = model.calendar.nextMeeting {
+            Divider()
+            Text("\(next.title), \(CalendarModel.countdown(start: next.start, end: next.end, now: model.calendar.now))")
+            Button("Join \(next.meeting.provider.name)") { CalendarModel.join(next.meeting) }
+            Button("Show in Calendar") {
+                openWindow(id: "main")
+                NSApp.activate()
+                model.mode = .calendar
+                model.calendar.reveal(eventID: next.eventId, time: .timed(start: next.start, end: next.end))
+            }
+            Divider()
+        }
         Button("Sync Now") { model?.core.syncNow() }
             .disabled(model == nil)
         CheckForUpdatesButton()

@@ -1,0 +1,154 @@
+@preconcurrency import JoltaFFI
+import AppKit
+
+/// The app's side of the calendar: switching modes, keys, reminders and joining.
+extension AppModel {
+    func startCalendar() {
+        calendar.onChange = { [weak self] in self?.scheduleReminders() }
+        notifier.onOpenEvent = { [weak self] id, time in
+            self?.showMainWindow()
+            self?.mode = .calendar
+            self?.calendar.reveal(eventID: id, time: time)
+        }
+        notifier.onJoin = { [weak self] id, time in self?.join(eventID: id, time: time) }
+        KeyRouter.shared.calendarHandler = { [weak self] event in self?.handleCalendarKey(event) ?? false }
+        scheduleReminders()
+        // The 48 hours ahead move on; pick up reminders that came into range.
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3600))
+                self?.scheduleReminders()
+            }
+        }
+        // Launch arguments for checking the calendar from scripts:
+        // `-JoltaMode calendar -JoltaSpan month -JoltaOpenEvent "Design review" -JoltaDayPanel YES`.
+        let defaults = UserDefaults.standard
+        if let span = defaults.string(forKey: "JoltaSpan").flatMap(CalendarSpan.init(rawValue:)) { calendar.span = span }
+        if defaults.string(forKey: "JoltaDayPanel") != nil { showsDayPanel = defaults.bool(forKey: "JoltaDayPanel") }
+        if defaults.string(forKey: "JoltaMode") == "calendar" { mode = .calendar }
+        if let title = defaults.string(forKey: "JoltaOpenEvent"), let event = calendar.events.first(where: { $0.title == title }) {
+            calendar.openDetail(event)
+        }
+        if let bench = CalendarBench.shared {
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                if let window = KeyRouter.shared.window { bench.run(window: window) { [weak self] in self?.mode = .calendar } }
+            }
+        }
+    }
+
+    func modeChanged() {
+        palette = nil
+        showsHelp = false
+        if mode == .calendar {
+            calendar.reloadCalendars()
+            calendar.refresh()
+            if calendar.hasNoCalendars, !UserDefaults.standard.bool(forKey: Self.key("CalendarIntroDone")) { showsCalendarIntro = true }
+        } else {
+            calendar.closeDetail()
+            requestListFocus()
+        }
+    }
+
+    func finishCalendarIntro() {
+        UserDefaults.standard.set(true, forKey: Self.key("CalendarIntroDone"))
+        showsCalendarIntro = false
+    }
+
+    /// Reschedules the next 48 hours of reminders a moment after the last
+    /// change, so a sync that touches many calendars reschedules once.
+    func scheduleReminders() {
+        reminderTask?.cancel()
+        let core = core, notifier = notifier
+        reminderTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            let now = Int64(Date.now.timeIntervalSince1970)
+            guard let reminders = try? core.calendarReminders(from: now, to: now + 48 * 3600) else { return }
+            await notifier.schedule(reminders: reminders)
+        }
+    }
+
+    /// The palette's and ⇧⌘J's Join next meeting.
+    func joinNextMeeting() {
+        calendar.refreshNextMeeting()
+        guard let next = calendar.nextMeeting else { return notify("No online meeting in the next week") }
+        CalendarModel.join(next.meeting)
+        notify("Joining \(next.title)")
+    }
+
+    /// A `webcal://` link clicked anywhere: asks, then subscribes and shows the calendar.
+    func subscribe(link url: URL) {
+        guard ["webcal", "webcals"].contains(url.scheme?.lowercased() ?? "") else { return }
+        let alert = NSAlert()
+        alert.messageText = "Subscribe to this calendar?"
+        alert.informativeText = url.absoluteString
+        alert.addButton(withTitle: "Subscribe")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        notify("Subscribing…")
+        Task {
+            do {
+                let info = try await core.subscribeCalendar(url: url.absoluteString)
+                notify(info.syncError.map { "Subscribed to \(info.name), but the download failed: \($0)" } ?? "Subscribed to \(info.name)")
+                calendar.reloadCalendars()
+                calendar.refresh()
+                mode = .calendar
+            } catch {
+                notify("Couldn't subscribe: \(error)")
+            }
+        }
+    }
+
+    private func join(eventID: Int64, time: OccurrenceTime?) {
+        if let meeting = (try? core.calendarEvent(eventId: eventID, time: time, appCss: ""))?.meeting {
+            CalendarModel.join(meeting)
+        }
+    }
+
+    private func showMainWindow() {
+        NSApp.activate()
+        KeyRouter.shared.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Calendar mode's keys, and ⇧C in mail. Returns false to leave a key to mail.
+    func handleCalendarKey(_ event: NSEvent) -> Bool {
+        CalendarBench.shared?.mark("key received")
+        if event.modifierFlags.contains(.command) { return false }
+        let command = CalendarCommand.forKey(event)
+        if mode == .mail {
+            guard command == .dayPanel, palette == nil, !showsHelp, compose == nil else { return false }
+            showsDayPanel.toggle()
+            return true
+        }
+        if palette != nil || showsHelp {
+            if event.keyCode == 53 { palette = nil; showsHelp = false }
+            return true
+        }
+        if event.characters == "?" { showsHelp = true; return true }
+        let cal = calendar
+        switch command {
+        case .today: cal.goToday()
+        case .next: cal.shift(1); CalendarBench.shared?.mark("key handled")
+        case .previous: cal.shift(-1); CalendarBench.shared?.mark("key handled")
+        case .day: cal.span = .day
+        case .workWeek: cal.span = .workWeek
+        case .week: cal.span = .week
+        case .month: cal.span = .month
+        case .agenda: cal.span = .agenda
+        case .toggleCalendar: if let n = CalendarCommand.digit(event) { cal.toggleCalendar(number: n) }
+        case .move:
+            let move: CalendarModel.SelectionMove = switch event.keyCode {
+            case 123: .left
+            case 124: .right
+            case 125: .down
+            default: .up
+            }
+            cal.moveSelection(move)
+        case .open: cal.openSelected()
+        case .close: if cal.detail != nil { cal.closeDetail() } else { cal.selectedID = nil }
+        case .dayPanel, .mail, .calendar, .joinNext, nil: break
+        }
+        return true
+    }
+}

@@ -118,6 +118,18 @@ struct PaletteView: View {
                 model.confirmEmpty = model.source
             })
         }
+        out.append(PaletteItem(id: "join-next", title: "Join next meeting", detail: model.calendar.nextMeeting?.title ?? "",
+                               icon: "video", keys: CalendarCommand.joinNext.keys) { [model] in model.joinNextMeeting() })
+        if model.mode == .mail {
+            out.append(PaletteItem(id: "calendar", title: "Go to Calendar", icon: "calendar", keys: CalendarCommand.calendar.keys) { [model] in
+                model.mode = .calendar
+            })
+            out.append(PaletteItem(id: "day-panel", title: model.showsDayPanel ? "Hide today beside mail" : "Show today beside mail",
+                                   icon: "sidebar.right", keys: CalendarCommand.dayPanel.keys) { [model] in model.showsDayPanel.toggle() })
+        } else {
+            out.append(PaletteItem(id: "mail", title: "Go to Mail", icon: "tray", keys: CalendarCommand.mail.keys) { [model] in model.mode = .mail })
+        }
+        out.append(PaletteItem(id: "calendar-settings", title: "Calendar Settings…", icon: "gearshape") { [model] in model.openSettings(.calendar) })
         out.append(PaletteItem(id: "sync", title: "Sync now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
             model.showsHelp = true
@@ -399,6 +411,16 @@ struct HelpView: View {
                 HStack(spacing: 10) {
                     KeyCap(key: "⌘N").frame(width: 52, alignment: .leading)
                     Text("New message").foregroundStyle(Color(Theme.text2))
+                }
+            }
+            .font(.system(size: 12.5))
+            Text("Calendar").font(.system(size: 13, weight: .semibold)).padding(.top, 4)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
+                ForEach(CalendarCommand.allCases) { c in
+                    HStack(spacing: 10) {
+                        KeyCap(key: c.keys.uppercased()).frame(width: 52, alignment: .leading)
+                        Text(c.title).foregroundStyle(Color(Theme.text2))
+                    }
                 }
             }
             .font(.system(size: 12.5))

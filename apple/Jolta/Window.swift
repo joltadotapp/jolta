@@ -10,6 +10,8 @@ final class KeyRouter {
     weak var window: NSWindow?
     /// The message list's key handler; returns true when it used the key.
     var handler: ((NSEvent) -> Bool)?
+    /// Calendar mode's keys, and ⇧C for the day panel in mail; asked first.
+    var calendarHandler: ((NSEvent) -> Bool)?
     private var monitor: Any?
 
     func install() {
@@ -23,6 +25,7 @@ final class KeyRouter {
         guard let window, event.window === window, window.attachedSheet == nil else { return false }
         guard event.modifierFlags.intersection([.command, .control]).isEmpty else { return false }
         if let text = window.firstResponder as? NSTextView, text.isEditable { return false }
+        if calendarHandler?(event) == true { return true }
         return handler?(event) ?? false
     }
 }

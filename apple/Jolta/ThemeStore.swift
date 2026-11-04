@@ -58,6 +58,12 @@ final class ThemeStore {
         Self.live.withLock { $0 = active }
     }
 
+    /// The tokens on screen for one appearance, for colors mixed from them
+    /// while AppKit draws (calendar colors), on whatever thread it draws.
+    nonisolated static func tokens(_ mode: ThemeMode) -> ThemeTokens {
+        live.withLock { $0[mode] }
+    }
+
     var dark: ThemePalette { ThemePalette.named(darkID) ?? .graphiteDark }
     var light: ThemePalette { ThemePalette.named(lightID) ?? .graphiteLight }
 

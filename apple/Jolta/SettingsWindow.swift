@@ -3,7 +3,7 @@ import SwiftUI
 
 /// One page of the settings window.
 enum SettingsPage: Hashable {
-    case general, account(Int64), sections, vips, snippets, ai, agents, activity, about
+    case general, account(Int64), calendar, sections, vips, snippets, ai, agents, activity, about
 }
 
 /// The settings window: pages in a searchable sidebar on the left, the
@@ -37,6 +37,8 @@ struct SettingsView: View {
             (nil, [Item(page: .general, title: "General", icon: "gearshape",
                         keywords: "notifications banners new mail vip contacts address suggestions autocomplete")]),
             ("Accounts", accounts),
+            ("Calendar", [Item(page: .calendar, title: "Calendar", icon: "calendar",
+                               keywords: "calendars google microsoft caldav icloud subscription webcal feed holidays color busy reminders notifications")]),
             ("Inbox", [
                 Item(page: .sections, title: "Sections", icon: "rectangle.split.3x1", keywords: "split inbox tabs query newsletters notifications"),
                 Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people"),
@@ -122,6 +124,7 @@ struct SettingsView: View {
                 } else {
                     SettingsScroll { Text("This account was removed.").foregroundStyle(Color(Theme.text3)) }
                 }
+            case .calendar: CalendarSettings(model: model)
             case .sections: SectionsSettings(model: model)
             case .vips: VIPSettings(model: model)
             case .snippets: SnippetsSettings(model: model)

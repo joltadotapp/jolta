@@ -12,6 +12,20 @@
 	<integer>3600</integer>
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Calendar subscription</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>webcal</string>
+				<string>webcals</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+		</dict>
+	</array>
 	<key>NSContactsUsageDescription</key>
 	<string>Jolta suggests people from Contacts when you type in To, Cc and Bcc. Contacts stay on this Mac.</string>
 </dict>
