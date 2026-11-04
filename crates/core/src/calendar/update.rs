@@ -196,11 +196,14 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
             before = Some((version, events));
         }
     }
-    // A series the calendar holds cancelled cancels each of its occurrences.
+    // A series the calendar holds cancelled cancels each of its occurrences,
+    // unless the occurrence's invitation is newer, as a reinstated one is.
+    // Graph keeps no SEQUENCE, so its cancelled series covers them all.
     if rid.is_some()
         && sent.method != Method::Cancel
         && let Some(master) = store::stored_event(seen.conn, uid, None, Some(seen.account), seen.here)?
         && master.event.status == EventStatus::Cancelled
+        && (store::calendar(seen.conn, master.calendar_id)?.source == CalendarSource::Graph || master.event.sequence >= this.sequence)
     {
         newest = Some((Version { sequence: master.event.sequence, stamp: None }, Method::Cancel));
     }

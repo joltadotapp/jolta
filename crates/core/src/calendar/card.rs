@@ -1591,10 +1591,17 @@ pub(crate) mod tests {
         let series = version("s", "standup", "REQUEST", 0, "20261104T070000Z", "DTSTART:20261110T083000Z\r\nDTEND:20261110T084500Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n");
         let mut master = invitation::find(series.as_bytes(), &[ME.into()]).remove(0).event;
         master.status = EventStatus::Cancelled;
-        j.store.write(|tx| store::apply_item(tx, calendar, "standup.ics", None, &[master], None, &Horizon::around(now(), Brussels))).unwrap();
+        master.sequence = 2;
+        let store_master = |m: &EventData| j.store.write(|tx| store::apply_item(tx, calendar, "standup.ics", None, std::slice::from_ref(m), None, &Horizon::around(now(), Brussels))).unwrap();
+        store_master(&master);
         let c = stored_card(&j, id, &one);
         assert_eq!((c.outdated, &c.answering), (true, &None));
         assert_eq!(notes(&c)[0], "The organizer has since cancelled this meeting");
+
+        let reinstated = version("o3", "standup", "REQUEST", 3, "20261104T100000Z", "RECURRENCE-ID:20261117T083000Z\r\nDTSTART:20261118T133000Z\r\nDTEND:20261118T134500Z\r\nSUMMARY:Standup\r\n");
+        let later = import(&j, reinstated.as_bytes());
+        let c = stored_card(&j, later, &reinstated);
+        assert!(!c.outdated && c.answering.is_some(), "an occurrence invited after the series was cancelled stays answerable");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

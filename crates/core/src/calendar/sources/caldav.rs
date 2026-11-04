@@ -478,7 +478,8 @@ impl CalDav {
             Some(etag) => etag,
             None => match self.versioned(&url).await? {
                 None => return Ok(Gone::Already),
-                Some((text, _)) if !same_version(known, &text, here) => return Ok(Gone::Changed),
+                // Still quiet too, or the DELETE could tell the organizer.
+                Some((text, _)) if !same_version(known, &text, here) || remove::quiet(&text, &known.uid).is_some() => return Ok(Gone::Changed),
                 Some((_, etag)) => etag,
             },
         };
@@ -658,6 +659,11 @@ fn cached(event: &rsvp::Stored) -> Option<(String, Option<String>)> {
 mod tests {
 
     /// Meeting `a` at a SEQUENCE, as the server stores it.
+    /// Meeting `a` as the attendee's copy holds it after Jolta quieted it.
+    fn quiet_meeting(sequence: i64) -> String {
+        meeting(sequence).replace("ORGANIZER:", "ORGANIZER;SCHEDULE-AGENT=CLIENT:")
+    }
+
     fn meeting(sequence: i64) -> String {
         format!(
             "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSEQUENCE:{sequence}\r\n\
@@ -666,15 +672,15 @@ mod tests {
     }
 
     /// A CalDAV server on localhost that answers each request in turn with
-    /// a status, an ETag or none, and for a GET meeting `a` at a SEQUENCE.
+    /// a status, an ETag or none, and a body.
     /// It returns each request's first line, with its If-Match when it has one.
-    async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<i64>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
+    async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<String>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let mut seen = Vec::new();
-            for (status, etag, sequence) in answers {
+            for (status, etag, body) in answers {
                 let Ok(Ok((mut socket, _))) = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await else { break };
                 let mut request = vec![0; 16384];
                 let n = socket.read(&mut request).await.unwrap();
@@ -685,7 +691,7 @@ mod tests {
                     Some(etag) => format!("{first} If-Match {etag}"),
                     None => first,
                 });
-                let body = sequence.map(meeting).unwrap_or_default();
+                let body = body.unwrap_or_default();
                 let etag = etag.map(|e| format!("ETag: {e}\r\n")).unwrap_or_default();
                 let reply = format!("HTTP/1.1 {status}\r\n{etag}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(reply.as_bytes()).await.unwrap();
@@ -727,7 +733,7 @@ mod tests {
     /// reinstated: the 412 stops the removal, with no second try.
     #[tokio::test]
     async fn a_copy_changed_since_the_sync_is_left_alone() {
-        let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", Some("\"2\""), None), ("200 OK", Some("\"2\""), Some(1)), ("204 No Content", None, None)]).await;
+        let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", Some("\"2\""), None), ("200 OK", Some("\"2\""), Some(meeting(1))), ("204 No Content", None, None)]).await;
         assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Changed);
         assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\""], "no GET, PUT or DELETE after the 412");
     }
@@ -737,23 +743,27 @@ mod tests {
     /// Jolta read.
     #[tokio::test]
     async fn a_put_without_an_etag_deletes_only_the_same_version() {
-        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(1)), ("204 No Content", None, None)]).await;
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(meeting(1))), ("204 No Content", None, None)]).await;
         assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Changed);
         assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics"], "the organizer changed it in between");
 
-        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(0)), ("204 No Content", None, None)]).await;
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(quiet_meeting(0))), ("204 No Content", None, None)]).await;
         assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Deleted(None));
         assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics", "DELETE /cal/a.ics If-Match \"3\""]);
+
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None), ("200 OK", Some("\"3\""), Some(meeting(0))), ("204 No Content", None, None)]).await;
+        assert_eq!(dav.remove(&calendar, &stored(Some("\"1\""))).await.unwrap(), Gone::Changed);
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics If-Match \"1\"", "GET /cal/a.ics"], "the copy lost SCHEDULE-AGENT=CLIENT, so a DELETE could tell the organizer");
     }
 
     #[tokio::test]
     async fn a_copy_without_an_etag_is_never_written() {
-        let (dav, calendar, server) = caldav_server(vec![("200 OK", None, Some(0)), ("204 No Content", None, None), ("204 No Content", None, None)]).await;
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", None, Some(meeting(0))), ("204 No Content", None, None), ("204 No Content", None, None)]).await;
         let err = dav.remove(&calendar, &stored(None)).await.unwrap_err();
         assert!(err.to_string().contains("no version tag (ETag)"), "{err}");
         assert_eq!(server.await.unwrap(), ["GET /cal/a.ics"]);
 
-        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"4\""), Some(2)), ("204 No Content", None, None)]).await;
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"4\""), Some(meeting(2))), ("204 No Content", None, None)]).await;
         assert_eq!(dav.remove(&calendar, &stored(None)).await.unwrap(), Gone::Changed, "newer than the stored copy");
         assert_eq!(server.await.unwrap(), ["GET /cal/a.ics"]);
     }
