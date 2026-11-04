@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 
 use super::recur::{self, Occurrence, Source, Window};
-use super::{CalendarId, CalendarSource, EventData, EventStatus, Local, Moment, Response, ShowAs, Span};
+use super::{Bounds, CalendarId, CalendarSource, EventData, EventStatus, Local, Moment, Response, ShowAs, Span};
 
 /// How far the occurrence table reaches, and the zone floating times and
 /// all-day events are placed in.
@@ -72,6 +72,18 @@ pub fn place(master: Option<&EventData>, overrides: &[EventData], horizon: &Hori
             })
             .collect(),
     }
+}
+
+/// The occurrence of a series that an invitation shows: the next one that
+/// hasn't ended at `now`, or the last when all have. An all-day occurrence
+/// ends at the start of the day after it, here.
+pub fn shown_occurrence(master: &EventData, overrides: &[EventData], now: DateTime<Utc>, here: Tz) -> Option<Occurrence> {
+    let placed = place(Some(master), overrides, &Horizon::around(now, here));
+    let ended = |o: &Occurrence| match o.span.bounds(here) {
+        Bounds::Utc { end, .. } => end <= now,
+        Bounds::Days { end, .. } => end <= super::tz::day_number(now.with_timezone(&here).date_naive()),
+    };
+    placed.iter().find(|o| !ended(o)).or(placed.last()).copied()
 }
 
 /// Whether the event blocks time, before the calendar's own "counts as busy".

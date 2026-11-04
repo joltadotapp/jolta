@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::invitation::{Invitation, Method};
-use crate::calendar::series::copy_rank;
+use crate::calendar::recur::{Occurrence, Source};
+use crate::calendar::series::{self, copy_rank};
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response, tz};
 use crate::model::*;
 use crate::{Error, Result, compose};
@@ -19,8 +20,8 @@ use crate::{Error, Result, compose};
 pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitation]) -> Result<()> {
     conn.prepare_cached("DELETE FROM invitation WHERE message_id = ?1")?.execute([id])?;
     let mut insert = conn.prepare_cached(
-        "INSERT OR IGNORE INTO invitation (message_id, uid, recurrence_id, sequence, method, organizer, ends)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR IGNORE INTO invitation (message_id, uid, recurrence_id, sequence, method, organizer, ends, timing)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     let here = tz::here();
     for i in invitations {
@@ -33,9 +34,29 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
             i.method,
             e.organizer.as_ref().map(|o| o.address.as_str()).unwrap_or_default(),
             i.ends(here).map_or(0, |t| t.timestamp()),
+            timing(i),
         ])?;
     }
     Ok(())
+}
+
+/// What places the occurrences of a repeating event or a changed
+/// occurrence, as JSON; '' for a single event and for a message that gives
+/// no time.
+fn timing(i: &Invitation) -> String {
+    let e = &i.event;
+    if !i.dated || (e.recurrence.is_none() && e.recurrence_id.is_none()) {
+        return String::new();
+    }
+    let placed = EventData {
+        recurrence_id: e.recurrence_id,
+        this_and_future: e.this_and_future,
+        recurrence: e.recurrence.clone(),
+        status: e.status,
+        sequence: e.sequence,
+        ..EventData::new(e.uid.clone(), e.span)
+    };
+    serde_json::to_string(&placed).expect("an event serializes")
 }
 
 pub fn invitation_scan_batch(conn: &Connection, limit: usize) -> Result<Vec<(MessageId, String)>> {
@@ -223,6 +244,7 @@ pub enum InvitationState {
 
 /// One `invitation` row with what its state depends on.
 struct Named {
+    message: MessageId,
     thread: ThreadId,
     account: AccountId,
     receiver: String,
@@ -232,22 +254,25 @@ struct Named {
     method: Method,
     organizer: String,
     ends: i64,
+    timing: String,
 }
 
-const NAMED: &str = "SELECT m.thread_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends
+const NAMED: &str = "SELECT i.message_id, m.thread_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends, i.timing
      FROM invitation i JOIN message m ON m.id = i.message_id JOIN account a ON a.id = m.account_id";
 
 fn named(r: &Row) -> rusqlite::Result<Named> {
     Ok(Named {
-        thread: r.get(0)?,
-        account: r.get(1)?,
-        receiver: r.get(2)?,
-        uid: r.get(3)?,
-        recurrence_id: r.get(4)?,
-        sequence: r.get(5)?,
-        method: r.get(6)?,
-        organizer: r.get(7)?,
-        ends: r.get(8)?,
+        message: r.get(0)?,
+        thread: r.get(1)?,
+        account: r.get(2)?,
+        receiver: r.get(3)?,
+        uid: r.get(4)?,
+        recurrence_id: r.get(5)?,
+        sequence: r.get(6)?,
+        method: r.get(7)?,
+        organizer: r.get(8)?,
+        ends: r.get(9)?,
+        timing: r.get(10)?,
     })
 }
 
@@ -266,9 +291,11 @@ pub fn thread_invitations(conn: &Connection, threads: &[ThreadId], now: DateTime
     let ids = serde_json::to_string(&threads.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers");
     let rows = conn.prepare_cached(&format!("{NAMED} {PAGE}"))?.query_map([ids], named)?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = HashMap::new();
-    for n in rows {
+    for (i, n) in rows.iter().enumerate() {
         if !out.contains_key(&n.thread) {
-            out.insert(n.thread, state(conn, &n, now, here)?);
+            // The same message's changed occurrences follow its series.
+            let overrides: Vec<&Named> = rows[i + 1..].iter().take_while(|o| o.message == n.message).filter(|o| o.uid == n.uid).collect();
+            out.insert(n.thread, state(conn, n, &overrides, now, here)?);
         }
     }
     Ok(out)
@@ -290,14 +317,17 @@ pub fn unanswered_threads(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Re
 
 /// A request is answered in the calendars of the account it came to, as
 /// its card answers it.
-fn state(conn: &Connection, n: &Named, now: DateTime<Utc>, here: Tz) -> Result<InvitationState> {
+fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<InvitationState> {
     match n.method {
         Method::Cancel => return Ok(InvitationState::Cancelled),
         Method::Request if !n.organizer.trim().is_empty() && !n.organizer.trim().eq_ignore_ascii_case(&n.receiver) => {}
         _ => return Ok(InvitationState::Plain),
     }
-    let rid = moment_from_text(&n.recurrence_id);
-    let copy = stored_event(conn, &n.uid, rid.as_ref(), Some(n.account), here)?;
+    let (shown, occurrence) = shown_event(n, overrides, now, here)?;
+    let copy = match stored_event(conn, &n.uid, shown.as_ref(), Some(n.account), here)? {
+        None if shown.is_some() && n.recurrence_id.is_empty() => stored_event(conn, &n.uid, None, Some(n.account), here)?,
+        found => found,
+    };
     let cancelled: bool = conn
         .prepare_cached(
             "SELECT EXISTS (SELECT 1 FROM invitation WHERE uid = ?1 AND method = 'CANCEL' AND recurrence_id IN (?2, '') AND sequence >= ?3)",
@@ -306,11 +336,30 @@ fn state(conn: &Connection, n: &Named, now: DateTime<Utc>, here: Tz) -> Result<I
     if cancelled || copy.as_ref().is_some_and(|c| c.event.status == EventStatus::Cancelled) {
         return Ok(InvitationState::Cancelled);
     }
-    let remembered = remembered_answer(conn, n.account, &n.uid, rid.as_ref())?;
+    let remembered = remembered_answer(conn, n.account, &n.uid, occurrence.as_ref())?;
     Ok(match shown_answer(conn, copy.as_ref(), remembered)? {
         Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
         _ if n.ends > now.timestamp() => InvitationState::Unanswered,
         _ => InvitationState::Plain,
+    })
+}
+
+/// The recurrence id of the event whose calendar copy holds the answer, and
+/// of the occurrence an answer given from Jolta names, as the card picks
+/// them: for a series, the occurrence `series::shown_occurrence` shows,
+/// either one of the message's changed occurrences or one the rule makes.
+fn shown_event(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<(Option<Moment>, Option<Moment>)> {
+    let rid = moment_from_text(&n.recurrence_id);
+    let parse = |n: &Named| serde_json::from_str::<EventData>(&n.timing).map_err(|e| Error::Other(format!("invitation timing of {}: {e}", n.uid)));
+    if rid.is_some() || n.timing.is_empty() {
+        return Ok((rid, rid));
+    }
+    let master = parse(n)?;
+    let overrides = overrides.iter().filter(|o| !o.timing.is_empty()).map(|o| parse(o)).collect::<Result<Vec<_>>>()?;
+    Ok(match series::shown_occurrence(&master, &overrides, now, here) {
+        Some(Occurrence { source: Source::Override(i), .. }) => (overrides[i].recurrence_id, overrides[i].recurrence_id),
+        Some(o) => (None, Some(o.span.start())),
+        None => (None, Some(master.span.start())),
     })
 }
 
@@ -556,6 +605,45 @@ mod tests {
         let endless = String::from_utf8_lossy(mail!("series.eml")).replace(";UNTIL=20261217T225959Z", "").replace("standup-series@", "endless@");
         let endless = crate::calendar::invitation::find(endless.as_bytes(), &[]).remove(0);
         assert_eq!(endless.ends(chrono_tz::Europe::Brussels), Some(DateTime::<Utc>::MAX_UTC));
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    /// The answer the card of this message shows at `now`, as the list would.
+    fn card_says(jolta: &crate::Jolta, message: MessageId, raw: &[u8], now: DateTime<Utc>) -> InvitationState {
+        use crate::calendar::card;
+        let me = ["me@example.com".to_string()];
+        let found = crate::calendar::invitation::find(raw, &me);
+        let cx = card::Context { message, account: AccountId(1), me: &me, sender: "ann@example.com", now, here: chrono_tz::Europe::Brussels };
+        match jolta.store.read(|c| card::cards(c, &found, &cx)).unwrap().remove(0) {
+            card::Card::Event(e) => match e.answer {
+                Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
+                _ => InvitationState::Unanswered,
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_series_shows_the_answer_to_the_occurrence_its_card_shows() {
+        let (jolta, _) = jolta("state-occurrence");
+        let series = import(&jolta, mail!("series.eml"));
+        let at = |s: &str| {
+            let wall = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+            Moment::Time(crate::calendar::Local { wall, zone: crate::calendar::Zone::Tz(chrono_tz::Europe::Brussels) })
+        };
+        let uid = "standup-series@example.com";
+        for (occurrence, answer) in [("2026-11-05 09:30", Response::Accepted), ("2026-11-10 09:30", Response::Declined)] {
+            let given = GivenAnswer { answer, note: String::new(), notify: true };
+            jolta.store.write(|tx| remember_answer(tx, AccountId(1), uid, Some(&at(occurrence)), &given, None)).unwrap();
+        }
+        for (now, expected, why) in [
+            (now(), InvitationState::Answered(Response::Accepted), "Thursday's, moved to 10:00"),
+            (Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap(), InvitationState::Answered(Response::Declined), "next Tuesday's"),
+            (Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap(), InvitationState::Unanswered, "Thursday 12 November's, not answered"),
+        ] {
+            assert_eq!(card_says(&jolta, series, mail!("series.eml"), now), expected, "the card: {why}");
+            assert_eq!(shown(&jolta, series, now), Some(expected), "the list: {why}");
+        }
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 
