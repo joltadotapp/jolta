@@ -349,23 +349,16 @@ impl Google {
             },
         };
         let url = format!("{BASE}/calendars/{}/events/{}", encode(&calendar.remote_id), encode(&id));
-        for attempt in 0..3 {
-            let (status, body) = self.get(&url).await?;
-            let event: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            if google_gone(status, &event) {
-                return Ok(Gone::Already);
-            }
-            if !(200..300).contains(&status) {
-                return Err(failure(status, &body));
-            }
-            let (status, body) = self.request(reqwest::Method::DELETE, &format!("{url}?sendUpdates=none"), None, event["etag"].as_str()).await?;
-            match status {
-                200..300 | 404 | 410 => return Ok(Gone::Deleted(None)),
-                412 if attempt < 2 => continue,
-                _ => return Err(failure(status, &body)),
-            }
+        let (status, body) = self.get(&url).await?;
+        let event: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        if google_gone(status, &event) {
+            return Ok(Gone::Already);
         }
-        unreachable!("the last attempt returns")
+        if !(200..300).contains(&status) {
+            return Err(failure(status, &body));
+        }
+        let (status, body) = self.request(reqwest::Method::DELETE, &format!("{url}?sendUpdates=none"), None, event["etag"].as_str()).await?;
+        deleted(status, &body)
     }
 
     /// The id of the occurrence of series `master` that `rid` names. Google
@@ -393,6 +386,17 @@ impl Google {
             .find(|g| g.original_start_time.as_ref().and_then(|w| moment(w, fallback)).is_some_and(|m| m.names(rid, here)))
             .map(|g| g.id)
             .ok_or_else(|| Error::NotFound("Google has no occurrence of this series at that time".into()))
+    }
+}
+
+/// What Google's answer to the DELETE of a cancelled meeting says. A 412
+/// means the event changed since it was read, perhaps reinstated, so it
+/// stays for the user to look at again.
+fn deleted(status: u16, body: &[u8]) -> Result<Gone> {
+    match status {
+        200..300 | 404 | 410 => Ok(Gone::Deleted(None)),
+        412 => Ok(Gone::Changed),
+        _ => Err(failure(status, body)),
     }
 }
 
@@ -906,6 +910,14 @@ mod tests {
         assert!(google_gone(200, &json!({"status": "cancelled"})));
         assert!(!google_gone(200, &json!({"status": "confirmed"})));
         assert!(!google_gone(500, &json!({"status": "cancelled"})), "an error says nothing");
+    }
+
+    #[test]
+    fn a_meeting_changed_since_it_was_read_stays() {
+        assert_eq!(deleted(412, b"").unwrap(), Gone::Changed, "no second delete of what may be a reinstated meeting");
+        assert_eq!(deleted(204, b"").unwrap(), Gone::Deleted(None));
+        assert_eq!(deleted(410, b"").unwrap(), Gone::Deleted(None));
+        assert!(deleted(403, b"").is_err());
     }
 
     #[test]
