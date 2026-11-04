@@ -546,6 +546,7 @@ mod tests {
         j.store
             .write(|tx| {
                 tx.execute("INSERT INTO message (id, account_id, remote_id, thread_id, from_addr, to_addrs, date) VALUES (9, 1, 's', 9, 'me@example.com', 'ann@example.com', 0)", [])?;
+                tx.execute("INSERT INTO message_fts (rowid, sender, recipients) VALUES (9, ' me@example.com', 'ann@example.com ')", [])?;
                 Ok(())
             })
             .unwrap();

@@ -99,29 +99,32 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
     Ok(best.map(|(_, e)| e))
 }
 
+/// Mail from the address that the user answered, through the partial
+/// index `message_answered`, which needs this exact `flags & 4` term.
+const REPLIED: &str = "SELECT EXISTS (SELECT 1 FROM message WHERE from_addr = ?1 COLLATE NOCASE AND (flags & 4) != 0)";
+const _: () = assert!(Flags::ANSWERED == 4);
+/// The recipients of the user's own mail that the search index finds the
+/// address in, newest first: a contact the user writes to is found in the
+/// first rows, and only a stranger's own messages are read to the end.
+const SENT: &str = "SELECT m.to_addrs || ', ' || m.cc_addrs FROM message_fts f
+     JOIN message m ON m.id = f.rowid JOIN account a ON a.id = m.account_id
+     WHERE message_fts MATCH ?1 AND m.from_addr = a.address COLLATE NOCASE ORDER BY f.rowid DESC";
+
 /// Whether the user ever sent mail to `address` from one of their
-/// accounts, or replied to mail from it.
+/// accounts, or replied to mail from it. A search phrase also matches
+/// longer addresses ("jan@x.com" in "jan@x.com.au"), so each hit is
+/// checked against the parsed recipients.
 pub fn has_written_to(conn: &Connection, address: &str) -> Result<bool> {
     let address = address.trim().to_lowercase();
-    if address.is_empty() {
+    if !address.contains(char::is_alphanumeric) {
         return Ok(false);
     }
-    let replied: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM message WHERE from_addr = ?1 COLLATE NOCASE AND (flags & ?2) != 0)",
-        params![address, Flags::ANSWERED],
-        |r| r.get(0),
-    )?;
+    let replied: bool = conn.query_row(REPLIED, [&address], |r| r.get(0))?;
     if replied {
         return Ok(true);
     }
-    // instr finds the address inside longer ones too ("an@x" in "jan@x"),
-    // so each hit is checked against the parsed recipients.
-    let mut stmt = conn.prepare_cached(
-        "SELECT m.to_addrs || ', ' || m.cc_addrs FROM message m JOIN account a ON a.id = m.account_id
-         WHERE m.from_addr = a.address COLLATE NOCASE
-           AND (instr(lower(m.to_addrs), ?1) > 0 OR instr(lower(m.cc_addrs), ?1) > 0)",
-    )?;
-    let mut rows = stmt.query([&address])?;
+    let mut stmt = conn.prepare_cached(SENT)?;
+    let mut rows = stmt.query([format!("recipients : \"{}\"", address.replace('"', "\"\""))])?;
     while let Some(r) = rows.next()? {
         let list: String = r.get(0)?;
         if compose::parse_addresses(&list).iter().any(|(_, a)| a.trim().eq_ignore_ascii_case(&address)) {
@@ -243,6 +246,28 @@ mod tests {
     }
 
     #[test]
+    fn written_to_reads_no_message_it_doesnt_need() {
+        let (jolta, _) = jolta("written-plan");
+        let plans: Vec<String> = jolta
+            .store
+            .read(|c| {
+                let mut details = Vec::new();
+                for (sql, n) in [(REPLIED, 1), (SENT, 1)] {
+                    let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let args = vec![rusqlite::types::Value::Text("x".into()); n];
+                    let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+                    while let Some(r) = rows.next()? {
+                        details.push(r.get::<_, String>(3)?);
+                    }
+                }
+                Ok(details)
+            })
+            .unwrap();
+        assert!(!plans.iter().any(|d| d == "SCAN m" || d == "SCAN message" || d.starts_with("SCAN m ") || d.starts_with("SCAN message ")), "{plans:#?}");
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
     fn written_to_means_sent_to_or_replied_to() {
         let (jolta, _) = jolta("written");
         jolta
@@ -252,7 +277,11 @@ mod tests {
                     "INSERT INTO message (id, account_id, remote_id, thread_id, from_addr, to_addrs, cc_addrs, date, flags)
                      VALUES (1, 1, 'a', 1, 'ME@example.com', 'Jan Peeters <jan@example.com>', 'Cleo <cleo@example.com>', 0, 0),
                             (2, 1, 'b', 2, 'bart@example.com', 'me@example.com', '', 0, 4),
-                            (3, 1, 'c', 3, 'news@example.com', 'me@example.com', '', 0, 0);",
+                            (3, 1, 'c', 3, 'news@example.com', 'me@example.com', '', 0, 0);
+                     INSERT INTO message_fts (rowid, subject, sender, recipients, body)
+                     VALUES (1, '', ' ME@example.com', 'Jan Peeters <jan@example.com> Cleo <cleo@example.com>', ''),
+                            (2, '', ' bart@example.com', 'me@example.com ', ''),
+                            (3, '', ' news@example.com', 'me@example.com ', '');",
                 )?;
                 Ok(())
             })
@@ -260,7 +289,7 @@ mod tests {
         let written = |a: &str| jolta.store.read(|c| has_written_to(c, a)).unwrap();
         assert!(written("jan@example.com") && written("Cleo@Example.com"), "sent to, in To or Cc");
         assert!(written("bart@example.com"), "replied to");
-        assert!(!written("an@example.com"), "only whole addresses");
+        assert!(!written("an@example.com") && !written("example.com"), "only whole addresses");
         assert!(!written("news@example.com") && !written(""));
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }

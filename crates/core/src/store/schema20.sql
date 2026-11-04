@@ -15,6 +15,9 @@ CREATE TABLE invitation (
 CREATE INDEX invitation_uid ON invitation(uid);
 -- An invitation looks its event up by UID across every calendar.
 CREATE INDEX event_by_uid ON event(uid, recurrence_id);
+-- "You haven't written to this sender" asks whether the user answered mail
+-- from an address; few messages carry the answered flag (4), so this stays small.
+CREATE INDEX message_answered ON message(from_addr COLLATE NOCASE) WHERE (flags & 4) != 0;
 
 -- Bodies stored before Jolta read invitations get one background pass, for
 -- mail of the last 400 days: the rows serve upcoming events, and an older
