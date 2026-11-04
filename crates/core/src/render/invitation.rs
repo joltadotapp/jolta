@@ -20,7 +20,7 @@ fn event(c: &EventCard) -> String {
         "<section class=\"jolta-invite{}{}\"{}><div class=\"jolta-invite-head\"><span class=\"jolta-invite-label\">{CALENDAR}{}</span>",
         if c.cancelled { " jolta-invite-cancelled" } else { "" },
         if c.outdated { " jolta-invite-outdated" } else { "" },
-        c.answering.as_ref().map(|a| format!(" data-rsvp=\"{}\"", a.message.0)).unwrap_or_default(),
+        c.answering.as_ref().map(|a| a.message).or(c.removing.as_ref().map(|r| r.message)).map(|m| format!(" data-rsvp=\"{}\"", m.0)).unwrap_or_default(),
         c.label
     );
     // The chosen button says it when the user can answer.
@@ -69,7 +69,16 @@ fn event(c: &EventCard) -> String {
             h.push_str(&strip(s));
         }
     }
-    let answers = c.answering.as_ref().map(|a| answers(a, c.answer)).unwrap_or_default();
+    let mut answers = c.answering.as_ref().map(|a| answers(a, c.answer)).unwrap_or_default();
+    if let Some(r) = &c.removing {
+        let what = r.occurrence.as_ref().map_or_else(|| "this meeting".to_string(), |(_, day)| format!("{day}\u{2019}s meeting"));
+        let _ = write!(
+            answers,
+            "<a class=\"jolta-remove\" href=\"x-rsvp:{}/remove\" title=\"Take {} out of your calendar without telling the organizer\">Remove from calendar</a>",
+            r.message.0,
+            escape(&what)
+        );
+    }
     let join = c.join.as_ref().map(join).unwrap_or_default();
     if !answers.is_empty() || !join.is_empty() {
         let _ = write!(h, "<div class=\"jolta-invite-actions\">{answers}{join}</div>");
@@ -286,6 +295,7 @@ mod tests {
                 strip: Some(Strip { hours: vec![(0.0, "14:00".into())], busy: vec![block("<i>Standup</i>", true)], lanes: 1, this: block("x", false) }),
             }),
             answering: None,
+            removing: None,
         }
     }
 

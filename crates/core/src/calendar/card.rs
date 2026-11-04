@@ -55,6 +55,18 @@ pub struct EventCard {
     /// Set when the user can answer: an invitation to them that they don't
     /// organize.
     pub answering: Option<Answering>,
+    /// Set on a cancellation whose meeting the calendar of the account it
+    /// came to still holds.
+    pub removing: Option<Removing>,
+}
+
+/// What Remove from calendar needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Removing {
+    pub message: MessageId,
+    pub uid: String,
+    /// The occurrence cancelled alone, and its day: "Thu 5 Nov".
+    pub occurrence: Option<(Moment, String)>,
 }
 
 /// What the answer buttons need.
@@ -292,6 +304,11 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         None => (None, stored.clone()),
     };
 
+    let removing = if method == Method::Cancel && current { removable(conn, sent, cx)? } else { None };
+    if method == Method::Cancel && current && removing.is_none() && store::account_calendar_on(conn, cx.account)? {
+        notes.push(Note { text: "Not in your calendar".into(), warn: false });
+    }
+
     let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
     let availability = match bounds {
         Some(bounds) if current && wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
@@ -330,7 +347,46 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         },
         availability,
         answering,
+        removing,
     })
+}
+
+/// Remove from calendar for a cancellation: when the account's calendar
+/// still holds the event, or the occurrence it cancels, and hasn't
+/// cancelled it there yet.
+fn removable(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Option<Removing>> {
+    let live = |e: &EventData| e.status != EventStatus::Cancelled;
+    let copy = |rid: Option<&Moment>| store::stored_event(conn, &sent.uid, rid, Some(cx.account), cx.here);
+    let held = match &sent.recurrence_id {
+        None => copy(None)?.is_some_and(|s| live(&s.event)),
+        Some(rid) => match copy(Some(rid))? {
+            Some(changed) => live(&changed.event),
+            None => copy(None)?.is_some_and(|m| live(&m.event) && occurs(&m.event, rid, cx.here)),
+        },
+    };
+    Ok(held.then(|| Removing {
+        message: cx.message,
+        uid: sent.uid.clone(),
+        occurrence: sent.recurrence_id.map(|rid| {
+            let day = match rid {
+                Moment::Date(d) => d,
+                Moment::Time(t) => t.instant(cx.here).with_timezone(&cx.here).date_naive(),
+            };
+            (rid, date(day, cx))
+        }),
+    }))
+}
+
+/// Whether the series makes an occurrence at `rid`, one its EXDATEs don't
+/// take out.
+fn occurs(master: &EventData, rid: &Moment, here: Tz) -> bool {
+    let Some(span) = series::occurrence_span(&master.span, rid, here) else { return false };
+    let (start, end) = match span.bounds(here) {
+        Bounds::Utc { start, end } => (start, end),
+        Bounds::Days { start, end } => (tz::instant(day(start).and_time(chrono::NaiveTime::MIN), here), tz::instant(day(end).and_time(chrono::NaiveTime::MIN), here)),
+    };
+    let window = recur::Window { start: start - Duration::days(1), end: end + Duration::days(1) };
+    series::place(Some(master), &[], &Horizon { window, here }).iter().any(|o| o.source == Source::Master && o.span.start().names(rid, here))
 }
 
 /// The answer given from Jolta to this invitation, and the event its reply
@@ -899,8 +955,8 @@ pub(crate) mod tests {
         let (j, _) = jolta("card-cancel");
         let c = event_card(&j, mail!("cancel.eml"));
         assert_eq!((c.label, c.cancelled), ("Cancelled", true));
-        assert_eq!(notes(&c), ["Cancelled by the organizer"]);
-        assert_eq!(c.availability, None);
+        assert_eq!(notes(&c), ["Cancelled by the organizer", "Not in your calendar"], "the account's calendar is on");
+        assert_eq!((c.availability, c.removing), (None, None));
 
         let Card::Reply(r) = cards_of(&j, mail!("reply.eml")).remove(0) else { panic!("a reply") };
         assert_eq!(r, ReplyCard { line: "Bo Nilsson accepted".into(), comment: Some("See you there".into()), about: "Design crit · Fri 13 Nov".into() });
@@ -1186,6 +1242,38 @@ pub(crate) mod tests {
         let c = stored_card(&j, id, &raw);
         assert_eq!(c.changes.when, edit("Tue 17 Nov · 09:30 to 09:45", "Wed 18 Nov · 14:00 to 14:15"));
         assert_eq!(c.changes.repeat, None, "the occurrence isn't the series");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Remove from calendar shows while the account's calendar holds the
+    /// cancelled event, or the cancelled occurrence of a series.
+    #[test]
+    fn a_cancellation_offers_remove_while_the_calendar_holds_it() {
+        let (j, calendar) = jolta("card-remove");
+        let horizon = Horizon::around(now(), Brussels);
+        let hold = |remote: &str, events: Vec<EventData>| j.store.write(|tx| store::apply_item(tx, calendar, remote, None, &events, None, &horizon)).unwrap();
+        let cancel = version("x", "sync", "CANCEL", 1, "20261104T090000Z", V1);
+        let id = crate::calendar::invitation::tests::import(&j, cancel.as_bytes());
+        let mut copy = invitation::find(version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1).as_bytes(), &[ME.into()]).remove(0).event;
+        hold("sync.ics", vec![copy.clone()]);
+        let c = stored_card(&j, id, &cancel);
+        assert_eq!(c.removing, Some(Removing { message: id, uid: "sync".into(), occurrence: None }));
+        assert_eq!(notes(&c), ["Cancelled by the organizer"]);
+        copy.status = EventStatus::Cancelled;
+        hold("sync.ics", vec![copy]);
+        assert_eq!(stored_card(&j, id, &cancel).removing, None, "the server cancelled it already");
+
+        let series = "DTSTART;TZID=Europe/Brussels:20261110T093000\r\nDTEND;TZID=Europe/Brussels:20261110T094500\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n";
+        let mut master = invitation::find(version("s", "standup", "REQUEST", 0, "20261104T080000Z", series).as_bytes(), &[ME.into()]).remove(0).event;
+        hold("standup.ics", vec![master.clone()]);
+        let one = version("o", "standup", "CANCEL", 1, "20261104T090000Z", &format!("RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\n{series}").replace("RRULE:FREQ=WEEKLY\r\n", ""));
+        let id = crate::calendar::invitation::tests::import(&j, one.as_bytes());
+        let c = stored_card(&j, id, &one);
+        let (rid, day) = c.removing.unwrap().occurrence.unwrap();
+        assert_eq!((rid, day.as_str()), (Moment::Time(Local { wall: chrono::NaiveDate::from_ymd_opt(2026, 11, 17).unwrap().and_hms_opt(9, 30, 0).unwrap(), zone: Zone::Tz(Brussels) }), "Tue 17 Nov"));
+        master.recurrence.as_mut().unwrap().exdates.push(rid);
+        hold("standup.ics", vec![master]);
+        assert_eq!(stored_card(&j, id, &one).removing, None, "the series leaves that occurrence out already");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

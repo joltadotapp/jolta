@@ -19,7 +19,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Change, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
+use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
@@ -427,6 +427,35 @@ impl GraphCalendar {
         Ok(id)
     }
 
+    /// Deletes a meeting the organizer cancelled from the user's calendar,
+    /// unless Exchange has removed it or marked it cancelled already, as it
+    /// does when it reads the organizer's cancellation. Deleting an
+    /// attendee's copy sends the organizer nothing.
+    pub async fn remove(&self, target: &Target) -> Result<Gone> {
+        let id = match &target.occurrence {
+            None => target.event.remote_id.clone(),
+            Some(Occurrence { stored: Some(s), .. }) => s.remote_id.clone(),
+            Some(Occurrence { recurrence_id, stored: None }) => match self.instance(&target.event, recurrence_id).await {
+                Ok(id) => id,
+                Err(Error::NotFound(_)) => return Ok(Gone::Already),
+                Err(e) => return Err(e),
+            },
+        };
+        let path = format!("/me/events/{}", encode(&id));
+        let (status, event) = self.request("GET", &format!("{path}?$select=isCancelled"), None, &[]).await?;
+        if graph_gone(status, &event) {
+            return Ok(Gone::Already);
+        }
+        if !(200..300).contains(&status) {
+            return Err(self.failure(status, &event));
+        }
+        let (status, reply) = self.request("DELETE", &path, None, &[]).await?;
+        match status {
+            200..300 | 404 => Ok(Gone::Deleted(None)),
+            _ => Err(self.failure(status, &reply)),
+        }
+    }
+
     /// The id of the occurrence of `master` that `rid` names, from the
     /// series' instances around it. An all-day occurrence's original start
     /// is midnight in the series' own zone.
@@ -462,6 +491,12 @@ impl GraphCalendar {
             .and_then(|i| i["id"].as_str().map(str::to_string))
             .ok_or_else(|| Error::NotFound("Microsoft 365 has no occurrence of this series at that time".into()))
     }
+}
+
+/// Whether Graph's answer to a GET of an event says the organizer's
+/// cancellation took it out of the calendar already: gone, or cancelled.
+fn graph_gone(status: u16, event: &Value) -> bool {
+    status == 404 || ((200..300).contains(&status) && event["isCancelled"] == true)
 }
 
 /// The delta window: from the first of this month 2 years back to 3 years
@@ -1002,6 +1037,14 @@ mod tests {
             ["2026-11-21 00:30", "2026-11-22 00:30", "2026-11-23 00:30", "2026-11-24 00:30"],
             "25 November 00:30 in Brussels is still 24 November in UTC, and must not count"
         );
+    }
+
+    #[test]
+    fn exchange_has_acted_on_a_cancellation_when_the_event_is_gone_or_cancelled() {
+        assert!(graph_gone(404, &Value::Null));
+        assert!(graph_gone(200, &json!({"isCancelled": true})));
+        assert!(!graph_gone(200, &json!({"isCancelled": false})));
+        assert!(!graph_gone(403, &json!({"isCancelled": true})), "an error says nothing");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate};
 use jolta_core::calendar::scheduler::Scheduler;
-use jolta_core::calendar::{self as cal, Bounds, CalendarId, EventId, detail, remind, respond, rsvp, sync, tz};
+use jolta_core::calendar::{self as cal, Bounds, CalendarId, EventId, detail, remind, remove, respond, rsvp, sync, tz};
 use jolta_core::{AccountId, store};
 
 use crate::{AccountInfo, Core, CoreError, CoreEvent, Result};
@@ -299,6 +299,20 @@ impl Core {
     /// toast: "Accepted. Jolta emailed Ann."
     pub async fn answer_invitation(&self, message_id: i64, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
         self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options).await
+    }
+
+    /// Takes the meeting a cancellation's card names out of the calendar,
+    /// as its Remove from calendar link does. Returns the words for the
+    /// toast: "Removed from your calendar."
+    pub async fn remove_cancelled(&self, message_id: i64) -> Result<String> {
+        let jolta = self.jolta.clone();
+        let removed = self
+            .runtime
+            .spawn(async move { remove::remove(&jolta, jolta_core::MessageId(message_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.calendar_changed([removed.calendar]);
+        Ok(removed.text)
     }
 
     /// Answers an event from its detail; `time` names the occurrence, as

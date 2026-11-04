@@ -11,7 +11,8 @@ use jolta_core::Jolta;
 use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
-use jolta_core::calendar::respond;
+use jolta_core::calendar::card::{self, Card, Edit};
+use jolta_core::calendar::{invitation, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
@@ -114,6 +115,12 @@ pub enum CalCommand {
         #[arg(long)]
         occurrence: bool,
     },
+    /// Print the invitation cards of a message as the reader shows them,
+    /// with what an update struck through as ~~old~~.
+    Card { message: i64 },
+    /// Take the meeting a cancellation names out of the calendar, as its
+    /// card's Remove from calendar does.
+    Remove { message: i64 },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
         #[arg(value_enum)]
@@ -388,6 +395,18 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             Ok(())
         }
+        CalCommand::Card { message } => {
+            for card in message_cards(jolta, jolta_core::MessageId(message)).await? {
+                print_card(&card);
+            }
+            Ok(())
+        }
+        CalCommand::Remove { message } => {
+            let t = Instant::now();
+            let done = remove::remove(jolta, jolta_core::MessageId(message)).await?;
+            println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            Ok(())
+        }
         CalCommand::Rsvp { event, accept, maybe, decline: _, note, no_reply, occurrence } => {
             let answer = if accept {
                 Answer::Accept
@@ -548,4 +567,48 @@ fn moment_text(m: &Moment) -> String {
 
 fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
+}
+
+/// The cards of a message, built as the reader builds them.
+async fn message_cards(jolta: &Jolta, message: jolta_core::MessageId) -> Result<Vec<Card>> {
+    let (account, sender): (jolta_core::AccountId, String) =
+        jolta.store.read(|c| Ok(c.query_row("SELECT account_id, from_addr FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))?))?;
+    let raw = jolta_core::imap::message_source(jolta, message).await?;
+    Ok(jolta.store.read(|c| {
+        let me: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
+        let found = invitation::find(&raw, &me);
+        let cx = card::Context { message, account, me: &me, sender: &sender, now: Utc::now(), here: tz::here(), blobs: &jolta.blobs };
+        card::cards(c, &found, &cx)
+    })?)
+}
+
+fn print_card(card: &Card) {
+    let edit = |e: &Edit| {
+        let old = if e.old.is_empty() { String::new() } else { format!("~~{}~~ ", e.old) };
+        let new = if e.new.is_empty() { String::new() } else { format!("[{}]", e.new) };
+        format!("{}{old}{new}{}", e.lead, e.tail)
+    };
+    match card {
+        Card::Reply(r) => println!("{} {}", r.line, r.about),
+        Card::Event(e) => {
+            println!("{}{}: {}", e.label, if e.outdated { " (outdated)" } else { "" }, e.title);
+            let line = |name: &str, changed: &Option<Edit>, now: &Option<String>| match (changed, now) {
+                (Some(c), _) => println!("  {name}: {}", edit(c)),
+                (None, Some(t)) => println!("  {name}: {t}"),
+                (None, None) => {}
+            };
+            line("when", &e.changes.when, &e.when);
+            line("repeat", &e.changes.repeat, &e.repeat);
+            line("place", &e.changes.location, &e.location);
+            line("link", &e.changes.join, &e.join.as_ref().map(|j| j.provider.to_string()));
+            for n in &e.notes {
+                println!("  note: {}", n.text);
+            }
+            let answer = e.answer.map_or("none", card::answer_word);
+            println!("  answer: {answer}{}", if e.answering.is_some() { ", Accept, Maybe and Decline offered" } else { "" });
+            if let Some(r) = &e.removing {
+                println!("  Remove from calendar offered{}", r.occurrence.as_ref().map(|(_, d)| format!(" for {d}")).unwrap_or_default());
+            }
+        }
+    }
 }

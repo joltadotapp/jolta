@@ -106,6 +106,8 @@ final class AppModel {
     /// How the open card's next answer goes out, and the answer going out now.
     var answerChoices = AnswerChoices()
     var pendingAnswer: InvitationAnswer?
+    /// The cancellation whose meeting Remove from calendar is taking out now.
+    var pendingRemoval: Int64?
     /// The note field or the scope menu under the open card, when one is up.
     var rsvpPanel: RsvpPanel?
     /// The card the choices, the panel and the pending answer belong to.

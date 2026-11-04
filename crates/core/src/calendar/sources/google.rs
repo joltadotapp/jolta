@@ -13,7 +13,7 @@ use chrono_tz::Tz;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Change, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
+use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
@@ -334,6 +334,40 @@ impl Google {
         unreachable!("the last attempt returns")
     }
 
+    /// Deletes a meeting the organizer cancelled from the user's calendar
+    /// with `sendUpdates=none`, unless Google has removed or cancelled it
+    /// already, as it does when it reads the organizer's cancellation.
+    pub async fn remove(&self, calendar: &Calendar, target: &Target) -> Result<Gone> {
+        let id = match &target.occurrence {
+            None => target.event.remote_id.clone(),
+            Some(Occurrence { stored: Some(s), .. }) => s.remote_id.clone(),
+            Some(Occurrence { recurrence_id, stored: None }) => match self.instance(calendar, &target.event.remote_id, recurrence_id).await {
+                Ok(id) => id,
+                // The instances Google lists leave cancelled ones out.
+                Err(Error::NotFound(_)) => return Ok(Gone::Already),
+                Err(e) => return Err(e),
+            },
+        };
+        let url = format!("{BASE}/calendars/{}/events/{}", encode(&calendar.remote_id), encode(&id));
+        for attempt in 0..3 {
+            let (status, body) = self.get(&url).await?;
+            let event: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            if google_gone(status, &event) {
+                return Ok(Gone::Already);
+            }
+            if !(200..300).contains(&status) {
+                return Err(failure(status, &body));
+            }
+            let (status, body) = self.request(reqwest::Method::DELETE, &format!("{url}?sendUpdates=none"), None, event["etag"].as_str()).await?;
+            match status {
+                200..300 | 404 | 410 => return Ok(Gone::Deleted(None)),
+                412 if attempt < 2 => continue,
+                _ => return Err(failure(status, &body)),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
     /// The id of the occurrence of series `master` that `rid` names. Google
     /// lists instances by their time, so the day around it is searched for
     /// the one whose original start matches.
@@ -360,6 +394,12 @@ impl Google {
             .map(|g| g.id)
             .ok_or_else(|| Error::NotFound("Google has no occurrence of this series at that time".into()))
     }
+}
+
+/// Whether Google's answer to a GET of an event says the organizer's
+/// cancellation took it out of the calendar already: gone, or cancelled.
+fn google_gone(status: u16, event: &Value) -> bool {
+    matches!(status, 404 | 410) || ((200..300).contains(&status) && event["status"] == "cancelled")
 }
 
 /// Which attendee the calendar answers as: the entry Google marks `self`,
@@ -858,6 +898,14 @@ mod tests {
             })
             .collect();
         assert_eq!(starts, ["11-02 09:00", "11-16 11:00", "11-23 09:00"], "9 November is excluded, 16 November moved");
+    }
+
+    #[test]
+    fn google_has_acted_on_a_cancellation_when_the_event_is_gone_or_cancelled() {
+        assert!(google_gone(404, &Value::Null) && google_gone(410, &Value::Null));
+        assert!(google_gone(200, &json!({"status": "cancelled"})));
+        assert!(!google_gone(200, &json!({"status": "confirmed"})));
+        assert!(!google_gone(500, &json!({"status": "cancelled"})), "an error says nothing");
     }
 
     #[test]

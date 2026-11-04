@@ -12,7 +12,8 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use super::dav::{self, APPLE, CALDAV, CALENDARSERVER, DAV, MultiStatus, href_key};
-use super::{Change, Known, SyncBatch, http_client, http_error, vanished};
+use super::{Change, Gone, Known, SyncBatch, http_client, http_error, vanished};
+use crate::calendar::remove;
 use crate::calendar::rsvp::{self, Rsvp, Target};
 use crate::calendar::{Access, Calendar, ical};
 use crate::store::RemoteCalendar;
@@ -426,6 +427,69 @@ impl CalDav {
             }
         }
         unreachable!("the last attempt returns")
+    }
+
+    /// Takes a meeting the organizer cancelled out of the calendar with
+    /// `If-Match`, the organizer not told: an occurrence leaves by an EXDATE
+    /// on its series, the whole event by a DELETE. A scheduling server
+    /// (RFC 6638) replies for an attendee whose copy loses an event, so the
+    /// copy first gets SCHEDULE-AGENT=CLIENT on its ORGANIZER, which stops
+    /// that. A server that doesn't schedule ignores it.
+    pub async fn remove(&self, calendar: &Calendar, target: &Target) -> Result<Gone> {
+        let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
+        let url = join(&collection, &path_escape(&target.event.remote_id))?;
+        let uid = &target.event.data.uid;
+        let here = crate::calendar::tz::here();
+        let mut current = cached(&target.event);
+        for _ in 0..3 {
+            let (text, etag) = match current.take() {
+                Some(stored) => stored,
+                None => {
+                    let reply = self.exchange("GET", &url, &[], "").await?;
+                    match reply.status {
+                        200 => (reply.body, reply.etag),
+                        404 | 410 => return Ok(Gone::Already),
+                        status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
+                    }
+                }
+            };
+            let edited = match &target.occurrence {
+                Some(o) => match remove::without_occurrence(&text, uid, &o.recurrence_id, here)? {
+                    Some(edited) => Some(edited),
+                    None => return Ok(Gone::Already),
+                },
+                None => remove::quiet(&text, uid),
+            };
+            if let Some(edited) = edited {
+                let mut headers = vec![("Content-Type", "text/calendar; charset=utf-8")];
+                if let Some(etag) = &etag {
+                    headers.push(("If-Match", etag));
+                }
+                let reply = self.exchange("PUT", &url, &headers, &edited).await?;
+                match reply.status {
+                    200..300 if target.occurrence.is_some() => {
+                        let me = self.me().await;
+                        let events = ical::read(&edited, &me)?;
+                        let remote_id = target.event.remote_id.clone();
+                        return Ok(Gone::Deleted(Some(Change::Upsert { remote_id, etag: reply.etag, events, raw: Some(edited.into_bytes()) })));
+                    }
+                    // The DELETE goes with the ETag of what was just written.
+                    200..300 => current = reply.etag.map(|etag| (edited, Some(etag))),
+                    412 => {}
+                    404 | 410 => return Ok(Gone::Already),
+                    status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
+                }
+                continue;
+            }
+            let headers: Vec<(&str, &str)> = etag.as_deref().map(|e| ("If-Match", e)).into_iter().collect();
+            let reply = self.exchange("DELETE", &url, &headers, "").await?;
+            match reply.status {
+                200..300 | 404 | 410 => return Ok(Gone::Deleted(None)),
+                412 => {}
+                status => return Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
+            }
+        }
+        Err(Error::Other(format!("CalDAV {url} kept changing while Jolta removed it; try again.")))
     }
 }
 

@@ -113,6 +113,26 @@ extension AppModel {
         }
     }
 
+    /// Takes the meeting a cancellation's card names out of the calendar.
+    /// The card comes back from the store without the link.
+    func removeCancelled(message: Int64) {
+        guard pendingRemoval == nil, let threadID = openThread?.threadId else { return }
+        pendingRemoval = message
+        Task {
+            do {
+                let text = try await core.removeCancelled(messageId: message)
+                if let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
+                   selectedThreadID == threadID {
+                    openThread = view
+                }
+                notify(text)
+            } catch {
+                notify("\(error)")
+            }
+            pendingRemoval = nil
+        }
+    }
+
     /// Answers an event from the calendar's detail. The detail redraws when
     /// the core reports the calendar changed.
     func answerEvent(_ eventID: Int64, time: OccurrenceTime?, answer: InvitationAnswer, choices: AnswerChoices) async -> Bool {
@@ -139,6 +159,15 @@ extension ReaderPage {
             return nil
         }
         return CGRect(x: v[0], y: v[1], width: v[2], height: v[3])
+    }
+
+    /// Marks Remove from calendar on a card while it goes out.
+    func markRemoving(message: Int64, on: Bool) {
+        let script = """
+        const card = document.querySelector(`[data-rsvp="${id}"]`);
+        if (card) card.classList.toggle("jolta-sending", on);
+        """
+        Task { _ = try? await page.callJavaScript(script, arguments: ["id": String(message), "on": on]) }
     }
 
     /// Shows the choices and the answer going out on the card, with the
