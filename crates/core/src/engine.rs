@@ -119,8 +119,12 @@ impl Engine {
     }
 
     /// Starts syncing an account added while the engine runs.
+    /// Starts syncing a new account. For one already syncing, such as after
+    /// Sign in again, it retries now instead of when its wait runs out.
     pub fn add_account(self: &Arc<Self>, account: Account) {
-        if !self.wakes.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&account.id) {
+        if self.wakes.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&account.id) {
+            self.wake(account.id);
+        } else {
             self.spawn(account);
         }
     }
@@ -369,7 +373,10 @@ impl Engine {
                 Err(e) => {
                     conn = None;
                     (self.sink)(Event::SyncFailed(account.id, e.to_string()));
-                    tokio::time::sleep(backoff.next()).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff.next()) => {}
+                        _ = wake.notify.notified() => {}
+                    }
                     continue;
                 }
             }
