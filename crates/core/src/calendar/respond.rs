@@ -85,7 +85,8 @@ pub fn plan(copy: Option<CalendarSource>, notify: bool, proposing: bool) -> Resu
 pub struct Outcome {
     /// For the toast: "Accepted. Jolta emailed Ann."
     pub text: String,
-    /// The account whose outbox holds the reply mail; its engine sends it.
+    /// The account whose outbox holds a reply mail to send; its engine
+    /// sends it. None when the organizer has it already.
     pub mailed_from: Option<AccountId>,
     /// The calendar whose copy changed.
     pub calendar: Option<CalendarId>,
@@ -197,7 +198,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     let uid = r.uid.clone();
     let shown = r.shown;
     let version = r.version.clone();
-    jolta
+    let waiting = jolta
         .store
         .write_async(move |tx| {
             // Read again where the outbox can't change underneath.
@@ -211,40 +212,41 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
                 Some(m) => store::outbox_mail(tx, account, &m.message_id)?,
                 None => None,
             };
-            let reply = match (kept, same) {
+            // The reply mail, and whether it waits to go.
+            let (reply, waiting) = match (kept, same) {
                 (kept, Some(same)) => {
-                    let id = match same {
-                        store::ReplyMail::Waiting(id) => {
-                            store::send_now(tx, id)?;
-                            id
-                        }
-                        store::ReplyMail::Sent(id) => id,
-                    };
                     if let Some(store::ReplyMail::Waiting(other)) = kept.filter(|k| *k != same) {
                         store::cancel_send(tx, other)?;
                     }
-                    Some(id)
+                    match same {
+                        store::ReplyMail::Waiting(id) => {
+                            store::send_now(tx, id)?;
+                            (Some(id), true)
+                        }
+                        store::ReplyMail::Sent(id) => (Some(id), false),
+                    }
                 }
                 (Some(store::ReplyMail::Waiting(id)), None) if again => {
                     store::send_now(tx, id)?;
-                    Some(id)
+                    (Some(id), true)
                 }
-                (Some(store::ReplyMail::Sent(id)), None) if again => Some(id),
+                (Some(store::ReplyMail::Sent(id)), None) if again => (Some(id), false),
                 (waiting, None) => {
                     if let Some(store::ReplyMail::Waiting(id)) = waiting {
                         store::cancel_send(tx, id)?;
                     }
                     match (&mail, &blob) {
-                        (Some(m), Some(blob)) => Some(queue(tx, account, m, blob)?),
-                        _ => None,
+                        (Some(m), Some(blob)) => (Some(queue(tx, account, m, blob)?), true),
+                        _ => (None, false),
                     }
                 }
             };
-            store::remember_answer(tx, account, &uid, rid.as_ref(), &store::GivenAnswer { proposal, ..given }, &version, reply)
+            store::remember_answer(tx, account, &uid, rid.as_ref(), &store::GivenAnswer { proposal, ..given }, &version, reply)?;
+            Ok(waiting)
         })
         .await?;
     let calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
-    Ok(Outcome { text: told(req, &r, plan), mailed_from: plan.mail.then_some(r.account), calendar })
+    Ok(Outcome { text: told(req, &r, plan), mailed_from: waiting.then_some(r.account), calendar })
 }
 
 /// The answer kept, given again the same way, to an invitation that still
@@ -950,6 +952,26 @@ mod tests {
         run(&j, request(message, Answer::Accept, None, true, false)).unwrap();
         assert_eq!(outbox(&j).len(), 2, "a new answer after a proposal is a reply of its own");
         assert_eq!(counter_of(&outbox(&j)[1].3).0, "REPLY");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A proposal or a reply the organizer has already leaves nothing in the
+    /// outbox, so the caller waits for no mail to go.
+    #[test]
+    fn nothing_is_mailed_once_the_organizer_has_it() {
+        let (j, _) = jolta("respond-nothing-left");
+        let message = import(&j, mail!("google-request.eml"));
+        let mailed = |req: Request| run(&j, req).unwrap().mailed_from;
+        let friday = || proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45");
+        assert_eq!(mailed(friday()), Some(AccountId(1)), "the COUNTER waits in the outbox");
+        assert_eq!(mailed(friday()), Some(AccountId(1)), "and still does");
+        set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+        assert_eq!(mailed(friday()), None, "the organizer has this proposal");
+        assert_eq!(mailed(request(message, Answer::Maybe, None, true, false)), None, "and the maybe it carried");
+        assert_eq!(mailed(request(message, Answer::Accept, None, true, false)), Some(AccountId(1)), "a new answer waits");
+        set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+        assert_eq!(mailed(request(message, Answer::Accept, None, true, false)), None, "the organizer has it");
+        assert_eq!(outbox(&j).len(), 2);
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
