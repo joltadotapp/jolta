@@ -401,8 +401,9 @@ impl GraphCalendar {
         Ok(out)
     }
 
-    /// `accept`, `tentativelyAccept` or `decline` with the note as
-    /// `comment` and `sendResponse`. Exchange sends the organizer the reply.
+    /// `accept`, `tentativelyAccept` or `decline` with `sendResponse`, and
+    /// the note as `comment` when a reply goes out. Exchange sends the
+    /// organizer the reply.
     pub async fn answer(&self, target: &Target, rsvp: &Rsvp) -> Result<String> {
         let id = match &target.occurrence {
             None => target.event.remote_id.clone(),
@@ -414,7 +415,11 @@ impl GraphCalendar {
             Answer::Maybe => "tentativelyAccept",
             Answer::Decline => "decline",
         };
-        let body = json!({ "comment": rsvp.note.clone().unwrap_or_default(), "sendResponse": rsvp.notify });
+        // Graph refuses a comment, even an empty one, without sendResponse.
+        let body = match &rsvp.note {
+            Some(note) if rsvp.notify => json!({ "comment": note, "sendResponse": true }),
+            _ => json!({ "sendResponse": rsvp.notify }),
+        };
         let (status, reply) = self.request("POST", &format!("/me/events/{}/{action}", encode(&id)), Some(&body), &[]).await?;
         if !(200..300).contains(&status) {
             return Err(self.failure(status, &reply));
