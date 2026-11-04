@@ -452,6 +452,7 @@ enum ReaderStyle {
     .jolta-strip-busy.jolta-conflict { color: var(--tx); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 75%, transparent); }
     .jolta-strip-this { background: color-mix(in oklab, var(--tx) 13%, var(--bg)); color: var(--tx); font-weight: 600;
       box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 35%, transparent); }
+    .jolta-strip .jolta-strip-beside { width: max-content; background: var(--bg); box-shadow: none; padding: 0 4px 0 5px; border-radius: 0; }
     .jolta-invite-actions { display: flex; gap: 8px; margin-top: 12px; }
     .jolta-join { padding: 3px 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
       text-decoration: none; cursor: default; }

@@ -76,20 +76,33 @@ fn strip(s: &Strip) -> String {
     }
     for b in &s.busy {
         let class = if b.conflict { "jolta-strip-busy jolta-conflict" } else { "jolta-strip-busy" };
-        h.push_str(&block(class, b, HOURS_ROW + f32::from(b.lane) * LANE));
+        let next = s.busy.iter().filter(|o| o.lane == b.lane && o.left > b.left).map(|o| o.left).fold(100.0, f32::min);
+        h.push_str(&block(class, b, HOURS_ROW + f32::from(b.lane) * LANE, next));
     }
-    h.push_str(&block("jolta-strip-this", &s.this, this_top));
+    h.push_str(&block("jolta-strip-this", &s.this, this_top, 100.0));
     h.push_str("</div>");
     h
 }
 
-/// Narrower than this, in percent of the strip, a block shows no words.
+/// Narrower than this, in percent of the strip, a block's title doesn't fit
+/// inside it and goes beside it, when its row has that much room.
 const LABEL_MIN: f32 = 9.0;
 
-fn block(class: &str, b: &Block, top: f32) -> String {
+/// `next` is where the next block in the row starts.
+fn block(class: &str, b: &Block, top: f32, next: f32) -> String {
     let title = escape(&b.title);
-    let label = if b.width >= LABEL_MIN { title.as_str() } else { "" };
-    format!("<span class=\"{class}\" style=\"left:{:.2}%;width:{:.2}%;top:{top}px\" title=\"{title}\">{label}</span>", b.left, b.width)
+    let inside = b.width >= LABEL_MIN;
+    let mut h = format!(
+        "<span class=\"{class}\" style=\"left:{:.2}%;width:{:.2}%;top:{top}px\" title=\"{title}\">{}</span>",
+        b.left,
+        b.width,
+        if inside { title.as_str() } else { "" }
+    );
+    let (end, room) = (b.left + b.width, next - b.left - b.width);
+    if !inside && room >= LABEL_MIN && !title.is_empty() {
+        let _ = write!(h, "<span class=\"{class} jolta-strip-beside\" style=\"left:{end:.2}%;max-width:{room:.2}%;top:{top}px\">{title}</span>");
+    }
+    h
 }
 
 /// `x-join:` hands the app both links; it opens the provider's app when it
@@ -205,6 +218,23 @@ mod tests {
         let page = render_thread(&[view], "").html;
         let (card_at, body_at) = (page.find("jolta-invite").unwrap(), page.find("id=\"m7\"").unwrap());
         assert!(card_at < body_at, "the card comes before the body and outside it, where the message's styles can't reach");
+    }
+
+    #[test]
+    fn a_short_block_has_its_title_beside_it() {
+        let block = |left: f32, width: f32, lane: u8, title: &str| Block { left, width, lane, title: title.into(), conflict: false };
+        let strip = Strip {
+            hours: Vec::new(),
+            busy: vec![block(10.0, 5.0, 0, "Coffee"), block(17.0, 20.0, 0, "Design sync"), block(60.0, 5.0, 0, "Call")],
+            lanes: 1,
+            this: block(45.0, 5.0, 0, "Team standup"),
+        };
+        let html = super::strip(&strip);
+        assert!(html.contains(">Team&#32;standup</span>"), "{html}");
+        assert!(html.contains("left:50.00%;max-width:50.00%"), "the rest of its row: {html}");
+        assert!(html.contains(">Call</span>"), "nothing after it in its row");
+        assert!(!html.contains(">Coffee</span>"), "Design sync starts 2% later, no room: {html}");
+        assert!(html.contains(">Design&#32;sync</span>"), "wide enough for its title inside");
     }
 
     #[test]
