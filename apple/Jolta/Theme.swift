@@ -101,3 +101,23 @@ struct KeyCap: View {
             }
     }
 }
+
+/// A theme's background, text and accent as three overlapping dots.
+struct ThemeSwatch: View {
+    let theme: ThemePalette
+
+    var body: some View {
+        HStack(spacing: -3) {
+            dot(theme.tokens.bg)
+            dot(theme.tokens.text)
+            dot(theme.tokens.accent)
+        }
+    }
+
+    private func dot(_ color: UInt32) -> some View {
+        Circle()
+            .fill(Color(nsColor: NSColor(hex: color)))
+            .overlay(Circle().strokeBorder(Color(Theme.line), lineWidth: 1))
+            .frame(width: 8, height: 8)
+    }
+}

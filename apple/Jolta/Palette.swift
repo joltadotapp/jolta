@@ -11,7 +11,7 @@ enum PaletteMode: Equatable {
     /// A snippet to insert at the cursor of the message being written.
     case snippets
     case move
-    /// The theme for the Mac's dark or light appearance, previewed as the selection moves.
+    /// A theme to show, previewed as the selection moves.
     case themes
 }
 
@@ -137,11 +137,22 @@ struct PaletteView: View {
         out.append(PaletteItem(id: "themes", title: "Change Theme…", icon: "paintpalette", keepsOpen: true) { [model] in
             model.palette = .themes
         })
+        if let match = matchMacOSItem { out.append(match) }
         return out
     }
 
-    /// Graphite, then Omarchy's themes by name. Choosing one makes it the
-    /// theme for its own mode, whichever mode the Mac is in.
+    /// While one theme shows always: back to a theme for each macOS appearance.
+    private var matchMacOSItem: PaletteItem? {
+        guard ThemeStore.shared.choice.fixed != nil else { return nil }
+        return PaletteItem(id: "match-macos", title: "Match macOS Appearance", icon: "circle.lefthalf.filled") { [model] in
+            let store = ThemeStore.shared
+            store.update { $0.matchMacOS() }
+            model.notify("Matching macOS again, with \(store.choice.light.name) in light mode and \(store.choice.dark.name) in dark mode.")
+        }
+    }
+
+    /// Graphite, then Omarchy's themes by name. Choosing one shows it at
+    /// once (`ThemeChoice.pick`).
     private var themeItems: [PaletteItem] {
         let store = ThemeStore.shared
         var out: [PaletteItem] = []
@@ -149,15 +160,13 @@ struct PaletteView: View {
             out.append(PaletteItem(id: "back", title: "Back to Commands", icon: "chevron.left", keepsOpen: true) { [model] in
                 model.palette = .commands
             })
+            if let match = matchMacOSItem { out.append(match) }
         }
         for theme in ThemePalette.all {
             out.append(PaletteItem(id: "theme-\(theme.id)", title: theme.name, detail: theme.mode == .dark ? "Dark" : "Light",
                                    icon: "paintpalette", theme: theme) { [model] in
-                let system = store.systemMode
-                store.save(theme)
-                if theme.mode != system {
-                    let shown = system == .dark ? store.dark : store.light
-                    model.notify("\(theme.name) is your \(theme.mode.rawValue) theme. Your Mac is in \(system.rawValue) mode, so Jolta shows \(shown.name).")
+                if store.pick(theme) {
+                    model.notify("Always using \(theme.name). Match macOS again in Settings › Appearance.")
                 }
             })
         }
@@ -335,12 +344,7 @@ struct PaletteView: View {
     private func row(_ item: PaletteItem, on: Bool) -> some View {
         HStack(spacing: 12) {
             if let theme = item.theme {
-                HStack(spacing: -3) {
-                    swatch(theme.tokens.bg)
-                    swatch(theme.tokens.text)
-                    swatch(theme.tokens.accent)
-                }
-                .frame(width: 18)
+                ThemeSwatch(theme: theme).frame(width: 18)
             } else {
                 Image(systemName: item.icon).frame(width: 18).foregroundStyle(Color(Theme.text3))
             }
@@ -349,8 +353,8 @@ struct PaletteView: View {
                 Text(item.detail).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
             }
             Spacer()
-            if let theme = item.theme, ThemeStore.shared.isSaved(theme) {
-                HStack(spacing: 4) { Image(systemName: "checkmark"); Text("In use") }
+            if let theme = item.theme, let use = ThemeStore.shared.choice.use(of: theme) {
+                HStack(spacing: 4) { Image(systemName: "checkmark"); Text(use.label) }
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(Theme.text3))
             }
@@ -367,13 +371,6 @@ struct PaletteView: View {
         }
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
-    }
-
-    private func swatch(_ color: UInt32) -> some View {
-        Circle()
-            .fill(Color(nsColor: NSColor(hex: color)))
-            .overlay(Circle().strokeBorder(Color(Theme.line), lineWidth: 1))
-            .frame(width: 8, height: 8)
     }
 
     private func choose(_ list: [PaletteItem]) {

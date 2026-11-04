@@ -145,7 +145,7 @@ final class Journeys: XCTestCase {
         XCTAssertGreaterThan(distance(chosen, graphite), 6, "the chosen theme stays after the palette closes")
 
         openThemes(app)
-        XCTAssertTrue(text(app, "In use").exists, "the theme list marks the saved themes")
+        XCTAssertTrue(text(app, "Dark mode").exists && text(app, "Light mode").exists, "the theme list marks the theme for each appearance")
         for _ in 0..<5 { app.typeKey(.upArrow, modifierFlags: []) }
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on Back to Commands leaves the theme list")
@@ -159,6 +159,36 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         let kept = listColor(app, "Chosen theme after leaving the palette") { self.distance($0, chosen) <= 3 }
         XCTAssertLessThanOrEqual(distance(kept, chosen), 3, "leaving the theme list without choosing keeps the saved theme")
+    }
+
+    /// A theme of the other mode than the Mac's shows at once, as the one
+    /// theme Jolta always uses, until Match macOS Appearance.
+    func testThemeOfTheOtherModeShowsAlways() throws {
+        let app = try launch()
+        let graphite = listColor(app, "Graphite, matching macOS")
+        let other = luminance(graphite) < 0.5 ? "Graphite Light" : "Graphite Dark"
+
+        openThemes(app)
+        app.typeText(other)
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Always using \(other).").waitForExistence(timeout: 5), "a toast says the theme now shows always")
+        let always = listColor(app, "\(other), always") { self.distance($0, graphite) > 40 }
+        XCTAssertGreaterThan(distance(always, graphite), 40, "the theme of the other mode shows")
+
+        openThemes(app)
+        XCTAssertTrue(text(app, "Always").exists, "the theme list marks the theme shown always")
+        XCTAssertTrue(text(app, "Match macOS Appearance").exists, "the theme list offers matching macOS again")
+        app.typeKey(.escape, modifierFlags: [])
+
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("match macos")
+        app.typeKey(.return, modifierFlags: [])
+        let matched = listColor(app, "Matching macOS again") { self.distance($0, graphite) <= 3 }
+        XCTAssertLessThanOrEqual(distance(matched, graphite), 3, "Match macOS Appearance brings back the theme for the Mac's mode")
+    }
+
+    private func luminance(_ c: [Int]) -> Double {
+        c.count == 3 ? Double(c.reduce(0, +)) / (3 * 255) : 0
     }
 
     func testSearchFiltersTheList() throws {

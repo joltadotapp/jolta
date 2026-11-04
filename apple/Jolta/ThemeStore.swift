@@ -2,7 +2,7 @@ import AppKit
 import Observation
 import Synchronization
 
-/// The palettes on screen: the saved dark and light themes, with a theme
+/// The palettes on screen: the chosen dark and light themes, with a theme
 /// being previewed in place of the one for its mode.
 nonisolated struct ThemePair: Equatable, Sendable {
     var dark: ThemeTokens
@@ -14,15 +14,15 @@ nonisolated struct ThemePair: Equatable, Sendable {
     }
 }
 
-/// The saved dark and light themes and the one being previewed from ⌘K.
-/// macOS's appearance picks between the two; a preview forces the
-/// appearance of its own mode so a dark theme shows on a light Mac.
+/// The theme choice and the theme being previewed from ⌘K. A choice that
+/// shows one theme always, and a preview, force the appearance of that
+/// theme's mode on the whole app, so system controls, scroll bars and the
+/// reader's web page match it.
 @Observable
 final class ThemeStore {
     static let shared = ThemeStore()
 
-    private(set) var darkID: String
-    private(set) var lightID: String
+    private(set) var choice: ThemeChoice
     private(set) var preview: ThemePalette?
     /// What every theme color resolves to right now.
     private(set) var active: ThemePair
@@ -33,29 +33,18 @@ final class ThemeStore {
     @ObservationIgnored private var colors: [KeyPath<ThemeTokens, UInt32>: NSColor] = [:]
     @ObservationIgnored private let keyPrefix: String
 
-    private static func key(_ mode: ThemeMode, _ prefix: String) -> String {
-        prefix + (mode == .dark ? "ThemeDark" : "ThemeLight")
-    }
-
     private init() {
         let defaults = UserDefaults.standard
         let test = AppModel.isTestData ? defaults.string(forKey: "JoltaTestData") ?? "" : ""
         let prefix = test.isEmpty ? "" : test + "."
         // UI tests save under their own keys and start from Graphite each launch.
-        if !test.isEmpty {
-            defaults.removeObject(forKey: Self.key(.dark, prefix))
-            defaults.removeObject(forKey: Self.key(.light, prefix))
-        }
-        func saved(_ mode: ThemeMode) -> ThemePalette? {
-            defaults.string(forKey: Self.key(mode, prefix)).flatMap(ThemePalette.named).flatMap { $0.mode == mode ? $0 : nil }
-        }
-        let dark = saved(.dark) ?? .graphiteDark
-        let light = saved(.light) ?? .graphiteLight
+        if !test.isEmpty { ThemeChoice.forget(defaults, prefix: prefix) }
         keyPrefix = prefix
-        darkID = dark.id
-        lightID = light.id
-        active = ThemePair(dark: dark.tokens, light: light.tokens)
+        let choice = ThemeChoice.load(defaults, prefix: prefix)
+        self.choice = choice
+        active = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
         Self.live.withLock { $0 = active }
+        force(choice.always)
     }
 
     /// The tokens on screen for one appearance, for colors mixed from them
@@ -64,49 +53,49 @@ final class ThemeStore {
         live.withLock { $0[mode] }
     }
 
-    var dark: ThemePalette { ThemePalette.named(darkID) ?? .graphiteDark }
-    var light: ThemePalette { ThemePalette.named(lightID) ?? .graphiteLight }
-
-    /// The mode macOS shows Jolta in, leaving a preview's forced appearance aside.
+    /// macOS's appearance. While Jolta forces its own, the one from just
+    /// before, which only matters while the choice matches macOS and a
+    /// preview forces another.
     var systemMode: ThemeMode {
-        guard NSApp.appearance == nil else { return systemModeBeforePreview }
-        return NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        NSApp.appearance == nil ? Self.mode(NSApp.effectiveAppearance) : systemModeBeforeForcing
     }
-    @ObservationIgnored private var systemModeBeforePreview = ThemeMode.dark
+    @ObservationIgnored private var systemModeBeforeForcing = ThemeMode.dark
 
-    /// The saved theme macOS's appearance shows now.
-    var shown: ThemePalette { systemMode == .dark ? dark : light }
-
-    func isSaved(_ palette: ThemePalette) -> Bool {
-        palette.id == (palette.mode == .dark ? darkID : lightID)
-    }
+    /// The theme on screen, leaving a preview aside.
+    var shown: ThemePalette { choice.shown(systemMode) }
 
     func startPreview(_ palette: ThemePalette) {
         guard preview != palette else { return }
-        if preview == nil { systemModeBeforePreview = systemMode }
         preview = palette
-        NSApp.appearance = NSAppearance(named: palette.mode == .dark ? .darkAqua : .aqua)
         apply()
     }
 
     func endPreview() {
         guard preview != nil else { return }
         preview = nil
-        NSApp.appearance = nil
         apply()
     }
 
-    /// Makes `palette` the theme for its mode and ends any preview.
-    func save(_ palette: ThemePalette) {
-        if palette.mode == .dark { darkID = palette.id } else { lightID = palette.id }
-        UserDefaults.standard.set(palette.id, forKey: Self.key(palette.mode, keyPrefix))
+    /// Changes the choice, saves it and ends any preview.
+    func update(_ change: (inout ThemeChoice) -> Void) {
+        change(&choice)
+        choice.save(UserDefaults.standard, prefix: keyPrefix)
         preview = nil
-        NSApp.appearance = nil
         apply()
+    }
+
+    /// Chooses a theme from ⌘K (`ThemeChoice.pick`). Returns whether the
+    /// pick made Jolta stop matching macOS.
+    @discardableResult func pick(_ theme: ThemePalette) -> Bool {
+        let matched = choice.always == nil
+        let system = systemMode
+        update { $0.pick(theme, system: system) }
+        return matched && choice.always != nil
     }
 
     private func apply() {
-        var pair = ThemePair(dark: dark.tokens, light: light.tokens)
+        force(preview?.mode ?? choice.always)
+        var pair = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
         if let preview { pair[preview.mode] = preview.tokens }
         guard pair != active else { return }
         Self.live.withLock { $0 = pair }
@@ -116,6 +105,18 @@ final class ThemeStore {
         for window in NSApp.windows {
             if let view = window.contentView { Self.redraw(view) }
         }
+    }
+
+    /// Shows the whole app in `mode`, or in macOS's appearance for nil.
+    private func force(_ mode: ThemeMode?) {
+        let name: NSAppearance.Name? = mode.map { $0 == .dark ? .darkAqua : .aqua }
+        guard NSApp.appearance?.name != name else { return }
+        if NSApp.appearance == nil { systemModeBeforeForcing = systemMode }
+        NSApp.appearance = name.flatMap(NSAppearance.init(named:))
+    }
+
+    private static func mode(_ appearance: NSAppearance) -> ThemeMode {
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
     }
 
     private static func redraw(_ view: NSView) {
