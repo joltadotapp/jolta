@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use jolta_core::imap::{self, SyncEvent, SyncOptions};
 use jolta_core::search::{self, ThreadRow};
-use jolta_core::store;
+use jolta_core::store::{self, InvitationState};
 use jolta_core::{AccountKind, Jolta, MailboxRole, MessageId, secrets, synth};
 
 #[derive(Parser)]
@@ -805,14 +805,22 @@ fn print_rows(rows: &[ThreadRow]) {
             if r.has_attachments { '📎' } else { ' ' }
         );
         let count = if r.message_count > 1 { format!(" ({})", r.message_count) } else { String::new() };
+        let invitation = match r.invitation {
+            None => String::new(),
+            Some(InvitationState::Unanswered) => " [Not answered]".into(),
+            Some(InvitationState::Answered(a)) => format!(" [{}]", jolta_core::calendar::card::answer_word(a)),
+            Some(InvitationState::Cancelled) => " [Cancelled]".into(),
+            Some(InvitationState::Plain) => " [invitation]".into(),
+        };
         println!(
-            "{:>16}  {}  {}  {:<22}  {}{}  {}",
+            "{:>16}  {}  {}  {:<22}  {}{}{}  {}",
             r.message_id.0,
             format_date(r.date),
             marks,
             truncate(from, 22),
             truncate(&r.subject, 60),
             count,
+            invitation,
             truncate(&r.snippet, 50)
         );
     }

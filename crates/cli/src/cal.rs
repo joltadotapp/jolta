@@ -92,6 +92,10 @@ pub enum CalCommand {
         #[arg(long)]
         occurrence: Option<String>,
     },
+    /// Read the invitations in stored bodies not read yet, then count the
+    /// conversations by the state their list row shows, and what
+    /// `is:invite` finds.
+    Invitations,
     /// Answer the invitation on a message as the reader's card does: through
     /// the calendar's provider, the CalDAV copy and a reply mail, or the
     /// reply mail alone. Waits until a reply mail has left.
@@ -345,6 +349,32 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 Ok(items.len())
             })?;
             println!("{count} events in the local calendar {name}.");
+            Ok(())
+        }
+        CalCommand::Invitations => {
+            let t = Instant::now();
+            let found = jolta_core::engine::scan_invitations(jolta)?;
+            println!("{found} bodies read now held invitations ({:.1} s).", t.elapsed().as_secs_f64());
+            let (now, here) = (Utc::now(), tz::here());
+            let t = Instant::now();
+            let states = jolta.store.read(|c| {
+                let mut stmt = c.prepare("SELECT DISTINCT m.thread_id FROM invitation i JOIN message m ON m.id = i.message_id")?;
+                let threads: Vec<jolta_core::ThreadId> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+                threads.into_iter().map(|thread| store::thread_invitation(c, thread, now, here)).collect::<jolta_core::Result<Vec<_>>>()
+            })?;
+            let each = t.elapsed().as_secs_f64() * 1000.0 / states.len().max(1) as f64;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for s in states.iter().flatten() {
+                *counts.entry(format!("{s:?}")).or_default() += 1;
+            }
+            println!("{} conversations with an invitation, {each:.3} ms each:", states.len());
+            for (state, n) in counts {
+                println!("  {n:>6}  {state}");
+            }
+            let q = jolta_core::search::parse("is:invite")?;
+            let t = Instant::now();
+            let invites = jolta.store.read(|c| jolta_core::search::query_count(c, &q))?;
+            println!("is:invite finds {invites} conversations ({:.2} ms).", t.elapsed().as_secs_f64() * 1000.0);
             Ok(())
         }
         CalCommand::Answer { message, accept, maybe, decline: _, note, no_reply, occurrence } => {
