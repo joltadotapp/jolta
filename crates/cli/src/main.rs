@@ -241,6 +241,20 @@ enum DevCommand {
     Expunge { account: String, mailbox: String, uids: String },
     /// GET a Microsoft Graph path (such as /me/mailFolders/inbox/messages) and print the JSON.
     Graph { account: String, path: String },
+    /// Send one request with an account's calendar sign-in and print the status, ETag and body:
+    /// the OAuth token for Google and Microsoft (a Graph path or a full URL), the password for
+    /// CalDAV (a full URL on the account's server). For setting up and checking test meetings.
+    Http {
+        account: String,
+        method: String,
+        url: String,
+        /// The body: JSON for Google and Graph, iCalendar or XML for CalDAV. `@file` reads a file.
+        #[arg(long, default_value = "")]
+        body: String,
+        /// A header as `Name: value`, such as `If-Match: "abc"` or `Content-Type: text/calendar`.
+        #[arg(long = "header")]
+        headers: Vec<String>,
+    },
     /// Add an account with no server and the usual folders, for test data
     /// filled with `jolta import`. The UI tests use it.
     LocalAccount { address: String },
@@ -593,6 +607,25 @@ async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
+    if let DevCommand::Http { account, method, url, body, headers } = &cmd {
+        let a = jolta.store.read(|c| store::find_account(c, account))?;
+        let caldav = jolta.store.read(|c| store::caldav_url(c, a.id))?;
+        let body = match body.strip_prefix('@') {
+            Some(path) => std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
+            None => body.clone(),
+        };
+        let headers: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|h| h.split_once(':').map(|(k, v)| (k.trim(), v.trim())).with_context(|| format!("{h} is not a header like Name: value")))
+            .collect::<Result<_>>()?;
+        let (status, etag, reply) = jolta_core::calendar::sources::signed_request(&a, caldav.as_deref(), method, url, &body, &headers).await?;
+        println!("{status}{}", etag.map(|e| format!("  ETag {e}")).unwrap_or_default());
+        match serde_json::from_str::<serde_json::Value>(&reply) {
+            Ok(json) if !json.is_null() => println!("{}", serde_json::to_string_pretty(&json)?),
+            _ => println!("{reply}"),
+        }
+        return Ok(());
+    }
     if let DevCommand::LocalAccount { address } = &cmd {
         let folders = [
             ("INBOX", Some(MailboxRole::Inbox)),
@@ -636,7 +669,7 @@ async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
         | DevCommand::Search { account, mailbox, .. }
         | DevCommand::Store { account, mailbox, .. }
         | DevCommand::Expunge { account, mailbox, .. } => (account.clone(), mailbox.clone()),
-        DevCommand::Graph { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
+        DevCommand::Graph { .. } | DevCommand::Http { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
     };
     let a = jolta.store.read(|c| store::find_account(c, &account))?;
     let mut session = imap::connect_account(&a).await?;
@@ -659,7 +692,7 @@ async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
             let n = session.uid_store(&uids, &change).await?.try_collect::<Vec<_>>().await?.len();
             println!("changed {n} message(s)");
         }
-        DevCommand::Graph { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
+        DevCommand::Graph { .. } | DevCommand::Http { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
         DevCommand::Expunge { uids, .. } => {
             session.select(&mailbox).await?;
             session.uid_store(&uids, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;

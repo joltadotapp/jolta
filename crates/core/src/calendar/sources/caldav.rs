@@ -81,12 +81,12 @@ enum Collection {
     Unsupported,
 }
 
-struct Reply {
-    status: u16,
+pub(super) struct Reply {
+    pub(super) status: u16,
     /// Where the answer came from after redirects; hrefs resolve against it.
     url: Url,
-    body: String,
-    etag: Option<String>,
+    pub(super) body: String,
+    pub(super) etag: Option<String>,
 }
 
 impl CalDav {
@@ -133,7 +133,7 @@ impl CalDav {
     }
 
     /// One request, following redirects with the same method and body.
-    async fn exchange(&self, method: &str, url: &Url, headers: &[(&str, &str)], body: &str) -> Result<Reply> {
+    pub(super) async fn exchange(&self, method: &str, url: &Url, headers: &[(&str, &str)], body: &str) -> Result<Reply> {
         let method = reqwest::Method::from_bytes(method.as_bytes()).expect("a valid method");
         let mut url = url.clone();
         let mut attempts = 0;

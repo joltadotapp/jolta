@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::rsvp::{Rsvp, Target};
 use super::{Calendar, CalendarSource, EventData};
 use crate::store::RemoteCalendar;
-use crate::{Error, Result};
+use crate::{Account, AccountKind, Error, Result};
 
 /// The remote objects a calendar holds, with their ETags, by remote id.
 pub type Known = BTreeMap<String, Option<String>>;
@@ -80,6 +80,42 @@ impl Source {
             Source::Google(s) => s.answer(calendar, target, rsvp).await,
             Source::Graph(s) => s.answer(target, rsvp).await,
             Source::Webcal(_) => Err(Error::Other("This event is in a subscribed calendar, which is read-only, so it can't be answered.".into())),
+        }
+    }
+}
+
+/// One request with an account's calendar sign-in, for `jolta dev http`:
+/// the OAuth token for Google and Microsoft accounts, the password for
+/// CalDAV, which goes only to the servers discovery would start from.
+/// Returns the status, the ETag and the body.
+pub async fn signed_request(
+    account: &Account,
+    caldav_url: Option<&str>,
+    method: &str,
+    url: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Result<(u16, Option<String>, String)> {
+    let json = || -> Result<Option<serde_json::Value>> {
+        (!body.trim().is_empty())
+            .then(|| serde_json::from_str(body).map_err(|e| Error::Other(format!("the body isn't JSON: {e}"))))
+            .transpose()
+    };
+    match account.kind {
+        AccountKind::Graph => {
+            let (status, reply) = graph::GraphCalendar::new(account)?.request(method, url, json()?.as_ref(), headers).await?;
+            Ok((status, reply["@odata.etag"].as_str().map(str::to_string), reply.to_string()))
+        }
+        AccountKind::Gmail => {
+            let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| Error::Other(format!("HTTP method {method}: {e}")))?;
+            let if_match = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("If-Match")).map(|(_, v)| *v);
+            let (status, reply) = google::Google::new(account)?.request(method, url, json()?.as_ref(), if_match).await?;
+            Ok((status, None, String::from_utf8_lossy(&reply).into_owned()))
+        }
+        AccountKind::Imap => {
+            let url = reqwest::Url::parse(url).map_err(|e| Error::Other(format!("{url}: {e}")))?;
+            let reply = caldav::CalDav::new(account, caldav_url)?.exchange(method, &url, headers, body).await?;
+            Ok((reply.status, reply.etag, reply.body))
         }
     }
 }

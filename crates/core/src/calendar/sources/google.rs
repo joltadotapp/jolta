@@ -189,7 +189,7 @@ impl Google {
 
     /// A request with the account's token. Rate limits and brief outages
     /// are retried; the caller reads every other status.
-    async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
+    pub(super) async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
         for attempt in 0..5u32 {
             let token = oauth::access_token(&self.account).await?;
             let mut req = self.http.request(method.clone(), url).bearer_auth(&token);

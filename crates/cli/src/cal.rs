@@ -11,7 +11,8 @@ use jolta_core::Jolta;
 use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
-use jolta_core::calendar::{Bounds, CalendarId, EventData, ical, sync, synth, tz};
+use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
+use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
 
 use crate::{pct, truncate};
@@ -68,6 +69,27 @@ pub enum CalCommand {
         /// "#rrggbb".
         #[arg(long)]
         color: Option<String>,
+    },
+    /// Answer an invitation through the event's calendar, which sends the organizer the reply.
+    #[command(group = clap::ArgGroup::new("answer").required(true))]
+    Rsvp {
+        /// The event's id, as `jolta cal list` shows it after the title.
+        event: i64,
+        #[arg(long, group = "answer")]
+        accept: bool,
+        #[arg(long, group = "answer")]
+        maybe: bool,
+        #[arg(long, group = "answer")]
+        decline: bool,
+        /// A note for the organizer.
+        #[arg(long)]
+        note: Option<String>,
+        /// Save the answer without sending the organizer a reply.
+        #[arg(long)]
+        no_reply: bool,
+        /// Answer one occurrence of a series: its day (2026-11-12) or recurrence id (20261112T100000).
+        #[arg(long)]
+        occurrence: Option<String>,
     },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
@@ -195,8 +217,9 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 let meeting = o.meeting.as_ref().map(|m| m.provider.to_string()).unwrap_or_default();
                 let calendar = names.get(&o.calendar_id).map_or("", String::as_str);
                 days.entry(day).or_default().push(format!(
-                    "  {when:<19} {:<40} {:<18} {response:<12} {meeting}",
+                    "  {when:<19} {:<40} {:>6} {:<18} {response:<12} {meeting}",
                     truncate(&title_of(o), 40),
+                    format!("#{}", o.event_id),
                     truncate(calendar, 18)
                 ));
             }
@@ -301,6 +324,57 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             println!("{count} events in the local calendar {name}.");
             Ok(())
         }
+        CalCommand::Rsvp { event, accept, maybe, decline: _, note, no_reply, occurrence } => {
+            let answer = if accept {
+                Answer::Accept
+            } else if maybe {
+                Answer::Maybe
+            } else {
+                Answer::Decline
+            };
+            let event = EventId(event);
+            let scope = match &occurrence {
+                Some(spec) => Scope::Occurrence(rsvp::occurrence(jolta, event, spec)?),
+                None => Scope::Series,
+            };
+            let (calendar, uid, title): (CalendarId, String, String) = jolta.store.read(|c| {
+                Ok(c.query_row("SELECT calendar_id, uid, title FROM event WHERE id = ?1", [event], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+            })?;
+            let what = match &scope {
+                Scope::Series => "the whole event".to_string(),
+                Scope::Occurrence(rid) => format!("the occurrence of {}", moment_text(rid)),
+            };
+            let t = Instant::now();
+            rsvp::answer(jolta, &Rsvp { event, answer, note, notify: !no_reply, scope }).await?;
+            println!(
+                "{} {what} of {title:?} in {:.2} s; {}.",
+                match answer {
+                    Answer::Accept => "Accepted",
+                    Answer::Maybe => "Tentatively accepted",
+                    Answer::Decline => "Declined",
+                },
+                t.elapsed().as_secs_f64(),
+                if no_reply { "no reply goes to the organizer" } else { "the organizer gets a reply" }
+            );
+            let report = sync::sync_calendar(jolta, calendar).await?;
+            println!("Synced the calendar: {} changed, {} removed. Stored answers now:", report.upserted, report.removed);
+            let rows: Vec<String> = jolta.store.read(|c| {
+                let mut stmt = c.prepare("SELECT data FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY recurrence_id")?;
+                let rows = stmt.query_map((calendar, &uid), |r| r.get(0))?;
+                Ok(rows.collect::<std::result::Result<Vec<String>, _>>()?)
+            })?;
+            for data in rows {
+                let e: EventData = serde_json::from_str(&data)?;
+                let me = e.attendees.iter().find(|a| a.is_me);
+                println!(
+                    "  {:<34} {:<12} {}",
+                    e.recurrence_id.as_ref().map_or("series or single event".to_string(), moment_text),
+                    me.map_or("-".to_string(), |a| a.response.to_string()),
+                    me.map(|a| a.comment.as_str()).filter(|c| !c.is_empty()).map(|c| format!("{c:?}")).unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
         CalCommand::Fact { fact, account } => {
             let account = account.map(|spec| jolta.store.read(|c| store::find_account(c, &spec))).transpose()?;
             crate::cal_fact::run(fact, account.as_ref()).await
@@ -396,6 +470,16 @@ fn day(n: i32) -> NaiveDate {
 
 fn title_of(o: &OccurrenceRow) -> String {
     if o.title.is_empty() { "(no title)".into() } else { o.title.clone() }
+}
+
+fn moment_text(m: &Moment) -> String {
+    match m {
+        Moment::Date(d) => d.format("%a %-d %b %Y").to_string(),
+        Moment::Time(t) => match t.zone {
+            Zone::Tz(zone) => format!("{} {zone}", t.wall.format("%a %-d %b %Y %H:%M")),
+            Zone::Floating => t.wall.format("%a %-d %b %Y %H:%M").to_string(),
+        },
+    }
 }
 
 fn yes(b: bool) -> &'static str {
