@@ -43,7 +43,7 @@ extension AppModel {
         if mode == .calendar {
             calendar.reloadCalendars()
             calendar.refresh()
-            if calendar.hasNoCalendars, !UserDefaults.standard.bool(forKey: "CalendarIntroDone") { showsCalendarIntro = true }
+            if calendar.hasNoCalendars, !UserDefaults.standard.bool(forKey: Self.key("CalendarIntroDone")) { showsCalendarIntro = true }
         } else {
             calendar.closeDetail()
             requestListFocus()
@@ -51,7 +51,7 @@ extension AppModel {
     }
 
     func finishCalendarIntro() {
-        UserDefaults.standard.set(true, forKey: "CalendarIntroDone")
+        UserDefaults.standard.set(true, forKey: Self.key("CalendarIntroDone"))
         showsCalendarIntro = false
     }
 

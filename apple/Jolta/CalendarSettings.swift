@@ -91,9 +91,11 @@ struct SubscribeField: View {
                     detailColor: message?.failed == true ? .red : Color(Theme.text3)) {
             HStack(spacing: 8) {
                 TextField("", text: $url, prompt: Text("webcal://"))
-                    .settingsField(width: 220)
+                    .settingsField(width: 190)
                     .onSubmit(add)
-                Button(adding ? "Adding…" : "Add", action: add).disabled(adding || url.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button(adding ? "Adding…" : "Add", action: add)
+                    .fixedSize()
+                    .disabled(adding || url.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
     }
@@ -138,7 +140,7 @@ struct CalendarSettings: View {
                     ForEach(group.calendars) { entry in CalendarSettingsRow(model: model, info: entry.info, removal: $removal) }
                 }
             }
-            SettingsSection("Subscriptions") {
+            SettingsSection("Subscribe") {
                 SubscribeField(model: model)
                 SettingsRow(title: "Open webcal:// links in Jolta",
                             detail: "Clicking a calendar subscription link anywhere on this Mac subscribes in Jolta.") {
@@ -221,6 +223,7 @@ struct CalendarSettingsRow: View {
     private func toggle(_ title: String, _ on: Bool, _ set: @escaping (Bool) throws -> Void) -> some View {
         Toggle(title, isOn: Binding(get: { on }, set: { value in change { try set(value) } }))
             .toggleStyle(.checkbox)
+            .tint(Color(Theme.accent))
             .font(.system(size: 12))
     }
 
@@ -257,7 +260,7 @@ struct CalendarIntroSheet: View {
             }
             HStack {
                 Spacer()
-                Button("Done") { model.finishCalendarIntro() }.keyboardShortcut(.defaultAction)
+                Button("Done") { model.finishCalendarIntro() }.keyboardShortcut(.defaultAction).tint(Color(Theme.accent))
             }
         }
         .padding(24)

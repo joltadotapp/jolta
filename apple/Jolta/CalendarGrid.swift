@@ -313,9 +313,12 @@ final class DayStrip: CanvasView {
         }
         guard height > lanesTop else { return }
         let label = line("all day", Self.labelFont)
-        cg.setFillColor(Theme.text3.cgColor)
-        cg.textPosition = CGPoint(x: gutter - 10 - CTLineGetTypographicBounds(label, nil, nil, nil), y: lanesTop + 15)
-        CTLineDraw(label, cg)
+        let labelWidth = CTLineGetTypographicBounds(label, nil, nil, nil)
+        if labelWidth + 14 <= gutter {
+            cg.setFillColor(Theme.text3.cgColor)
+            cg.textPosition = CGPoint(x: gutter - 10 - labelWidth, y: lanesTop + 15)
+            CTLineDraw(label, cg)
+        }
         for item in content.lanes where item.lane < Self.maxLanes {
             let e = item.event, r = box(item)
             cg.saveGState()

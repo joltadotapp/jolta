@@ -31,9 +31,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// Scheduled reminders' identifiers start with this; the record's id follows.
     static let reminderPrefix = "cal-"
     private nonisolated static let snoozePrefix = "calsnooze-"
-    /// macOS keeps 64 pending notifications per app (measured on macOS 27,
-    /// see docs/architecture.md); a few stay free for snoozes.
-    static let reminderLimit = 56
+    /// macOS 27 keeps 100 pending notifications per app, and one added past
+    /// that pushes out another, not necessarily the latest (measured
+    /// 2026-11-04); ten stay free for snoozes.
+    static let reminderLimit = 90
 
     private enum Category {
         static let meeting = "calendar-meeting"

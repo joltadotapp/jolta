@@ -573,7 +573,8 @@ struct AgendaView: View {
                             .padding(.horizontal, 24)
                             .padding(.top, 18)
                             .padding(.bottom, 6)
-                        ForEach(list) { e in AgendaRow(cal: cal, event: e).id(e.id) }
+                        // A multi-day event shows under each of its days; the id carries the day.
+                        ForEach(list, id: \.id) { e in AgendaRow(cal: cal, event: e).id(day.key + "/" + e.id) }
                     }
                     if byDay.isEmpty {
                         Text("Nothing in these \(CalendarSpan.agendaDays) days")
@@ -584,7 +585,9 @@ struct AgendaView: View {
                 }
                 .padding(.bottom, 20)
             }
-            .onChange(of: cal.selectedID) { _, id in if let id { proxy.scrollTo(id) } }
+            .onChange(of: cal.selectedID) { _, id in
+                if let id, let day = byDay.first(where: { $0.1.contains { $0.id == id } })?.0 { proxy.scrollTo(day.key + "/" + id) }
+            }
         }
     }
 }

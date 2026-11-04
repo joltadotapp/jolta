@@ -190,8 +190,8 @@ struct CalendarGroup: Identifiable {
 @Observable
 final class CalendarModel {
     let core: Core
-    var span: CalendarSpan = CalendarSpan(rawValue: UserDefaults.standard.string(forKey: "CalendarSpan") ?? "") ?? .week {
-        didSet { UserDefaults.standard.set(span.rawValue, forKey: "CalendarSpan"); reload() }
+    var span: CalendarSpan = CalendarSpan(rawValue: UserDefaults.standard.string(forKey: AppModel.key("CalendarSpan")) ?? "") ?? .week {
+        didSet { UserDefaults.standard.set(span.rawValue, forKey: AppModel.key("CalendarSpan")); reload() }
     }
     /// A day inside the period on screen.
     private(set) var anchor: Date = .now

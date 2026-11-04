@@ -58,7 +58,9 @@ final class AppModel {
     /// Mail or the full calendar (⌘1, ⌘2).
     var mode: AppMode = .mail { didSet { if mode != oldValue { modeChanged() } } }
     /// Today's calendar beside the mail, toggled with ⇧C.
-    var showsDayPanel = UserDefaults.standard.bool(forKey: "DayPanel") { didSet { UserDefaults.standard.set(showsDayPanel, forKey: "DayPanel") } }
+    var showsDayPanel = UserDefaults.standard.bool(forKey: AppModel.key("DayPanel")) {
+        didSet { UserDefaults.standard.set(showsDayPanel, forKey: Self.key("DayPanel")) }
+    }
     /// The first open of calendar mode with no calendar on asks which to show.
     var showsCalendarIntro = false
     @ObservationIgnored var reminderTask: Task<Void, Never>?
@@ -218,6 +220,8 @@ final class AppModel {
         case "calendar": settingsRequest = .calendar
         default: break
         }
+        // `-JoltaTheme tokyo-night` previews that theme, for screenshots.
+        if let id = defaults.string(forKey: "JoltaTheme"), let theme = ThemePalette.named(id) { ThemeStore.shared.startPreview(theme) }
         // `-JoltaPalette commands|snooze|move|themes` opens the palette, for screenshots.
         switch defaults.string(forKey: "JoltaPalette") {
         case "commands": palette = .commands
@@ -264,6 +268,12 @@ final class AppModel {
     }
 
     static var isTestData: Bool { testFolder != nil }
+
+    /// A preference key of its own per test folder, so checks never change
+    /// the preferences of Jolta as Koen uses it.
+    static func key(_ name: String) -> String {
+        testFolder.map { "\($0).\(name)" } ?? name
+    }
 
     /// The test store's folder: `Test` for `-JoltaTestData YES`, or the name
     /// given, so each UI test can start from its own fresh folder.
