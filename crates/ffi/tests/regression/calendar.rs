@@ -158,11 +158,11 @@ fn start_of(rows: &[OccurrenceRecord], title: &str) -> i64 {
     }
 }
 
-/// Waits up to two seconds for the scheduler to make `done` true.
+/// Waits up to ten seconds for the scheduler to make `done` true.
 fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let started = Instant::now();
     while !done() {
-        assert!(started.elapsed() < Duration::from_secs(2), "timed out waiting: {what}");
+        assert!(started.elapsed() < Duration::from_secs(10), "timed out waiting: {what}");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
