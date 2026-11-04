@@ -631,8 +631,16 @@ impl Core {
         *due = Some(at);
         let (refresh, order, listener) = (self.refresh.clone(), self.order.clone(), self.listener.clone());
         self.runtime.spawn(async move {
-            let wait = (UNIX_EPOCH + Duration::from_secs(at.max(0) as u64)).duration_since(SystemTime::now()).unwrap_or_default();
-            tokio::time::sleep(wait).await;
+            // Tokio's clock stops while the Mac sleeps, so the wait is cut
+            // into minutes, each checked against the wall clock: a list goes
+            // stale for at most a minute after waking past `at`.
+            let deadline = UNIX_EPOCH + Duration::from_secs(at.max(0) as u64);
+            while let Ok(left) = deadline.duration_since(SystemTime::now()) {
+                if left.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(left.min(Duration::from_secs(60))).await;
+            }
             if refresh.lock().unwrap_or_else(|e| e.into_inner()).take_if(|d| *d == at).is_some() {
                 *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 listener.on_event(CoreEvent::ListsChanged);

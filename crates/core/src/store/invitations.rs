@@ -398,7 +398,9 @@ fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result
     let ends = Some(end_of(&o.span, here).timestamp());
     Ok(match o.source {
         Source::Override(i) => Picked { event: overrides[i].recurrence_id, occurrence: overrides[i].recurrence_id, ends },
-        Source::Master => Picked { event: None, occurrence: Some(o.span.start()), ends },
+        // The calendar may hold this occurrence as an override the mail
+        // doesn't have; the series' copy answers when it doesn't.
+        Source::Master => Picked { event: Some(o.span.start()), occurrence: Some(o.span.start()), ends },
     })
 }
 
@@ -683,6 +685,35 @@ mod tests {
             assert_eq!(card_says(&jolta, series, mail!("series.eml"), now), expected, "the card: {why}");
             assert_eq!(shown(&jolta, series, now), Some(expected), "the list: {why}");
         }
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    /// The calendar answered one occurrence of a series the mail sent whole:
+    /// its copy is an override the mail doesn't have.
+    #[test]
+    fn a_series_shows_the_calendars_answer_for_the_occurrence_its_card_shows() {
+        let (jolta, calendar) = jolta("state-occurrence-copy");
+        let series = import(&jolta, mail!("series.eml"));
+        let me = ["me@example.com".to_string()];
+        let mut events: Vec<EventData> = crate::calendar::invitation::find(mail!("series.eml"), &me).into_iter().map(|i| i.event).collect();
+        let master = events.iter().find(|e| e.recurrence_id.is_none()).unwrap().clone();
+        let wall = chrono::NaiveDateTime::parse_from_str("2026-11-10 09:30", "%Y-%m-%d %H:%M").unwrap();
+        let rid = Moment::Time(crate::calendar::Local { wall, zone: crate::calendar::Zone::Tz(chrono_tz::Europe::Brussels) });
+        let mut tuesday = EventData {
+            recurrence_id: Some(rid),
+            recurrence: None,
+            span: crate::calendar::series::occurrence_span(&master.span, &rid, chrono_tz::Europe::Brussels).unwrap(),
+            ..master
+        };
+        tuesday.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = Response::Accepted);
+        assert!(tuesday.my_response() == Some(Response::Accepted), "the user is on the guest list");
+        events.push(tuesday);
+        let horizon = crate::calendar::series::Horizon::around(now(), chrono_tz::Europe::Brussels);
+        jolta.store.write(|tx| crate::store::apply_item(tx, calendar, "s1", Some("1"), &events, None, &horizon).map(|_| ())).unwrap();
+
+        let after_thursday = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap();
+        let accepted = InvitationState::Answered(Response::Accepted);
+        assert_eq!(shown(&jolta, series, after_thursday), Some(accepted), "the list: next Tuesday's copy");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 
