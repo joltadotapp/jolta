@@ -183,7 +183,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         let newer_copy = match source {
             _ if cancelled && sent.method == Method::Cancel => false,
             CalendarSource::Graph => cancelled,
-            _ => copy.event.sequence > this.sequence || (cancelled && copy.event.sequence >= this.sequence),
+            _ => copy.event.sequence > this.sequence || cancels(copy, this.sequence),
         };
         if newer_copy {
             let version = Version { sequence: copy.event.sequence, stamp: None };
@@ -203,14 +203,11 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
             before = Some((version, events));
         }
     }
-    // A series the calendar holds cancelled cancels each of its occurrences,
-    // unless the occurrence's invitation is newer, as a reinstated one is.
-    // Graph keeps no SEQUENCE, so its cancelled series covers them all.
+    // A series the calendar holds cancelled cancels each of its occurrences.
     if rid.is_some()
         && sent.method != Method::Cancel
         && let Some(master) = store::stored_event(seen.conn, uid, None, Some(seen.account), seen.here)?
-        && master.event.status == EventStatus::Cancelled
-        && (master.source == CalendarSource::Graph || master.event.sequence >= this.sequence)
+        && cancels(&master, this.sequence)
     {
         newest = Some((Version { sequence: master.event.sequence, stamp: None }, Method::Cancel));
     }
@@ -220,6 +217,15 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         before = occurrence_before(seen, organizer.as_deref(), uid, &rid)?.map(|e| (Version { sequence: e.sequence, stamp: None }, vec![e]));
     }
     Ok(History { newer: newest.map(|(_, method)| method), before: before.map(|(_, events)| events).unwrap_or_default(), not_from_organizer: false })
+}
+
+/// Whether the account's calendar copy of an event or series, cancelled,
+/// cancels an invitation to it or to one of its occurrences at `sequence`:
+/// unless the invitation is newer, as a reinstated one is. Graph keeps no
+/// SEQUENCE, so its cancelled copy covers every invitation. The card and
+/// the list both judge by this.
+pub fn cancels(copy: &store::StoredEvent, sequence: i64) -> bool {
+    copy.event.status == EventStatus::Cancelled && (copy.source == CalendarSource::Graph || copy.event.sequence >= sequence)
 }
 
 /// A copy still at an earlier version than the mail: a lower SEQUENCE, or

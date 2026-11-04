@@ -13,7 +13,7 @@ use crate::calendar::invitation::{Invitation, Method, end_of};
 use crate::calendar::recur::Source;
 use crate::calendar::series::{self, copy_rank};
 use crate::calendar::update::{self, holds};
-use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response, tz};
+use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response, tz};
 use crate::model::*;
 use crate::{Error, Result, compose};
 
@@ -401,10 +401,16 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], me: &[String], now:
         return fixed(InvitationState::Cancelled);
     }
     let picked = pick(n, overrides, now, here)?;
-    let copy = match stored_event(conn, &n.uid, picked.event.as_ref(), Some(n.account), here)? {
-        None if picked.event.is_some() && n.recurrence_id.is_empty() => stored_event(conn, &n.uid, None, Some(n.account), here)?,
-        found => found,
+    // The account's copy of the event or series, and of the occurrence shown
+    // when the calendar holds one. A series' copy answers for an occurrence
+    // without its own copy only when the message is the series'.
+    let whole = stored_event(conn, &n.uid, None, Some(n.account), here)?;
+    let own = match &picked.event {
+        Some(at) => stored_event(conn, &n.uid, Some(at), Some(n.account), here)?,
+        None => None,
     };
+    let copy_cancelled = own.iter().chain(&whole).any(|c| update::cancels(c, n.sequence));
+    let copy = own.or(whole.filter(|_| n.recurrence_id.is_empty()));
     // The organizer's cancellation of this event, or of the series this
     // occurrence is of, at the same SEQUENCE or later.
     let rid = moment_from_text(&n.recurrence_id);
@@ -424,7 +430,7 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], me: &[String], now:
             };
             event && organizers(&named, &from)
         });
-    if cancelled || copy.as_ref().is_some_and(|c| c.event.status == EventStatus::Cancelled) {
+    if cancelled || copy_cancelled {
         return fixed(InvitationState::Cancelled);
     }
     let remembered = remembered_answer(conn, n.account, &n.uid, picked.occurrence.as_ref())?;
@@ -961,7 +967,8 @@ mod tests {
     }
 
     /// Every mix of a calendar copy, of the event or of the occurrence shown
-    /// or both, on CalDAV or Graph, and an answer given from Jolta to the
+    /// or both, or the occurrence's in a series the calendar holds cancelled,
+    /// on CalDAV or Graph, and an answer given from Jolta to the
     /// whole event or to that occurrence, with or without a reply mail, for a
     /// single event, an unchanged and a moved occurrence of a series and an
     /// occurrence invited to alone; then again after the organizer's update
@@ -1038,6 +1045,7 @@ mod tests {
                 let whole_version = if sent.iter().any(|e| e.recurrence_id.is_none()) { sent.clone() } else { whole_series.clone() };
                 let mut whole = base.clone();
                 answer(&mut whole, Response::Declined);
+                let whole_cancelled = EventData { status: crate::calendar::EventStatus::Cancelled, ..whole.clone() };
                 let mut own = occurrence.map(|rid| crate::calendar::series::occurrence(&sent, &rid, brussels).or_else(|| crate::calendar::series::occurrence(std::slice::from_ref(&base), &rid, brussels)).unwrap());
                 let own_version = own.clone();
                 if let Some(own) = &mut own {
@@ -1048,6 +1056,7 @@ mod tests {
                     ("the event's copy", vec![whole.clone()]),
                     ("the occurrence's copy", own.iter().cloned().collect()),
                     ("both copies", [whole.clone()].into_iter().chain(own.clone()).collect()),
+                    ("the event's cancelled copy and the occurrence's", [whole_cancelled.clone()].into_iter().chain(own.clone()).collect()),
                 ]
                 .into_iter()
                 .filter(|(_, c)| occurrence.is_some() || c.len() < 2)
@@ -1090,12 +1099,21 @@ mod tests {
                                     seen.insert(format!("{card:?}"));
                                 }
                                 let card = |i: usize| card_says(&jolta, compared[i].1, compared[i].2, now);
+                                // Graph keeps no SEQUENCE: its cancelled series covers an update too.
+                                let in_cancelled = copy.starts_with("the event's cancelled copy");
+                                let unanswered = match in_cancelled && source == "Graph" {
+                                    true => InvitationState::Cancelled,
+                                    false => InvitationState::Unanswered,
+                                };
                                 match arrival {
                                     "nothing since" => {
+                                        if in_cancelled {
+                                            assert_eq!(card(0), InvitationState::Cancelled, "{cell}: the series cancelled");
+                                        }
                                         before.insert(cell, card(0));
                                     }
                                     "an update that moved it" => {
-                                        assert_eq!(card(0), InvitationState::Unanswered, "{cell}: answered before the move");
+                                        assert_eq!(card(0), unanswered, "{cell}: answered before the move");
                                         if *copy == "no copy" && let (Some(rid), Some((m, r))) = (rid, &later) {
                                             // Answered again, for the version that moved it.
                                             let moved: Vec<EventData> = crate::calendar::invitation::find(r, &me).into_iter().map(|i| i.event).collect();
