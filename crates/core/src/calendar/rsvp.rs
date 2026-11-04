@@ -262,7 +262,7 @@ fn record(conn: &Connection, calendar: super::CalendarId, target: &Target, rsvp:
         Some(Occurrence { stored: Some(s), .. }) => store::set_event_data(conn, s.id, &mine(&s.data))?,
         Some(Occurrence { recurrence_id, stored: None }) => {
             let master = &target.event.data;
-            let span = occurrence_span(&master.span, recurrence_id, here)
+            let span = series::occurrence_span(&master.span, recurrence_id, here)
                 .ok_or_else(|| Error::Other("The occurrence and its series disagree on whether they are all-day.".into()))?;
             let single = EventData { recurrence_id: Some(*recurrence_id), recurrence: None, span, ..mine(master) };
             store::insert_event(conn, calendar, landed, None, &single, None)?;
@@ -289,20 +289,6 @@ fn with_answer(data: &EventData, rsvp: &Rsvp, me: &str) -> EventData {
         }),
     }
     data
-}
-
-/// The span of the unchanged occurrence `recurrence_id` names: the master's,
-/// moved to start there on the master's own clock.
-fn occurrence_span(master: &Span, recurrence_id: &Moment, here: Tz) -> Option<Span> {
-    match (master, recurrence_id) {
-        (Span::Timed { start, end }, Moment::Time(at)) => {
-            let wall = tz::wall(at.instant(here), start.zone, here);
-            let shift = wall - start.wall;
-            Some(Span::Timed { start: Local { wall, zone: start.zone }, end: Local { wall: end.wall + shift, zone: end.zone } })
-        }
-        (Span::AllDay { start, end }, Moment::Date(day)) => Some(Span::AllDay { start: *day, end: *day + (*end - *start) }),
-        _ => None,
-    }
 }
 
 /// The recurrence id of the occurrence `spec` names in the series of
@@ -817,15 +803,15 @@ mod tests {
         let span = Span::Timed { start: at("2026-10-20 09:00", brussels), end: at("2026-10-20 09:30", brussels) };
         let after_the_clock_change = Moment::Time(at("2026-11-03 09:00", brussels));
         assert_eq!(
-            occurrence_span(&span, &after_the_clock_change, Europe::Brussels),
+            series::occurrence_span(&span, &after_the_clock_change, Europe::Brussels),
             Some(Span::Timed { start: at("2026-11-03 09:00", brussels), end: at("2026-11-03 09:30", brussels) })
         );
         let utc = Moment::Time(at("2026-11-03 08:00", Zone::Tz(Tz::UTC)));
-        assert_eq!(occurrence_span(&span, &utc, Europe::Brussels).map(|s| s.start()), Some(after_the_clock_change), "read on the series' clock");
+        assert_eq!(series::occurrence_span(&span, &utc, Europe::Brussels).map(|s| s.start()), Some(after_the_clock_change), "read on the series' clock");
         let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         let all_day = Span::AllDay { start: day("2026-11-02"), end: day("2026-11-04") };
-        assert_eq!(occurrence_span(&all_day, &Moment::Date(day("2026-11-09")), Europe::Brussels), Some(Span::AllDay { start: day("2026-11-09"), end: day("2026-11-11") }));
-        assert_eq!(occurrence_span(&all_day, &after_the_clock_change, Europe::Brussels), None);
+        assert_eq!(series::occurrence_span(&all_day, &Moment::Date(day("2026-11-09")), Europe::Brussels), Some(Span::AllDay { start: day("2026-11-09"), end: day("2026-11-11") }));
+        assert_eq!(series::occurrence_span(&all_day, &after_the_clock_change, Europe::Brussels), None);
     }
 
     /// The text/calendar part of a built reply, and the message.
