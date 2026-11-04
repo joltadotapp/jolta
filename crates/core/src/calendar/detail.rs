@@ -126,7 +126,7 @@ fn when(span: &Span, at: Bounds, here: Tz) -> When {
         Bounds::Utc { start, end } => {
             let own = match span {
                 Span::Timed { start: own_start, .. } => match own_start.zone {
-                    Zone::Tz(tz) if offset(tz, start) != offset(here, start) => Some(tz),
+                    Zone::Tz(tz) if !instant_only(tz) && offset(tz, start) != offset(here, start) => Some(tz),
                     _ => None,
                 },
                 Span::AllDay { .. } => None,
@@ -143,6 +143,12 @@ fn when(span: &Span, at: Bounds, here: Tz) -> When {
             When::Timed { start, end, zone: own, text }
         }
     }
+}
+
+/// UTC marks an instant, not a zone the organizer chose: many apps write
+/// every time that way, so it gets no "UTC (… here)".
+fn instant_only(tz: Tz) -> bool {
+    matches!(tz, Tz::UTC | Tz::Etc__UTC | Tz::Etc__GMT | Tz::GMT | Tz::Etc__Zulu | Tz::Zulu | Tz::Etc__UCT | Tz::UCT | Tz::Universal | Tz::Etc__Universal)
 }
 
 fn offset(tz: Tz, at: DateTime<Utc>) -> i32 {
@@ -188,6 +194,7 @@ mod tests {
     fn times_in_the_events_zone_and_here() {
         assert_eq!(text(timed(New_York, "2026-11-09 10:00", 60)), "10:00 to 11:00 New York (16:00 to 17:00 here)");
         assert_eq!(text(timed(Paris, "2026-11-09 10:00", 60)), "10:00 to 11:00", "the same clock needs no second time");
+        assert_eq!(text(timed(chrono_tz::UTC, "2026-11-04 11:21", 30)), "12:21 to 12:51", "a time written in UTC is shown here only");
         assert_eq!(text(timed(Brussels, "2026-11-09 23:00", 60)), "23:00 to 00:00");
         assert_eq!(text(timed(Brussels, "2026-11-09 23:00", 120)), "Mon 9 Nov 23:00 to Tue 10 Nov 01:00");
         let trip = Span::AllDay {
