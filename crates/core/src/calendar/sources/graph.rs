@@ -210,7 +210,8 @@ impl GraphCalendar {
     /// One request with the account's token and Jolta's `Prefer` header.
     /// Throttling (429) and brief outages are retried after Retry-After, as
     /// the mail engine does; every other status goes back to the caller.
-    pub async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)> {
+    pub async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)> {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| Error::Other(format!("HTTP method {method}: {e}")))?;
         let url = if url.starts_with("https://") { url.to_string() } else { format!("{BASE}{url}") };
         for attempt in 0..5u32 {
             let token = oauth::access_token(&self.account).await?;
@@ -239,7 +240,7 @@ impl GraphCalendar {
     }
 
     async fn get_ok(&self, url: &str) -> Result<Value> {
-        let (status, json) = self.request(reqwest::Method::GET, url, None, &[]).await?;
+        let (status, json) = self.request("GET", url, None, &[]).await?;
         if !(200..300).contains(&status) {
             return Err(self.failure(status, &json));
         }
@@ -327,7 +328,7 @@ impl GraphCalendar {
         let mut round = Round { items: Vec::new(), complete: !first.contains("deltatoken"), delta_link: None };
         let mut next = Some(first.to_string());
         while let Some(url) = next {
-            let (status, page) = self.request(reqwest::Method::GET, &url, None, &[]).await?;
+            let (status, page) = self.request("GET", &url, None, &[]).await?;
             match status {
                 200..300 => {}
                 400 | 404 | 405 | 410 | 501 if round.items.is_empty() => {
@@ -364,7 +365,7 @@ impl GraphCalendar {
                     })
                     .collect();
                 let (status, reply) =
-                    self.request(reqwest::Method::POST, "/$batch", Some(&json!({ "requests": requests })), &[]).await?;
+                    self.request("POST", "/$batch", Some(&json!({ "requests": requests })), &[]).await?;
                 if !(200..300).contains(&status) {
                     return Err(self.failure(status, &reply));
                 }

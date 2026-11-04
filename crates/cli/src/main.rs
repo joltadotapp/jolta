@@ -1,6 +1,7 @@
 //! `jolta`: a developer tool over the Jolta core.
 
 mod cal;
+mod cal_fact;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;

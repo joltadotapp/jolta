@@ -60,6 +60,13 @@ pub enum CalCommand {
     Meeting { file: PathBuf },
     /// Build the synthetic calendar: 5 calendars, 20,000 events, 300 repeating.
     Gen,
+    /// Check one provider fact from the calendar plan against an account.
+    Fact {
+        #[arg(value_enum)]
+        fact: crate::cal_fact::Fact,
+        /// The account (id or address); the Google fact needs none.
+        account: Option<String>,
+    },
     /// Time one-week occurrence queries over the store.
     Bench {
         #[arg(long, default_value_t = 200)]
@@ -258,6 +265,10 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 t.elapsed().as_secs_f64()
             );
             Ok(())
+        }
+        CalCommand::Fact { fact, account } => {
+            let account = account.map(|spec| jolta.store.read(|c| store::find_account(c, &spec))).transpose()?;
+            crate::cal_fact::run(fact, account.as_ref()).await
         }
         CalCommand::Bench { runs } => bench(jolta, runs),
     }
