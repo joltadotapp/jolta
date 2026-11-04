@@ -5,6 +5,7 @@ mod fixture;
 mod server;
 
 mod accounts;
+mod calendar;
 mod compose;
 mod mail;
 mod search;

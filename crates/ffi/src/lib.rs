@@ -16,6 +16,7 @@ use jolta_core::{AccountId, Jolta, MailboxId, MessageId, ThreadId, reader, searc
 uniffi::setup_scaffolding!();
 
 mod ai;
+pub mod calendar;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
@@ -50,6 +51,18 @@ pub struct AccountInfo {
     pub provider: String,
     pub address: String,
     pub display_name: String,
+}
+
+impl From<jolta_core::Account> for AccountInfo {
+    fn from(a: jolta_core::Account) -> Self {
+        AccountInfo {
+            id: a.id.0,
+            kind: a.kind.to_string(),
+            provider: a.provider_label().to_string(),
+            address: a.address,
+            display_name: a.display_name,
+        }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -217,6 +230,10 @@ pub enum CoreEvent {
     ActionFailed { message: String },
     /// A local model's download moved on, finished, stopped or was removed.
     ModelChanged { id: String, state: ai::ModelState },
+    /// The occurrences of these calendars changed; redraw views that show them.
+    CalendarChanged { calendar_ids: Vec<i64> },
+    /// A calendar sync ended. `error` is None when it reached the server.
+    CalendarSynced { calendar_id: i64, error: Option<String> },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -511,13 +528,7 @@ impl SignIn {
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }
-                Ok::<_, jolta_core::Error>(AccountInfo {
-                    id: account.id.0,
-                    kind: account.kind.to_string(),
-                    provider: account.provider_label().to_string(),
-                    address: account.address,
-                    display_name: account.display_name,
-                })
+                Ok::<_, jolta_core::Error>(AccountInfo::from(account))
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
@@ -610,13 +621,7 @@ impl Core {
             .store
             .read(store::accounts)?
             .into_iter()
-            .map(|a| AccountInfo {
-                id: a.id.0,
-                kind: a.kind.to_string(),
-                provider: a.provider_label().to_string(),
-                address: a.address,
-                display_name: a.display_name,
-            })
+            .map(AccountInfo::from)
             .collect())
     }
 
@@ -799,6 +804,8 @@ impl Core {
                 Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
                 Event::AgentActivity => CoreEvent::AgentActivity,
                 Event::SendFailed(message) => CoreEvent::SendFailed { message },
+                Event::CalendarsChanged(ids) => CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() },
+                Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
             };
             listener.on_event(event);
         });

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 use crate::actions::{self, Action, Context};
+use crate::calendar::scheduler::Scheduler;
 use crate::compose::{self, Compose};
 use crate::graph::Graph;
 use crate::imap::{self, Caps, Scope, Session, SyncOptions};
@@ -57,6 +58,10 @@ pub enum Event {
     /// An agent called a tool (the audit log changed).
     AgentActivity,
     SendFailed(String),
+    /// The occurrences of these calendars changed.
+    CalendarsChanged(Vec<crate::calendar::CalendarId>),
+    /// A calendar sync ended; `error` says why it failed.
+    CalendarSynced { calendar: crate::calendar::CalendarId, error: Option<String> },
 }
 
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -84,12 +89,14 @@ pub struct Engine {
     sink: Sink,
     runtime: tokio::runtime::Handle,
     wakes: Mutex<HashMap<AccountId, Arc<Wake>>>,
+    calendars: Arc<Scheduler>,
 }
 
 impl Engine {
     /// Starts a worker and an IDLE task for every account that has a server.
     pub fn start(jolta: Jolta, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
-        let engine = Arc::new(Engine { jolta, sink, runtime, wakes: Mutex::new(HashMap::new()) });
+        let calendars = Scheduler::start(jolta.clone(), sink.clone(), &runtime);
+        let engine = Arc::new(Engine { jolta, sink, runtime, wakes: Mutex::new(HashMap::new()), calendars });
         for account in engine.jolta.store.read(store::accounts)? {
             engine.spawn(account);
         }
@@ -315,8 +322,13 @@ impl Engine {
         password.and(smtp)
     }
 
-    /// Syncs every account now, all mailboxes.
+    pub fn calendars(&self) -> &Arc<Scheduler> {
+        &self.calendars
+    }
+
+    /// Syncs every account now, all mailboxes, and every shown calendar.
     pub fn sync_now(&self) {
+        self.calendars.sync_now();
         for w in self.wakes.lock().unwrap_or_else(|e| e.into_inner()).values() {
             w.full_sync.store(true, Ordering::SeqCst);
             w.poke();
