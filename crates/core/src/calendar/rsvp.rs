@@ -7,8 +7,9 @@
 //! which the server's scheduling sends the reply. Answers go out at once and
 //! fail when offline, until the calendar op queue exists.
 //!
-//! `imip_reply` writes the reply mail (RFC 6047) for an invitation whose
-//! account doesn't have its calendar on in Jolta.
+//! `imip_reply` writes the reply mail (RFC 6047) Jolta sends itself: for an
+//! invitation no synced calendar holds, and on iCloud, which doesn't tell an
+//! outside organizer. `respond` decides which an answer needs.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -447,11 +448,21 @@ pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Momen
     Ok(obj.to_string())
 }
 
-/// Adds the override of an unchanged occurrence: the master without its
-/// repeat rules, starting at `rid`, its end moved along. Returns the
-/// RECURRENCE-ID value as written.
+/// Adds the override of an unchanged occurrence, made by `occurrence_of`.
+/// Returns the RECURRENCE-ID value as written.
 fn add_override(obj: &mut Object, uid: &str, rid: &Moment, here: Tz) -> Result<String> {
     let master = obj.event(uid, None).ok_or_else(|| Error::Other(format!("the calendar object has no series {uid}")))?;
+    let (over, value) = occurrence_of(master, rid, here)?;
+    if !obj.add_after_master(over) {
+        return Err(Error::Other(format!("the calendar object has no series {uid}")));
+    }
+    Ok(value)
+}
+
+/// One unchanged occurrence of `master` as a VEVENT of its own: the master
+/// without its repeat rules, starting at `rid`, its end moved along, with a
+/// RECURRENCE-ID. Returns it and the RECURRENCE-ID value as written.
+fn occurrence_of(master: &Component, rid: &Moment, here: Tz) -> Result<(Component, String)> {
     let start = master.prop("DTSTART").ok_or_else(|| Error::Other("the series has no start".into()))?.clone();
     let value = value_like(&start, rid, here).ok_or_else(|| Error::Other("the occurrence and its series disagree on whether they are all-day".into()))?;
     // DTSTART, DTEND and the new start are all written on one clock, so the
@@ -484,35 +495,61 @@ fn add_override(obj: &mut Object, uid: &str, rid: &Moment, here: Tz) -> Result<S
         }
     }
     over.add(id);
-    if !obj.add_after_master(over) {
-        return Err(Error::Other(format!("the calendar object has no series {uid}")));
-    }
-    Ok(value)
+    Ok((over, value))
 }
 
-/// The iMIP reply (RFC 6047) to an invitation, from `me`: a METHOD:REPLY
-/// object (RFC 5546 section 3.2.3) holding only the user's own ATTENDEE line
-/// with its PARTSTAT, and the invitation's UID, SEQUENCE and RECURRENCE-ID,
-/// so the organizer's calendar finds the meeting. A note goes in COMMENT.
-/// For invitations whose account doesn't have its calendar on in Jolta; the
-/// result goes through the account's outbox like any other mail.
-pub fn imip_reply(invitation: &str, me: &str, answer: Answer, note: Option<&str>) -> Result<Built> {
-    let invite = Object::parse(invitation);
+/// Who an iMIP reply comes from, and what it answers.
+pub struct ImipReply<'a> {
+    /// The invitation as the organizer sent it, or the calendar's copy.
+    pub invitation: &'a str,
+    /// The account that sends the reply: its From address.
+    pub from: &'a str,
+    /// Every address of the user. The ATTENDEE line the invitation has for
+    /// one of them is the one answered, so an invitation to an alias is
+    /// answered as that alias.
+    pub me: &'a [String],
+    pub answer: Answer,
+    pub note: Option<&'a str>,
+    /// One occurrence of a series, by its recurrence id; else all of it.
+    pub occurrence: Option<Moment>,
+}
+
+/// The iMIP reply (RFC 6047) to an invitation: a METHOD:REPLY object (RFC
+/// 5546 section 3.2.3) holding only the user's own ATTENDEE line with its
+/// PARTSTAT, and the invitation's UID, SEQUENCE and RECURRENCE-ID, so the
+/// organizer's calendar finds the meeting. A note goes in COMMENT. It goes
+/// to the organizer only, through the account's outbox like any other mail.
+pub fn imip_reply(r: &ImipReply, here: Tz) -> Result<Built> {
+    let invite = Object::parse(r.invitation);
     let calendar = invite.calendar().ok_or_else(|| Error::Other("the invitation holds no calendar".into()))?;
     if let Some(method) = calendar.prop("METHOD").map(|m| m.value().trim().to_ascii_uppercase())
-        && method != "REQUEST"
+        && !matches!(method.as_str(), "REQUEST" | "ADD" | "PUBLISH")
     {
         return Err(Error::Other(format!("this calendar mail is a {method}, not an invitation")));
     }
     let events: Vec<&Component> = calendar.components().filter(|c| c.name() == "VEVENT").collect();
-    let event = events
+    let master = events
         .iter()
         .find(|e| e.prop("RECURRENCE-ID").is_none())
         .or(events.first())
+        .copied()
         .ok_or_else(|| Error::Other("the invitation holds no event".into()))?;
-    let organizer = event.prop("ORGANIZER").ok_or_else(|| Error::Other("the invitation names no organizer".into()))?;
+    let made;
+    let event: &Component = match &r.occurrence {
+        None => master,
+        Some(rid) => match events.iter().find(|e| e.prop("RECURRENCE-ID").and_then(prop_moment).is_some_and(|m| m.names(rid, here))) {
+            Some(changed) => changed,
+            None if master.prop("RRULE").is_some() || master.prop("RDATE").is_some() => {
+                made = occurrence_of(master, rid, here)?.0;
+                &made
+            }
+            None => return Err(Error::Other("This invitation doesn't repeat, so it has no single occurrence to answer.".into())),
+        },
+    };
+    let organizer = event.prop("ORGANIZER").or(master.prop("ORGANIZER")).ok_or_else(|| Error::Other("the invitation names no organizer".into()))?;
     let organizer_address = organizer.address().or(organizer.param("EMAIL")).map(str::to_string)
         .ok_or_else(|| Error::Other("the invitation's organizer has no address".into()))?;
+    let me = r.from;
 
     let mut reply = Component::new("VEVENT");
     for name in ["UID", "RECURRENCE-ID", "SEQUENCE", "DTSTART", "DTEND", "DURATION", "SUMMARY"] {
@@ -525,13 +562,16 @@ pub fn imip_reply(invitation: &str, me: &str, answer: Answer, note: Option<&str>
     }
     reply.add(Prop::new("DTSTAMP", &format!("{}Z", Utc::now().format("%Y%m%dT%H%M%S"))));
     reply.add(organizer.clone());
-    let mut attendee = event.props().find(|p| p.is("ATTENDEE") && is_me(p, &[me])).cloned().unwrap_or_else(|| Prop::new("ATTENDEE", &format!("mailto:{me}")));
-    attendee.set_param("PARTSTAT", answer.partstat());
+    let mine = |e: &Component| e.props().find(|p| p.is("ATTENDEE") && is_me(p, r.me)).cloned();
+    let mut attendee = mine(event).or_else(|| mine(master)).unwrap_or_else(|| Prop::new("ATTENDEE", &format!("mailto:{me}")));
+    attendee.set_param("PARTSTAT", r.answer.partstat());
     for stale in ["RSVP", "SCHEDULE-STATUS", "X-RESPONSE-COMMENT"] {
         attendee.remove_param(stale);
     }
+    let who = attendee.address().unwrap_or(me).to_string();
     reply.add(attendee);
-    if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
+    let note = r.note.filter(|n| !n.trim().is_empty());
+    if let Some(n) = note {
         reply.add(Prop::text_value("COMMENT", n));
     }
 
@@ -550,13 +590,13 @@ pub fn imip_reply(invitation: &str, me: &str, answer: Answer, note: Option<&str>
     let ics = Object::new(cal).to_string();
 
     let title = event.prop("SUMMARY").map(Prop::text).unwrap_or_default();
-    let (prefix, verb) = match answer {
+    let (prefix, verb) = match r.answer {
         Answer::Accept => ("Accepted", "accepted"),
         Answer::Maybe => ("Tentative", "tentatively accepted"),
         Answer::Decline => ("Declined", "declined"),
     };
-    let mut text = format!("{me} has {verb} this invitation.");
-    if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
+    let mut text = format!("{who} has {verb} this invitation.");
+    if let Some(n) = note {
         text.push_str(&format!("\n\n{n}"));
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
@@ -814,6 +854,11 @@ mod tests {
         assert_eq!(series::occurrence_span(&all_day, &after_the_clock_change, Europe::Brussels), None);
     }
 
+    fn reply_to(invitation: &str, me: &str, answer: Answer, note: Option<&str>, occurrence: Option<Moment>) -> Result<Built> {
+        let me = [me.to_string()];
+        imip_reply(&ImipReply { invitation, from: &me[0], me: &me, answer, note, occurrence }, Europe::Brussels)
+    }
+
     /// The text/calendar part of a built reply, and the message.
     fn reply_parts(built: &Built) -> (mail_parser::Message<'_>, String) {
         let msg = mail_parser::MessageParser::default().parse(&built.raw).expect("a message");
@@ -832,7 +877,7 @@ mod tests {
 
     #[test]
     fn imip_reply_to_a_google_invitation() {
-        let built = imip_reply(fixture!("google.ics"), ME, Answer::Maybe, Some("Ik ben 10 minuten later; sorry")).unwrap();
+        let built = reply_to(fixture!("google.ics"), ME, Answer::Maybe, Some("Ik ben 10 minuten later; sorry"), None).unwrap();
         assert_eq!(built.recipients, ["lotte.maes@example.com"]);
         assert_eq!(built.from, ME);
         let (msg, ics) = reply_parts(&built);
@@ -865,7 +910,7 @@ mod tests {
 
     #[test]
     fn imip_reply_keeps_the_zone_and_the_series() {
-        let built = imip_reply(fixture!("outlook-series.ics"), "KOEN@example.org", Answer::Decline, None).unwrap();
+        let built = reply_to(fixture!("outlook-series.ics"), "KOEN@example.org", Answer::Decline, None, None).unwrap();
         let (msg, ics) = reply_parts(&built);
         assert_eq!(msg.subject(), Some("Declined: Weekplanning"));
         let cal = Object::parse(&ics);
@@ -882,10 +927,41 @@ mod tests {
     }
 
     #[test]
+    fn imip_reply_for_one_occurrence() {
+        let paris = Zone::Tz(Tz::Europe__Paris);
+        let unchanged = Moment::Time(at("2026-12-01 10:00", paris));
+        let (_, ics) = reply_parts(&reply_to(fixture!("outlook-series.ics"), ME, Answer::Decline, None, Some(unchanged)).unwrap());
+        let read = read_events(&ics);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].recurrence_id, Some(unchanged));
+        assert_eq!(read[0].span, Span::Timed { start: at("2026-12-01 10:00", paris), end: at("2026-12-01 10:30", paris) });
+        assert!(read[0].recurrence.is_none(), "no repeat rule in a reply for one occurrence");
+        assert!(ics.contains("RECURRENCE-ID;TZID=Romance Standard Time:20261201T100000"), "{ics}");
+
+        let moved = Moment::Time(at("2026-11-17 10:00", paris));
+        let (_, ics) = reply_parts(&reply_to(fixture!("outlook-series.ics"), ME, Answer::Accept, None, Some(moved)).unwrap());
+        assert_eq!(read_events(&ics)[0].recurrence_id, Some(moved), "the changed occurrence's own event");
+
+        let single = reply_to(fixture!("google.ics"), ME, Answer::Accept, None, Some(unchanged)).err().unwrap();
+        assert!(single.to_string().contains("doesn't repeat"), "{single}");
+    }
+
+    #[test]
+    fn imip_reply_from_the_account_for_an_alias() {
+        let me = ["account@example.net".to_string(), ME.to_string()];
+        let r = ImipReply { invitation: fixture!("google.ics"), from: &me[0], me: &me, answer: Answer::Accept, note: None, occurrence: None };
+        let built = imip_reply(&r, Europe::Brussels).unwrap();
+        let (msg, ics) = reply_parts(&built);
+        assert_eq!(msg.from().and_then(|f| f.first()).and_then(|a| a.address()), Some("account@example.net"));
+        assert_eq!(built.recipients, ["lotte.maes@example.com"], "the organizer only");
+        assert_eq!(read_events(&ics)[0].attendees.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), [ME], "the address invited");
+    }
+
+    #[test]
     fn imip_reply_refuses_what_is_not_an_invitation() {
         let cancel = fixture!("google.ics").replace("METHOD:REQUEST", "METHOD:CANCEL");
-        assert!(imip_reply(&cancel, ME, Answer::Accept, None).err().unwrap().to_string().contains("CANCEL"));
-        let built = imip_reply(fixture!("google.ics"), "list-member@example.org", Answer::Accept, None).unwrap();
+        assert!(reply_to(&cancel, ME, Answer::Accept, None, None).err().unwrap().to_string().contains("CANCEL"));
+        let built = reply_to(fixture!("google.ics"), "list-member@example.org", Answer::Accept, None, None).unwrap();
         let (_, ics) = reply_parts(&built);
         assert!(ics.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:list-member@example.org"), "invited through a list: {ics}");
     }
