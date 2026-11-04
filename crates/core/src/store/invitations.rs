@@ -41,23 +41,26 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
     Ok(())
 }
 
-/// What places the occurrences of a repeating event or a changed
-/// occurrence, as JSON; '' for a single event and for a message that gives
-/// no time.
+/// What places the event a message sends, as JSON; '' for a message that
+/// gives no time.
 fn timing(i: &Invitation) -> String {
-    let e = &i.event;
-    if !i.dated || (e.recurrence.is_none() && e.recurrence_id.is_none()) {
+    if !i.dated {
         return String::new();
     }
-    let placed = EventData {
+    serde_json::to_string(&placed(&i.event)).expect("an event serializes")
+}
+
+/// A version of an event with only what `update::holds` compares: its
+/// SEQUENCE, its span, and for a series the repeat rule.
+fn placed(e: &EventData) -> EventData {
+    EventData {
         recurrence_id: e.recurrence_id,
         this_and_future: e.this_and_future,
         recurrence: e.recurrence.clone(),
         status: e.status,
         sequence: e.sequence,
         ..EventData::new(e.uid.clone(), e.span)
-    };
-    serde_json::to_string(&placed).expect("an event serializes")
+    }
 }
 
 pub fn invitation_scan_batch(conn: &Connection, limit: usize) -> Result<Vec<(MessageId, String)>> {
@@ -159,14 +162,15 @@ pub enum ReplyMail {
 }
 
 /// Keeps the answer the user gave an event's invitation on an account:
-/// the whole event, or with `recurrence_id` one occurrence, with the outbox
-/// row of its reply mail.
-pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, given: &GivenAnswer, reply: Option<i64>) -> Result<()> {
+/// the whole event, or with `recurrence_id` one occurrence, with the
+/// version answered (the event or occurrence, or a series with its changed
+/// occurrences) and the outbox row of its reply mail.
+pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, given: &GivenAnswer, version: &[EventData], reply: Option<i64>) -> Result<()> {
     conn.execute(
-        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer, note, notify, reply) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer, note, notify, reply, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT (account_id, uid, recurrence_id) DO UPDATE SET answer = excluded.answer, note = excluded.note,
-           notify = excluded.notify, reply = excluded.reply",
-        params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), given.answer, given.note, given.notify, reply],
+           notify = excluded.notify, reply = excluded.reply, version = excluded.version",
+        params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), given.answer, given.note, given.notify, reply, serde_json::to_string(&version.iter().map(placed).collect::<Vec<_>>()).expect("events serialize")],
     )?;
     // A whole series answered again replaces what was said for single
     // occurrences, and takes back their replies still waiting.
@@ -203,39 +207,52 @@ pub fn given_answer(conn: &Connection, account: AccountId, uid: &str, recurrence
         .optional()?)
 }
 
-/// The answer kept for an occurrence, else for its whole event.
-pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<Response>> {
-    let rid = recurrence_id.map(moment_text).unwrap_or_default();
-    Ok(conn
-        .query_row(
-            "SELECT answer FROM invitation_answer WHERE account_id = ?1 AND uid = ?2 AND recurrence_id IN (?3, '')
-             ORDER BY recurrence_id = '' LIMIT 1",
-            params![account, uid, rid],
-            |r| r.get(0),
-        )
-        .optional()?)
+/// An answer given from Jolta and the version it went to, as
+/// `remember_answer` keeps it. Answers kept before Jolta recorded the
+/// version have none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Remembered {
+    pub answer: Response,
+    pub version: Option<Vec<EventData>>,
 }
 
-/// Where the answer an invitation shows comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnswerFrom<'a> {
-    /// A provider's or a CalDAV copy, which Jolta answers through.
-    Calendar(&'a StoredEvent),
-    /// The answer given from Jolta.
-    Jolta,
-    /// A feed's or this Mac's copy, which only says what it was imported
-    /// with.
-    Import,
+/// The answer kept for an occurrence, else for its whole event.
+pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<Remembered>> {
+    let rid = recurrence_id.map(moment_text).unwrap_or_default();
+    let row: Option<(Response, Option<String>)> = conn
+        .query_row(
+            "SELECT answer, version FROM invitation_answer WHERE account_id = ?1 AND uid = ?2 AND recurrence_id IN (?3, '')
+             ORDER BY recurrence_id = '' LIMIT 1",
+            params![account, uid, rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((answer, version)) = row else { return Ok(None) };
+    let version = version.map(|v| serde_json::from_str(&v).map_err(|e| Error::Other(format!("answered version of {uid}: {e}")))).transpose()?;
+    Ok(Some(Remembered { answer, version }))
 }
 
 /// The user's answer to an invitation on the account it came to, as its
-/// card and the list show it: `copy` is that account's copy of the event
-/// and `remembered` the answer given from Jolta. Jolta answers through a
-/// provider's or a CalDAV copy, so that one holds the answer it gave.
-pub fn shown_answer(copy: Option<&StoredEvent>, remembered: Option<Response>) -> Option<(Response, AnswerFrom<'_>)> {
+/// card and the list show it: `copy` is that account's copy of the event,
+/// `remembered` the answer given from Jolta, and `sent` the events the
+/// message sends with the one that places the occurrence shown, None for a
+/// message that gives no time. Jolta answers through a provider's or a
+/// CalDAV copy, so that one holds the answer it gave. Its answer, or the one
+/// given from Jolta, holds only for the version and the occurrence it went
+/// to, and reads Not answered after that. A feed's or this Mac's copy only
+/// says what it was imported with.
+pub fn shown_answer(copy: Option<&StoredEvent>, remembered: Option<&Remembered>, sent: Option<(&[EventData], &EventData)>, here: Tz) -> Option<Response> {
+    let judged = |answer: Response, answered: &[EventData], source: Option<CalendarSource>| match sent {
+        Some((events, said)) if !holds(answered, source, events, said, here) => Response::NeedsAction,
+        _ => answer,
+    };
     match copy {
-        Some(s) if !matches!(s.source, CalendarSource::Webcal | CalendarSource::Local) => s.event.my_response().map(|r| (r, AnswerFrom::Calendar(s))),
-        copy => remembered.map(|r| (r, AnswerFrom::Jolta)).or_else(|| copy.and_then(|s| s.event.my_response()).map(|r| (r, AnswerFrom::Import))),
+        Some(s) if !matches!(s.source, CalendarSource::Webcal | CalendarSource::Local) => s.event.my_response().map(|r| judged(r, std::slice::from_ref(&s.event), Some(s.source))),
+        copy => match remembered {
+            Some(Remembered { answer, version: Some(answered) }) => Some(judged(*answer, answered, None)),
+            Some(Remembered { answer, version: None }) => Some(*answer),
+            None => copy.and_then(|s| s.event.my_response()),
+        },
     }
 }
 
@@ -411,13 +428,8 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], me: &[String], now:
         return fixed(InvitationState::Cancelled);
     }
     let remembered = remembered_answer(conn, n.account, &n.uid, picked.occurrence.as_ref())?;
-    // A calendar's copy holds only for the version and the occurrence the
-    // message sends, as on the card. An answer given from Jolta is judged
-    // there by its reply mail, which the list doesn't read.
-    let answer = shown_answer(copy.as_ref(), remembered).map(|(r, from)| match from {
-        AnswerFrom::Calendar(s) if picked.sent.as_ref().is_some_and(|(events, said)| !holds(&s.event, Some(s.source), events, &events[*said], here)) => Response::NeedsAction,
-        _ => r,
-    });
+    let sent = picked.sent.as_ref().map(|(events, said)| (events.as_slice(), &events[*said]));
+    let answer = shown_answer(copy.as_ref(), remembered.as_ref(), sent, here);
     let state = match answer {
         Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
         _ if n.ends > now.timestamp() => InvitationState::Unanswered,
@@ -437,8 +449,8 @@ struct Picked {
     /// For a series, when the occurrence it shows ends, in unix seconds.
     ends: Option<i64>,
     /// The events the message sends, as `timing` places them, and which of
-    /// them places the occurrence shown. None for a single event and for a
-    /// message that gives no time.
+    /// them places the occurrence shown. None for a message that gives no
+    /// time.
     sent: Option<(Vec<EventData>, usize)>,
 }
 
@@ -451,7 +463,7 @@ fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result
         return Ok(Picked { event: rid, occurrence: rid, ends: None, sent: None });
     }
     let this = parse(n)?;
-    if rid.is_some() {
+    if rid.is_some() || this.recurrence.is_none() {
         return Ok(Picked { event: rid, occurrence: rid, ends: None, sent: Some((vec![this], 0)) });
     }
     let overrides = overrides.iter().filter(|o| !o.timing.is_empty()).map(|o| parse(o)).collect::<Result<Vec<_>>>()?;
@@ -465,22 +477,6 @@ fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result
         Some((Source::Master, start)) => (Some(start), Some(start), 0),
     };
     Ok(Picked { event, occurrence, ends, sent: Some(([this].into_iter().chain(overrides).collect(), said)) })
-}
-
-/// The reply mail Jolta sent with the answer `remembered_answer` finds:
-/// its blob, which names the version answered. None for an answer given
-/// without a reply, or a reply that failed for good.
-pub fn remembered_reply(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<String>> {
-    let rid = recurrence_id.map(moment_text).unwrap_or_default();
-    Ok(conn
-        .query_row(
-            "SELECT o.blob FROM invitation_answer a JOIN outbox o ON o.id = a.reply AND o.state IN ('queued', 'sent')
-             WHERE a.account_id = ?1 AND a.uid = ?2 AND a.recurrence_id IN (?3, '')
-             ORDER BY a.recurrence_id = '' LIMIT 1",
-            params![account, uid, rid],
-            |r| r.get(0),
-        )
-        .optional()?)
 }
 
 /// One message on an account that carries a version of an event.
@@ -725,7 +721,8 @@ mod tests {
         assert_eq!(open(&jolta, now()), [request]);
 
         let given = GivenAnswer { answer: Response::Tentative, note: String::new(), notify: true };
-        jolta.store.write(|tx| remember_answer(tx, AccountId(1), "7kq2m4p9r1s3t5v7x9z0b2d4f6@google.com", None, &given, None)).unwrap();
+        let version = crate::calendar::invitation::find(mail!("google-request.eml"), &[]).remove(0).event;
+        jolta.store.write(|tx| remember_answer(tx, AccountId(1), &version.uid, None, &given, std::slice::from_ref(&version), None)).unwrap();
         assert_eq!(shown(&jolta, request, now()), Some(InvitationState::Answered(Response::Tentative)), "the answer given from Jolta");
         assert!(open(&jolta, now()).is_empty());
 
@@ -820,9 +817,11 @@ mod tests {
             Moment::Time(crate::calendar::Local { wall, zone: crate::calendar::Zone::Tz(chrono_tz::Europe::Brussels) })
         };
         let uid = "standup-series@example.com";
+        let sent: Vec<EventData> = crate::calendar::invitation::find(mail!("series.eml"), &[]).into_iter().map(|i| i.event).collect();
         for (occurrence, answer) in [("2026-11-05 09:30", Response::Accepted), ("2026-11-10 09:30", Response::Declined)] {
             let given = GivenAnswer { answer, note: String::new(), notify: true };
-            jolta.store.write(|tx| remember_answer(tx, AccountId(1), uid, Some(&at(occurrence)), &given, None)).unwrap();
+            let version = series::occurrence(&sent, &at(occurrence), chrono_tz::Europe::Brussels).unwrap();
+            jolta.store.write(|tx| remember_answer(tx, AccountId(1), uid, Some(&at(occurrence)), &given, std::slice::from_ref(&version), None)).unwrap();
         }
         for (now, expected, why) in [
             (now(), InvitationState::Answered(Response::Accepted), "Thursday's, moved to 10:00"),
@@ -914,6 +913,25 @@ mod tests {
         text.split("\r\n").map(line).collect::<Vec<_>>().join("\r\n").into_bytes()
     }
 
+    /// The organizer's update of `raw` at SEQUENCE 1, the next morning: two
+    /// hours later when `moved`, else only retitled.
+    fn update(raw: &[u8], moved: bool) -> Vec<u8> {
+        edited(raw, |l| {
+            let later = |l: &str| {
+                let hour = l.rfind(':').unwrap() + 10;
+                format!("{}{:02}{}", &l[..hour], l[hour..hour + 2].parse::<u32>().unwrap() + 2, &l[hour + 2..])
+            };
+            match l {
+                _ if l.starts_with("Message-ID: <") => Some(l.replace('<', "<update-")),
+                _ if l.starts_with("Date:") => Some("Date: Wed, 04 Nov 2026 07:00:00 +0000".into()),
+                "SEQUENCE:0" => Some("SEQUENCE:1".into()),
+                _ if moved && (l.starts_with("DTSTART") || l.starts_with("DTEND")) => Some(later(l)),
+                _ if !moved && l.starts_with("SUMMARY:") => Some(format!("{l}, renamed")),
+                _ => None,
+            }
+        })
+    }
+
     /// Mallory's `method` for the event of `raw`, at SEQUENCE 100, in a
     /// conversation of its own, naming Ann as the organizer or Mallory.
     fn stranger(raw: &[u8], method: &str, names_self: bool) -> Vec<u8> {
@@ -944,13 +962,16 @@ mod tests {
 
     /// Every mix of a calendar copy, of the event or of the occurrence shown
     /// or both, on CalDAV or Graph, and an answer given from Jolta to the
-    /// whole event or to that occurrence, for a single event, an unchanged
-    /// and a moved occurrence of a series and an occurrence invited to alone;
-    /// then again after the organizer's cancellation of the whole series or
-    /// of Thursday's occurrence named in UTC, and after a stranger's CANCEL
-    /// or REQUEST for the same UID: the card and the list say the same.
+    /// whole event or to that occurrence, with or without a reply mail, for a
+    /// single event, an unchanged and a moved occurrence of a series and an
+    /// occurrence invited to alone; then again after the organizer's update
+    /// that moves it or only retitles it, the organizer's cancellation of the
+    /// whole series or of Thursday's occurrence named in UTC, and a
+    /// stranger's CANCEL or REQUEST for the same UID: the card and the list
+    /// say the same.
     #[test]
     fn the_card_and_the_list_show_the_same_answer() {
+        use crate::calendar::rsvp::{self, Answer, ImipReply};
         let brussels = chrono_tz::Europe::Brussels;
         let at = |s: &str| {
             let wall = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
@@ -972,14 +993,17 @@ mod tests {
             ("a moved occurrence", series.clone(), now(), Some(at("2026-11-05 09:30"))),
             ("an occurrence invited to alone", alone, now(), Some(at("2026-11-05 09:30"))),
         ];
-        let series_master = crate::calendar::invitation::find(&series, &me).into_iter().map(|i| i.event).find(|e| e.recurrence_id.is_none()).unwrap();
+        let whole_series: Vec<EventData> = crate::calendar::invitation::find(&series, &me).into_iter().map(|i| i.event).collect();
+        let series_master = whole_series.iter().find(|e| e.recurrence_id.is_none()).unwrap().clone();
         let answer = |e: &mut EventData, r: Response| e.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = r);
         let mut seen = std::collections::BTreeSet::new();
         let mut before = HashMap::new();
         for (what, raw, now, occurrence) in shapes {
             let whole_event = if occurrence.is_some() { series.clone() } else { raw.clone() };
-            let arrivals: [(&str, Option<Vec<u8>>); 7] = [
+            let arrivals: [(&str, Option<Vec<u8>>); 9] = [
                 ("nothing since", None),
+                ("an update that moved it", Some(update(&raw, true))),
+                ("an update that kept its time", Some(update(&raw, false))),
                 ("the organizer's CANCEL of the whole event", Some(cancelled(&whole_event))),
                 ("the organizer's CANCEL of Thursday's occurrence", occurrence.map(|_| cancelled(thursday_in_utc.as_bytes()))),
                 ("a stranger's CANCEL naming the organizer", Some(stranger(&raw, "CANCEL", false))),
@@ -998,18 +1022,24 @@ mod tests {
                     .unwrap();
                 let message = import(&jolta, &raw);
                 let later = later.map(|r| (import(&jolta, &r), r));
-                // A cancellation's own card is Cancelled in both by its method
-                // alone.
+                // An update's card stands for the request's; the list doesn't
+                // know of updates in other conversations. A cancellation's own
+                // card is Cancelled in both by its method alone.
                 let compared: Vec<(&str, MessageId, &[u8])> = match &later {
+                    Some((m, r)) if arrival.contains("update") => vec![("the update", *m, r.as_slice())],
                     Some((m, r)) if arrival.contains("stranger") => vec![("the request", message, raw.as_slice()), ("the stranger's mail", *m, r.as_slice())],
                     _ => vec![("the request", message, raw.as_slice())],
                 };
                 let sent: Vec<EventData> = crate::calendar::invitation::find(&raw, &me).into_iter().map(|i| i.event).collect();
                 let uid = sent[0].uid.clone();
                 let base = sent.iter().find(|e| e.recurrence_id.is_none()).cloned().unwrap_or_else(|| series_master.clone());
+                // The whole event answered from Jolta, from this message or
+                // for an occurrence invited to alone from the series'.
+                let whole_version = if sent.iter().any(|e| e.recurrence_id.is_none()) { sent.clone() } else { whole_series.clone() };
                 let mut whole = base.clone();
                 answer(&mut whole, Response::Declined);
                 let mut own = occurrence.map(|rid| crate::calendar::series::occurrence(&sent, &rid, brussels).or_else(|| crate::calendar::series::occurrence(std::slice::from_ref(&base), &rid, brussels)).unwrap());
+                let own_version = own.clone();
                 if let Some(own) = &mut own {
                     answer(own, Response::Accepted);
                 }
@@ -1022,43 +1052,76 @@ mod tests {
                 .into_iter()
                 .filter(|(_, c)| occurrence.is_some() || c.len() < 2)
                 .collect();
+                let text = crate::calendar::invitation::calendar_text(&raw, &uid).unwrap();
                 for (calendar, source) in [(caldav, "CalDAV"), (graph, "Graph")] {
                     for (copy, events) in &copies {
                         let answers = [("no answer from Jolta", None), ("the event answered from Jolta", Some(None)), ("the occurrence answered from Jolta", occurrence.map(Some))];
                         for (remembered, rid) in answers.into_iter().filter(|(w, rid)| rid.is_some() || w.starts_with("no")) {
-                            let cell = format!("{what}, {copy} on {source}, {remembered}");
-                            jolta
-                                .store
-                                .write(|tx| {
-                                    tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer;")?;
-                                    if !events.is_empty() {
-                                        let horizon = Horizon::around(now, brussels);
-                                        crate::store::apply_item(tx, calendar, "c1", Some("1"), events, None, &horizon)?;
-                                    }
-                                    let given = |r| GivenAnswer { answer: r, note: String::new(), notify: false };
-                                    match rid {
-                                        Some(None) => remember_answer(tx, AccountId(1), &uid, None, &given(Response::Tentative), None),
-                                        Some(Some(rid)) => remember_answer(tx, AccountId(1), &uid, Some(&rid), &given(Response::Accepted), None),
-                                        None => Ok(()),
-                                    }
-                                })
-                                .unwrap();
-                            for (which, m, r) in &compared {
-                                let card = card_says(&jolta, *m, r, now);
-                                assert_eq!(Some(card), shown(&jolta, *m, now), "{cell}, after {arrival}: {which}");
-                                seen.insert(format!("{card:?}"));
-                            }
-                            let card = |i: usize| card_says(&jolta, compared[i].1, compared[i].2, now);
-                            match arrival {
-                                "nothing since" => {
-                                    before.insert(cell, card(0));
+                            for reply in [false, true].into_iter().filter(|r| !r || rid.is_some()) {
+                                let cell = format!("{what}, {copy} on {source}, {remembered}{}", if reply { " with a reply" } else { "" });
+                                jolta
+                                    .store
+                                    .write(|tx| {
+                                        tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer; DELETE FROM outbox;")?;
+                                        if !events.is_empty() {
+                                            let horizon = Horizon::around(now, brussels);
+                                            crate::store::apply_item(tx, calendar, "c1", Some("1"), events, None, &horizon)?;
+                                        }
+                                        let Some(rid) = rid else { return Ok(()) };
+                                        let (said, version) = match rid {
+                                            None => ((Answer::Maybe, Response::Tentative), whole_version.clone()),
+                                            Some(_) => ((Answer::Accept, Response::Accepted), own_version.clone().into_iter().collect()),
+                                        };
+                                        let given = GivenAnswer { answer: said.1, note: String::new(), notify: reply };
+                                        let reply = match reply {
+                                            true => {
+                                                let built = rsvp::imip_reply(&ImipReply { invitation: &text, from: "me@example.com", me: &me, answer: said.0, note: None, occurrence: rid }, brussels)?;
+                                                let blob = jolta.blobs.put(&built.raw)?;
+                                                Some(crate::store::queue_outbox(tx, AccountId(1), None, &blob, &built.message_id, &built.from, &built.recipients, None, 0)?)
+                                            }
+                                            false => None,
+                                        };
+                                        remember_answer(tx, AccountId(1), &uid, rid.as_ref(), &given, &version, reply)
+                                    })
+                                    .unwrap();
+                                for (which, m, r) in &compared {
+                                    let card = card_says(&jolta, *m, r, now);
+                                    assert_eq!(Some(card), shown(&jolta, *m, now), "{cell}, after {arrival}: {which}");
+                                    seen.insert(format!("{card:?}"));
                                 }
-                                "the organizer's CANCEL of the whole event" => assert_eq!(card(0), InvitationState::Cancelled, "{cell}: {arrival}"),
-                                "the organizer's CANCEL of Thursday's occurrence" if what.ends_with("alone") => assert_eq!(card(0), InvitationState::Cancelled, "{cell}: {arrival}"),
-                                "the organizer's CANCEL of Thursday's occurrence" => {}
-                                _ => {
-                                    assert_eq!(card(0), before[&cell], "{cell}: the request after {arrival}");
-                                    assert_eq!(card(1), InvitationState::Plain, "{cell}: {arrival}");
+                                let card = |i: usize| card_says(&jolta, compared[i].1, compared[i].2, now);
+                                match arrival {
+                                    "nothing since" => {
+                                        before.insert(cell, card(0));
+                                    }
+                                    "an update that moved it" => {
+                                        assert_eq!(card(0), InvitationState::Unanswered, "{cell}: answered before the move");
+                                        if *copy == "no copy" && let (Some(rid), Some((m, r))) = (rid, &later) {
+                                            // Answered again, for the version that moved it.
+                                            let moved: Vec<EventData> = crate::calendar::invitation::find(r, &me).into_iter().map(|i| i.event).collect();
+                                            let shown_at = rid.map(|_| event_card(&jolta, *m, r, now).answering.unwrap().occurrence.unwrap().recurrence_id);
+                                            let version = match &shown_at {
+                                                Some(at) => vec![crate::calendar::series::occurrence(&moved, at, brussels).unwrap()],
+                                                None => moved.clone(),
+                                            };
+                                            let given = GivenAnswer { answer: Response::Declined, note: String::new(), notify: false };
+                                            jolta.store.write(|tx| remember_answer(tx, AccountId(1), &uid, shown_at.as_ref(), &given, &version, None)).unwrap();
+                                            let card = card_says(&jolta, *m, r, now);
+                                            assert_eq!(Some(card), shown(&jolta, *m, now), "{cell}, answered again after the move");
+                                            assert_eq!(card, InvitationState::Answered(Response::Declined), "{cell}, answered again after the move");
+                                        }
+                                    }
+                                    "the organizer's CANCEL of the whole event" => assert_eq!(card(0), InvitationState::Cancelled, "{cell}: {arrival}"),
+                                    "the organizer's CANCEL of Thursday's occurrence" if what.ends_with("alone") => assert_eq!(card(0), InvitationState::Cancelled, "{cell}: {arrival}"),
+                                    "the organizer's CANCEL of Thursday's occurrence" => {}
+                                    // The copies here leave out the series' moved occurrence,
+                                    // so only an answer from Jolta places it as the mail does.
+                                    "an update that kept its time" if *copy == "no copy" => assert_eq!(card(0), before[&cell], "{cell}: answered before the new title"),
+                                    "an update that kept its time" => {}
+                                    _ => {
+                                        assert_eq!(card(0), before[&cell], "{cell}: the request after {arrival}");
+                                        assert_eq!(card(1), InvitationState::Plain, "{cell}: {arrival}");
+                                    }
                                 }
                             }
                         }

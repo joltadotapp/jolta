@@ -42,13 +42,16 @@ pub fn answer_holds(answered: &EventData, source: Option<CalendarSource>, now: &
     (answered.sequence >= now.sequence && source != Some(CalendarSource::Graph)) || same_time(answered, now, here)
 }
 
-/// Whether an answer given to `answered`, by a reply or in a copy from
+/// Whether an answer given to `answered`, from Jolta or in a copy from
 /// `source`, holds for a message that sends `message`, where `said` is the
 /// event that places the occurrence shown: for the version of the same
 /// event the message sends, and when the answer went to the series of an
 /// occurrence the message sends on its own, for the series' occurrence at
-/// that recurrence id. The card and the list both judge by this.
-pub fn holds(answered: &EventData, source: Option<CalendarSource>, message: &[EventData], said: &EventData, here: Tz) -> bool {
+/// that recurrence id. `answered` is the event or occurrence answered, or a
+/// series with its changed occurrences, of which the one `said` names
+/// counts. The card and the list both judge by this.
+pub fn holds(answered: &[EventData], source: Option<CalendarSource>, message: &[EventData], said: &EventData, here: Tz) -> bool {
+    let Some(answered) = version_of(answered, said, here).or(answered.iter().find(|e| e.recurrence_id.is_none())).or(answered.first()) else { return true };
     let event = version_of(message, answered, here).is_none_or(|now| answer_holds(answered, source, now, here));
     let occurrence = match (answered.recurrence_id, said.recurrence_id) {
         (None, Some(rid)) => series::occurrence_span(&answered.span, &rid, here).is_some_and(|span| {
@@ -62,37 +65,12 @@ pub fn holds(answered: &EventData, source: Option<CalendarSource>, message: &[Ev
 
 /// The event in `message` that `other`, a version of the same event or
 /// occurrence, compares with.
-pub fn version_of<'a>(message: &'a [EventData], other: &EventData, here: Tz) -> Option<&'a EventData> {
+fn version_of<'a>(message: &'a [EventData], other: &EventData, here: Tz) -> Option<&'a EventData> {
     message.iter().find(|e| match (&e.recurrence_id, &other.recurrence_id) {
         (None, None) => true,
         (Some(a), Some(b)) => a.names(b, here),
         _ => false,
     })
-}
-
-/// The version of an event a reply mail answered. The reply carries its
-/// SEQUENCE, start and end; for a series the repeat rule comes from the
-/// account's request it answered, the latest at that SEQUENCE sent before
-/// the reply. Without that request the rule counts as kept.
-pub fn answered_by(seen: &Seen, reply: &Invitation, now: &EventData) -> Result<EventData> {
-    let r = &reply.event;
-    let recurrence = match r.recurrence_id {
-        Some(_) => None,
-        None => {
-            let at = Version { sequence: r.sequence, stamp: None };
-            let before_reply = |v: &Version| v.sequence == r.sequence && reply.stamp.is_none_or(|sent| v.stamp.is_none_or(|s| s <= sent));
-            let request = mails(seen, organizer(seen.conn, seen.account, seen.me, &r.uid)?.as_deref(), &r.uid, None, at)?
-                .into_iter()
-                .filter(|(method, _, v)| *method == Method::Request && before_reply(v))
-                .max_by_key(|(_, _, v)| *v)
-                .and_then(|(_, events, _)| events.into_iter().find(|e| e.recurrence_id.is_none()));
-            match request {
-                Some(request) => request.recurrence,
-                None => now.recurrence.clone(),
-            }
-        }
-    };
-    Ok(EventData { recurrence, ..r.clone() })
 }
 
 /// The same start, end and repeat rule. EXDATEs don't count: an

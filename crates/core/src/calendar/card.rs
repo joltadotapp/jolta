@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 
 use super::detail::{city, instant_only, offset, range};
-use super::invitation::{self, Invitation, Method};
+use super::invitation::{Invitation, Method};
 use super::recur::Source;
 use super::series::{self, Horizon};
 use super::update;
@@ -307,7 +307,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     // An invitation the user answers is answered in the calendars of the
     // account it came to; another account's copy may be the organizer's own.
     let (remembered, answered) = match &answering {
-        Some(a) => (remembered(conn, a, cx)?, copy(Some(cx.account))?),
+        Some(a) => (store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?, copy(Some(cx.account))?),
         None => (None, stored.clone()),
     };
 
@@ -323,21 +323,12 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         _ => None,
     };
 
-    // The answer picked as for the list, which holds only for the version of
-    // the meeting and the occurrence it was given to; only the card reads
-    // the reply mail an answer from Jolta went out in. A message that isn't
-    // the organizer's says nothing about it.
-    let answer = match store::shown_answer(answered.as_ref(), remembered.as_ref().map(|(r, _)| *r)) {
-        _ if !current || !trusted || method == Method::Cancel => None,
-        Some((r, store::AnswerFrom::Calendar(s))) => Some((r, update::holds(&s.event, Some(s.source), message, said, cx.here))),
-        Some((r, store::AnswerFrom::Jolta)) => match remembered.as_ref().and_then(|(_, reply)| reply.as_ref()) {
-            Some(reply) => Some((r, reply_holds(&seen, reply, message, said, cx)?)),
-            None => Some((r, true)),
-        },
-        Some((r, store::AnswerFrom::Import)) => Some((r, true)),
-        None => None,
-    }
-    .map(|(r, holds)| if holds { r } else { Response::NeedsAction });
+    // The answer picked as for the list. A message that isn't the
+    // organizer's says nothing about it.
+    let answer = match current && trusted && method != Method::Cancel {
+        true => store::shown_answer(answered.as_ref(), remembered.as_ref(), Some((message, said)), cx.here),
+        false => None,
+    };
 
     Ok(EventCard {
         label: label(method, !history.before.is_empty()),
@@ -414,27 +405,6 @@ fn title(method: Method, shown: &EventData, before: &[EventData]) -> String {
         _ if own.is_empty() => "(no title)".into(),
         _ => own.to_string(),
     }
-}
-
-/// The answer given from Jolta to this invitation, and its reply mail,
-/// which says the version answered.
-fn remembered(conn: &Connection, a: &Answering, cx: &Context) -> Result<Option<(Response, Option<Invitation>)>> {
-    let rid = a.occurrence.as_ref().map(|o| &o.recurrence_id);
-    let Some(answer) = store::remembered_answer(conn, cx.account, &a.uid, rid)? else { return Ok(None) };
-    let reply = store::remembered_reply(conn, cx.account, &a.uid, rid)?
-        .and_then(|hash| cx.blobs.get(&hash).ok())
-        .and_then(|raw| invitation::find(&raw, cx.me).into_iter().find(|i| i.method == Method::Reply && i.event.uid == a.uid));
-    Ok(Some((answer, reply)))
-}
-
-/// Whether the answer `reply` sent holds for this message, judged by the
-/// version of the event it answered.
-fn reply_holds(seen: &update::Seen, reply: &Invitation, message: &[EventData], said: &EventData, cx: &Context) -> Result<bool> {
-    let answered = match update::version_of(message, &reply.event, cx.here) {
-        Some(now) => update::answered_by(seen, reply, now)?,
-        None => reply.event.clone(),
-    };
-    Ok(update::holds(&answered, None, message, said, cx.here))
 }
 
 /// "The organizer changed the title": an update that changed nothing the

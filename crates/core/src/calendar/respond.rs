@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::card::{self, Card};
 use super::rsvp::{self, Answer, ImipReply, Rsvp, Scope};
-use super::{Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Person, Response, invitation, tz};
+use super::{Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Person, Response, invitation, series, tz};
 use crate::compose::Built;
 use crate::model::{AccountId, MessageId};
 use crate::{Error, Jolta, Result, imap, store};
@@ -109,6 +109,8 @@ struct Resolved {
     organizer: String,
     /// The answer the card or the detail shows now.
     shown: Option<Response>,
+    /// The version answered, as `store::remember_answer` keeps it.
+    version: Vec<EventData>,
 }
 
 /// Answers, tells the organizer the way `plan` says, and keeps the answer
@@ -158,6 +160,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     let blob = mail.as_ref().map(|m| jolta.blobs.put(&m.raw)).transpose()?;
     let uid = r.uid.clone();
     let shown = r.shown;
+    let version = r.version.clone();
     jolta
         .store
         .write_async(move |tx| {
@@ -180,7 +183,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
                     }
                 }
             };
-            store::remember_answer(tx, account, &uid, rid.as_ref(), &given, reply)
+            store::remember_answer(tx, account, &uid, rid.as_ref(), &given, &version, reply)
         })
         .await?;
     let calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
@@ -259,6 +262,9 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
             };
             let me = addresses(&from, copy.as_ref().map(|s| &s.event));
             let copy = copy.map(|s| Copy { event: s.event_id, calendar: s.calendar_id, source: s.source });
+            let occurrence = a.occurrence.filter(|o| o.alone || occurrence_only).map(|o| (o.recurrence_id, o.day));
+            let events: Vec<EventData> = invitations.iter().filter(|i| i.event.uid == a.uid).map(|i| i.event.clone()).collect();
+            let version = answered(events, occurrence.as_ref().map(|(rid, _)| rid), here);
             Ok(Resolved {
                 account,
                 from,
@@ -266,9 +272,10 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 uid: a.uid,
                 me,
                 copy,
-                occurrence: a.occurrence.filter(|o| o.alone || occurrence_only).map(|o| (o.recurrence_id, o.day)),
+                occurrence,
                 organizer: a.organizer,
                 shown,
+                version,
             })
         })
         .await
@@ -294,6 +301,7 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
         }
         None => None,
     };
+    let version = answered(vec![data.clone()], occurrence.as_ref().map(|(rid, _)| rid), here);
     Ok(Resolved {
         account,
         from,
@@ -303,8 +311,18 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
         occurrence,
         organizer: data.organizer.as_ref().map(short_name).unwrap_or_default(),
         shown: data.my_response(),
+        version,
         uid: data.uid,
     })
+}
+
+/// The version an answer goes to, from the events of one UID: the
+/// occurrence `rid` as they place it, else all of them.
+fn answered(events: Vec<EventData>, rid: Option<&Moment>, here: Tz) -> Vec<EventData> {
+    match rid.and_then(|rid| series::occurrence(&events, rid, here)) {
+        Some(occurrence) => vec![occurrence],
+        None => events,
+    }
 }
 
 /// The account's address, then the aliases its calendar's copy of the
@@ -675,6 +693,46 @@ mod tests {
         let sent: Vec<String> = replies(&j).into_iter().map(|(state, ..)| state).collect();
         assert_eq!(sent, ["sent", "queued"], "the same answer to the moved meeting is a new reply");
         assert!(reply_ics(&outbox(&j)[1].3).contains("SEQUENCE:2"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// "Don't send a reply" keeps the version answered as a reply mail
+    /// would: the card and the list keep the answer for a new title, and ask
+    /// again for a new day or a new repeat rule.
+    #[test]
+    fn an_answer_without_a_reply_asks_again_after_a_move() {
+        use crate::calendar::card::tests::{V1, version};
+        let (j, _) = jolta("respond-quiet-update");
+        let list = |m: MessageId| {
+            j.store
+                .read(|c| {
+                    let thread = c.query_row("SELECT thread_id FROM message WHERE id = ?1", [m], |r| r.get(0))?;
+                    Ok(store::thread_invitations(c, &[thread], now(), tz::here())?.get(&thread).copied())
+                })
+                .unwrap()
+        };
+        let both = |m: MessageId, raw: &str| (card_answer(&j, m, raw.as_bytes()), list(m));
+        let accepted = (Some(Response::Accepted), Some(store::InvitationState::Answered(Response::Accepted)));
+        let asked = (Some(Response::NeedsAction), Some(store::InvitationState::Unanswered));
+
+        let first = version("q1", "quiet", "REQUEST", 0, "20261104T080000Z", V1);
+        let m1 = import(&j, first.as_bytes());
+        run(&j, request(m1, Answer::Accept, None, false, false)).unwrap();
+        assert!(outbox(&j).is_empty(), "no reply");
+        let retitled = version("q2", "quiet", "REQUEST", 1, "20261104T090000Z", &V1.replace("SUMMARY:Sync", "SUMMARY:Weekly sync"));
+        assert_eq!(both(import(&j, retitled.as_bytes()), &retitled), accepted, "a new title keeps the answer");
+        let moved = version("q3", "quiet", "REQUEST", 2, "20261104T100000Z", &V1.replace("20261112T15", "20261113T15").replace("20261112T16", "20261113T16"));
+        assert_eq!(both(import(&j, moved.as_bytes()), &moved), asked, "a new day asks again");
+
+        let series = "DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\n";
+        let weekly = version("w1", "quiet-series", "REQUEST", 0, "20261104T080000Z", &format!("{series}RRULE:FREQ=WEEKLY\r\n"));
+        let w1 = import(&j, weekly.as_bytes());
+        run(&j, request(w1, Answer::Accept, None, false, false)).unwrap();
+        let renamed = version("w2", "quiet-series", "REQUEST", 1, "20261104T090000Z", &format!("{}RRULE:FREQ=WEEKLY\r\n", series.replace("Sync", "Team sync")));
+        assert_eq!(both(import(&j, renamed.as_bytes()), &renamed), accepted, "the same rule");
+        let daily = version("w3", "quiet-series", "REQUEST", 2, "20261104T100000Z", &format!("{series}RRULE:FREQ=DAILY\r\n"));
+        assert_eq!(both(import(&j, daily.as_bytes()), &daily), asked, "weekly became daily");
+        assert!(outbox(&j).is_empty());
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
