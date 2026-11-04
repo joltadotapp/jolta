@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::super::{NewCopy, Replaced, encode, with_join_link};
-use super::GraphCalendar;
+use super::{GraphCalendar, PatternedRecurrence, rrule};
 use crate::calendar::rsvp::{Answer, Occurrence, Stored, Target};
-use crate::calendar::{Calendar, EventData, EventId, EventStatus, Local, Recurrence, Span, Zone, tz};
+use crate::calendar::{Calendar, EventData, EventId, EventStatus, Local, Recurrence, Span, Zone, recur, tz};
 use crate::{Error, Result};
 
 /// PidLidGlobalObjectId and PidLidCleanGlobalObjectId, which Graph reads
@@ -137,7 +137,7 @@ pub(crate) fn event_body(e: &EventData, answer: Option<Answer>, here: Tz) -> Res
     });
     if let Some(r) = &e.recurrence {
         v["recurrence"] = pattern(r, &e.span, here)
-            .ok_or_else(|| Error::Other("Microsoft 365 can't repeat an event the way this invitation does, so pick another calendar for it.".into()))?;
+            .ok_or_else(|| Error::Other("Microsoft 365 can't repeat this meeting the same way, so pick another calendar for it.".into()))?;
     }
     Ok(v)
 }
@@ -188,8 +188,9 @@ fn global_object_id(uid: &str) -> String {
 }
 
 /// An RRULE as Graph's `patternedRecurrence`. None for what Graph can't
-/// hold: more than one rule, RDATEs, frequencies below a day, and BY parts
-/// beyond the weekdays, one day of the month, one month and one position.
+/// hold: more than one rule, RDATEs, frequencies below a day, BY parts
+/// beyond the weekdays, one day of the month, one month and one position,
+/// and a pattern that would repeat on other days (`same_occurrences`).
 pub(crate) fn pattern(r: &Recurrence, span: &Span, here: Tz) -> Option<Value> {
     let [rule] = r.rules.as_slice() else { return None };
     if !r.rdates.is_empty() {
@@ -288,7 +289,24 @@ pub(crate) fn pattern(r: &Recurrence, span: &Span, here: Tz) -> Option<Value> {
         (None, None) => json!({ "type": "noEnd", "startDate": start_date, "recurrenceTimeZone": zone.name() }),
         (Some(_), Some(_)) => return None,
     };
-    Some(json!({ "pattern": pattern, "range": range }))
+    let value = json!({ "pattern": pattern, "range": range });
+    same_occurrences(rule, &value, span, start, zone, here).then_some(value)
+}
+
+/// Whether Graph's pattern repeats on the days the rule does, as Jolta
+/// reads each back, over four years from the series' start: Exchange moves
+/// a day of the month that a month lacks to its last day, where RFC 5545
+/// skips the month.
+fn same_occurrences(rule: &str, value: &Value, span: &Span, start: NaiveDate, zone: Tz, here: Tz) -> bool {
+    let Ok(graph) = serde_json::from_value::<PatternedRecurrence>(value.clone()) else { return false };
+    let Some(back) = rrule(&graph, matches!(span, Span::AllDay { .. }), zone) else { return false };
+    let from = tz::instant(start.and_time(NaiveTime::MIN), zone) - chrono::Duration::days(1);
+    let window = recur::Window { start: from, end: from + chrono::Duration::days(4 * 366) };
+    let days = |rule: &str| {
+        let master = EventData { recurrence: Some(Recurrence { rules: vec![rule.to_string()], ..Recurrence::default() }), ..EventData::new("", *span) };
+        recur::expand(&master, &[], window, here).into_iter().map(|o| o.span).collect::<Vec<_>>()
+    };
+    days(rule) == days(&back)
 }
 
 /// The last day an UNTIL lets the series reach, in the series' zone.
@@ -320,9 +338,8 @@ fn day_name(d: &str) -> Option<&'static str> {
 mod tests {
     use chrono_tz::Europe::Brussels;
 
-    use super::super::{PatternedRecurrence, rrule, unpack_uid};
+    use super::super::unpack_uid;
     use super::*;
-    use crate::calendar::recur;
 
     fn timed(day: &str) -> Span {
         let wall = NaiveDateTime::parse_from_str(&format!("{day}T09:30:00"), "%Y-%m-%dT%H:%M:%S").unwrap();
@@ -351,6 +368,11 @@ mod tests {
             ("FREQ=MONTHLY;BYMONTHDAY=12", "2026-11-12"),
             ("FREQ=MONTHLY;BYDAY=-1FR", "2026-11-27"),
             ("FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2", "2026-11-10"),
+            ("FREQ=MONTHLY;BYMONTHDAY=28", "2026-11-28"),
+            ("FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1", "2026-11-30"),
+            ("FREQ=MONTHLY;BYDAY=MO,WE;BYSETPOS=3", "2026-11-09"),
+            ("FREQ=MONTHLY;INTERVAL=2;BYDAY=-1SU", "2026-11-29"),
+            ("FREQ=MONTHLY;BYMONTHDAY=31;COUNT=2", "2026-12-31"),
             ("FREQ=YEARLY", "2026-11-10"),
             ("FREQ=YEARLY;BYMONTH=3;BYDAY=1MO", "2027-03-01"),
         ] {
@@ -369,6 +391,24 @@ mod tests {
         }
         let two = Recurrence { rules: vec!["FREQ=DAILY".into(), "FREQ=WEEKLY".into()], ..Recurrence::default() };
         assert_eq!(pattern(&two, &timed("2026-11-10"), Brussels), None);
+    }
+
+    /// Exchange moves a day of the month that a month lacks to its last
+    /// day, where RFC 5545 skips the month, so such a series isn't copied.
+    #[test]
+    fn a_series_graph_would_repeat_on_other_days_is_refused() {
+        for (rule, day) in [
+            ("FREQ=MONTHLY;BYMONTHDAY=29", "2026-11-29"),
+            ("FREQ=MONTHLY;BYMONTHDAY=30", "2026-11-30"),
+            ("FREQ=MONTHLY;BYMONTHDAY=31", "2026-12-31"),
+            ("FREQ=MONTHLY;INTERVAL=3", "2027-01-31"),
+            ("FREQ=MONTHLY;BYMONTHDAY=30;UNTIL=20270401T000000Z", "2026-12-30"),
+        ] {
+            assert_eq!(pattern(&rules(rule), &timed(day), Brussels), None, "{rule}");
+        }
+        let e = EventData { recurrence: Some(rules("FREQ=MONTHLY;BYMONTHDAY=31")), ..EventData::new("u", timed("2026-12-31")) };
+        let refused = event_body(&e, None, Brussels).unwrap_err().to_string();
+        assert!(refused.contains("Microsoft 365 can't repeat this meeting the same way"), "{refused}");
     }
 
     #[test]
