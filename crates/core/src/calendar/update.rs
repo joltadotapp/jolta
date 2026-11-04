@@ -224,14 +224,19 @@ pub fn proposer<'a>(counter: &'a EventData, from: &str) -> Option<&'a Attendee> 
 }
 
 /// Whether a COUNTER is a guest's proposal: it names the meeting's
-/// organizer, as `organizer` established it, and comes from its proposer,
+/// organizer, as `organizer` established it, or for the user's own meeting
+/// names none, as Exchange's COUNTER doesn't, and comes from its proposer,
 /// or from a provider sending for them, who is a guest of the meeting on
 /// the account's calendar copy or on one of the organizer's requests. A
 /// meeting the account knows nothing of has no guests to check against.
 fn from_guest(seen: &Seen, organizer: Option<&str>, counter: &EventData) -> Result<bool> {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     let Some(organizer) = organizer else { return Ok(false) };
-    if !counter.organizer.as_ref().is_some_and(|o| same(&o.address, organizer)) {
+    let names = match &counter.organizer {
+        Some(o) => same(&o.address, organizer),
+        None => seen.me.iter().any(|m| same(m, organizer)),
+    };
+    if !names {
         return Ok(false);
     }
     let Some(proposer) = proposer(counter, seen.sender).map(|a| a.person.address.clone()) else { return Ok(false) };

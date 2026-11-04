@@ -483,7 +483,10 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             let t = Instant::now();
             let done = proposal::decline(jolta, jolta_core::MessageId(message)).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
-            engine.send(done.mailed_from, t).await
+            match done.mailed_from {
+                Some(account) => engine.send(account, t).await,
+                None => Ok(()),
+            }
         }
         CalCommand::Remove { message } => {
             let t = Instant::now();

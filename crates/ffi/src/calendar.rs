@@ -374,7 +374,9 @@ impl Core {
             .spawn(async move { proposal::decline(&jolta, jolta_core::MessageId(message_id)).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        self.running_engine()?.wake(done.mailed_from);
+        if let Some(account) = done.mailed_from {
+            self.running_engine()?.wake(account);
+        }
         Ok(done.text)
     }
 

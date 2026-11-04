@@ -301,6 +301,8 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let update = current && matches!(method, Method::Request | Method::Add);
     let changes = if update { changes(&history.before, described, cx) } else { Changes::default() };
 
+    let countered_now = if method == Method::Counter { Some(countered(conn, said, &history.before, cx)?) } else { None };
+
     let mut notes = Vec::new();
     match method {
         Method::Cancel => notes.push(Note { text: "Cancelled by the organizer".into(), warn: true }),
@@ -367,7 +369,10 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         notes.push(Note { text: "Not in your calendar".into(), warn: false });
     }
 
-    let proposal = if method == Method::Counter && current && trusted { Some(proposed(conn, said, &history.before, &receiver, cx)?) } else { None };
+    let proposal = match &countered_now {
+        Some(now) if current && trusted => Some(proposed(conn, said, now, &receiver, cx)?),
+        _ => None,
+    };
     // A declined proposal's time no longer needs its conflicts.
     let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish) || (method == Method::Counter && !proposal.as_ref().is_some_and(|p| p.declined));
     let availability = match bounds {
@@ -384,7 +389,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
 
     Ok(EventCard {
         label: label(method, !history.before.is_empty()),
-        title: title(method, shown, &history.before),
+        title: title(method, shown, countered_now.as_deref().unwrap_or(&history.before)),
         cancelled: method == Method::Cancel || shown.status == EventStatus::Cancelled,
         when,
         elsewhere,
@@ -404,20 +409,25 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     })
 }
 
-/// What the organizer sees of a guest's proposal: the meeting's time now,
-/// from the account's calendar copy else the request before it, and
-/// Decline proposal when the account the proposal came to organizes it.
-fn proposed(conn: &Connection, counter: &EventData, before: &[EventData], receiver: &str, cx: &Context) -> Result<Proposed> {
+/// The meeting a proposal is for as the organizer has it now: the
+/// account's calendar copy, else the request before it; for one occurrence,
+/// that occurrence.
+fn countered(conn: &Connection, counter: &EventData, before: &[EventData], cx: &Context) -> Result<Vec<EventData>> {
     let copy = store::stored_series(conn, &counter.uid, Some(cx.account))?;
     let series = if copy.is_empty() { before } else { &copy };
-    let now = match &counter.recurrence_id {
+    Ok(match &counter.recurrence_id {
         Some(rid) => series::occurrence(series, rid, cx.here).into_iter().collect(),
         None => series.to_vec(),
-    };
-    let organizes = counter.organizer.as_ref().is_some_and(|o| o.address.trim().eq_ignore_ascii_case(receiver));
+    })
+}
+
+/// What the organizer sees of a guest's proposal: the meeting's time now,
+/// and Decline proposal when the account the proposal came to organizes it.
+fn proposed(conn: &Connection, counter: &EventData, now: &[EventData], receiver: &str, cx: &Context) -> Result<Proposed> {
+    let organizes = update::organizer(conn, cx.account, cx.me, &counter.uid)?.is_some_and(|o| o.trim().eq_ignore_ascii_case(receiver));
     let declined = store::calendar_answer_to(conn, cx.message)?.is_some();
     Ok(Proposed {
-        now: Lines::of(&now, cx).map(|l| l.when()),
+        now: Lines::of(now, cx).map(|l| l.when()),
         proposer: update::proposer(counter, cx.sender).map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false)),
         declining: (organizes && !declined).then_some(cx.message),
         declined,
@@ -479,13 +489,14 @@ fn occurs(master: &EventData, rid: &Moment, here: Tz) -> bool {
 }
 
 /// The event's title. Exchange writes its cancellation's as "Canceled:
-/// Design review", in the organizer's language; the request before it
-/// gives the title itself.
+/// Design review" and its proposal's as "New Time Proposed: Design review",
+/// in the sender's language; the request before it, or for a proposal the
+/// meeting as the organizer has it, gives the title itself.
 fn title(method: Method, shown: &EventData, before: &[EventData]) -> String {
     let own = shown.title.trim();
     let earlier = before.iter().find(|e| e.recurrence_id == shown.recurrence_id).or(before.first()).map(|e| e.title.trim()).filter(|t| !t.is_empty());
     match earlier {
-        Some(t) if method == Method::Cancel && own.len() > t.len() && own.ends_with(t) => t.to_string(),
+        Some(t) if matches!(method, Method::Cancel | Method::Counter) && own.len() > t.len() && own.ends_with(t) => t.to_string(),
         _ if own.is_empty() => "(no title)".into(),
         _ => own.to_string(),
     }

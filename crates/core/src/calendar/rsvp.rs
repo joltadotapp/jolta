@@ -787,17 +787,19 @@ fn spoken(p: &Proposal, here: Tz) -> String {
 
 /// The organizer's no to a proposal (RFC 5546 section 3.2.8): a
 /// METHOD:DECLINECOUNTER object echoing the COUNTER's UID, SEQUENCE and
-/// RECURRENCE-ID, with its ORGANIZER and the proposer's ATTENDEE line, from
-/// the organizer's account `from` to the proposer only. The meeting keeps
-/// its time; the proposer's calendar keeps its copy.
-pub fn imip_decline_counter(counter: &str, from: &str, proposer: &str) -> Result<Built> {
+/// RECURRENCE-ID, with its ORGANIZER, else `from` as Exchange's COUNTER
+/// names none, and the proposer's ATTENDEE line, from the organizer's
+/// account `from` to the proposer only. The meeting keeps its time; the
+/// proposer's calendar keeps its copy. `title` is the meeting's, which
+/// Exchange's COUNTER gives as "New Time Proposed: Planning".
+pub fn imip_decline_counter(counter: &str, from: &str, proposer: &str, title: &str) -> Result<Built> {
     let obj = Object::parse(counter);
     let calendar = obj.calendar().ok_or_else(|| Error::Other("the proposal holds no calendar".into()))?;
     if !calendar.prop("METHOD").is_some_and(|m| m.value().trim().eq_ignore_ascii_case("COUNTER")) {
         return Err(Error::Other("this calendar mail isn't a proposal for a new time".into()));
     }
     let event = calendar.components().find(|c| c.name() == "VEVENT").ok_or_else(|| Error::Other("the proposal holds no event".into()))?;
-    let organizer = event.prop("ORGANIZER").cloned().ok_or_else(|| Error::Other("the proposal names no organizer".into()))?;
+    let organizer = event.prop("ORGANIZER").cloned().unwrap_or_else(|| Prop::new("ORGANIZER", &format!("mailto:{from}")));
     let mut attendee = event
         .props()
         .find(|p| p.is("ATTENDEE") && is_me(p, &[proposer]))
@@ -812,7 +814,7 @@ pub fn imip_decline_counter(counter: &str, from: &str, proposer: &str) -> Result
     let name = cn(&attendee);
     decline.add(attendee);
     let zones: Vec<Component> = calendar.components().filter(|c| c.name() == "VTIMEZONE").cloned().collect();
-    let title = event.prop("SUMMARY").map(Prop::text).unwrap_or_default();
+    let title = title.trim();
     let same_as = ["DECLINECOUNTER", from, &proposed("UID"), &proposed("RECURRENCE-ID"), &proposed("SEQUENCE"), proposer, &proposed("DTSTART"), &proposed("DTEND")].join("\n");
     imip_mail(Mail {
         from,
@@ -1274,9 +1276,9 @@ mod tests {
         let (_, counter) = itip_parts(&counter, "COUNTER");
         let organizer = "sofie.janssens@example.com";
 
-        let built = imip_decline_counter(&counter, organizer, ME).unwrap();
+        let built = imip_decline_counter(&counter, organizer, ME, "Weekplanning").unwrap();
         assert_eq!((built.from.as_str(), built.recipients.as_slice()), (organizer, [ME.to_string()].as_slice()), "from the organizer to the proposer only");
-        assert_eq!(built.message_id, imip_decline_counter(&counter, organizer, ME).unwrap().message_id, "the same no twice is one mail");
+        assert_eq!(built.message_id, imip_decline_counter(&counter, organizer, ME, "Weekplanning").unwrap().message_id, "the same no twice is one mail");
         let (msg, ics) = itip_parts(&built, "DECLINECOUNTER");
         assert_eq!(msg.subject(), Some("New time declined: Weekplanning"));
         let obj = Object::parse(&ics);
@@ -1288,8 +1290,12 @@ mod tests {
         assert_eq!((attendees.len(), attendees[0].address(), attendees[0].param("PARTSTAT")), (1, Some(ME), None), "{ics}");
         assert!(ev.prop("DTSTART").is_none(), "the meeting keeps its time, which the proposer already has");
 
+        let exchange: String = counter.lines().filter(|l| !l.starts_with("ORGANIZER")).map(|l| format!("{l}\r\n")).collect();
+        let (_, ics) = itip_parts(&imip_decline_counter(&exchange, organizer, ME, "Weekplanning").unwrap(), "DECLINECOUNTER");
+        assert!(ics.contains("ORGANIZER:mailto:sofie.janssens@example.com"), "Exchange's COUNTER names no organizer: {ics}");
+
         let err = |r: Result<Built>| r.err().expect("refused").to_string();
-        assert!(err(imip_decline_counter(fixture!("google.ics"), organizer, ME)).contains("isn't a proposal"));
-        assert!(err(imip_decline_counter(&counter, organizer, "someone@example.org")).contains("doesn't name"));
+        assert!(err(imip_decline_counter(fixture!("google.ics"), organizer, ME, "")).contains("isn't a proposal"));
+        assert!(err(imip_decline_counter(&counter, organizer, "someone@example.org", "")).contains("doesn't name"));
     }
 }
