@@ -783,7 +783,21 @@ mod tests {
 
         let after_thursday = Utc.with_ymd_and_hms(2026, 11, 5, 12, 0, 0).unwrap();
         let accepted = InvitationState::Answered(Response::Accepted);
+        assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_thursday), accepted, "the card: next Tuesday's copy");
         assert_eq!(shown(&jolta, series, after_thursday), Some(accepted), "the list: next Tuesday's copy");
+
+        // The series answered Declined doesn't reach an occurrence the
+        // calendar holds its own answer for.
+        for e in events.iter_mut().filter(|e| e.recurrence_id.is_none()) {
+            e.attendees.iter_mut().filter(|a| a.is_me).for_each(|a| a.response = Response::Declined);
+        }
+        jolta.store.write(|tx| crate::store::apply_item(tx, calendar, "s1", Some("2"), &events, None, &horizon).map(|_| ())).unwrap();
+        assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_thursday), accepted, "the card: Tuesday's own copy");
+        assert_eq!(shown(&jolta, series, after_thursday), Some(accepted), "the list: Tuesday's own copy");
+        let after_tuesday = Utc.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap();
+        let declined = InvitationState::Answered(Response::Declined);
+        assert_eq!(card_says(&jolta, series, mail!("series.eml"), after_tuesday), declined, "the card: the series' answer for Thursday 12 November");
+        assert_eq!(shown(&jolta, series, after_tuesday), Some(declined), "the list: the series' answer for Thursday 12 November");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

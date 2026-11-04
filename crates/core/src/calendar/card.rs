@@ -249,9 +249,16 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         }
         None => (None, None),
     };
+    // The calendar may hold the occurrence shown as an override the message
+    // doesn't have, with its own answer; the series' copy answers when it
+    // doesn't, as in the list.
+    let at = match occurrence {
+        Some((e, span)) if repeats && e.recurrence_id.is_none() => Some(span.start()),
+        _ => shown.recurrence_id,
+    };
     let copy = |account: Option<AccountId>| -> Result<Option<store::StoredEvent>> {
-        Ok(match store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), account, cx.here)? {
-            None if shown.recurrence_id.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, account, cx.here)?,
+        Ok(match store::stored_event(conn, &shown.uid, at.as_ref(), account, cx.here)? {
+            None if at.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, account, cx.here)?,
             found => found,
         })
     };
