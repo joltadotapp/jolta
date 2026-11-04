@@ -542,6 +542,8 @@ enum ReaderStyle {
     .jolta-rsvp-options a:hover { color: var(--tx2); }
     .jolta-rsvp-options a.jolta-on { color: var(--tx); }
     .jolta-rsvp-options .jolta-rsvp-note { display: block; }
+    .jolta-invite a:focus { outline: none; }
+    .jolta-invite a:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; border-radius: 7px; }
     .jolta-rsvp-quiet .jolta-tick { opacity: 0; }
     .jolta-rsvp-quiet.jolta-on .jolta-tick { opacity: 1; }
     .jolta-join:hover { background: var(--fill); }
