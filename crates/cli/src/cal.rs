@@ -376,6 +376,9 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             let t = Instant::now();
             let invites = jolta.store.read(|c| jolta_core::search::query_count(c, &q))?;
             println!("is:invite finds {invites} conversations ({:.2} ms).", t.elapsed().as_secs_f64() * 1000.0);
+            let t = Instant::now();
+            let change = jolta.store.read(|c| store::next_invitation_change(c, now, here))?;
+            println!("The next state changes by time at {change:?} ({:.2} ms).", t.elapsed().as_secs_f64() * 1000.0);
             Ok(())
         }
         CalCommand::Answer { message, accept, maybe, decline: _, note, no_reply, occurrence } => {

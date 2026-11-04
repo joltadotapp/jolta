@@ -9,8 +9,8 @@ use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::calendar::{moment_from_text, moment_text};
-use crate::calendar::invitation::{Invitation, Method};
-use crate::calendar::recur::{Occurrence, Source};
+use crate::calendar::invitation::{Invitation, Method, end_of};
+use crate::calendar::recur::Source;
 use crate::calendar::series::{self, copy_rank};
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response, tz};
 use crate::model::*;
@@ -288,6 +288,18 @@ const PAGE: &str = "WHERE m.thread_id IN (SELECT value FROM json_each(?1))
 /// The state of the invitation each of these conversations shows, for those
 /// that have one.
 pub fn thread_invitations(conn: &Connection, threads: &[ThreadId], now: DateTime<Utc>, here: Tz) -> Result<HashMap<ThreadId, InvitationState>> {
+    Ok(shown(conn, threads, now, here)?.into_iter().map(|(t, s)| (t, s.state)).collect())
+}
+
+/// A conversation's invitation state, and when time alone changes it in
+/// unix seconds: the end of the event a "Not answered" request is for, or
+/// of the occurrence a series shows, which then moves on to the next.
+struct Shown {
+    state: InvitationState,
+    until: Option<i64>,
+}
+
+fn shown(conn: &Connection, threads: &[ThreadId], now: DateTime<Utc>, here: Tz) -> Result<HashMap<ThreadId, Shown>> {
     let ids = serde_json::to_string(&threads.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers");
     let rows = conn.prepare_cached(&format!("{NAMED} {PAGE}"))?.query_map([ids], named)?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = HashMap::new();
@@ -302,30 +314,43 @@ pub fn thread_invitations(conn: &Connection, threads: &[ThreadId], now: DateTime
 }
 
 /// The conversations whose invitation shows "Not answered", for
-/// `is:invite`. Only a request for an event to come can, so those
-/// conversations are the ones to ask `thread_invitations` about.
+/// `is:invite`.
 pub fn unanswered_threads(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Vec<ThreadId>> {
-    let threads = conn
+    let threads = to_come(conn, now)?;
+    let shown = shown(conn, &threads, now, here)?;
+    Ok(threads.into_iter().filter(|t| shown.get(t).is_some_and(|s| s.state == InvitationState::Unanswered)).collect())
+}
+
+/// When the next conversation's "Not answered" comes or goes with time
+/// alone, so a list and what `is:invite` finds hold until then.
+pub fn next_invitation_change(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Option<DateTime<Utc>>> {
+    let threads = to_come(conn, now)?;
+    Ok(shown(conn, &threads, now, here)?.values().filter_map(|s| s.until).min().and_then(|t| DateTime::from_timestamp(t, 0)))
+}
+
+/// The conversations with a request for an event to come: the only ones
+/// that can show "Not answered", or change by time alone.
+fn to_come(conn: &Connection, now: DateTime<Utc>) -> Result<Vec<ThreadId>> {
+    Ok(conn
         .prepare_cached(
             "SELECT DISTINCT m.thread_id FROM invitation i JOIN message m ON m.id = i.message_id WHERE i.method = 'REQUEST' AND i.ends > ?1",
         )?
         .query_map([now.timestamp()], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<ThreadId>>>()?;
-    let shown = thread_invitations(conn, &threads, now, here)?;
-    Ok(threads.into_iter().filter(|t| shown.get(t) == Some(&InvitationState::Unanswered)).collect())
+        .collect::<rusqlite::Result<Vec<ThreadId>>>()?)
 }
 
 /// A request is answered in the calendars of the account it came to, as
 /// its card answers it.
-fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<InvitationState> {
+fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<Shown> {
+    let fixed = |state| Ok(Shown { state, until: None });
     match n.method {
-        Method::Cancel => return Ok(InvitationState::Cancelled),
+        Method::Cancel => return fixed(InvitationState::Cancelled),
         Method::Request if !n.organizer.trim().is_empty() && !n.organizer.trim().eq_ignore_ascii_case(&n.receiver) => {}
-        _ => return Ok(InvitationState::Plain),
+        _ => return fixed(InvitationState::Plain),
     }
-    let (shown, occurrence) = shown_event(n, overrides, now, here)?;
-    let copy = match stored_event(conn, &n.uid, shown.as_ref(), Some(n.account), here)? {
-        None if shown.is_some() && n.recurrence_id.is_empty() => stored_event(conn, &n.uid, None, Some(n.account), here)?,
+    let picked = pick(n, overrides, now, here)?;
+    let copy = match stored_event(conn, &n.uid, picked.event.as_ref(), Some(n.account), here)? {
+        None if picked.event.is_some() && n.recurrence_id.is_empty() => stored_event(conn, &n.uid, None, Some(n.account), here)?,
         found => found,
     };
     let cancelled: bool = conn
@@ -334,32 +359,46 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>,
         )?
         .query_row(params![n.uid, n.recurrence_id, n.sequence], |r| r.get(0))?;
     if cancelled || copy.as_ref().is_some_and(|c| c.event.status == EventStatus::Cancelled) {
-        return Ok(InvitationState::Cancelled);
+        return fixed(InvitationState::Cancelled);
     }
-    let remembered = remembered_answer(conn, n.account, &n.uid, occurrence.as_ref())?;
-    Ok(match shown_answer(conn, copy.as_ref(), remembered)? {
+    let remembered = remembered_answer(conn, n.account, &n.uid, picked.occurrence.as_ref())?;
+    let state = match shown_answer(conn, copy.as_ref(), remembered)? {
         Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
         _ if n.ends > now.timestamp() => InvitationState::Unanswered,
         _ => InvitationState::Plain,
-    })
+    };
+    let unanswered = (state == InvitationState::Unanswered).then_some(n.ends);
+    let until = picked.ends.into_iter().chain(unanswered).filter(|&t| t > now.timestamp()).min();
+    Ok(Shown { state, until })
 }
 
-/// The recurrence id of the event whose calendar copy holds the answer, and
-/// of the occurrence an answer given from Jolta names, as the card picks
-/// them: for a series, the occurrence `series::shown_occurrence` shows,
-/// either one of the message's changed occurrences or one the rule makes.
-fn shown_event(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<(Option<Moment>, Option<Moment>)> {
+/// Where a request's answer is read from, as its card picks it.
+struct Picked {
+    /// The recurrence id of the event whose calendar copy holds the answer.
+    event: Option<Moment>,
+    /// The occurrence an answer given from Jolta names.
+    occurrence: Option<Moment>,
+    /// For a series, when the occurrence it shows ends, in unix seconds.
+    ends: Option<i64>,
+}
+
+/// For a series, the occurrence `series::shown_occurrence` shows, either
+/// one of the message's changed occurrences or one the rule makes.
+fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result<Picked> {
     let rid = moment_from_text(&n.recurrence_id);
     let parse = |n: &Named| serde_json::from_str::<EventData>(&n.timing).map_err(|e| Error::Other(format!("invitation timing of {}: {e}", n.uid)));
     if rid.is_some() || n.timing.is_empty() {
-        return Ok((rid, rid));
+        return Ok(Picked { event: rid, occurrence: rid, ends: None });
     }
     let master = parse(n)?;
     let overrides = overrides.iter().filter(|o| !o.timing.is_empty()).map(|o| parse(o)).collect::<Result<Vec<_>>>()?;
-    Ok(match series::shown_occurrence(&master, &overrides, now, here) {
-        Some(Occurrence { source: Source::Override(i), .. }) => (overrides[i].recurrence_id, overrides[i].recurrence_id),
-        Some(o) => (None, Some(o.span.start())),
-        None => (None, Some(master.span.start())),
+    let Some(o) = series::shown_occurrence(&master, &overrides, now, here) else {
+        return Ok(Picked { event: None, occurrence: Some(master.span.start()), ends: None });
+    };
+    let ends = Some(end_of(&o.span, here).timestamp());
+    Ok(match o.source {
+        Source::Override(i) => Picked { event: overrides[i].recurrence_id, occurrence: overrides[i].recurrence_id, ends },
+        Source::Master => Picked { event: None, occurrence: Some(o.span.start()), ends },
     })
 }
 
@@ -644,6 +683,19 @@ mod tests {
             assert_eq!(card_says(&jolta, series, mail!("series.eml"), now), expected, "the card: {why}");
             assert_eq!(shown(&jolta, series, now), Some(expected), "the list: {why}");
         }
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn states_hold_until_an_unanswered_event_ends_or_a_series_moves_on() {
+        let (jolta, _) = jolta("state-change");
+        let next = |now| jolta.store.read(|c| next_invitation_change(c, now, chrono_tz::Europe::Brussels)).unwrap();
+        assert_eq!(next(now()), None);
+        import(&jolta, mail!("google-request.eml"));
+        assert_eq!(next(now()), Utc.with_ymd_and_hms(2026, 11, 12, 15, 45, 0).single(), "16:45 Brussels, when Not answered goes");
+        import(&jolta, mail!("series.eml"));
+        assert_eq!(next(now()), Utc.with_ymd_and_hms(2026, 11, 5, 9, 15, 0).single(), "Thursday's standup ends at 10:15 Brussels");
+        assert_eq!(next(Utc.with_ymd_and_hms(2026, 12, 18, 0, 0, 0).unwrap()), None, "everything has passed");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

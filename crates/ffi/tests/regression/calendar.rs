@@ -405,6 +405,38 @@ fn invitations_in_the_list_and_is_invite() {
     assert_eq!(answered.invitation, Some(InvitationState::Answered { response: EventResponse::Accepted }));
 }
 
+/// A cached list holds only until a "Not answered" invitation in it ends,
+/// and the app hears then that lists changed.
+#[test]
+fn the_list_order_expires_when_an_unanswered_invitation_ends() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let end = chrono::DateTime::from_timestamp(Utc::now().timestamp() + 3, 0).unwrap();
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:soon\r\nDTSTAMP:20261101T000000Z\r\n\
+         DTSTART:{}\r\nDTEND:{}\r\nSUMMARY:Soon\r\nORGANIZER:mailto:ann@test.invalid\r\n\
+         ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@test.invalid\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        (end - chrono::Duration::hours(1)).format("%Y%m%dT%H%M%SZ"),
+        end.format("%Y%m%dT%H%M%SZ"),
+    );
+    app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Soon", "Details inside.").attach("invite.ics", &ics));
+    assert_eq!(app.core.list_count("is:invite".into(), BY_DATE).unwrap(), 1);
+    let mut heard = app.events.0.lock().unwrap().len();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let events = app.events.0.lock().unwrap().clone();
+        if events[heard..].contains(&"lists") {
+            if Utc::now() >= end {
+                break;
+            }
+            heard = events.len();
+        }
+        assert!(std::time::Instant::now() < deadline, "the app hears that lists changed when the event ends");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(app.core.list_count("is:invite".into(), BY_DATE).unwrap(), 0, "the cached order went with it");
+}
+
 #[test]
 fn account_calendars_stay_with_their_account() {
     let app = App::new();

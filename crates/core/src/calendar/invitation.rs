@@ -68,7 +68,8 @@ impl Invitation {
     }
 }
 
-fn end_of(span: &Span, here: Tz) -> DateTime<Utc> {
+/// When a span ends: an all-day one at the start of the day after it, here.
+pub(crate) fn end_of(span: &Span, here: Tz) -> DateTime<Utc> {
     match span {
         Span::AllDay { end, .. } => tz::instant(end.and_time(NaiveTime::MIN), here),
         Span::Timed { end, .. } => end.instant(here),

@@ -566,7 +566,9 @@ pub struct Core {
     engine_sink: Mutex<Option<jolta_core::engine::Sink>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
-    order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>>,
+    order: Arc<Mutex<Option<Order>>>,
+    /// When `refresh_at` next drops the order and tells the app.
+    refresh: Arc<Mutex<Option<i64>>>,
     /// Address suggestions, rebuilt when older than `PEOPLE_FRESH` or when
     /// the address book or forgotten addresses change.
     people: Arc<Mutex<Option<(Instant, Arc<People>)>>>,
@@ -585,18 +587,57 @@ fn build_people(jolta: &Jolta, book: &Mutex<Vec<(String, String)>>) -> jolta_cor
     jolta.store.read(|c| People::build(c, now, &book))
 }
 
+struct Order {
+    query: String,
+    sort: ListSort,
+    threads: Arc<Vec<(ThreadId, MessageId)>>,
+    /// When an invitation's "Not answered" comes or goes with time, which
+    /// changes the rows and what `is:invite` finds, in unix seconds.
+    expires: Option<i64>,
+}
+
+impl Order {
+    fn holds(&self, query: &str) -> bool {
+        self.query == query && self.expires.is_none_or(|t| now() < t)
+    }
+}
+
 impl Core {
     fn order(&self, query: &str, sort: ListSort) -> Result<Arc<Vec<(ThreadId, MessageId)>>> {
         let mut cache = self.order.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((q, s, order)) = cache.as_ref() {
-            if q == query && *s == sort {
-                return Ok(order.clone());
-            }
+        if let Some(order) = cache.as_ref().filter(|o| o.holds(query) && o.sort == sort) {
+            return Ok(order.threads.clone());
         }
         let q = search::parse(query)?;
-        let order = Arc::new(self.jolta.store.read(|c| search::query_order(c, &q, sort.into()))?);
-        *cache = Some((query.to_string(), sort, order.clone()));
-        Ok(order)
+        let (threads, expires) = self.jolta.store.read(|c| {
+            let expires = store::next_invitation_change(c, chrono::Utc::now(), jolta_core::calendar::tz::here())?;
+            Ok((Arc::new(search::query_order(c, &q, sort.into())?), expires.map(|t| t.timestamp())))
+        })?;
+        *cache = Some(Order { query: query.to_string(), sort, threads: threads.clone(), expires });
+        if let Some(at) = expires {
+            self.refresh_at(at);
+        }
+        Ok(threads)
+    }
+
+    /// Drops the list order and tells the app that lists changed at `at`,
+    /// unix seconds. One time waits: an earlier one replaces a later one,
+    /// and so does any once its own has passed, as when the Mac slept.
+    fn refresh_at(&self, at: i64) {
+        let mut due = self.refresh.lock().unwrap_or_else(|e| e.into_inner());
+        if due.is_some_and(|d| d <= at && d > now()) {
+            return;
+        }
+        *due = Some(at);
+        let (refresh, order, listener) = (self.refresh.clone(), self.order.clone(), self.listener.clone());
+        self.runtime.spawn(async move {
+            let wait = (UNIX_EPOCH + Duration::from_secs(at.max(0) as u64)).duration_since(SystemTime::now()).unwrap_or_default();
+            tokio::time::sleep(wait).await;
+            if refresh.lock().unwrap_or_else(|e| e.into_inner()).take_if(|d| *d == at).is_some() {
+                *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                listener.on_event(CoreEvent::ListsChanged);
+            }
+        });
     }
 }
 
@@ -612,7 +653,7 @@ impl Core {
             .build()
             .map_err(|e| CoreError::Failed { message: e.to_string() })?;
         let ai = Arc::new(jolta_core::ai::Ai::new(&jolta.data_dir, ai::helper_path()));
-        let order: Arc<Mutex<Option<(String, ListSort, Arc<Vec<(ThreadId, MessageId)>>)>>> = Arc::new(Mutex::new(None));
+        let order: Arc<Mutex<Option<Order>>> = Arc::new(Mutex::new(None));
         let changed: jolta_core::ai::background::Changed = {
             let (order, listener) = (order.clone(), listener.clone());
             Arc::new(move || {
@@ -627,6 +668,7 @@ impl Core {
             engine: Mutex::new(None),
             engine_sink: Mutex::new(None),
             order,
+            refresh: Arc::default(),
             people: Arc::new(Mutex::new(None)),
             address_book: Arc::new(Mutex::new(Vec::new())),
             ai,
@@ -674,10 +716,8 @@ impl Core {
 
     /// Threads matching a query, for badges. Leaves the list cache alone.
     pub fn query_count(&self, query: String) -> Result<u32> {
-        if let Some((cached, _, order)) = self.order.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            if *cached == query {
-                return Ok(order.len() as u32);
-            }
+        if let Some(order) = self.order.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|o| o.holds(&query)) {
+            return Ok(order.threads.len() as u32);
         }
         let q = search::parse(&query)?;
         Ok(self.jolta.store.read(|c| search::query_count(c, &q))?)
