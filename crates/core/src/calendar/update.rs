@@ -263,14 +263,7 @@ fn occurrence_before(seen: &Seen, organizer: Option<&str>, uid: &str, rid: &Mome
         Some(events) => events,
         None => store::stored_series(seen.conn, uid, Some(seen.account))?,
     };
-    if let Some(changed) = events.iter().find(|e| e.recurrence_id.is_some_and(|r| r.names(rid, seen.here))) {
-        return Ok(Some(changed.clone()));
-    }
-    let master = events.iter().find(|e| e.recurrence_id.is_none() && e.recurrence.is_some());
-    Ok(master.and_then(|m| {
-        let span = series::occurrence_span(&m.span, rid, seen.here)?;
-        Some(EventData { recurrence_id: Some(*rid), recurrence: None, span, ..m.clone() })
-    }))
+    Ok(series::occurrence(&events, rid, seen.here))
 }
 
 /// The requests, additions and cancellations for `uid` and `rid` in the

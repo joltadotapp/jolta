@@ -128,6 +128,17 @@ mod copy_tests {
     }
 }
 
+/// The occurrence `recurrence_id` names as these events of a series have
+/// it: its changed occurrence, else the repeating master's moved there.
+pub fn occurrence(events: &[EventData], recurrence_id: &Moment, here: Tz) -> Option<EventData> {
+    if let Some(changed) = events.iter().find(|e| e.recurrence_id.is_some_and(|r| r.names(recurrence_id, here))) {
+        return Some(changed.clone());
+    }
+    let master = events.iter().find(|e| e.recurrence_id.is_none() && e.recurrence.is_some())?;
+    let span = occurrence_span(&master.span, recurrence_id, here)?;
+    Some(EventData { recurrence_id: Some(*recurrence_id), recurrence: None, span, ..master.clone() })
+}
+
 /// The span of the unchanged occurrence `recurrence_id` names in a series
 /// whose master spans `master`: the master's, moved to start there on the
 /// master's own clock. None when one is all-day and the other isn't.

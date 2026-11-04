@@ -219,14 +219,7 @@ pub fn cards(conn: &Connection, invitations: &[Invitation], cx: &Context) -> Res
 fn stored_copy(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Vec<EventData>> {
     let series = store::stored_series(conn, &sent.uid, None)?;
     let Some(rid) = sent.recurrence_id else { return Ok(series) };
-    if let Some(o) = series.iter().find(|e| e.recurrence_id.is_some_and(|stored| rid.names(&stored, cx.here))) {
-        return Ok(vec![o.clone()]);
-    }
-    let master = series.iter().find(|e| e.recurrence_id.is_none() && e.recurrence.is_some());
-    Ok(master
-        .and_then(|m| series::occurrence_span(&m.span, &rid, cx.here).map(|span| EventData { recurrence_id: Some(rid), recurrence: None, span, ..m.clone() }))
-        .into_iter()
-        .collect())
+    Ok(series::occurrence(&series, &rid, cx.here).into_iter().collect())
 }
 
 /// `sent` is the invitation the card is about, the series or single event
