@@ -394,7 +394,7 @@ impl CalDav {
         let rid = target.recurrence_id();
         let here = crate::calendar::tz::here();
         let me = self.me().await;
-        let mut current = target.event.raw.as_ref().map(|raw| (String::from_utf8_lossy(raw).into_owned(), target.event.etag.clone()));
+        let mut current = cached(&target.event);
         for attempt in 0..2 {
             let (text, etag) = match current.take() {
                 Some(stored) => stored,
@@ -548,8 +548,29 @@ fn access(r: &dav::Response) -> Access {
     }
 }
 
+/// The stored text of an event to answer on, with the ETag that guards the
+/// PUT. Text without an ETag (a server may leave it out of a PUT reply) is
+/// fetched again, so an answer never overwrites a newer version unguarded.
+fn cached(event: &rsvp::Stored) -> Option<(String, Option<String>)> {
+    let etag = event.etag.clone()?;
+    event.raw.as_ref().map(|raw| (String::from_utf8_lossy(raw).into_owned(), Some(etag)))
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stored_text_without_an_etag_is_fetched_again() {
+        let event = |etag: Option<&str>| rsvp::Stored {
+            id: crate::calendar::EventId(1),
+            remote_id: "/cal/a.ics".into(),
+            etag: etag.map(str::to_string),
+            raw: Some(b"BEGIN:VCALENDAR".to_vec()),
+            data: crate::calendar::EventData::new("a", crate::calendar::Span::AllDay { start: chrono::NaiveDate::MIN, end: chrono::NaiveDate::MIN }),
+        };
+        assert_eq!(cached(&event(None)), None, "no ETag to guard the PUT with");
+        assert_eq!(cached(&event(Some("\"7\""))), Some(("BEGIN:VCALENDAR".into(), Some("\"7\"".into()))));
+    }
     use super::*;
 
     /// The shape iCloud answers a depth-1 PROPFIND on the calendar home

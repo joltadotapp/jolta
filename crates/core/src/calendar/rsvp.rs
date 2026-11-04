@@ -169,7 +169,12 @@ struct Written {
 /// the other providers' answers are set on the stored events.
 fn store_answer(conn: &Connection, calendar: super::CalendarId, target: &Target, rsvp: &Rsvp, landed: &str, written: Option<Written>, here: Tz) -> Result<()> {
     match written {
-        Some(w) => store::apply_item(conn, calendar, landed, w.etag.as_deref(), &w.events, w.blob.as_deref(), &Horizon::around(Utc::now(), here)).map(|_| ()),
+        Some(w) => {
+            // An answer that changed nothing on the server keeps its ETag, which
+            // would make `apply_item` skip the copy read with the aliases.
+            conn.execute("UPDATE event SET etag = NULL WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, landed])?;
+            store::apply_item(conn, calendar, landed, w.etag.as_deref(), &w.events, w.blob.as_deref(), &Horizon::around(Utc::now(), here)).map(|_| ())
+        }
         None => record(conn, calendar, target, rsvp, landed, here),
     }
 }
@@ -715,7 +720,8 @@ mod tests {
                 let (_, rows, account) = series_of(tx, master)?;
                 let target = target(rows, master, &Scope::Series, here, account)?;
                 let events = super::super::ical::read(&written, &me.map(String::from))?;
-                let written = Written { etag: None, events, blob: None };
+                // Answering as already answered leaves the server's ETag as it was.
+                let written = Written { etag: Some("\"1\"".into()), events, blob: None };
                 store_answer(tx, calendar, &target, &rsvp(Answer::Accept, None, true), &target.event.remote_id, Some(written), here)?;
                 let mut stmt = tx.prepare("SELECT data FROM event ORDER BY recurrence_id")?;
                 let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
