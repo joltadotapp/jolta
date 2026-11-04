@@ -145,6 +145,8 @@ enum Command {
     Bench {
         #[arg(long, default_value_t = 30)]
         runs: usize,
+        /// Time these queries instead of the synthetic set.
+        queries: Vec<String>,
     },
     /// Calendars: turn them on, subscribe, sync, list and expand.
     #[command(subcommand)]
@@ -359,7 +361,7 @@ async fn main() -> Result<()> {
             println!("Account {id} ({}) has {messages} messages, built in {:.1} s.", synth::ADDRESS, t.elapsed().as_secs_f64());
             Ok(())
         }
-        Command::Bench { runs } => bench(&jolta, runs),
+        Command::Bench { runs, queries } => bench(&jolta, runs, queries),
         Command::Cal(cmd) => cal::run(&jolta, cmd).await,
         Command::Dev(cmd) => dev(&jolta, cmd).await,
         Command::McpServe { socket } => {
@@ -844,13 +846,13 @@ fn mail_parser_text(raw: &[u8]) -> String {
     )
 }
 
-fn bench(jolta: &Jolta, runs: usize) -> Result<()> {
+fn bench(jolta: &Jolta, runs: usize, asked: Vec<String>) -> Result<()> {
     let total: i64 = jolta.store.read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))?;
     // Words of different frequency in the synthetic vocabulary: rank 1, 401 and 20,001.
     let common = synth::word(0);
     let mid = synth::word(400);
     let rare = synth::word(20_000);
-    let queries = [
+    let synthetic = [
         String::new(),
         "in:inbox".into(),
         "is:unread in:inbox".into(),
@@ -867,6 +869,7 @@ fn bench(jolta: &Jolta, runs: usize) -> Result<()> {
         "after:2025-01-01 before:2025-02-01".into(),
         format!("-{common} {mid}"),
     ];
+    let queries = if asked.is_empty() { synthetic.to_vec() } else { asked };
     println!("{total} messages, {runs} runs per query; times are first page of 50 threads + match count.\n");
     println!("{:<40} {:>9} {:>9} {:>9} {:>9}", "query", "page p50", "page p95", "count p95", "threads");
     let mut worst: f64 = 0.0;
