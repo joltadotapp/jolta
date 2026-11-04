@@ -361,15 +361,15 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         a.new_time = Some(if takes_proposals(conn, invitation, answered.as_ref(), cx)? { NewTime::Open { start, end } } else { NewTime::Refused });
     }
 
-    let proposal = if method == Method::Counter && current && trusted { Some(proposed(conn, said, &history.before, &receiver, cx)?) } else { None };
-
     let held = method == Method::Cancel && current && held(conn, sent, cx)?;
     let removing = if held && trusted { removable(conn, sent, cx)? } else { None };
     if method == Method::Cancel && current && !held && store::account_calendar_on(conn, cx.account)? {
         notes.push(Note { text: "Not in your calendar".into(), warn: false });
     }
 
-    let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
+    let proposal = if method == Method::Counter && current && trusted { Some(proposed(conn, said, &history.before, &receiver, cx)?) } else { None };
+    // A declined proposal's time no longer needs its conflicts.
+    let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish) || (method == Method::Counter && !proposal.as_ref().is_some_and(|p| p.declined));
     let availability = match bounds {
         Some(bounds) if current && wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
         _ => None,

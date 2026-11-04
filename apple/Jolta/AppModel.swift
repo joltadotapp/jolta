@@ -108,7 +108,12 @@ final class AppModel {
     var pendingAnswer: InvitationAnswer?
     /// The cancellation whose meeting Remove from calendar is taking out now.
     var pendingRemoval: Int64?
-    /// The note field or the scope menu under the open card, when one is up.
+    /// The proposal whose Decline proposal is going out now.
+    var pendingDecline: Int64?
+    /// Set by P: the card whose Propose new time panel the reader opens.
+    var proposeFor: Int64?
+    /// The note field, the scope menu or the propose panel under the open
+    /// card, when one is up.
     var rsvpPanel: RsvpPanel?
     /// The card the choices, the panel and the pending answer belong to.
     var rsvpMessage: Int64?

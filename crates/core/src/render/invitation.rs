@@ -143,13 +143,6 @@ fn answers(a: &Answering, given: Option<Response>) -> String {
         );
     }
     h.push_str("</span>");
-    if let Some(NewTime::Open { .. }) = a.new_time {
-        let _ = write!(
-            h,
-            "<a class=\"jolta-rsvp-propose\" href=\"x-rsvp:{}/propose\" title=\"Propose new time (P)\">Propose new time<kbd>P</kbd></a>",
-            a.message.0
-        );
-    }
     h
 }
 
@@ -159,7 +152,7 @@ fn proposal(p: &Proposed) -> String {
     if let Some(m) = p.declining {
         let _ = write!(
             h,
-            "<a class=\"jolta-decline-proposal\" href=\"x-rsvp:{}/decline-proposal\" title=\"Keep the meeting's time and tell {}\">Decline proposal</a>",
+            "<a class=\"jolta-decline-proposal\" href=\"x-rsvp:{}/decline-proposal\" title=\"Keep the meeting's time and tell {} (N)\">Decline proposal<kbd>N</kbd></a>",
             m.0,
             escape(&p.proposer)
         );
@@ -174,14 +167,21 @@ fn proposal(p: &Proposed) -> String {
 /// them and marks them here while the card is on screen.
 fn options(a: &Answering) -> String {
     let id = a.message.0;
-    let mut h = format!(
-        "<div class=\"jolta-rsvp-options\"><a class=\"jolta-rsvp-note\" href=\"x-rsvp:{id}/note\">Add a note</a>\
-         <a class=\"jolta-rsvp-quiet\" href=\"x-rsvp:{id}/quiet\" title=\"Set your answer without telling {}\">{BOX}Don&apos;t send a reply</a>",
+    let mut h = format!("<div class=\"jolta-rsvp-options\"><a class=\"jolta-rsvp-note\" href=\"x-rsvp:{id}/note\">Add a note</a>");
+    match a.new_time {
+        Some(NewTime::Open { .. }) => {
+            let _ = write!(h, "<a class=\"jolta-rsvp-propose\" href=\"x-rsvp:{id}/propose\" title=\"Propose new time (P)\">Propose new time<kbd>P</kbd></a>");
+        }
+        Some(NewTime::Refused) => {
+            let _ = write!(h, "<span class=\"jolta-rsvp-fixed\">{} takes no new time proposals</span>", escape(if a.organizer.is_empty() { "The organizer" } else { &a.organizer }));
+        }
+        None => {}
+    }
+    let _ = write!(
+        h,
+        "<a class=\"jolta-rsvp-quiet\" href=\"x-rsvp:{id}/quiet\" title=\"Set your answer without telling {}\">{BOX}Don&apos;t send a reply</a>",
         escape(if a.organizer.is_empty() { "the organizer" } else { &a.organizer })
     );
-    if a.new_time == Some(NewTime::Refused) {
-        let _ = write!(h, "<span class=\"jolta-rsvp-fixed\">{} takes no new time proposals</span>", escape(if a.organizer.is_empty() { "The organizer" } else { &a.organizer }));
-    }
     if let Some(o) = a.occurrence.as_ref().filter(|o| !o.alone) {
         let _ = write!(
             h,
@@ -460,7 +460,7 @@ mod tests {
 
         let open = with(answering(Some(NewTime::Open { start: at(15), end: at(16) })));
         assert!(open.contains("<a class=\"jolta-rsvp-propose\" href=\"x-rsvp:7/propose\" title=\"Propose new time (P)\">Propose new time<kbd>P</kbd></a>"), "{open}");
-        assert!(open.find("jolta-rsvp-decline").unwrap() < open.find("jolta-rsvp-propose").unwrap(), "after the answers");
+        assert!(open.find("jolta-rsvp-note").unwrap() < open.find("jolta-rsvp-propose").unwrap(), "beside Add a note, under the answers");
         let refused = with(answering(Some(NewTime::Refused)));
         assert!(!refused.contains("x-rsvp:7/propose") && refused.contains("Ann&#32;&lt;b&gt; takes no new time proposals"), "{refused}");
         assert!(!with(answering(None)).contains("propose"), "an all-day meeting gets no new time");
@@ -475,7 +475,7 @@ mod tests {
         assert!(open.starts_with("<section class=\"jolta-invite\" data-rsvp=\"9\">"), "the app finds the card by its message: {open}");
         assert!(open.contains("<div class=\"jolta-invite-was\">Currently Thu&#32;12&#32;Nov&#32;·&#32;16:00&#32;to&#32;17:00</div>"), "{open}");
         assert!(open.find("jolta-invite-when").unwrap() < open.find("jolta-invite-was").unwrap(), "the proposed time first");
-        assert!(open.contains("href=\"x-rsvp:9/decline-proposal\" title=\"Keep the meeting's time and tell Bo&#32;&lt;i&gt;\">Decline proposal</a>"), "{open}");
+        assert!(open.contains("href=\"x-rsvp:9/decline-proposal\" title=\"Keep the meeting's time and tell Bo&#32;&lt;i&gt; (N)\">Decline proposal<kbd>N</kbd></a>"), "{open}");
         assert!(open.contains(">Accept in your calendar</span>"));
 
         let declined = with(proposed(None, true));

@@ -176,6 +176,7 @@ mod tests {
         assert_eq!(outbox(&j), [(ME.to_string(), "bo@example.com".to_string(), Some(message.0), "DECLINECOUNTER".to_string())], "from the organizer to the proposer");
         let c = card_of(&j, message, &raw);
         assert_eq!(c.proposal.as_ref().map(|p| (p.declining, p.declined)), Some((None, true)), "the card says it was handled");
+        assert_eq!(c.availability, None, "a declined time needs no conflicts");
 
         assert_eq!(run(decline(&j, message)).unwrap().text, "Bo's proposal was declined already.");
         j.store.write(|tx| Ok(tx.execute_batch("UPDATE outbox SET state = 'sent'")?)).unwrap();

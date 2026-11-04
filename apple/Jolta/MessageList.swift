@@ -225,6 +225,11 @@ struct MessageList: NSViewRepresentable {
                 if event.keyCode == 53 { model.palette = nil; model.showsHelp = false }
                 return true
             }
+            // The propose panel's date fields and buttons take every key.
+            if case .propose = model.rsvpPanel {
+                if event.keyCode == 53 { model.rsvpPanel = nil; return true }
+                return false
+            }
             if case .scope = model.rsvpPanel {
                 switch event.keyCode {
                 case 125, 126: model.answerChoices.occurrenceOnly.toggle()
