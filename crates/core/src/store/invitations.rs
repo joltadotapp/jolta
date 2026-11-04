@@ -60,17 +60,17 @@ pub struct StoredEvent {
     pub event: EventData,
 }
 
-/// The event with this UID and recurrence id in a shown calendar. A
-/// recurrence id matches the same moment written in another zone, as
-/// `Moment::names` decides. A meeting in several calendars gives the copy
-/// the views show.
-pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, here: Tz) -> Result<Option<StoredEvent>> {
+/// The event with this UID and recurrence id in a shown calendar, of
+/// `account` only when one is given. A recurrence id matches the same
+/// moment written in another zone, as `Moment::names` decides. A meeting in
+/// several calendars gives the copy the views show.
+pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, account: Option<AccountId>, here: Tz) -> Result<Option<StoredEvent>> {
     let mut stmt = conn.prepare_cached(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown",
+         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR c.account_id = ?3)",
     )?;
-    let rows = stmt.query_map(params![uid, recurrence_id.is_none()], |r| {
+    let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account], |r| {
         let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
         Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
     })?;
@@ -254,11 +254,11 @@ mod tests {
             .store
             .write(|tx| crate::store::apply_item(tx, calendar, "remote-1", None, &[event.clone()], None, &horizon))
             .unwrap();
-        let stored = jolta.store.read(|c| stored_event(c, &event.uid, None, chrono_tz::Europe::Brussels)).unwrap().unwrap();
+        let stored = jolta.store.read(|c| stored_event(c, &event.uid, None, None, chrono_tz::Europe::Brussels)).unwrap().unwrap();
         assert_eq!((stored.calendar_id, stored.event.my_response(), stored.event.sequence), (calendar, Some(Response::Accepted), 2));
-        assert_eq!(jolta.store.read(|c| stored_event(c, "someone-else", None, chrono_tz::Europe::Brussels)).unwrap(), None);
+        assert_eq!(jolta.store.read(|c| stored_event(c, "someone-else", None, None, chrono_tz::Europe::Brussels)).unwrap(), None);
         jolta.store.write(|tx| crate::store::set_calendar_shown(tx, calendar, false)).unwrap();
-        assert_eq!(jolta.store.read(|c| stored_event(c, &event.uid, None, chrono_tz::Europe::Brussels)).unwrap(), None, "hidden calendars don't count");
+        assert_eq!(jolta.store.read(|c| stored_event(c, &event.uid, None, None, chrono_tz::Europe::Brussels)).unwrap(), None, "hidden calendars don't count");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 
@@ -276,12 +276,12 @@ mod tests {
             wall: local.instant(chrono_tz::UTC).naive_utc(),
             zone: crate::calendar::Zone::Tz(chrono_tz::UTC),
         });
-        let found = |rid: &Moment| jolta.store.read(|c| stored_event(c, &moved.uid, Some(rid), chrono_tz::Europe::Brussels)).unwrap();
+        let found = |rid: &Moment| jolta.store.read(|c| stored_event(c, &moved.uid, Some(rid), None, chrono_tz::Europe::Brussels)).unwrap();
         assert_eq!(found(&brussels).map(|s| s.event.sequence), Some(3));
         assert_eq!(found(&utc).map(|s| s.event.sequence), Some(3), "09:30 Brussels is 08:30 UTC in November");
         let later = Moment::Time(crate::calendar::Local { wall: local.wall + chrono::Duration::hours(1), ..local });
         assert_eq!(found(&later), None);
-        assert_eq!(jolta.store.read(|c| stored_event(c, &moved.uid, None, chrono_tz::Europe::Brussels)).unwrap(), None, "no master stored");
+        assert_eq!(jolta.store.read(|c| stored_event(c, &moved.uid, None, None, chrono_tz::Europe::Brussels)).unwrap(), None, "no master stored");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

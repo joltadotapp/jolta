@@ -77,9 +77,10 @@ pub struct Outcome {
 }
 
 /// Whether an event's detail offers answers: an invitation to the user
-/// from someone else, in a calendar Jolta answers through.
-pub fn can_answer(me: &[String], calendar: &Calendar, e: &EventData) -> bool {
-    let theirs = e.organizer.as_ref().is_some_and(|o| !me.iter().any(|m| m.eq_ignore_ascii_case(&o.address)));
+/// from an organizer other than the calendar's own account, in a calendar
+/// Jolta answers through.
+pub fn can_answer(account: &str, calendar: &Calendar, e: &EventData) -> bool {
+    let theirs = e.organizer.as_ref().is_some_and(|o| !o.address.trim().eq_ignore_ascii_case(account));
     theirs && e.my_response().is_some() && plan(Some(calendar.source), true).is_ok_and(|p| p.provider.is_some())
 }
 
@@ -209,8 +210,14 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 })
                 .ok_or_else(|| Error::Other("This message has no invitation to answer.".into()))?;
             let sent = invitations.iter().find(|i| i.event.uid == a.uid && i.event.recurrence_id.is_none()).or(invitations.iter().find(|i| i.event.uid == a.uid));
-            let copy = match store::stored_event(c, &a.uid, None, here)? {
-                None => sent.and_then(|i| i.event.recurrence_id).map(|rid| store::stored_event(c, &a.uid, Some(&rid), here)).transpose()?.flatten(),
+            // The copy in the calendars of the account the invitation came
+            // to: another account's may be the organizer's own.
+            let copy = match store::stored_event(c, &a.uid, None, Some(account), here)? {
+                None => sent
+                    .and_then(|i| i.event.recurrence_id)
+                    .map(|rid| store::stored_event(c, &a.uid, Some(&rid), Some(account), here))
+                    .transpose()?
+                    .flatten(),
                 found => found,
             };
             let copy = copy
@@ -403,6 +410,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept, [(String::new(), "accepted".to_string())], "the series answer replaces the occurrence's");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// One of the user's accounts invites another. The organizer's copy is
+    /// in the first account's calendar; the invitation is answered from the
+    /// account it came to, here by mail, and never through that copy.
+    #[test]
+    fn one_of_my_accounts_invites_another() {
+        let (j, _) = jolta("respond-self");
+        let raw = "From: me2@example.net\r\nTo: me@example.com\r\nSubject: s\r\nMessage-ID: <self@example.net>\r\n\
+                   Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:self\r\n\
+                   DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Planning\r\nORGANIZER;CN=Me Elsewhere:mailto:me2@example.net\r\n\
+                   ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        j.store
+            .write(|tx| {
+                tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'gmail', 'me2@example.net', 'me2', 'a2', 0, 1)")?;
+                let remote = store::RemoteCalendar {
+                    remote_id: "primary".into(),
+                    name: "Other".into(),
+                    color: None,
+                    zone: None,
+                    access: crate::calendar::Access::Owner,
+                    primary: true,
+                    refresh: None,
+                };
+                let calendar = store::sync_calendar_list(tx, AccountId(2), CalendarSource::Google, &[remote])?[0].id;
+                let organizers = invitation::find(raw.as_bytes(), &["me2@example.net".into()]).remove(0).event;
+                store::apply_item(tx, calendar, "self", None, &[organizers], None, &crate::calendar::series::Horizon::around(now(), tz::here()))?;
+                Ok(())
+            })
+            .unwrap();
+        let message = import(&j, raw.as_bytes());
+        let done = run(&j, request(message, Answer::Accept, None, true, false)).expect("answered by mail, not through the organizer's copy");
+        assert_eq!(done.text, "Accepted. Jolta emailed Me.");
+        assert_eq!(outbox(&j).len(), 1);
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

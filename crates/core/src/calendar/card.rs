@@ -194,10 +194,13 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         }
         None => (None, None),
     };
-    let stored = match store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), cx.here)? {
-        None if shown.recurrence_id.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, cx.here)?,
-        found => found,
+    let copy = |account: Option<AccountId>| -> Result<Option<store::StoredEvent>> {
+        Ok(match store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), account, cx.here)? {
+            None if shown.recurrence_id.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, account, cx.here)?,
+            found => found,
+        })
     };
+    let stored = copy(None)?;
 
     let mut notes = Vec::new();
     match method {
@@ -215,7 +218,8 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
 
-    let answering = answerable(method, sent, cx).then(|| Answering {
+    let receiver = store::account(conn, cx.account)?.address;
+    let answering = answerable(method, sent, &receiver).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
         occurrence: occurrence.filter(|_| repeats).map(|(e, span)| ShownOccurrence {
@@ -225,11 +229,13 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
                 Bounds::Days { start, .. } => date(day(start), cx),
             },
         }),
-        organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, cx.me, true)),
+        organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, &[], true)),
     });
-    let remembered = match &answering {
-        Some(a) => store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?,
-        None => None,
+    // An invitation the user answers is answered in the calendars of the
+    // account it came to; another account's copy may be the organizer's own.
+    let (remembered, answered) = match &answering {
+        Some(a) => (store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?, copy(Some(cx.account))?),
+        None => (None, stored.clone()),
     };
 
     let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
@@ -251,7 +257,7 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         organizer: shown.organizer.as_ref().map(|o| name(o, cx.me, false)),
         guests: guests(shown, cx.me),
         notes,
-        answer: match stored.filter(|_| method != Method::Cancel) {
+        answer: match answered.filter(|_| method != Method::Cancel) {
             // Jolta answers through these, so they hold the answer it gave.
             Some(s) if answered_there(conn, &s)? => s.event.my_response(),
             stored => remembered.or(stored.and_then(|s| s.event.my_response())),
@@ -267,10 +273,11 @@ fn answered_there(conn: &Connection, copy: &store::StoredEvent) -> Result<bool> 
 }
 
 /// An invitation the user can answer: a request, or an event added or
-/// shared that names them, from an organizer who isn't the user.
-fn answerable(method: Method, said: &EventData, cx: &Context) -> bool {
+/// shared that names them, from an organizer other than the account it came
+/// to. One of the user's accounts can invite another.
+fn answerable(method: Method, said: &EventData, receiver: &str) -> bool {
     let Some(organizer) = &said.organizer else { return false };
-    if is_me(&organizer.address, cx.me) {
+    if organizer.address.trim().eq_ignore_ascii_case(receiver) {
         return false;
     }
     match method {

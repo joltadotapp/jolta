@@ -493,11 +493,12 @@ impl Core {
     /// description document, as for `open_thread`.
     pub fn calendar_event(&self, event_id: i64, time: Option<OccurrenceTime>, app_css: String) -> Result<EventDetail> {
         let at = time.map(Bounds::try_from).transpose()?;
-        let (d, me) = self.jolta.store.read(|c| {
-            let me: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
-            Ok((detail::open(c, EventId(event_id), at, tz::here(), &app_css)?, me))
+        let (d, account) = self.jolta.store.read(|c| {
+            let d = detail::open(c, EventId(event_id), at, tz::here(), &app_css)?;
+            let account = d.calendar.account_id.map(|a| store::account(c, a)).transpose()?.map(|a| a.address).unwrap_or_default();
+            Ok((d, account))
         })?;
-        let can_answer = respond::can_answer(&me, &d.calendar, &d.event);
+        let can_answer = respond::can_answer(&account, &d.calendar, &d.event);
         let person = |p: cal::Person| PersonRecord { name: p.name, address: p.address };
         let e = d.event;
         Ok(EventDetail {
