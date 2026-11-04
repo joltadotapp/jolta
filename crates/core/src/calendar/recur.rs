@@ -481,6 +481,109 @@ impl Until {
     }
 }
 
+/// Whether two series repeat the same way from their starts: the same
+/// rules and RDATEs, read with their defaults filled in. Graph writes no
+/// `INTERVAL=1` where an invitation mail does, and either may leave out
+/// the BYDAY a weekly rule takes from its start. EXDATEs don't count.
+pub fn same_repeat(a: Option<&Recurrence>, a_start: &Span, b: Option<&Recurrence>, b_start: &Span, here: Tz) -> bool {
+    let repeats = |r: Option<&Recurrence>| r.filter(|r| !r.rules.is_empty() || !r.rdates.is_empty()).cloned();
+    match (repeats(a), repeats(b)) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            let rules = |r: &Recurrence, start: &Span| {
+                let mut all: Vec<_> = r.rules.iter().map(|t| normal_rule(t, start, here)).collect();
+                all.sort();
+                all
+            };
+            a.rdates == b.rdates && rules(&a, a_start) == rules(&b, b_start)
+        }
+        _ => false,
+    }
+}
+
+/// An RRULE as its parts, with what RFC 5545 leaves to the start written
+/// out, lists sorted, and UNTIL as the start of the last occurrence it keeps.
+fn normal_rule(text: &str, start: &Span, here: Tz) -> std::collections::BTreeMap<String, String> {
+    let text = text.trim();
+    let mut parts: std::collections::BTreeMap<String, String> = text
+        .strip_prefix("RRULE:")
+        .unwrap_or(text)
+        .split(';')
+        .filter_map(|p| p.split_once('='))
+        .map(|(n, v)| (n.trim().to_ascii_uppercase(), v.trim().to_ascii_uppercase()))
+        .filter(|(n, _)| !n.starts_with("X-"))
+        .collect();
+    for (_, value) in parts.iter_mut().filter(|(n, _)| n.starts_with("BY")) {
+        let mut items: Vec<&str> = value.split(',').map(str::trim).collect();
+        items.sort_unstable();
+        items.dedup();
+        *value = items.join(",");
+    }
+    if parts.get("INTERVAL").is_some_and(|i| i == "1") {
+        parts.remove("INTERVAL");
+    }
+    let first = match start {
+        Span::AllDay { start, .. } => *start,
+        Span::Timed { start, .. } => start.wall.date(),
+    };
+    let has = |p: &std::collections::BTreeMap<String, String>, names: &[&str]| names.iter().any(|n| p.contains_key(*n));
+    let day_parts = ["BYDAY", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO"];
+    match parts.get("FREQ").map(String::as_str) {
+        Some("WEEKLY") if !parts.contains_key("BYDAY") => {
+            parts.insert("BYDAY".into(), weekday_code(first.weekday()).into());
+        }
+        Some("MONTHLY") if !has(&parts, &day_parts) => {
+            parts.insert("BYMONTHDAY".into(), first.day().to_string());
+        }
+        Some("YEARLY") if !has(&parts, &day_parts) => {
+            parts.entry("BYMONTH".into()).or_insert_with(|| first.month().to_string());
+            parts.insert("BYMONTHDAY".into(), first.day().to_string());
+        }
+        _ => {}
+    }
+    // The week start changes nothing for a weekly rule every week.
+    let weeks_matter = parts.contains_key("BYWEEKNO") || (parts.get("FREQ").is_some_and(|f| f == "WEEKLY") && parts.contains_key("INTERVAL"));
+    if !weeks_matter || parts.get("WKST").is_some_and(|w| w == "MO") {
+        parts.remove("WKST");
+    }
+    if let Some(last) = parts.get("UNTIL").and_then(|u| Until::parse(u)).and_then(|until| last_start(text, until, start, here)) {
+        parts.insert("UNTIL".into(), last);
+    }
+    parts
+}
+
+/// The start of the last occurrence `rule` makes from `start` up to its
+/// `until`, found by expanding back from `until` over ever longer windows.
+/// None when even 30 years back hold no occurrence, or for a rule too dense
+/// to expand, such as one every second.
+fn last_start(rule: &str, until: Until, start: &Span, here: Tz) -> Option<String> {
+    let clock = Clock::new(start, here);
+    let end = match clock.moment(clock.until(until)) {
+        Moment::Date(day) => midnight(day.succ_opt()?, here),
+        Moment::Time(local) => local.instant(here) + Duration::seconds(1),
+    };
+    let master = EventData { recurrence: Some(Recurrence { rules: vec![rule.to_string()], ..Recurrence::default() }), ..EventData::new("", *start) };
+    [1, 35, 800, 11_000].into_iter().find_map(|days| {
+        let window = Window { start: end - Duration::days(days), end };
+        expand(&master, &[], window, here).last().map(|o| match o.span.start() {
+            Moment::Date(day) => day.format("%Y%m%d").to_string(),
+            Moment::Time(local) => local.instant(here).format("%Y%m%dT%H%M%SZ").to_string(),
+        })
+    })
+}
+
+fn weekday_code(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "MO",
+        Weekday::Tue => "TU",
+        Weekday::Wed => "WE",
+        Weekday::Thu => "TH",
+        Weekday::Fri => "FR",
+        Weekday::Sat => "SA",
+        Weekday::Sun => "SU",
+    }
+}
+
 /// The rule in plain English ("Every 2 weeks on Tuesday and Thursday,
 /// until 19 December 2026"), or None when it doesn't fit a sentence and the
 /// UI shows "Custom repeat".
@@ -1678,5 +1781,25 @@ mod tests {
             ..Recurrence::default()
         };
         assert_eq!(describe(&two, &start), None);
+    }
+
+    #[test]
+    fn the_same_repeat_written_two_ways() {
+        let start = timed("2026-11-12 16:00", 60, Brussels);
+        let rec = |rule: &str| Recurrence { rules: vec![rule.into()], ..Recurrence::default() };
+        let same = |a: &str, b: &str| same_repeat(Some(&rec(a)), &start, Some(&rec(b)), &start, Brussels);
+        assert!(same("FREQ=WEEKLY;INTERVAL=1;BYDAY=TH;WKST=SU", "FREQ=WEEKLY;BYDAY=TH;WKST=SU"), "Graph leaves out INTERVAL=1");
+        assert!(same("FREQ=WEEKLY", "FREQ=WEEKLY;BYDAY=TH;WKST=SU"), "a weekly rule repeats on its start's day, whatever week start");
+        assert!(same("FREQ=WEEKLY;BYDAY=TH,TU", "freq=weekly;byday=TU,TH"));
+        assert!(same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T150000Z", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T225959Z"), "both keep the 17 December occurrence");
+        assert!(!same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T145959Z", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217T225959Z"), "one stops a minute before it");
+        assert!(same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261219"), "no Thursday on the 18th or the 19th");
+        assert!(!same("FREQ=WEEKLY;BYDAY=TH;UNTIL=20261216", "FREQ=WEEKLY;BYDAY=TH;UNTIL=20261217"));
+        assert!(same("FREQ=MONTHLY;UNTIL=20270115", "FREQ=MONTHLY;UNTIL=20270211T000000Z"), "both end on 12 January");
+        assert!(same("FREQ=SECONDLY;UNTIL=20261112T150500Z", "FREQ=SECONDLY;UNTIL=20261112T150500Z"));
+        assert!(same("FREQ=MONTHLY", "FREQ=MONTHLY;BYMONTHDAY=12"));
+        assert!(!same("FREQ=WEEKLY;BYDAY=TH", "FREQ=DAILY"));
+        assert!(!same("FREQ=WEEKLY;INTERVAL=2;BYDAY=TH,SU;WKST=SU", "FREQ=WEEKLY;INTERVAL=2;BYDAY=TH,SU"), "every other week, the week start picks which Sunday");
+        assert!(!same_repeat(Some(&rec("FREQ=DAILY")), &start, None, &start, Brussels));
     }
 }

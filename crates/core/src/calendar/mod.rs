@@ -10,6 +10,7 @@ pub mod meeting;
 mod model;
 pub mod recur;
 pub mod remind;
+pub mod remove;
 pub mod respond;
 pub mod rsvp;
 pub mod scheduler;
@@ -18,5 +19,6 @@ pub mod sources;
 pub mod sync;
 pub mod synth;
 pub mod tz;
+pub mod update;
 
 pub use model::*;

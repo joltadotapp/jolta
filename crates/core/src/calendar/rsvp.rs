@@ -118,9 +118,8 @@ impl Target {
 /// stored answer so views change at once. The stored ETag stays, so the
 /// next sync replaces the stored event with the server's version.
 pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
-    let (event, scope) = (rsvp.event, rsvp.scope.clone());
     let here = tz::here();
-    let (calendar, rows, me) = jolta.store.read_async(move |c| series_of(c, event)).await?;
+    let (calendar, target) = target_of(jolta, rsvp.event, &rsvp.scope).await?;
     match calendar.source {
         CalendarSource::Local => return Err(Error::Other("This event is in a calendar on this Mac only. Answering it by mail isn't built yet.".into())),
         CalendarSource::EventKit => {
@@ -128,22 +127,12 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
         }
         _ => {}
     }
-    let mut target = target(rows, event, &scope, here, me)?;
     let organizer = target.event.data.organizer.as_ref().map(|o| o.address.as_str());
     if organizer.is_some_and(|o| o.eq_ignore_ascii_case(&target.me)) {
         return Err(Error::Other("You organize this meeting, so there is no invitation to answer.".into()));
     }
     if organizer.is_none() && target.event.data.attendees.is_empty() {
         return Err(Error::Other("This event has no organizer or guests, so there is no invitation to answer.".into()));
-    }
-    for stored in std::iter::once(&mut target.event).chain(target.occurrence.as_mut().and_then(|o| o.stored.as_mut())) {
-        stored.raw = jolta.store.read_async({
-            let id = stored.id;
-            move |c| Ok(c.query_row("SELECT blob FROM event WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))?)
-        })
-        .await?
-        .map(|hash| jolta.blobs.get(&hash))
-        .transpose()?;
     }
 
     let source = sync::calendar_source(jolta, &calendar).await?;
@@ -155,6 +144,24 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
         _ => None,
     };
     jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
+}
+
+/// The calendar of `event`, and what a change in `scope` goes to, with the
+/// objects as the server last gave them.
+pub(crate) async fn target_of(jolta: &Jolta, event: EventId, scope: &Scope) -> Result<(Calendar, Target)> {
+    let here = tz::here();
+    let (calendar, rows, me) = jolta.store.read_async(move |c| series_of(c, event)).await?;
+    let mut target = target(rows, event, scope, here, me)?;
+    for stored in std::iter::once(&mut target.event).chain(target.occurrence.as_mut().and_then(|o| o.stored.as_mut())) {
+        stored.raw = jolta.store.read_async({
+            let id = stored.id;
+            move |c| Ok(c.query_row("SELECT blob FROM event WHERE id = ?1", [id], |r| r.get::<_, Option<String>>(0))?)
+        })
+        .await?
+        .map(|hash| jolta.blobs.get(&hash))
+        .transpose()?;
+    }
+    Ok((calendar, target))
 }
 
 /// A resource as the answer wrote it to the server, read with every address
@@ -377,7 +384,7 @@ fn parse_moment(value: &str, tzid: Option<&str>, zone: Zone) -> Option<Moment> {
 
 /// The moment a DTSTART or RECURRENCE-ID line holds. None for a TZID Jolta
 /// can't place, such as Outlook's "Customized Time Zone".
-fn prop_moment(p: &Prop) -> Option<Moment> {
+pub(super) fn prop_moment(p: &Prop) -> Option<Moment> {
     if p.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE")) {
         return NaiveDate::parse_from_str(p.value().trim(), "%Y%m%d").ok().map(Moment::Date);
     }
@@ -386,7 +393,7 @@ fn prop_moment(p: &Prop) -> Option<Moment> {
 
 /// `moment` written the way `like` (a DTSTART) writes its value: a date, a
 /// UTC time, or a wall time on its TZID's clock.
-fn value_like(like: &Prop, moment: &Moment, here: Tz) -> Option<String> {
+pub(super) fn value_like(like: &Prop, moment: &Moment, here: Tz) -> Option<String> {
     let date = like.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE")) || like.value().trim().len() == 8;
     match (moment, date) {
         (Moment::Date(d), true) => Some(d.format("%Y%m%d").to_string()),

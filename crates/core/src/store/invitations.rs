@@ -116,15 +116,16 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
 }
 
 /// Every stored event of the series with this UID, the master and its
-/// overrides, from the one calendar the views show it from.
-pub fn stored_series(conn: &Connection, uid: &str) -> Result<Vec<EventData>> {
+/// overrides, from the one calendar the views show it from, of `account`
+/// only when one is given.
+pub fn stored_series(conn: &Connection, uid: &str, account: Option<AccountId>) -> Result<Vec<EventData>> {
     let mut stmt = conn.prepare_cached(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND c.shown",
+         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR c.account_id = ?2)",
     )?;
     let rows = stmt
-        .query_map([uid], |r| {
+        .query_map(params![uid, account], |r| {
             let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
             Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
         })?
@@ -404,6 +405,75 @@ fn pick(n: &Named, overrides: &[&Named], now: DateTime<Utc>, here: Tz) -> Result
     })
 }
 
+/// The reply mail Jolta sent with the answer `remembered_answer` finds:
+/// its blob, which names the version answered. None for an answer given
+/// without a reply, or a reply that failed for good.
+pub fn remembered_reply(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<String>> {
+    let rid = recurrence_id.map(moment_text).unwrap_or_default();
+    Ok(conn
+        .query_row(
+            "SELECT o.blob FROM invitation_answer a JOIN outbox o ON o.id = a.reply AND o.state IN ('queued', 'sent')
+             WHERE a.account_id = ?1 AND a.uid = ?2 AND a.recurrence_id IN (?3, '')
+             ORDER BY a.recurrence_id = '' LIMIT 1",
+            params![account, uid, rid],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// One message on an account that carries a version of an event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionRow {
+    pub message: MessageId,
+    pub method: Method,
+    pub sequence: i64,
+    /// The ORGANIZER's address, empty without one.
+    pub organizer: String,
+    /// The mail's From address.
+    pub from: String,
+    /// The stored body.
+    pub blob: Option<String>,
+}
+
+/// The requests, additions and cancellations for this UID and recurrence
+/// id in the account's messages other than `skip`, highest SEQUENCE first.
+/// A recurrence id matches the same moment written in another zone.
+pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, skip: MessageId, here: Tz) -> Result<Vec<VersionRow>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT i.message_id, i.method, i.sequence, i.organizer, m.from_addr, m.blob, i.recurrence_id FROM invitation i JOIN message m ON m.id = i.message_id
+         WHERE i.uid = ?1 AND (i.recurrence_id = '') = ?2 AND m.account_id = ?3 AND i.message_id != ?4
+           AND i.method IN ('REQUEST', 'ADD', 'CANCEL') AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')
+         ORDER BY i.sequence DESC, i.message_id DESC",
+    )?;
+    let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account, skip], |r| {
+        let row = VersionRow { message: r.get(0)?, method: r.get(1)?, sequence: r.get(2)?, organizer: r.get(3)?, from: r.get(4)?, blob: r.get(5)? };
+        Ok((row, r.get::<_, String>(6)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (row, rid) = row?;
+        if recurrence_id.is_none_or(|want| moment_from_text(&rid).is_some_and(|m| m.names(want, here))) {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+/// The ORGANIZER and From of the account's requests for this UID, the
+/// whole event's and its occurrences', in the order they arrived: by the
+/// date sync took from the server (IMAP's INTERNALDATE, Graph's
+/// receivedDateTime), which a sender can't set. Ids don't keep that order,
+/// since sync stores each batch newest first.
+pub fn request_senders(conn: &Connection, account: AccountId, uid: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT i.organizer, m.from_addr FROM invitation i JOIN message m ON m.id = i.message_id
+         WHERE i.uid = ?1 AND m.account_id = ?2 AND i.method = 'REQUEST' AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')
+         ORDER BY m.date, m.id",
+    )?;
+    let rows = stmt.query_map(params![uid, account], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Mail from the address that the user answered, through the partial
 /// index `message_answered`, which needs this exact `flags & 4` term.
 const REPLIED: &str = "SELECT EXISTS (SELECT 1 FROM message WHERE from_addr = ?1 COLLATE NOCASE AND (flags & 4) != 0)";
@@ -654,7 +724,7 @@ mod tests {
         use crate::calendar::card;
         let me = ["me@example.com".to_string()];
         let found = crate::calendar::invitation::find(raw, &me);
-        let cx = card::Context { message, account: AccountId(1), me: &me, sender: "ann@example.com", now, here: chrono_tz::Europe::Brussels };
+        let cx = card::Context { message, account: AccountId(1), me: &me, sender: "ann@example.com", now, here: chrono_tz::Europe::Brussels, blobs: &jolta.blobs };
         match jolta.store.read(|c| card::cards(c, &found, &cx)).unwrap().remove(0) {
             card::Card::Event(e) => match e.answer {
                 Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),

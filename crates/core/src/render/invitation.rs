@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use super::escape;
 use crate::calendar::Response;
-use crate::calendar::card::{Answering, Block, Card, EventCard, Join, ReplyCard, Strip, answer_word};
+use crate::calendar::card::{Answering, Block, Card, Edit, EventCard, Join, ReplyCard, Strip, answer_word};
 
 pub fn card(card: &Card) -> String {
     match card {
@@ -17,9 +17,10 @@ pub fn card(card: &Card) -> String {
 
 fn event(c: &EventCard) -> String {
     let mut h = format!(
-        "<section class=\"jolta-invite{}\"{}><div class=\"jolta-invite-head\"><span class=\"jolta-invite-label\">{CALENDAR}{}</span>",
+        "<section class=\"jolta-invite{}{}\"{}><div class=\"jolta-invite-head\"><span class=\"jolta-invite-label\">{CALENDAR}{}</span>",
         if c.cancelled { " jolta-invite-cancelled" } else { "" },
-        c.answering.as_ref().map(|a| format!(" data-rsvp=\"{}\"", a.message.0)).unwrap_or_default(),
+        if c.outdated { " jolta-invite-outdated" } else { "" },
+        c.answering.as_ref().map(|a| a.message).or(c.removing.as_ref().map(|r| r.message)).map(|m| format!(" data-rsvp=\"{}\"", m.0)).unwrap_or_default(),
         c.label
     );
     // The chosen button says it when the user can answer.
@@ -27,15 +28,25 @@ fn event(c: &EventCard) -> String {
         let _ = write!(h, "<span class=\"jolta-invite-answer\">{}</span>", answer_word(answer));
     }
     let _ = write!(h, "</div><div class=\"jolta-invite-title\">{}</div>", escape(&c.title));
-    if let Some(when) = &c.when {
-        let _ = write!(h, "<div class=\"jolta-invite-when\">{}</div>", escape(when));
+    match (&c.changes.when, &c.when) {
+        (Some(e), _) => {
+            let _ = write!(h, "<div class=\"jolta-invite-when\">{}</div>", edit(e));
+        }
+        (None, Some(when)) => {
+            let _ = write!(h, "<div class=\"jolta-invite-when\">{}</div>", escape(when));
+        }
+        (None, None) => {}
     }
     if let Some(other) = &c.elsewhere {
         let _ = write!(h, "<div class=\"jolta-invite-elsewhere\">{}</div>", escape(other));
     }
-    let facts: Vec<String> = [(REPEAT, &c.repeat), (PLACE, &c.location)]
+    let facts: Vec<String> = [(REPEAT, &c.repeat, &c.changes.repeat), (PLACE, &c.location, &c.changes.location), (VIDEO, &None, &c.changes.join)]
         .into_iter()
-        .filter_map(|(icon, text)| text.as_ref().map(|t| format!("<span>{icon}{}</span>", escape(t))))
+        .filter_map(|(icon, text, changed)| match (changed, text) {
+            (Some(e), _) => Some(format!("<span>{icon}<span class=\"jolta-edit\">{}</span></span>", edit(e))),
+            (None, Some(t)) => Some(format!("<span>{icon}{}</span>", escape(t))),
+            (None, None) => None,
+        })
         .collect();
     if !facts.is_empty() {
         let _ = write!(h, "<div class=\"jolta-invite-facts\">{}</div>", facts.concat());
@@ -58,7 +69,16 @@ fn event(c: &EventCard) -> String {
             h.push_str(&strip(s));
         }
     }
-    let answers = c.answering.as_ref().map(|a| answers(a, c.answer)).unwrap_or_default();
+    let mut answers = c.answering.as_ref().map(|a| answers(a, c.answer)).unwrap_or_default();
+    if let Some(r) = &c.removing {
+        let what = r.occurrence.as_ref().map_or_else(|| "this meeting".to_string(), |(_, day)| format!("{day}\u{2019}s meeting"));
+        let _ = write!(
+            answers,
+            "<a class=\"jolta-remove\" href=\"x-rsvp:{}/remove\" title=\"Take {} out of your calendar without telling the organizer\">Remove from calendar</a>",
+            r.message.0,
+            escape(&what)
+        );
+    }
     let join = c.join.as_ref().map(join).unwrap_or_default();
     if !answers.is_empty() || !join.is_empty() {
         let _ = write!(h, "<div class=\"jolta-invite-actions\">{answers}{join}</div>");
@@ -67,6 +87,23 @@ fn event(c: &EventCard) -> String {
         h.push_str(&options(a));
     }
     h.push_str("</section>");
+    h
+}
+
+/// A changed line: the old part struck through, the new one marked. A
+/// line the update added has no old part, one it took away no new one.
+fn edit(e: &Edit) -> String {
+    let mut h = escape(&e.lead);
+    if !e.old.is_empty() {
+        let _ = write!(h, "<del>{}</del>", escape(&e.old));
+    }
+    if !e.old.is_empty() && !e.new.is_empty() {
+        h.push(' ');
+    }
+    if !e.new.is_empty() {
+        let _ = write!(h, "<ins>{}</ins>", escape(&e.new));
+    }
+    h.push_str(&escape(&e.tail));
     h
 }
 
@@ -214,6 +251,10 @@ const PLACE: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" aria-
 stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 20.5s-6-5.4-6-10.2a6 6 0 0 1 12 0c0 4.8-6 10.2-6 10.2z\"/>\
 <circle cx=\"12\" cy=\"10.3\" r=\"2.2\"/></svg>";
 
+const VIDEO: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" \
+stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3.5\" y=\"6.5\" width=\"12\" height=\"11\" rx=\"2.2\"/>\
+<path d=\"M15.5 10.5l5-3v9l-5-3\"/></svg>";
+
 const PEOPLE: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" \
 stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"9\" cy=\"9\" r=\"3.2\"/>\
 <path d=\"M3.5 19c.6-3 2.8-4.6 5.5-4.6s4.9 1.6 5.5 4.6M15.5 6.2a3 3 0 0 1 0 5.6M17.5 14.8c1.6.6 2.6 2 3 4.2\"/></svg>";
@@ -221,7 +262,7 @@ stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::card::{Availability, Note, ShownOccurrence};
+    use crate::calendar::card::{Availability, Changes, Note, ShownOccurrence};
     use crate::model::MessageId;
     use crate::render::{MessageView, render_thread};
     use crate::smime::Protection;
@@ -244,6 +285,8 @@ mod tests {
             }),
             organizer: Some("Ann <ann@example.com>".into()),
             guests: Some("Bo and Cy".into()),
+            changes: Default::default(),
+            outdated: false,
             notes: vec![Note { text: "You haven't written to this sender before".into(), warn: true }],
             answer: Some(Response::NeedsAction),
             availability: Some(Availability {
@@ -252,6 +295,7 @@ mod tests {
                 strip: Some(Strip { hours: vec![(0.0, "14:00".into())], busy: vec![block("<i>Standup</i>", true)], lanes: 1, this: block("x", false) }),
             }),
             answering: None,
+            removing: None,
         }
     }
 
@@ -267,6 +311,21 @@ mod tests {
         assert!(html.contains("<div class=\"jolta-invite-note jolta-warn\">You&#32;haven&apos;t"));
         assert!(html.contains("jolta-strip-busy jolta-conflict"));
         assert!(html.contains("<span class=\"jolta-invite-answer\">Not answered</span>"), "no buttons on this card, so the badge says it");
+    }
+
+    #[test]
+    fn an_update_strikes_the_old_value_and_marks_the_new() {
+        let changes = Changes {
+            when: Some(Edit { lead: "Thu 12 Nov · ".into(), old: "16:00 to 17:00".into(), new: "14:00 to 15:00".into(), tail: String::new() }),
+            location: Some(Edit { old: "<Room A>".into(), ..Edit::default() }),
+            join: Some(Edit { new: "New Zoom link".into(), ..Edit::default() }),
+            repeat: None,
+        };
+        let html = card(&Card::Event(EventCard { changes, location: None, outdated: true, ..hostile() }));
+        assert!(html.contains("<div class=\"jolta-invite-when\">Thu&#32;12&#32;Nov&#32;·&#32;<del>16:00&#32;to&#32;17:00</del> <ins>14:00&#32;to&#32;15:00</ins></div>"), "{html}");
+        assert!(html.contains("<span class=\"jolta-edit\"><del>&lt;Room&#32;A&gt;</del></span>"), "a place taken away: {html}");
+        assert!(html.contains("<span class=\"jolta-edit\"><ins>New&#32;Zoom&#32;link</ins></span>"));
+        assert!(html.starts_with("<section class=\"jolta-invite jolta-invite-outdated\""));
     }
 
     #[test]

@@ -87,6 +87,39 @@ impl Source {
             Source::Webcal(_) => Err(Error::Other("This event is in a subscribed calendar, which is read-only, so it can't be answered.".into())),
         }
     }
+
+    /// The user's addresses the server knows besides the account's own: a
+    /// CalDAV principal's calendar-user-address-set.
+    pub async fn addresses(&self) -> Vec<String> {
+        match self {
+            Source::CalDav(s) => s.me().await,
+            Source::Google(_) | Source::Graph(_) | Source::Webcal(_) => Vec::new(),
+        }
+    }
+
+    /// Takes a meeting its organizer cancelled out of the calendar,
+    /// telling nobody: the whole event, or the occurrence `target` names.
+    pub async fn remove(&self, calendar: &Calendar, target: &Target) -> Result<Gone> {
+        match self {
+            Source::CalDav(s) => s.remove(calendar, target).await,
+            Source::Google(s) => s.remove(calendar, target).await,
+            Source::Graph(s) => s.remove(target).await,
+            Source::Webcal(_) => Err(Error::Other("This event is in a subscribed calendar, which is read-only.".into())),
+        }
+    }
+}
+
+/// What removing a cancelled meeting did on the server.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Gone {
+    /// The server had already removed it or marked it cancelled, so Jolta
+    /// sent nothing.
+    Already,
+    /// Jolta deleted it. A CalDAV occurrence leaves through a new version
+    /// of its series, given here to store.
+    Deleted(Option<Change>),
+    /// The copy changed on the server since Jolta read it, so Jolta left it.
+    Changed,
 }
 
 /// One request with an account's calendar sign-in, for `jolta dev http`:

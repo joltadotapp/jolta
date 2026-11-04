@@ -34,6 +34,8 @@ pub struct Invitation {
     /// `Method::names_without_start` allows. `event.span` is then a
     /// stand-in, and the time comes from the calendar's copy.
     pub dated: bool,
+    /// The DTSTAMP, which orders two versions with the same SEQUENCE.
+    pub stamp: Option<DateTime<Utc>>,
 }
 
 impl Method {
@@ -110,9 +112,9 @@ pub fn in_message(msg: &MessageRef, me: &[String]) -> Vec<Invitation> {
             },
             None => Method::Publish,
         };
-        for (event, dated) in ical::read_invitation(&text, me).unwrap_or_default() {
+        for ical::Sent { event, dated, stamp } in ical::read_invitation(&text, me).unwrap_or_default() {
             if (dated || method.names_without_start()) && seen.insert((event.uid.clone(), event.recurrence_id)) {
-                out.push(Invitation { method, event, dated });
+                out.push(Invitation { method, event, dated, stamp });
             }
         }
     }
@@ -127,7 +129,7 @@ pub fn calendar_text(raw: &[u8], uid: &str) -> Option<String> {
     msg.parts()
         .filter(is_calendar)
         .map(|part| String::from_utf8_lossy(&part.decoded()).into_owned())
-        .find(|text| ical::read_invitation(text, &[]).unwrap_or_default().iter().any(|(e, _)| e.uid == uid))
+        .find(|text| ical::read_invitation(text, &[]).unwrap_or_default().iter().any(|s| s.event.uid == uid))
 }
 
 /// Whether a raw message may hold a calendar part, without parsing it: its

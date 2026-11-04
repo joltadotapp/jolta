@@ -332,6 +332,8 @@ struct ReaderView: View {
             return model.answerInvitation(answer, message: message)
         }
         switch action {
+        case "remove":
+            model.removeCancelled(message: message)
         case "quiet":
             model.rsvpPanel = nil
             model.answerChoices.quiet.toggle()
@@ -456,6 +458,9 @@ struct ReaderView: View {
         .animation(.snappy(duration: 0.16), value: model.rsvpPanel)
         .onChange(of: model.answerChoices) { reflect() }
         .onChange(of: model.pendingAnswer) { reflect() }
+        .onChange(of: model.pendingRemoval) { old, new in
+            if let message = new ?? old { reader.markRemoving(message: message, on: new != nil) }
+        }
         .onAppear {
             reader.onAttachment = onAttachment
             reader.onSaveAll = onSaveAll
@@ -556,6 +561,11 @@ enum ReaderStyle {
     .jolta-invite-note, .jolta-invite-free { margin-top: 10px; }
     .jolta-invite-note + .jolta-invite-note, .jolta-invite-note + .jolta-invite-free { margin-top: 2px; }
     .jolta-invite .jolta-warn { color: var(--acc); }
+    .jolta-invite del { color: var(--tx3); text-decoration: line-through; text-decoration-color: var(--tx3); }
+    .jolta-invite ins { padding: 0 3px; margin: 0 -1px; border-radius: 4px; text-decoration: none; color: var(--tx);
+      background: color-mix(in oklab, var(--acc) 15%, transparent); -webkit-box-decoration-break: clone; }
+    .jolta-invite-facts span.jolta-edit { display: inline; }
+    .jolta-invite-outdated .jolta-invite-title, .jolta-invite-outdated .jolta-invite-when { color: var(--tx2); }
     .jolta-strip { position: relative; margin-top: 8px; }
     .jolta-strip-hour { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line2); }
     .jolta-strip-hour i { position: absolute; top: 0; left: 4px; color: var(--tx3); font: 10.5px/14px ui-monospace, SFMono-Regular, monospace; }
@@ -569,7 +579,12 @@ enum ReaderStyle {
     .jolta-invite-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
     .jolta-join { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
-    .jolta-rsvp + .jolta-join { margin-left: auto; }
+    .jolta-rsvp + .jolta-join, .jolta-remove + .jolta-join { margin-left: auto; }
+    .jolta-remove { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
+      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default;
+      transition: background-color .16s ease; }
+    .jolta-remove:hover { background: var(--fill); }
+    .jolta-sending .jolta-remove { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-rsvp { display: inline-flex; gap: 6px; }
     .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
       border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
