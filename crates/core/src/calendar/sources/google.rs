@@ -5,6 +5,8 @@
 //! expired, and the calendar is listed in full again. The one write is
 //! answering an invitation.
 
+mod add;
+
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
@@ -321,7 +323,7 @@ impl Google {
         let send = if rsvp.notify { "all" } else { "none" };
         for attempt in 0..3 {
             let event: Value = parse(&self.get_ok(&url).await?)?;
-            let attendees = answered(&event, &self.account.address, rsvp)?;
+            let attendees = answered(&event, &target.me, target.me.eq_ignore_ascii_case(&self.account.address), rsvp)?;
             let (status, body) = self
                 .request(reqwest::Method::PATCH, &format!("{url}?sendUpdates={send}"), Some(&json!({ "attendees": attendees })), event["etag"].as_str())
                 .await?;
@@ -413,10 +415,12 @@ fn own_entry<T>(attendees: &[T], is_self: impl Fn(&T) -> bool, email: impl Fn(&T
     attendees.iter().position(is_self).or_else(|| attendees.iter().position(|a| me.iter().any(|m| m.eq_ignore_ascii_case(email(a)))))
 }
 
-/// The event's attendee list with the user's own entry answered.
-fn answered(event: &Value, me: &str, rsvp: &Rsvp) -> Result<Vec<Value>> {
+/// The event's attendee list with the user's own entry answered. On a copy
+/// the user added for another account (`own_calendar` false), the entry
+/// Google marks `self` is the calendar's account, not the one invited.
+fn answered(event: &Value, me: &str, own_calendar: bool, rsvp: &Rsvp) -> Result<Vec<Value>> {
     let mut attendees = event["attendees"].as_array().cloned().unwrap_or_default();
-    let own = own_entry(&attendees, |a| a["self"] == true, |a| a["email"].as_str().unwrap_or_default(), &[me.to_string()])
+    let own = own_entry(&attendees, |a| own_calendar && a["self"] == true, |a| a["email"].as_str().unwrap_or_default(), &[me.to_string()])
         .ok_or_else(|| Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")))?;
     let own = &mut attendees[own];
     own["responseStatus"] = json!(match rsvp.answer.response() {
@@ -842,14 +846,19 @@ mod tests {
             {"email": "me@example.com", "responseStatus": "needsAction"},
             {"email": "owner@example.com", "self": true, "responseStatus": "needsAction"}
         ]));
-        assert_eq!(statuses(&answered(&shared, "me@example.com", &accept).unwrap()), ["needsAction", "accepted"]);
-        assert_eq!(marked(&mapped(shared)), [false, true]);
+        assert_eq!(statuses(&answered(&shared, "me@example.com", true, &accept).unwrap()), ["needsAction", "accepted"]);
+        assert_eq!(marked(&mapped(shared.clone())), [false, true]);
+        assert_eq!(
+            statuses(&answered(&shared, "me@example.com", false, &accept).unwrap()),
+            ["accepted", "needsAction"],
+            "a copy added for the invited address answers as that address, not as the calendar's account"
+        );
 
         let own = event(json!([
             {"email": "boss@example.com", "responseStatus": "accepted"},
             {"email": "ME@example.com", "responseStatus": "needsAction"}
         ]));
-        assert_eq!(statuses(&answered(&own, "me@example.com", &accept).unwrap()), ["accepted", "accepted"], "without a self entry the address decides");
+        assert_eq!(statuses(&answered(&own, "me@example.com", true, &accept).unwrap()), ["accepted", "accepted"], "without a self entry the address decides");
         assert_eq!(marked(&mapped(own)), [false, true]);
     }
 

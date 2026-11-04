@@ -11,6 +11,8 @@
 //! fetched. Where Graph refuses delta for a calendar, each sync lists the
 //! window and compares change keys.
 
+mod add;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 

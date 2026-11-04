@@ -11,6 +11,8 @@ use quick_xml::escape::escape;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
+mod add;
+
 use super::dav::{self, APPLE, CALDAV, CALENDARSERVER, DAV, MultiStatus, href_key};
 use super::{Change, Gone, Known, SyncBatch, http_client, http_error, vanished};
 use crate::calendar::remove;
@@ -395,7 +397,9 @@ impl CalDav {
         let url = join(&collection, &path_escape(&target.event.remote_id))?;
         let rid = target.recurrence_id();
         let here = crate::calendar::tz::here();
-        let me = self.me().await;
+        // A copy the user added for another account answers as that one.
+        let principal = self.me().await;
+        let me = if principal.iter().any(|m| m.eq_ignore_ascii_case(&target.me)) { principal } else { vec![target.me.clone()] };
         let mut current = cached(&target.event);
         for attempt in 0..2 {
             let (text, etag) = match current.take() {
@@ -669,8 +673,9 @@ mod tests {
 
     /// A CalDAV server on localhost that answers each request in turn with
     /// a status, an ETag or none, and a body.
-    /// It returns each request's first line, with its If-Match when it has one.
-    async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<String>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
+    /// It returns each request's first line, with its If-Match or
+    /// If-None-Match when it has one.
+    pub(super) async fn caldav_server(answers: Vec<(&'static str, Option<&'static str>, Option<String>)>) -> (CalDav, Calendar, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -683,9 +688,11 @@ mod tests {
                 let request = String::from_utf8_lossy(&request[..n]).to_string();
                 let first = request.lines().next().unwrap_or_default().trim_end_matches(" HTTP/1.1").to_string();
                 let guard = request.lines().find_map(|l| l.to_ascii_lowercase().starts_with("if-match:").then(|| l[9..].trim().to_string()));
-                seen.push(match guard {
-                    Some(etag) => format!("{first} If-Match {etag}"),
-                    None => first,
+                let absent = request.lines().find_map(|l| l.to_ascii_lowercase().starts_with("if-none-match:").then(|| l[14..].trim().to_string()));
+                seen.push(match (guard, absent) {
+                    (Some(etag), _) => format!("{first} If-Match {etag}"),
+                    (None, Some(any)) => format!("{first} If-None-Match {any}"),
+                    (None, None) => first,
                 });
                 let body = body.unwrap_or_default();
                 let etag = etag.map(|e| format!("ETag: {e}\r\n")).unwrap_or_default();

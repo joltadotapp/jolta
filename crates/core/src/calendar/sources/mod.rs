@@ -109,6 +109,78 @@ impl Source {
     }
 }
 
+impl Source {
+    /// Puts a copy of an invitation in the calendar, telling nobody, and
+    /// returns the remote id of the object created. CalDAV also gives the
+    /// resource as written, to store as a sync would.
+    pub async fn create(&self, calendar: &Calendar, copy: &NewCopy<'_>) -> Result<(String, Option<Change>)> {
+        match self {
+            Source::CalDav(s) => s.create(calendar, copy).await.map(|c| match &c {
+                Change::Upsert { remote_id, .. } => (remote_id.clone(), Some(c)),
+                Change::Remove { remote_id } => (remote_id.clone(), None),
+            }),
+            Source::Google(s) => s.create(calendar, copy).await.map(|id| (id, None)),
+            Source::Graph(s) => s.create(calendar, copy).await.map(|id| (id, None)),
+            Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
+        }
+    }
+
+    /// Writes a newer version of the invitation over the copy `target`
+    /// holds, telling nobody, only while the copy is the version Jolta read.
+    pub async fn replace(&self, calendar: &Calendar, target: &Target, copy: &NewCopy<'_>) -> Result<Replaced> {
+        match self {
+            Source::CalDav(s) => s.replace(calendar, target, copy).await,
+            Source::Google(s) => s.replace(calendar, target, copy).await,
+            Source::Graph(s) => s.replace(target, copy).await,
+            Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
+        }
+    }
+
+    /// Gives a copy the user added the answer they sent by mail, telling
+    /// nobody. Graph's copy is the user's own event without guests, so the
+    /// answer shows as its free, tentative or busy time.
+    pub async fn follow(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<Option<Change>> {
+        let quiet = Rsvp { notify: false, note: None, ..rsvp.clone() };
+        match self {
+            Source::Graph(s) => s.follow(target, rsvp.answer).await.map(|_| None),
+            _ => self.answer(calendar, target, &quiet).await.map(|(_, change)| change),
+        }
+    }
+}
+
+/// An invitation as Add to calendar or Update in your calendar writes it.
+pub struct NewCopy<'a> {
+    pub uid: &'a str,
+    /// The invitation's calendar part as sent.
+    pub text: &'a str,
+    /// Its events for `uid`: the series or single event first when the
+    /// message has it, then changed occurrences.
+    pub events: &'a [EventData],
+    /// The address the invitation went to, whose attendee entry is the
+    /// user's, and the answer it gets when the user gave one that holds.
+    pub me: &'a str,
+    pub answer: Option<super::rsvp::Answer>,
+}
+
+impl NewCopy<'_> {
+    pub fn master(&self) -> Option<&EventData> {
+        self.events.iter().find(|e| e.recurrence_id.is_none())
+    }
+
+    pub fn overrides(&self) -> impl Iterator<Item = &EventData> {
+        self.events.iter().filter(|e| e.recurrence_id.is_some())
+    }
+}
+
+/// What writing a newer version over an added copy did.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Replaced {
+    /// Written. CalDAV gives the resource as written, to store.
+    Written(Option<Change>),
+    /// The copy changed in the calendar since Jolta read it, so Jolta left it.
+    Changed,
+}
+
 /// What removing a cancelled meeting did on the server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gone {
@@ -171,6 +243,24 @@ fn provider_url(url: &str, host: &str) -> Result<reqwest::Url> {
         return Ok(parsed);
     }
     Err(Error::Other(format!("Jolta sends this account's sign-in only to https://{host}, not to {url}.")))
+}
+
+/// The event's description, with its meeting's join link on a line of its
+/// own when the description doesn't hold it, for a copy whose provider
+/// keeps no other place for it.
+fn with_join_link(e: &EventData) -> String {
+    match &e.meeting {
+        Some(m) if !e.description.contains(&m.join_url) => {
+            if e.description.trim().is_empty() {
+                m.join_url.clone()
+            } else if e.description_html {
+                format!("<p><a href=\"{0}\">{0}</a></p>{1}", m.join_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;"), e.description)
+            } else {
+                format!("{}\n\n{}", m.join_url, e.description)
+            }
+        }
+        _ => e.description.clone(),
+    }
 }
 
 /// Removals for what `known` holds and the server no longer lists.
