@@ -2,14 +2,15 @@
 //! about them: the copy in the user's calendars and whether the user ever
 //! wrote to the sender.
 
+use chrono_tz::Tz;
 use rusqlite::{Connection, params};
 
 use super::calendar::moment_text;
 use crate::calendar::invitation::Invitation;
 use crate::calendar::series::copy_rank;
-use crate::calendar::{CalendarId, CalendarSource, EventId, EventStatus, Moment, Response};
+use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response};
 use crate::model::*;
-use crate::{Result, compose};
+use crate::{Error, Result, compose};
 
 /// Replaces the invitation rows of a message with the events of its body.
 pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitation]) -> Result<()> {
@@ -62,15 +63,16 @@ pub struct StoredEvent {
 }
 
 /// The event with this UID and recurrence id in a shown calendar. A
-/// meeting in several calendars gives the copy the views show.
-pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<StoredEvent>> {
+/// recurrence id matches the same moment written in another zone, as
+/// `Moment::names` decides. A meeting in several calendars gives the copy
+/// the views show.
+pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, here: Tz) -> Result<Option<StoredEvent>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT e.id, e.calendar_id, e.my_response, e.sequence, e.status, c.source, c.is_default
+        "SELECT e.id, e.calendar_id, e.my_response, e.sequence, e.status, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND e.recurrence_id = ?2 AND c.shown",
+         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown",
     )?;
-    let rid = recurrence_id.map(moment_text).unwrap_or_default();
-    let rows = stmt.query_map(params![uid, rid], |r| {
+    let rows = stmt.query_map(params![uid, recurrence_id.is_none()], |r| {
         let found = StoredEvent {
             event_id: r.get(0)?,
             calendar_id: r.get(1)?,
@@ -79,11 +81,17 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
             status: r.get(4)?,
         };
         let (source, is_default): (CalendarSource, bool) = (r.get(5)?, r.get(6)?);
-        Ok((copy_rank(uid, source, is_default, found.calendar_id), found))
+        Ok((copy_rank(uid, source, is_default, found.calendar_id), found, r.get::<_, String>(7)?))
     })?;
     let mut best: Option<((bool, bool, i64), StoredEvent)> = None;
     for row in rows {
-        let (rank, found) = row?;
+        let (rank, found, data) = row?;
+        if let Some(rid) = recurrence_id {
+            let event: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {}: {e}", found.event_id)))?;
+            if !event.recurrence_id.is_some_and(|stored| rid.names(&stored, here)) {
+                continue;
+            }
+        }
         if best.as_ref().is_none_or(|(b, _)| rank < *b) {
             best = Some((rank, found));
         }
@@ -128,7 +136,6 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::calendar::EventData;
     use crate::calendar::invitation::tests::{import, jolta, mail};
     use crate::calendar::series::Horizon;
 
@@ -204,11 +211,34 @@ mod tests {
             .store
             .write(|tx| crate::store::apply_item(tx, calendar, "remote-1", None, &[event.clone()], None, &horizon))
             .unwrap();
-        let stored = jolta.store.read(|c| stored_event(c, &event.uid, None)).unwrap().unwrap();
+        let stored = jolta.store.read(|c| stored_event(c, &event.uid, None, chrono_tz::Europe::Brussels)).unwrap().unwrap();
         assert_eq!((stored.calendar_id, stored.my_response, stored.sequence), (calendar, Some(Response::Accepted), 2));
-        assert_eq!(jolta.store.read(|c| stored_event(c, "someone-else", None)).unwrap(), None);
+        assert_eq!(jolta.store.read(|c| stored_event(c, "someone-else", None, chrono_tz::Europe::Brussels)).unwrap(), None);
         jolta.store.write(|tx| crate::store::set_calendar_shown(tx, calendar, false)).unwrap();
-        assert_eq!(jolta.store.read(|c| stored_event(c, &event.uid, None)).unwrap(), None, "hidden calendars don't count");
+        assert_eq!(jolta.store.read(|c| stored_event(c, &event.uid, None, chrono_tz::Europe::Brussels)).unwrap(), None, "hidden calendars don't count");
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn an_occurrence_matches_its_moment_in_any_zone() {
+        let (jolta, calendar) = jolta("match-moment");
+        let mut series = crate::calendar::invitation::find(mail!("series.eml"), &["me@example.com".into()]);
+        let mut moved = series.remove(1).event;
+        moved.sequence = 3;
+        let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 4, 0, 0, 0).unwrap(), chrono_tz::Europe::Brussels);
+        jolta.store.write(|tx| crate::store::apply_item(tx, calendar, "remote-1", None, &[moved.clone()], None, &horizon)).unwrap();
+        let brussels = moved.recurrence_id.unwrap();
+        let Moment::Time(local) = brussels else { panic!("a time") };
+        let utc = Moment::Time(crate::calendar::Local {
+            wall: local.instant(chrono_tz::UTC).naive_utc(),
+            zone: crate::calendar::Zone::Tz(chrono_tz::UTC),
+        });
+        let found = |rid: &Moment| jolta.store.read(|c| stored_event(c, &moved.uid, Some(rid), chrono_tz::Europe::Brussels)).unwrap();
+        assert_eq!(found(&brussels).map(|s| s.sequence), Some(3));
+        assert_eq!(found(&utc).map(|s| s.sequence), Some(3), "09:30 Brussels is 08:30 UTC in November");
+        let later = Moment::Time(crate::calendar::Local { wall: local.wall + chrono::Duration::hours(1), ..local });
+        assert_eq!(found(&later), None);
+        assert_eq!(jolta.store.read(|c| stored_event(c, &moved.uid, None, chrono_tz::Europe::Brussels)).unwrap(), None, "no master stored");
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

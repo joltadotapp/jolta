@@ -127,7 +127,7 @@ fn event(conn: &Connection, method: Method, events: &[EventData], cx: &Context) 
     let span = next_span(master, events, cx);
     let (when, elsewhere) = when(&span, shown, cx);
     let bounds = span.bounds(cx.here);
-    let stored = store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref())?;
+    let stored = store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), cx.here)?;
 
     let mut notes = Vec::new();
     match method {
