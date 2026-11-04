@@ -83,6 +83,8 @@ pub fn finish_invitation_scan(conn: &Connection, id: MessageId, invitations: &[I
 pub struct StoredEvent {
     pub event_id: EventId,
     pub calendar_id: CalendarId,
+    /// The calendar's source.
+    pub source: CalendarSource,
     pub event: EventData,
 }
 
@@ -98,11 +100,11 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
     )?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account], |r| {
         let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
+        Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, source, r.get::<_, String>(4)?))
     })?;
     let mut best: Option<((bool, bool, i64), StoredEvent)> = None;
     for row in rows {
-        let (rank, event_id, calendar_id, data) = row?;
+        let (rank, event_id, calendar_id, source, data) = row?;
         if best.as_ref().is_some_and(|(b, _)| *b <= rank) {
             continue;
         }
@@ -110,7 +112,7 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
         if recurrence_id.is_some_and(|rid| !event.recurrence_id.is_some_and(|stored| rid.names(&stored, here))) {
             continue;
         }
-        best = Some((rank, StoredEvent { event_id, calendar_id, event }));
+        best = Some((rank, StoredEvent { event_id, calendar_id, source, event }));
     }
     Ok(best.map(|(_, e)| e))
 }
@@ -213,21 +215,27 @@ pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recur
         .optional()?)
 }
 
-/// The user's answer to an invitation on the account it came to, as its
-/// card shows it: `copy` is that account's copy of the event and
-/// `remembered` the answer given from Jolta. Jolta answers through a
-/// provider's or a CalDAV copy, so that one holds the answer it gave; a
-/// feed's or this Mac's copy only says what it was imported with.
-pub fn shown_answer(conn: &Connection, copy: Option<&StoredEvent>, remembered: Option<Response>) -> Result<Option<Response>> {
-    match copy {
-        Some(s) if answered_there(conn, s)? => Ok(s.event.my_response()),
-        copy => Ok(remembered.or(copy.and_then(|s| s.event.my_response()))),
-    }
+/// Where the answer an invitation shows comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerFrom<'a> {
+    /// A provider's or a CalDAV copy, which Jolta answers through.
+    Calendar(&'a StoredEvent),
+    /// The answer given from Jolta.
+    Jolta,
+    /// A feed's or this Mac's copy, which only says what it was imported
+    /// with.
+    Import,
 }
 
-fn answered_there(conn: &Connection, copy: &StoredEvent) -> Result<bool> {
-    let source = super::calendar(conn, copy.calendar_id)?.source;
-    Ok(!matches!(source, CalendarSource::Webcal | CalendarSource::Local))
+/// The user's answer to an invitation on the account it came to, as its
+/// card and the list show it: `copy` is that account's copy of the event
+/// and `remembered` the answer given from Jolta. Jolta answers through a
+/// provider's or a CalDAV copy, so that one holds the answer it gave.
+pub fn shown_answer(copy: Option<&StoredEvent>, remembered: Option<Response>) -> Option<(Response, AnswerFrom<'_>)> {
+    match copy {
+        Some(s) if !matches!(s.source, CalendarSource::Webcal | CalendarSource::Local) => s.event.my_response().map(|r| (r, AnswerFrom::Calendar(s))),
+        copy => remembered.map(|r| (r, AnswerFrom::Jolta)).or_else(|| copy.and_then(|s| s.event.my_response()).map(|r| (r, AnswerFrom::Import))),
+    }
 }
 
 /// What the message list shows for a conversation with an invitation.
@@ -363,8 +371,8 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], now: DateTime<Utc>,
         return fixed(InvitationState::Cancelled);
     }
     let remembered = remembered_answer(conn, n.account, &n.uid, picked.occurrence.as_ref())?;
-    let state = match shown_answer(conn, copy.as_ref(), remembered)? {
-        Some(r) if r != Response::NeedsAction => InvitationState::Answered(r),
+    let state = match shown_answer(copy.as_ref(), remembered) {
+        Some((r, _)) if r != Response::NeedsAction => InvitationState::Answered(r),
         _ if n.ends > now.timestamp() => InvitationState::Unanswered,
         _ => InvitationState::Plain,
     };

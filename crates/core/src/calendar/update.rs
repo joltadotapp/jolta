@@ -42,6 +42,34 @@ pub fn answer_holds(answered: &EventData, source: Option<CalendarSource>, now: &
     (answered.sequence >= now.sequence && source != Some(CalendarSource::Graph)) || same_time(answered, now, here)
 }
 
+/// Whether an answer given to `answered`, by a reply or in a copy from
+/// `source`, holds for a message that sends `message`, where `said` is the
+/// event that places the occurrence shown: for the version of the same
+/// event the message sends, and when the answer went to the series of an
+/// occurrence the message sends on its own, for the series' occurrence at
+/// that recurrence id. The card and the list both judge by this.
+pub fn holds(answered: &EventData, source: Option<CalendarSource>, message: &[EventData], said: &EventData, here: Tz) -> bool {
+    let event = version_of(message, answered, here).is_none_or(|now| answer_holds(answered, source, now, here));
+    let occurrence = match (answered.recurrence_id, said.recurrence_id) {
+        (None, Some(rid)) => series::occurrence_span(&answered.span, &rid, here).is_some_and(|span| {
+            let there = EventData { recurrence_id: Some(rid), recurrence: None, span, ..answered.clone() };
+            answer_holds(&there, source, said, here)
+        }),
+        _ => true,
+    };
+    event && occurrence
+}
+
+/// The event in `message` that `other`, a version of the same event or
+/// occurrence, compares with.
+pub fn version_of<'a>(message: &'a [EventData], other: &EventData, here: Tz) -> Option<&'a EventData> {
+    message.iter().find(|e| match (&e.recurrence_id, &other.recurrence_id) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.names(b, here),
+        _ => false,
+    })
+}
+
 /// The version of an event a reply mail answered. The reply carries its
 /// SEQUENCE, start and end; for a series the repeat rule comes from the
 /// account's request it answered, the latest at that SEQUENCE sent before
@@ -169,7 +197,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
 
     let copy = store::stored_event(seen.conn, uid, rid.as_ref(), Some(seen.account), seen.here)?;
     if let Some(copy) = &copy {
-        let source = store::calendar(seen.conn, copy.calendar_id)?.source;
+        let source = copy.source;
         let cancelled = copy.event.status == EventStatus::Cancelled;
         // A cancelled copy took a cancellation, this one or a later one.
         // Graph keeps no SEQUENCE: its copy is newer only once cancelled.
@@ -203,7 +231,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         && sent.method != Method::Cancel
         && let Some(master) = store::stored_event(seen.conn, uid, None, Some(seen.account), seen.here)?
         && master.event.status == EventStatus::Cancelled
-        && (store::calendar(seen.conn, master.calendar_id)?.source == CalendarSource::Graph || master.event.sequence >= this.sequence)
+        && (master.source == CalendarSource::Graph || master.event.sequence >= this.sequence)
     {
         newest = Some((Version { sequence: master.event.sequence, stamp: None }, Method::Cancel));
     }

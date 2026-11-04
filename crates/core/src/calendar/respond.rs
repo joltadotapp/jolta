@@ -258,9 +258,7 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 found => found,
             };
             let me = addresses(&from, copy.as_ref().map(|s| &s.event));
-            let copy = copy
-                .map(|s| Ok::<_, Error>(Copy { event: s.event_id, calendar: s.calendar_id, source: store::calendar(c, s.calendar_id)?.source }))
-                .transpose()?;
+            let copy = copy.map(|s| Copy { event: s.event_id, calendar: s.calendar_id, source: s.source });
             Ok(Resolved {
                 account,
                 from,

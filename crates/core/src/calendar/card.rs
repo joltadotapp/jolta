@@ -12,7 +12,7 @@ use super::invitation::{self, Invitation, Method};
 use super::recur::Source;
 use super::series::{self, Horizon};
 use super::update;
-use super::{Bounds, CalendarSource, EventData, EventStatus, MeetingProvider, Moment, Person, Response, Role, Span, Zone, meeting, recur, tz};
+use super::{Bounds, EventData, EventStatus, MeetingProvider, Moment, Person, Response, Role, Span, Zone, meeting, recur, tz};
 use crate::blobs::Blobs;
 use crate::model::{AccountId, MessageId};
 use crate::{Result, store};
@@ -330,6 +330,20 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         _ => None,
     };
 
+    // The answer the list shows, which holds only for the version of the
+    // meeting and the occurrence it was given to.
+    let answer = match store::shown_answer(answered.as_ref(), remembered.as_ref().map(|(r, _)| *r)) {
+        _ if !current || method == Method::Cancel => None,
+        Some((r, store::AnswerFrom::Calendar(s))) => Some((r, update::holds(&s.event, Some(s.source), message, said, cx.here))),
+        Some((r, store::AnswerFrom::Jolta)) => match remembered.as_ref().and_then(|(_, reply)| reply.as_ref()) {
+            Some(reply) => Some((r, reply_holds(&seen, reply, message, said, cx)?)),
+            None => Some((r, true)),
+        },
+        Some((r, store::AnswerFrom::Import)) => Some((r, true)),
+        None => None,
+    }
+    .map(|(r, holds)| if holds { r } else { Response::NeedsAction });
+
     Ok(EventCard {
         label: label(method, !history.before.is_empty()),
         title: title(method, shown, &history.before),
@@ -344,25 +358,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         changes,
         outdated: !current,
         notes,
-        answer: match answered.filter(|_| current && method != Method::Cancel) {
-            // Jolta answers through these, so they hold the answer it gave.
-            Some(s) if answered_there(conn, &s)? => {
-                let source = store::calendar(conn, s.calendar_id)?.source;
-                let holds = holds(&s.event, Some(source), message, said, cx);
-                s.event.my_response().map(|r| if holds { r } else { Response::NeedsAction })
-            }
-            stored if current => match remembered {
-                Some((answer, reply)) => {
-                    let holds = match &reply {
-                        Some(r) => reply_holds(&seen, r, message, said, cx)?,
-                        None => true,
-                    };
-                    Some(if holds { answer } else { Response::NeedsAction })
-                }
-                None => stored.and_then(|s| s.event.my_response()),
-            },
-            _ => None,
-        },
+        answer,
         availability,
         answering,
         removing,
@@ -439,37 +435,11 @@ fn remembered(conn: &Connection, a: &Answering, cx: &Context) -> Result<Option<(
 /// Whether the answer `reply` sent holds for this message, judged by the
 /// version of the event it answered.
 fn reply_holds(seen: &update::Seen, reply: &Invitation, message: &[EventData], said: &EventData, cx: &Context) -> Result<bool> {
-    let answered = match version_of(message, &reply.event, cx) {
+    let answered = match update::version_of(message, &reply.event, cx.here) {
         Some(now) => update::answered_by(seen, reply, now)?,
         None => reply.event.clone(),
     };
-    Ok(holds(&answered, None, message, said, cx))
-}
-
-/// Whether an answer given to `answered`, by a reply or in a copy from
-/// `source`, holds for this message: for the version of the same event it
-/// sends, and when the card shows an occurrence and the answer went to its
-/// series, for the series' occurrence at that recurrence id.
-fn holds(answered: &EventData, source: Option<CalendarSource>, message: &[EventData], said: &EventData, cx: &Context) -> bool {
-    let event = version_of(message, answered, cx).is_none_or(|now| update::answer_holds(answered, source, now, cx.here));
-    let occurrence = match (answered.recurrence_id, said.recurrence_id) {
-        (None, Some(rid)) => series::occurrence_span(&answered.span, &rid, cx.here).is_some_and(|span| {
-            let there = EventData { recurrence_id: Some(rid), recurrence: None, span, ..answered.clone() };
-            update::answer_holds(&there, source, said, cx.here)
-        }),
-        _ => true,
-    };
-    event && occurrence
-}
-
-/// The event in this message that `other`, a version of the same event or
-/// occurrence, compares with.
-fn version_of<'a>(message: &'a [EventData], other: &EventData, cx: &Context) -> Option<&'a EventData> {
-    message.iter().find(|e| match (&e.recurrence_id, &other.recurrence_id) {
-        (None, None) => true,
-        (Some(a), Some(b)) => a.names(b, cx.here),
-        _ => false,
-    })
+    Ok(update::holds(&answered, None, message, said, cx.here))
 }
 
 /// "The organizer changed the title": an update that changed nothing the
@@ -543,11 +513,6 @@ fn changes(before: &[EventData], now: &[EventData], cx: &Context) -> Changes {
 
 fn repeat(master: Option<&EventData>) -> Option<String> {
     master.and_then(|m| m.recurrence.as_ref().map(|r| recur::describe(r, &m.span).unwrap_or_else(|| "Custom repeat".into())))
-}
-
-fn answered_there(conn: &Connection, copy: &store::StoredEvent) -> Result<bool> {
-    let source = store::calendar(conn, copy.calendar_id)?.source;
-    Ok(!matches!(source, CalendarSource::Webcal | CalendarSource::Local))
 }
 
 /// An invitation the user can answer: a request, or an event added or
@@ -907,7 +872,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::calendar::invitation::tests::{ME, import, jolta, mail};
-    use crate::calendar::{CalendarId, Local, invitation};
+    use crate::calendar::{CalendarId, CalendarSource, Local, invitation};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()
