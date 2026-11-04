@@ -12,7 +12,7 @@ use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
 use jolta_core::calendar::card::{self, Card, Edit};
-use jolta_core::calendar::{invitation, remove, respond};
+use jolta_core::calendar::{add, invitation, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
@@ -125,6 +125,18 @@ pub enum CalCommand {
     /// Take the meeting a cancellation names out of the calendar, as its
     /// card's Remove from calendar does.
     Remove { message: i64 },
+    /// Put the invitation on a message into a calendar, as its card's Add to
+    /// calendar does, telling nobody. Without a calendar, the menu's default;
+    /// with `--list`, print the menu.
+    Add {
+        message: i64,
+        calendar: Option<i64>,
+        #[arg(long)]
+        list: bool,
+    },
+    /// Write the newer invitation on a message over the copy added to a
+    /// calendar, as its card's Update in your calendar does.
+    Update { message: i64 },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
         #[arg(value_enum)]
@@ -441,6 +453,24 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
             Ok(())
         }
+        CalCommand::Add { message, calendar, list } => {
+            if list {
+                for c in add::menu(jolta, jolta_core::MessageId(message)).await? {
+                    println!("  {:>4}  {} {}  ({})", c.calendar.0, if c.default { "*" } else { " " }, c.name, c.account);
+                }
+                return Ok(());
+            }
+            let t = Instant::now();
+            let done = add::add(jolta, jolta_core::MessageId(message), calendar.map(CalendarId)).await?;
+            println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            Ok(())
+        }
+        CalCommand::Update { message } => {
+            let t = Instant::now();
+            let done = add::update(jolta, jolta_core::MessageId(message)).await?;
+            println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            Ok(())
+        }
         CalCommand::Rsvp { event, accept, maybe, decline: _, note, no_reply, occurrence } => {
             let answer = if accept {
                 Answer::Accept
@@ -642,6 +672,12 @@ fn print_card(card: &Card) {
             println!("  answer: {answer}{}", if e.answering.is_some() { ", Accept, Maybe and Decline offered" } else { "" });
             if let Some(r) = &e.removing {
                 println!("  Remove from calendar offered{}", r.occurrence.as_ref().map(|(_, d)| format!(" for {d}")).unwrap_or_default());
+            }
+            if e.adding.is_some() {
+                println!("  Add to calendar offered");
+            }
+            if let Some(u) = &e.updating {
+                println!("  Update in your calendar offered ({})", u.calendar);
             }
         }
     }

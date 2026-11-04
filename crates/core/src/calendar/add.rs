@@ -57,10 +57,11 @@ pub struct Updating {
     pub calendar: String,
 }
 
-/// The calendars an invitation can go to: every shown calendar of an
-/// account that Jolta can write an event to, except one that already holds
-/// an event with its UID, which a second copy would collide with.
-pub fn choices(conn: &Connection, uid: &str) -> Result<Vec<Choice>> {
+/// The calendars an invitation from `organizer` can go to: every shown
+/// calendar of an account that Jolta can write an event to, except one that
+/// already holds an event with its UID, which a second copy would collide
+/// with, and those of the organizer's own account, where the meeting is.
+pub fn choices(conn: &Connection, uid: &str, organizer: Option<&str>) -> Result<Vec<Choice>> {
     let accounts = store::accounts(conn)?;
     let last = store::last_added_calendar(conn)?;
     let mut holding = conn.prepare_cached("SELECT 1 FROM event WHERE calendar_id = ?1 AND uid = ?2 LIMIT 1")?;
@@ -69,7 +70,8 @@ pub fn choices(conn: &Connection, uid: &str) -> Result<Vec<Choice>> {
     for c in store::calendars(conn)? {
         let writable = matches!(c.access, Access::Owner | Access::Write) && matches!(c.source, CalendarSource::Google | CalendarSource::Graph | CalendarSource::CalDav);
         let Some(account) = c.account_id.and_then(|id| accounts.iter().find(|a| a.id == id)) else { continue };
-        if !c.shown || !writable || holding.query_row(rusqlite::params![c.id, uid], |_| Ok(())).optional()?.is_some() {
+        let organizes = organizer.is_some_and(|o| o.trim().eq_ignore_ascii_case(&account.address));
+        if organizes || !c.shown || !writable || holding.query_row(rusqlite::params![c.id, uid], |_| Ok(())).optional()?.is_some() {
             continue;
         }
         if c.is_default {
@@ -105,7 +107,8 @@ pub(crate) fn offers(conn: &Connection, sent: &Invitation, cx: &card::Context) -
     }
     let own = store::stored_event(conn, uid, None, Some(cx.account), cx.here)?.is_some()
         || rid.map(|rid| store::stored_event(conn, uid, Some(rid), Some(cx.account), cx.here)).transpose()?.flatten().is_some();
-    let adding = (!own && !choices(conn, uid)?.is_empty()).then(|| Adding { message: cx.message, uid: uid.clone() });
+    let organizer = sent.event.organizer.as_ref().map(|o| o.address.as_str());
+    let adding = (!own && !choices(conn, uid, organizer)?.is_empty()).then(|| Adding { message: cx.message, uid: uid.clone() });
     Ok((adding, None))
 }
 
@@ -169,6 +172,16 @@ impl Offered {
     }
 }
 
+/// The Add to calendar menu of the card on `message`.
+pub async fn menu(jolta: &Jolta, message: MessageId) -> Result<Vec<Choice>> {
+    let o = offered(jolta, message).await?;
+    if o.card.adding.is_none() {
+        return Ok(Vec::new());
+    }
+    let (uid, organizer) = (o.sent.event.uid.clone(), o.sent.event.organizer.map(|p| p.address));
+    jolta.store.read_async(move |c| choices(c, &uid, organizer.as_deref())).await
+}
+
 /// Puts the invitation on `message` into `calendar`, or the menu's
 /// default, when its card offers Add to calendar.
 pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>) -> Result<Added> {
@@ -177,12 +190,13 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
         return Err(Error::Other("This meeting is in your calendar already.".into()));
     }
     let uid = o.sent.event.uid.clone();
+    let organizer = o.sent.event.organizer.as_ref().map(|p| p.address.clone());
     let calendar = jolta
         .store
         .read_async({
             let uid = uid.clone();
             move |c| {
-                let list = choices(c, &uid)?;
+                let list = choices(c, &uid, organizer.as_deref())?;
                 let id = calendar.or(list.iter().find(|c| c.default).map(|c| c.calendar)).ok_or_else(|| Error::Other("Jolta has no calendar it can add this meeting to.".into()))?;
                 if !list.iter().any(|c| c.calendar == id) {
                     return Err(Error::Other("Jolta can't add this meeting to that calendar: it's read-only, hidden, or holds the meeting already.".into()));
@@ -416,7 +430,7 @@ mod tests {
         assert_eq!(card_of(&j, id, &v1).adding, None, "Personal holds it, Team is read-only and Side hidden");
         j.store.write(|tx| store::set_calendar_shown(tx, side, true)).unwrap();
         assert!(card_of(&j, id, &v1).adding.is_some());
-        assert!(j.store.read(|c| choices(c, "sync")).unwrap().iter().all(|c| c.calendar != personal));
+        assert!(j.store.read(|c| choices(c, "sync", Some("ann@example.com"))).unwrap().iter().all(|c| c.calendar != personal));
 
         added(&j, personal, "sync", "theirs", &v1);
         let c = card_of(&j, id, &v1);
@@ -439,7 +453,7 @@ mod tests {
     #[test]
     fn the_menu_offers_shown_calendars_jolta_can_write_without_the_meeting() {
         let (j, personal, team, side) = folder("add-menu");
-        let names = |j: &crate::Jolta| j.store.read(|c| choices(c, "sync")).unwrap().into_iter().map(|c| (c.name, c.default)).collect::<Vec<_>>();
+        let names = |j: &crate::Jolta| j.store.read(|c| choices(c, "sync", Some("ann@example.com"))).unwrap().into_iter().map(|c| (c.name, c.default)).collect::<Vec<_>>();
         assert_eq!(names(&j), [("Personal".to_string(), true)], "Team is read-only, Side hidden");
         j.store.write(|tx| store::set_calendar_shown(tx, side, true).map(|_| ())).unwrap();
         assert_eq!(names(&j), [("Personal".to_string(), true), ("Side".to_string(), false)], "the default calendar first chosen");
@@ -447,6 +461,8 @@ mod tests {
         assert_eq!(names(&j), [("Personal".to_string(), false), ("Side".to_string(), true)], "then the one last added to");
         j.store.write(|tx| store::set_last_added_calendar(tx, team)).unwrap();
         assert_eq!(names(&j)[0], ("Personal".to_string(), true), "a calendar no longer offered falls back to the default");
+        let own = j.store.read(|c| choices(c, "sync", Some(&OTHER.to_uppercase()))).unwrap();
+        assert!(own.is_empty(), "a meeting this account organizes is in its calendar already: {own:?}");
         let _ = personal;
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
