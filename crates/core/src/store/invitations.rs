@@ -8,7 +8,7 @@ use rusqlite::{Connection, params};
 use super::calendar::moment_text;
 use crate::calendar::invitation::Invitation;
 use crate::calendar::series::copy_rank;
-use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, Response};
+use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment};
 use crate::model::*;
 use crate::{Error, Result, compose};
 
@@ -57,9 +57,7 @@ pub fn finish_invitation_scan(conn: &Connection, id: MessageId, invitations: &[I
 pub struct StoredEvent {
     pub event_id: EventId,
     pub calendar_id: CalendarId,
-    pub my_response: Option<Response>,
-    pub sequence: i64,
-    pub status: EventStatus,
+    pub event: EventData,
 }
 
 /// The event with this UID and recurrence id in a shown calendar. A
@@ -68,33 +66,25 @@ pub struct StoredEvent {
 /// the views show.
 pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, here: Tz) -> Result<Option<StoredEvent>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT e.id, e.calendar_id, e.my_response, e.sequence, e.status, c.source, c.is_default, e.data
+        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
          WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown",
     )?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none()], |r| {
-        let found = StoredEvent {
-            event_id: r.get(0)?,
-            calendar_id: r.get(1)?,
-            my_response: r.get(2)?,
-            sequence: r.get(3)?,
-            status: r.get(4)?,
-        };
-        let (source, is_default): (CalendarSource, bool) = (r.get(5)?, r.get(6)?);
-        Ok((copy_rank(uid, source, is_default, found.calendar_id), found, r.get::<_, String>(7)?))
+        let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+        Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
     })?;
     let mut best: Option<((bool, bool, i64), StoredEvent)> = None;
     for row in rows {
-        let (rank, found, data) = row?;
-        if let Some(rid) = recurrence_id {
-            let event: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {}: {e}", found.event_id)))?;
-            if !event.recurrence_id.is_some_and(|stored| rid.names(&stored, here)) {
-                continue;
-            }
+        let (rank, event_id, calendar_id, data) = row?;
+        if best.as_ref().is_some_and(|(b, _)| *b <= rank) {
+            continue;
         }
-        if best.as_ref().is_none_or(|(b, _)| rank < *b) {
-            best = Some((rank, found));
+        let event: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {event_id}: {e}")))?;
+        if recurrence_id.is_some_and(|rid| !event.recurrence_id.is_some_and(|stored| rid.names(&stored, here))) {
+            continue;
         }
+        best = Some((rank, StoredEvent { event_id, calendar_id, event }));
     }
     Ok(best.map(|(_, e)| e))
 }
@@ -139,6 +129,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    use crate::calendar::Response;
     use crate::calendar::invitation::tests::{import, jolta, mail};
     use crate::calendar::series::Horizon;
 
@@ -215,7 +206,7 @@ mod tests {
             .write(|tx| crate::store::apply_item(tx, calendar, "remote-1", None, &[event.clone()], None, &horizon))
             .unwrap();
         let stored = jolta.store.read(|c| stored_event(c, &event.uid, None, chrono_tz::Europe::Brussels)).unwrap().unwrap();
-        assert_eq!((stored.calendar_id, stored.my_response, stored.sequence), (calendar, Some(Response::Accepted), 2));
+        assert_eq!((stored.calendar_id, stored.event.my_response(), stored.event.sequence), (calendar, Some(Response::Accepted), 2));
         assert_eq!(jolta.store.read(|c| stored_event(c, "someone-else", None, chrono_tz::Europe::Brussels)).unwrap(), None);
         jolta.store.write(|tx| crate::store::set_calendar_shown(tx, calendar, false)).unwrap();
         assert_eq!(jolta.store.read(|c| stored_event(c, &event.uid, None, chrono_tz::Europe::Brussels)).unwrap(), None, "hidden calendars don't count");
@@ -237,8 +228,8 @@ mod tests {
             zone: crate::calendar::Zone::Tz(chrono_tz::UTC),
         });
         let found = |rid: &Moment| jolta.store.read(|c| stored_event(c, &moved.uid, Some(rid), chrono_tz::Europe::Brussels)).unwrap();
-        assert_eq!(found(&brussels).map(|s| s.sequence), Some(3));
-        assert_eq!(found(&utc).map(|s| s.sequence), Some(3), "09:30 Brussels is 08:30 UTC in November");
+        assert_eq!(found(&brussels).map(|s| s.event.sequence), Some(3));
+        assert_eq!(found(&utc).map(|s| s.event.sequence), Some(3), "09:30 Brussels is 08:30 UTC in November");
         let later = Moment::Time(crate::calendar::Local { wall: local.wall + chrono::Duration::hours(1), ..local });
         assert_eq!(found(&later), None);
         assert_eq!(jolta.store.read(|c| stored_event(c, &moved.uid, None, chrono_tz::Europe::Brussels)).unwrap(), None, "no master stored");

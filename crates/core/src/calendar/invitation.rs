@@ -27,6 +27,18 @@ text_enum!(Method {
 pub struct Invitation {
     pub method: Method,
     pub event: EventData,
+    /// False when the part names the event without a DTSTART, which only
+    /// `Method::names_without_start` allows. `event.span` is then a
+    /// stand-in, and the time comes from the calendar's copy.
+    pub dated: bool,
+}
+
+impl Method {
+    /// RFC 5546 leaves DTSTART out of REFRESH and makes it optional in
+    /// CANCEL, REPLY and DECLINECOUNTER.
+    fn names_without_start(self) -> bool {
+        matches!(self, Method::Refresh | Method::Cancel | Method::Reply | Method::DeclineCounter)
+    }
 }
 
 /// A calendar part bigger than this is not an invitation anyone wrote by hand.
@@ -63,9 +75,9 @@ pub fn in_message(msg: &MessageRef, me: &[String]) -> Vec<Invitation> {
             },
             None => Method::Publish,
         };
-        for event in ical::read(&text, me).unwrap_or_default() {
-            if seen.insert((event.uid.clone(), event.recurrence_id)) {
-                out.push(Invitation { method, event });
+        for (event, dated) in ical::read_invitation(&text, me).unwrap_or_default() {
+            if (dated || method.names_without_start()) && seen.insert((event.uid.clone(), event.recurrence_id)) {
+                out.push(Invitation { method, event, dated });
             }
         }
     }

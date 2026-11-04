@@ -23,7 +23,10 @@ fn event(c: &EventCard) -> String {
     if let Some(answer) = c.answer {
         let _ = write!(h, "<span class=\"jolta-invite-answer\">{answer}</span>");
     }
-    let _ = write!(h, "</div><div class=\"jolta-invite-title\">{}</div><div class=\"jolta-invite-when\">{}</div>", escape(&c.title), escape(&c.when));
+    let _ = write!(h, "</div><div class=\"jolta-invite-title\">{}</div>", escape(&c.title));
+    if let Some(when) = &c.when {
+        let _ = write!(h, "<div class=\"jolta-invite-when\">{}</div>", escape(when));
+    }
     if let Some(other) = &c.elsewhere {
         let _ = write!(h, "<div class=\"jolta-invite-elsewhere\">{}</div>", escape(other));
     }
@@ -154,7 +157,7 @@ mod tests {
             label: "Invitation",
             title: "<img src=x onerror=alert(1)> & co".into(),
             cancelled: false,
-            when: "Thu 12 Nov · 16:00 to 16:45".into(),
+            when: Some("Thu 12 Nov · 16:00 to 16:45".into()),
             elsewhere: Some("10:00 to 10:45 New York".into()),
             repeat: None,
             location: Some("<b>Room</b>".into()),

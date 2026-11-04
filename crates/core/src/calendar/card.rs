@@ -29,8 +29,9 @@ pub struct EventCard {
     pub title: String,
     pub cancelled: bool,
     /// "Thu 5 Nov · 16:00 to 16:45" in the user's zone; the next
-    /// occurrence of a series that has started.
-    pub when: String,
+    /// occurrence of a series that has started. None when neither the
+    /// message nor the calendar gives a time.
+    pub when: Option<String>,
     /// "10:00 to 10:45 New York", when the event's own clock differs.
     pub elsewhere: Option<String>,
     pub repeat: Option<String>,
@@ -113,20 +114,42 @@ pub struct Context<'a> {
 pub fn cards(conn: &Connection, invitations: &[Invitation], cx: &Context) -> Result<Vec<Card>> {
     let mut out = Vec::new();
     for (_, events) in series::group(invitations.iter().map(|i| i.event.clone()).collect()) {
-        let method = invitations.iter().find(|i| i.event.uid == events[0].uid).map_or(Method::Publish, |i| i.method);
-        out.push(match method {
-            Method::Reply => Card::Reply(reply(&events[0], cx)),
-            _ => Card::Event(event(conn, method, &events, cx)?),
+        let sent = events.iter().find(|e| e.recurrence_id.is_none()).unwrap_or(&events[0]);
+        let i = invitations.iter().find(|i| i.event.uid == sent.uid && i.event.recurrence_id == sent.recurrence_id).expect("grouped from these");
+        // Without a start the message only names its event; the calendar's
+        // copy, when there is one, says when and where it is.
+        let copy;
+        let described: &[EventData] = if i.dated {
+            &events
+        } else {
+            copy = store::stored_event(conn, &sent.uid, sent.recurrence_id.as_ref(), cx.here)?;
+            copy.as_ref().map_or(&[], |c| std::slice::from_ref(&c.event))
+        };
+        out.push(match i.method {
+            Method::Reply => Card::Reply(reply(sent, described.first(), cx)),
+            method => Card::Event(event(conn, method, &events, described, cx)?),
         });
     }
     Ok(out)
 }
 
-fn event(conn: &Connection, method: Method, events: &[EventData], cx: &Context) -> Result<EventCard> {
-    let master = events.iter().find(|e| e.recurrence_id.is_none());
-    let (shown, span) = next(master, events, cx);
-    let (when, elsewhere) = when(&span, shown, cx);
-    let bounds = span.bounds(cx.here);
+/// `message` holds the events the mail sends, which say who asked and which
+/// version it is; `described` the ones that give the time and place: the
+/// same events, the calendar's copy, or none.
+fn event(conn: &Connection, method: Method, message: &[EventData], described: &[EventData], cx: &Context) -> Result<EventCard> {
+    let master = described.iter().find(|e| e.recurrence_id.is_none());
+    let occurrence = (!described.is_empty()).then(|| next(master, described, cx));
+    let sent = message.iter().find(|e| e.recurrence_id.is_none()).unwrap_or(&message[0]);
+    let shown = occurrence.map_or(sent, |(e, _)| e);
+    let said = message.iter().find(|e| e.recurrence_id == shown.recurrence_id).unwrap_or(sent);
+    let bounds = occurrence.map(|(_, span)| span.bounds(cx.here));
+    let (when, elsewhere) = match occurrence {
+        Some((e, span)) => {
+            let (when, elsewhere) = when(&span, e, cx);
+            (Some(when), elsewhere)
+        }
+        None => (None, None),
+    };
     let stored = match store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), cx.here)? {
         None if shown.recurrence_id.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, cx.here)?,
         found => found,
@@ -135,28 +158,27 @@ fn event(conn: &Connection, method: Method, events: &[EventData], cx: &Context) 
     let mut notes = Vec::new();
     match method {
         Method::Cancel => notes.push(Note { text: "Cancelled by the organizer".into(), warn: true }),
-        Method::Counter => notes.push(Note { text: with_comment(format!("{} proposed this new time", first_attendee(shown)), shown), warn: false }),
+        Method::Counter => notes.push(Note { text: with_comment(format!("{} proposed this new time", first_attendee(said)), said), warn: false }),
         Method::DeclineCounter => notes.push(Note { text: "The organizer kept the original time".into(), warn: false }),
-        Method::Refresh => notes.push(Note { text: format!("{} asked for the latest version", first_attendee(shown)), warn: false }),
+        Method::Refresh => notes.push(Note { text: format!("{} asked for the latest version", first_attendee(said)), warn: false }),
         Method::Add => notes.push(Note { text: "Adds dates to a repeating event".into(), warn: false }),
         Method::Request | Method::Publish | Method::Reply => {}
     }
-    if stored.as_ref().is_some_and(|s| s.sequence > shown.sequence) {
+    if stored.as_ref().is_some_and(|s| s.event.sequence > said.sequence) {
         notes.push(Note { text: "Your calendar has a newer version of this event".into(), warn: false });
     }
-    if method != Method::Cancel && stranger(conn, shown, cx)? {
+    if method != Method::Cancel && stranger(conn, said, cx)? {
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
 
     let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
-    let ends = match bounds {
-        Bounds::Utc { end, .. } => end,
-        Bounds::Days { end, .. } => tz::instant(day(end).and_time(chrono::NaiveTime::MIN), cx.here),
+    let availability = match bounds {
+        Some(bounds) if wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
+        _ => None,
     };
-    let availability = if wants_time && ends > cx.now { availability(conn, &shown.uid, bounds, &shown.title, cx)? } else { None };
 
     Ok(EventCard {
-        label: label(method, shown),
+        label: label(method, said),
         title: if shown.title.trim().is_empty() { "(no title)".into() } else { shown.title.trim().to_string() },
         cancelled: method == Method::Cancel || shown.status == EventStatus::Cancelled,
         when,
@@ -168,9 +190,16 @@ fn event(conn: &Connection, method: Method, events: &[EventData], cx: &Context) 
         organizer: shown.organizer.as_ref().map(|o| name(o, cx.me, false)),
         guests: guests(shown, cx.me),
         notes,
-        answer: stored.filter(|_| method != Method::Cancel).and_then(|s| s.my_response).map(answer_word),
+        answer: stored.filter(|_| method != Method::Cancel).and_then(|s| s.event.my_response()).map(answer_word),
         availability,
     })
+}
+
+fn ends(bounds: Bounds, cx: &Context) -> DateTime<Utc> {
+    match bounds {
+        Bounds::Utc { end, .. } => end,
+        Bounds::Days { end, .. } => tz::instant(day(end).and_time(chrono::NaiveTime::MIN), cx.here),
+    }
 }
 
 fn label(method: Method, e: &EventData) -> &'static str {
@@ -196,7 +225,9 @@ fn answer_word(r: Response) -> &'static str {
     }
 }
 
-fn reply(e: &EventData, cx: &Context) -> ReplyCard {
+/// `about` is the event the answer is about, when the reply or the
+/// calendar says when it is.
+fn reply(e: &EventData, about: Option<&EventData>, cx: &Context) -> ReplyCard {
     let who = e.attendees.first();
     let verb = match who.map(|a| a.response) {
         Some(Response::Accepted) => "accepted",
@@ -206,15 +237,20 @@ fn reply(e: &EventData, cx: &Context) -> ReplyCard {
         Some(Response::NeedsAction) | None => "replied",
     };
     let name = who.map_or_else(|| "Someone".into(), |a| name(&a.person, cx.me, false));
-    let day = match e.span.bounds(cx.here) {
+    let day = about.map(|a| match a.span.bounds(cx.here) {
         Bounds::Utc { start, .. } => date(start.with_timezone(&cx.here).date_naive(), cx),
         Bounds::Days { start, .. } => date(self::day(start), cx),
-    };
-    let title = e.title.trim();
+    });
+    let title = about.into_iter().chain([e]).map(|a| a.title.trim()).find(|t| !t.is_empty());
     ReplyCard {
         line: format!("{name} {verb}"),
         comment: who.map(|a| a.comment.trim().to_string()).filter(|c| !c.is_empty()),
-        about: if title.is_empty() { day } else { format!("{title} · {day}") },
+        about: match (title, day) {
+            (Some(title), Some(day)) => format!("{title} · {day}"),
+            (Some(title), None) => title.to_string(),
+            (None, Some(day)) => day,
+            (None, None) => "(no title)".into(),
+        },
     }
 }
 
@@ -300,11 +336,11 @@ fn location(e: &EventData) -> Option<String> {
 
 /// Join for a known provider only: an unknown link from a stranger's
 /// invitation stays in the mail, where opening it shows where it goes.
-fn join(e: &EventData, bounds: Bounds, now: DateTime<Utc>) -> Option<Join> {
+fn join(e: &EventData, bounds: Option<Bounds>, now: DateTime<Utc>) -> Option<Join> {
     let m = e.meeting.as_ref().filter(|m| m.provider != MeetingProvider::Other)?;
     let live = match bounds {
-        Bounds::Utc { start, end } => now >= start - Duration::minutes(5) && now < end,
-        Bounds::Days { .. } => false,
+        Some(Bounds::Utc { start, end }) => now >= start - Duration::minutes(5) && now < end,
+        Some(Bounds::Days { .. }) | None => false,
     };
     Some(Join { provider: provider_name(m.provider), url: m.join_url.clone(), app_url: meeting::app_url(m), live })
 }
@@ -529,7 +565,7 @@ mod tests {
         let c = event_card(&j, mail!("google-request.eml"));
         assert_eq!(c.label, "Invitation");
         assert_eq!(c.title, "Roadmap <review> & budget");
-        assert_eq!(c.when, "Thu 12 Nov · 16:00 to 16:45");
+        assert_eq!(c.when.as_deref(), Some("Thu 12 Nov · 16:00 to 16:45"));
         assert_eq!(c.elsewhere, None, "a time written in UTC has no zone of its own");
         assert_eq!(c.location.as_deref(), Some("Room 2.04 (8)"));
         assert_eq!(c.organizer.as_deref(), Some("Ann Dupont"));
@@ -574,7 +610,7 @@ mod tests {
     fn outlook_from_another_zone_and_icloud() {
         let (j, _) = jolta("card-outlook");
         let c = event_card(&j, mail!("outlook-request.eml"));
-        assert_eq!(c.when, "Mon 16 Nov · 16:00 to 17:00");
+        assert_eq!(c.when.as_deref(), Some("Mon 16 Nov · 16:00 to 17:00"));
         assert_eq!(c.elsewhere.as_deref(), Some("10:00 to 11:00 New York"));
         assert_eq!(c.location, None, "\"Microsoft Teams Meeting\" is the link, not a place");
         let join = c.join.unwrap();
@@ -583,7 +619,7 @@ mod tests {
         assert_eq!(c.guests.as_deref(), Some("Robin"));
 
         let icloud = event_card(&j, mail!("icloud-request.eml"));
-        assert_eq!(icloud.when, "Fri 6 Nov · 12:00 to 13:00");
+        assert_eq!(icloud.when.as_deref(), Some("Fri 6 Nov · 12:00 to 13:00"));
         assert_eq!(icloud.location.as_deref(), Some("Grote Markt"), "the name, not the address under it");
         assert_eq!(icloud.organizer.as_deref(), Some("Pat Morgan"));
         assert_eq!(icloud.guests, None, "only the organizer and the user");
@@ -609,6 +645,51 @@ mod tests {
             "Subject: s\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n\
              UID:u1\r\nSUMMARY:Sync\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\n{lines}END:VEVENT\r\nEND:VCALENDAR\r\n"
         )
+    }
+
+    /// An iTIP mail without DTSTART, as RFC 5546 has REFRESH and allows for
+    /// CANCEL, REPLY and DECLINECOUNTER.
+    fn undated(method: &str, uid: &str, lines: &str) -> String {
+        format!(
+            "Subject: s\r\nContent-Type: text/calendar; method={method}\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\n\
+             UID:{uid}\r\nDTSTAMP:20261104T080000Z\r\nORGANIZER;CN=Ann Dupont:mailto:ann@example.com\r\n{lines}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+    }
+
+    #[test]
+    fn a_message_without_a_start_takes_the_event_from_the_calendar() {
+        let (j, calendar) = jolta("card-undated");
+        let copy = invitation::find(mail!("google-request.eml"), &[ME.into()]).remove(0).event;
+        let uid = copy.uid.clone();
+        j.store.write(|tx| store::apply_item(tx, calendar, "g1", None, &[copy], None, &Horizon::around(now(), Brussels))).unwrap();
+        let asked = "ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\n";
+
+        let refresh = event_card(&j, undated("REFRESH", &uid, asked).as_bytes());
+        assert_eq!((refresh.label, refresh.title.as_str()), ("Update requested", "Roadmap <review> & budget"));
+        assert_eq!(refresh.when.as_deref(), Some("Thu 12 Nov · 16:00 to 16:45"));
+        assert_eq!(refresh.location.as_deref(), Some("Room 2.04 (8)"));
+        assert_eq!(refresh.notes[0].text, "Bo Nilsson asked for the latest version", "the guest who asked, not the copy's first guest");
+        assert_eq!(refresh.answer, Some("Not answered"));
+
+        let Card::Reply(reply) = cards_of(&j, undated("REPLY", &uid, "ATTENDEE;PARTSTAT=DECLINED;CN=Bo Nilsson:mailto:bo@example.com\r\n").as_bytes()).remove(0) else {
+            panic!("a reply")
+        };
+        assert_eq!((reply.line.as_str(), reply.about.as_str()), ("Bo Nilsson declined", "Roadmap <review> & budget · Thu 12 Nov"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_message_without_a_start_or_a_copy_shows_what_it_says() {
+        let (j, _) = jolta("card-undated-alone");
+        let cancel = event_card(&j, undated("CANCEL", "gone@example.com", "SUMMARY:Board dinner\r\nSEQUENCE:2\r\n").as_bytes());
+        assert_eq!((cancel.label, cancel.title.as_str(), cancel.cancelled), ("Cancelled", "Board dinner", true));
+        assert_eq!((cancel.when, cancel.availability), (None, None));
+        assert_eq!(cancel.organizer.as_deref(), Some("Ann Dupont"));
+
+        let refresh = event_card(&j, undated("REFRESH", "unknown@example.com", "ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\n").as_bytes());
+        assert_eq!((refresh.title.as_str(), refresh.when.as_deref()), ("(no title)", None));
+        assert!(cards_of(&j, undated("REQUEST", "u", "SUMMARY:No time\r\n").as_bytes()).is_empty(), "a request needs a start");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
     #[test]
@@ -641,7 +722,7 @@ mod tests {
     fn a_series_shows_its_next_occurrence() {
         let (j, _) = jolta("card-series");
         let c = event_card(&j, mail!("series.eml"));
-        assert_eq!(c.when, "Thu 5 Nov · 10:00 to 10:15", "Tuesday's has passed and Thursday's moved");
+        assert_eq!(c.when.as_deref(), Some("Thu 5 Nov · 10:00 to 10:15"), "Tuesday's has passed and Thursday's moved");
         assert_eq!(c.repeat.as_deref(), Some("Weekly on Tuesday and Thursday, until 17 December 2026"));
         assert_eq!(c.location, None, "the Zoom link is the Join button");
         assert_eq!(c.join.unwrap().provider, "Zoom");
@@ -658,7 +739,7 @@ mod tests {
             raw.replace_range(at..at + old.len(), new);
         }
         let c = event_card(&j, raw.as_bytes());
-        assert_eq!(c.when, "Thu 5 Nov · 10:00 to 10:15");
+        assert_eq!(c.when.as_deref(), Some("Thu 5 Nov · 10:00 to 10:15"));
         assert_eq!((c.title.as_str(), c.location.as_deref()), ("Standup in person", Some("Room B")));
         assert_eq!(c.join, None, "the series' Zoom link isn't this occurrence's");
         assert_eq!(c.repeat.as_deref(), Some("Weekly on Tuesday and Thursday, until 17 December 2026"), "still part of the series");
