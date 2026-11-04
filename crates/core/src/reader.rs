@@ -12,6 +12,7 @@ use crate::{Jolta, Result, imap, store};
 #[derive(Clone, Debug)]
 pub struct ThreadMessage {
     pub id: MessageId,
+    pub account: AccountId,
     pub from_name: String,
     pub from_addr: String,
     pub to: String,
@@ -37,7 +38,7 @@ pub struct ThreadDetail {
 pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, Vec<ThreadMessage>)> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, from_name, from_addr, to_addrs, cc_addrs, date, snippet, flags, subject, message_id,
-                EXISTS (SELECT 1 FROM vip v WHERE v.address = message.from_addr)
+                EXISTS (SELECT 1 FROM vip v WHERE v.address = message.from_addr), account_id
          FROM message WHERE thread_id = ?1 ORDER BY id",
     )?;
     let mut subject = String::new();
@@ -45,6 +46,7 @@ pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, V
         Ok((
             ThreadMessage {
                 id: r.get(0)?,
+                account: r.get(11)?,
                 from_name: r.get(1)?,
                 from_addr: r.get(2)?,
                 to: r.get(3)?,
@@ -150,9 +152,9 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
 /// The invitation cards of each message, empty for most.
 async fn invitation_cards(jolta: &Jolta, messages: &[ThreadMessage], raws: &[Vec<u8>]) -> Result<Vec<Vec<Card>>> {
     let me: Vec<String> = jolta.store.read_async(|c| Ok(store::accounts(c)?.into_iter().map(|a| a.address).collect())).await?;
-    let found: Vec<(String, Vec<invitation::Invitation>)> =
-        messages.iter().zip(raws).map(|(m, raw)| (m.from_addr.clone(), invitation::find(raw, &me))).collect();
-    if found.iter().all(|(_, i)| i.is_empty()) {
+    let found: Vec<(MessageId, AccountId, String, Vec<invitation::Invitation>)> =
+        messages.iter().zip(raws).map(|(m, raw)| (m.id, m.account, m.from_addr.clone(), invitation::find(raw, &me))).collect();
+    if found.iter().all(|(.., i)| i.is_empty()) {
         return Ok(vec![Vec::new(); messages.len()]);
     }
     jolta
@@ -161,7 +163,9 @@ async fn invitation_cards(jolta: &Jolta, messages: &[ThreadMessage], raws: &[Vec
             let (now, here) = (chrono::Utc::now(), tz::here());
             found
                 .iter()
-                .map(|(sender, invitations)| card::cards(c, invitations, &card::Context { me: &me, sender, now, here }))
+                .map(|(message, account, sender, invitations)| {
+                    card::cards(c, invitations, &card::Context { message: *message, account: *account, me: &me, sender, now, here })
+                })
                 .collect()
         })
         .await

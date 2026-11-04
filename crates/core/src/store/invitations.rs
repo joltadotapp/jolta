@@ -3,12 +3,12 @@
 //! wrote to the sender.
 
 use chrono_tz::Tz;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use super::calendar::moment_text;
 use crate::calendar::invitation::Invitation;
 use crate::calendar::series::copy_rank;
-use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment};
+use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response};
 use crate::model::*;
 use crate::{Error, Result, compose};
 
@@ -108,6 +108,34 @@ pub fn stored_series(conn: &Connection, uid: &str) -> Result<Vec<EventData>> {
         .filter(|(_, _, calendar, _)| *calendar == best.1)
         .map(|(_, id, _, data)| serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}"))))
         .collect()
+}
+
+/// Keeps the answer the user gave an event's invitation on an account:
+/// the whole event, or with `recurrence_id` one occurrence.
+pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, answer: Response) -> Result<()> {
+    conn.execute(
+        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (account_id, uid, recurrence_id) DO UPDATE SET answer = excluded.answer",
+        params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), answer],
+    )?;
+    // A whole series answered again replaces what was said for single occurrences.
+    if recurrence_id.is_none() {
+        conn.execute("DELETE FROM invitation_answer WHERE account_id = ?1 AND uid = ?2 AND recurrence_id != ''", params![account, uid])?;
+    }
+    Ok(())
+}
+
+/// The answer kept for an occurrence, else for its whole event.
+pub fn remembered_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<Response>> {
+    let rid = recurrence_id.map(moment_text).unwrap_or_default();
+    Ok(conn
+        .query_row(
+            "SELECT answer FROM invitation_answer WHERE account_id = ?1 AND uid = ?2 AND recurrence_id IN (?3, '')
+             ORDER BY recurrence_id = '' LIMIT 1",
+            params![account, uid, rid],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// Mail from the address that the user answered, through the partial

@@ -11,7 +11,8 @@ use super::detail::{city, instant_only, offset, range};
 use super::invitation::{Invitation, Method};
 use super::recur::Source;
 use super::series::{self, Horizon};
-use super::{Bounds, EventData, EventStatus, MeetingProvider, Person, Response, Role, Span, Zone, meeting, recur, tz};
+use super::{Bounds, CalendarSource, EventData, EventStatus, MeetingProvider, Moment, Person, Response, Role, Span, Zone, meeting, recur, tz};
+use crate::model::{AccountId, MessageId};
 use crate::{Result, store};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,9 +42,32 @@ pub struct EventCard {
     /// "Ann, Bo and 4 others".
     pub guests: Option<String>,
     pub notes: Vec<Note>,
-    /// The user's answer in their own calendar: "Accepted", "Not answered".
-    pub answer: Option<&'static str>,
+    /// The user's answer: in their own calendar, else the one they gave
+    /// from Jolta for an event no calendar of theirs holds.
+    pub answer: Option<Response>,
     pub availability: Option<Availability>,
+    /// Set when the user can answer: an invitation to them that they don't
+    /// organize.
+    pub answering: Option<Answering>,
+}
+
+/// What the answer buttons need.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answering {
+    pub message: MessageId,
+    pub uid: String,
+    /// For a repeating event, the occurrence the card shows, which "This
+    /// occurrence only" answers.
+    pub occurrence: Option<ShownOccurrence>,
+    /// "Ann", whom the answer tells.
+    pub organizer: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShownOccurrence {
+    pub recurrence_id: Moment,
+    /// "Thu 5 Nov".
+    pub day: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +125,9 @@ pub struct ReplyCard {
 
 /// What a card needs besides the invitation.
 pub struct Context<'a> {
+    /// The message the invitation came in, and the account it came to.
+    pub message: MessageId,
+    pub account: AccountId,
     /// The user's own addresses.
     pub me: &'a [String],
     /// The mail's From address, for an invitation without an organizer.
@@ -155,6 +182,7 @@ fn stored_copy(conn: &Connection, sent: &EventData, cx: &Context) -> Result<Vec<
 fn event(conn: &Connection, method: Method, message: &[EventData], described: &[EventData], cx: &Context) -> Result<EventCard> {
     let master = described.iter().find(|e| e.recurrence_id.is_none());
     let occurrence = (!described.is_empty()).then(|| next(master, described, cx));
+    let repeats = master.is_some_and(|m| m.recurrence.is_some());
     let sent = message.iter().find(|e| e.recurrence_id.is_none()).unwrap_or(&message[0]);
     let shown = occurrence.map_or(sent, |(e, _)| e);
     let said = message.iter().find(|e| e.recurrence_id == shown.recurrence_id).unwrap_or(sent);
@@ -187,6 +215,23 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
 
+    let answering = answerable(method, sent, cx).then(|| Answering {
+        message: cx.message,
+        uid: sent.uid.clone(),
+        occurrence: occurrence.filter(|_| repeats).map(|(e, span)| ShownOccurrence {
+            recurrence_id: e.recurrence_id.unwrap_or(span.start()),
+            day: match span.bounds(cx.here) {
+                Bounds::Utc { start, .. } => date(start.with_timezone(&cx.here).date_naive(), cx),
+                Bounds::Days { start, .. } => date(day(start), cx),
+            },
+        }),
+        organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, cx.me, true)),
+    });
+    let remembered = match &answering {
+        Some(a) => store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?,
+        None => None,
+    };
+
     let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
     let availability = match bounds {
         Some(bounds) if wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
@@ -206,9 +251,33 @@ fn event(conn: &Connection, method: Method, message: &[EventData], described: &[
         organizer: shown.organizer.as_ref().map(|o| name(o, cx.me, false)),
         guests: guests(shown, cx.me),
         notes,
-        answer: stored.filter(|_| method != Method::Cancel).and_then(|s| s.event.my_response()).map(answer_word),
+        answer: match stored.filter(|_| method != Method::Cancel) {
+            // Jolta answers through these, so they hold the answer it gave.
+            Some(s) if answered_there(conn, &s)? => s.event.my_response(),
+            stored => remembered.or(stored.and_then(|s| s.event.my_response())),
+        },
         availability,
+        answering,
     })
+}
+
+fn answered_there(conn: &Connection, copy: &store::StoredEvent) -> Result<bool> {
+    let source = store::calendar(conn, copy.calendar_id)?.source;
+    Ok(!matches!(source, CalendarSource::Webcal | CalendarSource::Local))
+}
+
+/// An invitation the user can answer: a request, or an event added or
+/// shared that names them, from an organizer who isn't the user.
+fn answerable(method: Method, said: &EventData, cx: &Context) -> bool {
+    let Some(organizer) = &said.organizer else { return false };
+    if is_me(&organizer.address, cx.me) {
+        return false;
+    }
+    match method {
+        Method::Request => true,
+        Method::Add | Method::Publish => said.my_response().is_some(),
+        Method::Cancel | Method::Reply | Method::Counter | Method::DeclineCounter | Method::Refresh => false,
+    }
 }
 
 fn ends(bounds: Bounds, cx: &Context) -> DateTime<Utc> {
@@ -231,7 +300,7 @@ fn label(method: Method, e: &EventData) -> &'static str {
     }
 }
 
-fn answer_word(r: Response) -> &'static str {
+pub fn answer_word(r: Response) -> &'static str {
     match r {
         Response::Accepted => "Accepted",
         Response::Tentative => "Maybe",
@@ -549,7 +618,7 @@ mod tests {
     fn cards_of(j: &crate::Jolta, raw: &[u8]) -> Vec<Card> {
         let me = [ME.to_string()];
         let found = invitation::find(raw, &me);
-        let cx = Context { me: &me, sender: "sender@example.com", now: now(), here: Brussels };
+        let cx = Context { message: MessageId(1), account: AccountId(1), me: &me, sender: "sender@example.com", now: now(), here: Brussels };
         j.store.read(|c| cards(c, &found, &cx)).unwrap()
     }
 
@@ -616,7 +685,7 @@ mod tests {
             })
             .unwrap();
         let c = event_card(&j, mail!("google-request.eml"));
-        assert_eq!(c.answer, Some("Accepted"));
+        assert_eq!(c.answer, Some(Response::Accepted));
         assert_eq!(c.availability.as_ref().unwrap().text, "Free at this time");
         assert!(notes(&c).is_empty(), "the user wrote to the organizer");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
@@ -685,7 +754,7 @@ mod tests {
         assert_eq!(refresh.when.as_deref(), Some("Thu 12 Nov · 16:00 to 16:45"));
         assert_eq!(refresh.location.as_deref(), Some("Room 2.04 (8)"));
         assert_eq!(refresh.notes[0].text, "Bo Nilsson asked for the latest version", "the guest who asked, not the copy's first guest");
-        assert_eq!(refresh.answer, Some("Not answered"));
+        assert_eq!(refresh.answer, Some(Response::NeedsAction));
 
         let Card::Reply(reply) = cards_of(&j, undated("REPLY", &uid, "ATTENDEE;PARTSTAT=DECLINED;CN=Bo Nilsson:mailto:bo@example.com\r\n").as_bytes()).remove(0) else {
             panic!("a reply")

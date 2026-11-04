@@ -5,7 +5,8 @@
 use std::fmt::Write;
 
 use super::escape;
-use crate::calendar::card::{Block, Card, EventCard, Join, ReplyCard, Strip};
+use crate::calendar::Response;
+use crate::calendar::card::{Answering, Block, Card, EventCard, Join, ReplyCard, Strip, answer_word};
 
 pub fn card(card: &Card) -> String {
     match card {
@@ -16,12 +17,14 @@ pub fn card(card: &Card) -> String {
 
 fn event(c: &EventCard) -> String {
     let mut h = format!(
-        "<section class=\"jolta-invite{}\"><div class=\"jolta-invite-head\"><span class=\"jolta-invite-label\">{CALENDAR}{}</span>",
+        "<section class=\"jolta-invite{}\"{}><div class=\"jolta-invite-head\"><span class=\"jolta-invite-label\">{CALENDAR}{}</span>",
         if c.cancelled { " jolta-invite-cancelled" } else { "" },
+        c.answering.as_ref().map(|a| format!(" data-rsvp=\"{}\"", a.message.0)).unwrap_or_default(),
         c.label
     );
-    if let Some(answer) = c.answer {
-        let _ = write!(h, "<span class=\"jolta-invite-answer\">{answer}</span>");
+    // The chosen button says it when the user can answer.
+    if let Some(answer) = c.answer.filter(|_| c.answering.is_none()) {
+        let _ = write!(h, "<span class=\"jolta-invite-answer\">{}</span>", answer_word(answer));
     }
     let _ = write!(h, "</div><div class=\"jolta-invite-title\">{}</div>", escape(&c.title));
     if let Some(when) = &c.when {
@@ -55,11 +58,58 @@ fn event(c: &EventCard) -> String {
             h.push_str(&strip(s));
         }
     }
-    // Answer buttons join Join in this row.
-    if let Some(j) = &c.join {
-        let _ = write!(h, "<div class=\"jolta-invite-actions\">{}</div>", join(j));
+    let answers = c.answering.as_ref().map(|a| answers(a, c.answer)).unwrap_or_default();
+    let join = c.join.as_ref().map(join).unwrap_or_default();
+    if !answers.is_empty() || !join.is_empty() {
+        let _ = write!(h, "<div class=\"jolta-invite-actions\">{answers}{join}</div>");
+    }
+    if let Some(a) = &c.answering {
+        h.push_str(&options(a));
     }
     h.push_str("</section>");
+    h
+}
+
+/// Accept, Maybe and Decline as `x-rsvp:<message>/<answer>` links with
+/// their keys; the answer given reads as done ("Accepted").
+fn answers(a: &Answering, given: Option<Response>) -> String {
+    let mut h = String::from("<span class=\"jolta-rsvp\" role=\"group\" aria-label=\"Your answer\">");
+    for (name, label, done, key, response) in [
+        ("accept", "Accept", "Accepted", 'Y', Response::Accepted),
+        ("maybe", "Maybe", "Maybe", 'M', Response::Tentative),
+        ("decline", "Decline", "Declined", 'N', Response::Declined),
+    ] {
+        let chosen = given == Some(response);
+        let _ = write!(
+            h,
+            "<a class=\"jolta-rsvp-{name}{}\" href=\"x-rsvp:{}/{name}\" title=\"{label} ({key})\" aria-pressed=\"{chosen}\">{}<span>{}</span><kbd>{key}</kbd></a>",
+            if chosen { " jolta-chosen" } else { "" },
+            a.message.0,
+            if chosen { CHECK } else { "" },
+            if chosen { done } else { label }
+        );
+    }
+    h.push_str("</span>");
+    h
+}
+
+/// The choices that change how the next answer goes out. The app keeps
+/// them and marks them here while the card is on screen.
+fn options(a: &Answering) -> String {
+    let id = a.message.0;
+    let mut h = format!(
+        "<div class=\"jolta-rsvp-options\"><a class=\"jolta-rsvp-note\" href=\"x-rsvp:{id}/note\">Add a note</a>\
+         <a class=\"jolta-rsvp-quiet\" href=\"x-rsvp:{id}/quiet\" title=\"Set your answer without telling {}\">{BOX}Don&apos;t send a reply</a>",
+        escape(if a.organizer.is_empty() { "the organizer" } else { &a.organizer })
+    );
+    if let Some(o) = &a.occurrence {
+        let _ = write!(
+            h,
+            "<a class=\"jolta-rsvp-scope\" href=\"x-rsvp:{id}/scope\" title=\"Answer the whole series or only {}\"><span>Whole series</span>{CHEVRON}</a>",
+            escape(&o.day)
+        );
+    }
+    h.push_str("</div>");
     h
 }
 
@@ -145,6 +195,16 @@ const CALENDAR: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" ar
 stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"4.5\" y=\"5.5\" width=\"15\" height=\"14\" rx=\"2\"/>\
 <path d=\"M4.5 10h15M9 3.5v4M15 3.5v4\"/></svg>";
 
+const CHECK: &str = "<svg width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" \
+stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 12.5l4.5 4.5L19 7.5\"/></svg>";
+
+const BOX: &str = "<svg width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" \
+stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"4\"/>\
+<path class=\"jolta-tick\" d=\"M8 12.3l2.8 2.8L16.2 9\"/></svg>";
+
+const CHEVRON: &str = "<svg width=\"9\" height=\"9\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" \
+stroke-width=\"2.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6 9.5l6 6 6-6\"/></svg>";
+
 const REPEAT: &str = "<svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" \
 stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 11V9.5A3.5 3.5 0 0 1 8.5 6H19m-3-3 3 3-3 3\"/>\
 <path d=\"M19 13v1.5a3.5 3.5 0 0 1-3.5 3.5H5m3 3-3-3 3-3\"/></svg>";
@@ -160,7 +220,8 @@ stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::card::{Availability, Note};
+    use crate::calendar::card::{Availability, Note, ShownOccurrence};
+    use crate::model::MessageId;
     use crate::render::{MessageView, render_thread};
     use crate::smime::Protection;
 
@@ -183,12 +244,13 @@ mod tests {
             organizer: Some("Ann <ann@example.com>".into()),
             guests: Some("Bo and Cy".into()),
             notes: vec![Note { text: "You haven't written to this sender before".into(), warn: true }],
-            answer: Some("Not answered"),
+            answer: Some(Response::NeedsAction),
             availability: Some(Availability {
                 text: "Overlaps with <script>".into(),
                 conflict: true,
                 strip: Some(Strip { hours: vec![(0.0, "14:00".into())], busy: vec![block("<i>Standup</i>", true)], lanes: 1, this: block("x", false) }),
             }),
+            answering: None,
         }
     }
 
@@ -203,7 +265,43 @@ mod tests {
         assert!(html.contains("class=\"jolta-join jolta-live\""), "Join is the accent while the meeting runs");
         assert!(html.contains("<div class=\"jolta-invite-note jolta-warn\">You&#32;haven&apos;t"));
         assert!(html.contains("jolta-strip-busy jolta-conflict"));
-        assert!(html.contains("<span class=\"jolta-invite-answer\">Not answered</span>"));
+        assert!(html.contains("<span class=\"jolta-invite-answer\">Not answered</span>"), "no buttons on this card, so the badge says it");
+    }
+
+    #[test]
+    fn the_answer_buttons_show_the_answer_given() {
+        let answering = Answering { message: MessageId(7), uid: "u".into(), occurrence: None, organizer: "Ann <b>".into() };
+        let with = |answer: Option<Response>, answering: Option<Answering>| card(&Card::Event(EventCard { answer, answering, join: None, ..hostile() }));
+        let chosen = |html: &str| html.matches("jolta-chosen").count();
+
+        let open = with(Some(Response::NeedsAction), Some(answering.clone()));
+        for (name, key) in [("accept", 'Y'), ("maybe", 'M'), ("decline", 'N')] {
+            assert!(open.contains(&format!("href=\"x-rsvp:7/{name}\"")), "{open}");
+            assert!(open.contains(&format!("<kbd>{key}</kbd>")));
+        }
+        assert_eq!((chosen(&open), open.matches("aria-pressed=\"false\"").count()), (0, 3), "nothing chosen yet");
+        assert!(!open.contains("jolta-invite-answer"), "the buttons say it, not a badge");
+        assert!(open.contains("href=\"x-rsvp:7/note\">Add a note</a>") && open.contains("href=\"x-rsvp:7/quiet\""));
+        assert!(open.contains("without telling Ann&#32;&lt;b&gt;"), "{open}");
+        assert!(!open.contains("x-rsvp:7/scope"), "a single event has no series to choose from");
+        assert!(open.find("jolta-rsvp-accept").unwrap() < open.find("jolta-rsvp-options").unwrap(), "options under the buttons");
+
+        let maybe = with(Some(Response::Tentative), Some(answering.clone()));
+        assert_eq!(chosen(&maybe), 1);
+        assert!(maybe.contains("<a class=\"jolta-rsvp-maybe jolta-chosen\" href=\"x-rsvp:7/maybe\" title=\"Maybe (M)\" aria-pressed=\"true\">"), "{maybe}");
+        assert!(maybe.contains("<span>Accept</span>") && maybe.contains("<span>Decline</span>"));
+        let accepted = with(Some(Response::Accepted), Some(answering.clone()));
+        assert!(accepted.contains("<span>Accepted</span>") && !accepted.contains("<span>Accept</span>"), "the answer given reads as done");
+
+        let series = Answering {
+            occurrence: Some(ShownOccurrence { recurrence_id: crate::calendar::Moment::Date(chrono::NaiveDate::from_ymd_opt(2026, 11, 5).unwrap()), day: "Thu 5 Nov".into() }),
+            ..answering
+        };
+        let series = with(None, Some(series));
+        assert!(series.contains("href=\"x-rsvp:7/scope\" title=\"Answer the whole series or only Thu&#32;5&#32;Nov\"><span>Whole series</span>"), "{series}");
+
+        let own = with(Some(Response::Accepted), None);
+        assert!(!own.contains("x-rsvp:") && own.contains("<span class=\"jolta-invite-answer\">Accepted</span>"), "no buttons, the badge says it");
     }
 
     #[test]
