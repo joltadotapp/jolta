@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use super::ical_edit::{Component, Object, Prop};
 use super::series::{self, Horizon};
 use super::sources::Change;
-use super::{Attendee, Calendar, CalendarSource, EventData, EventId, EventStatus, Local, Moment, Person, Response, Role, Span, Zone, sync, tz};
+use super::{Attendee, Bounds, Calendar, CalendarSource, EventData, EventId, EventStatus, Local, Moment, Person, Response, Role, Span, Zone, sync, tz};
 use crate::compose::Built;
 use crate::{Error, Jolta, Result, store};
 
@@ -298,10 +298,7 @@ fn with_answer(data: &EventData, rsvp: &Rsvp, me: &str) -> EventData {
 /// (`20261112T100000` on the series' clock, `20261112T090000Z`, `20261112`).
 pub fn occurrence(jolta: &Jolta, event: EventId, spec: &str) -> Result<Moment> {
     let here = tz::here();
-    let (_, rows, _) = jolta.store.read(|c| series_of(c, event))?;
-    let (masters, overrides): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.is_master);
-    let master = masters.into_iter().next().map(|r| r.stored.data);
-    let overrides: Vec<EventData> = overrides.into_iter().map(|r| r.stored.data).collect();
+    let (master, overrides) = jolta.store.read(|c| series_parts(c, event))?;
     let spec = spec.trim();
     if let Ok(day) = NaiveDate::parse_from_str(spec, "%Y-%m-%d") {
         let midnight = |d: NaiveDate| tz::instant(d.and_time(chrono::NaiveTime::MIN), here);
@@ -328,6 +325,34 @@ pub fn occurrence(jolta: &Jolta, event: EventId, spec: &str) -> Result<Moment> {
         _ => Zone::Floating,
     };
     parse_moment(spec, None, zone).ok_or_else(|| Error::Other(format!("{spec} is not a day like 2026-11-12 or a recurrence id like 20261112T100000")))
+}
+
+/// The recurrence id of the occurrence of `event`'s series that the
+/// calendar views place at `at`.
+pub fn occurrence_at(conn: &Connection, event: EventId, at: Bounds, here: Tz) -> Result<Moment> {
+    let (master, overrides) = series_parts(conn, event)?;
+    let midnight = |n: i32| tz::instant((NaiveDate::default() + chrono::Duration::days(n.into())).and_time(chrono::NaiveTime::MIN), here);
+    let (start, end) = match at {
+        Bounds::Utc { start, end } => (start, end),
+        Bounds::Days { start, end } => (midnight(start), midnight(end)),
+    };
+    let day = chrono::Duration::days(1);
+    let window = super::recur::Window { start: start - day, end: end + day };
+    series::place(master.as_ref(), &overrides, &Horizon { window, here })
+        .into_iter()
+        .find(|o| o.span.bounds(here) == at)
+        .and_then(|o| match o.source {
+            super::recur::Source::Master => Some(o.span.start()),
+            super::recur::Source::Override(i) => overrides[i].recurrence_id,
+        })
+        .ok_or_else(|| Error::NotFound("Jolta has no occurrence of this meeting at that time.".into()))
+}
+
+/// The master and the overrides of `event`'s series.
+fn series_parts(conn: &Connection, event: EventId) -> Result<(Option<EventData>, Vec<EventData>)> {
+    let (_, rows, _) = series_of(conn, event)?;
+    let (masters, overrides): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.is_master);
+    Ok((masters.into_iter().next().map(|r| r.stored.data), overrides.into_iter().map(|r| r.stored.data).collect()))
 }
 
 /// A DATE or DATE-TIME value: `20261112`, `20261112T090000Z`, or a wall

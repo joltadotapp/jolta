@@ -84,6 +84,17 @@ pub fn in_message(msg: &MessageRef, me: &[String]) -> Vec<Invitation> {
     out
 }
 
+/// The calendar part of a raw message that names the event `uid`, as sent,
+/// for the reply to it.
+pub fn calendar_text(raw: &[u8], uid: &str) -> Option<String> {
+    let raw = crate::smime::readable(raw);
+    let msg = MessageParser::new().parse(&raw[..])?;
+    msg.parts()
+        .filter(is_calendar)
+        .map(|part| String::from_utf8_lossy(&part.decoded()).into_owned())
+        .find(|text| ical::read_invitation(text, &[]).unwrap_or_default().iter().any(|(e, _)| e.uid == uid))
+}
+
 /// Whether a raw message may hold a calendar part, without parsing it: its
 /// bytes name a calendar type or an `.ics` file, or S/MIME hides its parts.
 pub fn may_hold(raw: &[u8]) -> bool {

@@ -10,6 +10,7 @@ pub mod meeting;
 mod model;
 pub mod recur;
 pub mod remind;
+pub mod respond;
 pub mod rsvp;
 pub mod scheduler;
 pub mod series;
