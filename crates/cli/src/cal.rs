@@ -112,6 +112,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Disable { account } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
             sync::disable(jolta, a.id)?;
+            jolta.collect_blobs(std::time::Duration::from_secs(3600))?;
             println!("Calendar is off for {}. Its calendars and events are gone from Jolta; the server keeps them.", a.address);
             Ok(())
         }

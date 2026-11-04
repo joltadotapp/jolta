@@ -202,6 +202,11 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(climbing.waitForNonExistence(timeout: 5), "\(key) hides the Personal calendar's events")
         app.typeKey(key, modifierFlags: [])
         XCTAssertTrue(climbing.waitForExistence(timeout: 5), "\(key) again shows them")
+
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "compose-subject").firstMatch.waitForExistence(timeout: 5),
+                      "⌘N in calendar mode shows the new message in mail")
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     private func waitUntil(_ done: () -> Bool) -> Bool {

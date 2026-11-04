@@ -87,6 +87,7 @@ struct ComposeView: View {
                 }
                 FieldRow(label: "Subject") {
                     TextField("", text: draft.subject)
+                        .accessibilityIdentifier("compose-subject")
                         .focused($focus, equals: .subject)
                         // The body is an AppKit text view, outside SwiftUI's focus order.
                         .onKeyPress(.tab) {

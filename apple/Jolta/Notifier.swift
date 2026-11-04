@@ -25,8 +25,9 @@ enum NewMailBanners: String, CaseIterable {
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     var onOpen: ((Int64) -> Void)?
     /// An occurrence to show in calendar mode, by event id and time.
-    var onOpenEvent: ((Int64, OccurrenceTime?) -> Void)?
-    var onJoin: ((Int64, OccurrenceTime?) -> Void)?
+    /// A reminder's id and fire time; the app looks the event up again.
+    var onOpenEvent: ((String, Int64) -> Void)?
+    var onJoin: ((String, Int64) -> Void)?
 
     /// Scheduled reminders' identifiers start with this; the record's id follows.
     static let reminderPrefix = "cal-"
@@ -79,10 +80,18 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// stable id, which replaces a pending one with the same id, and pending
     /// reminders no longer listed are removed. Calendar triggers fire with
     /// Jolta closed.
-    func schedule(reminders: [ReminderRecord]) async {
+    /// `stillDue` says whether a snoozed reminder still stands; those that
+    /// don't are removed, and the rest count against the limit.
+    func schedule(reminders: [ReminderRecord], stillDue: (String, Int64) -> Bool) async {
         let center = UNUserNotificationCenter.current()
         let now = Int64(Date.now.timeIntervalSince1970)
-        let wanted = reminders.filter { $0.fireAt > now }.prefix(Self.reminderLimit)
+        let snoozed = await center.pendingNotificationRequests().filter { $0.identifier.hasPrefix(Self.snoozePrefix) }
+        let lapsed = snoozed.filter { request in
+            guard let (id, fireAt) = Self.reminder(request.content.userInfo) else { return true }
+            return !stillDue(id, fireAt)
+        }
+        center.removePendingNotificationRequests(withIdentifiers: lapsed.map(\.identifier))
+        let wanted = reminders.filter { $0.fireAt > now }.prefix(max(0, Self.reminderLimit - (snoozed.count - lapsed.count)))
         if !wanted.isEmpty {
             _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
         }
@@ -96,7 +105,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             content.sound = .default
             content.threadIdentifier = "calendar"
             content.categoryIdentifier = r.joinUrl == nil ? Category.event : Category.meeting
-            content.userInfo = ["event": r.eventId, "time": Self.encode(r.time)]
+            content.userInfo = ["reminder": r.id, "fireAt": r.fireAt]
             let when = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second],
                                                        from: Date(timeIntervalSince1970: TimeInterval(r.fireAt)))
             let request = UNNotificationRequest(identifier: Self.reminderPrefix + r.id, content: content,
@@ -120,18 +129,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         return parts.joined(separator: " · ")
     }
 
-    private nonisolated static func encode(_ time: OccurrenceTime) -> [String: Any] {
-        switch time {
-        case .timed(let start, let end): ["start": start, "end": end]
-        case .allDay(let first, let last): ["first": first, "last": last]
-        }
-    }
-
-    private nonisolated static func decode(_ value: Any?) -> OccurrenceTime? {
-        guard let d = value as? [String: Any] else { return nil }
-        if let start = (d["start"] as? NSNumber)?.int64Value, let end = (d["end"] as? NSNumber)?.int64Value { return .timed(start: start, end: end) }
-        if let first = d["first"] as? String, let last = d["last"] as? String { return .allDay(firstDay: first, lastDay: last) }
-        return nil
+    private nonisolated static func reminder(_ info: [AnyHashable: Any]) -> (String, Int64)? {
+        guard let id = info["reminder"] as? String, let fireAt = (info["fireAt"] as? NSNumber)?.int64Value else { return nil }
+        return (id, fireAt)
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
@@ -140,18 +140,17 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             await MainActor.run { onOpen?(thread) }
             return
         }
-        guard let event = (info["event"] as? NSNumber)?.int64Value else { return }
-        let time = Self.decode(info["time"])
+        guard let (id, fireAt) = Self.reminder(info) else { return }
         switch response.actionIdentifier {
         case Action.join:
-            await MainActor.run { onJoin?(event, time) }
+            await MainActor.run { onJoin?(id, fireAt) }
         case Action.snooze:
             let content = response.notification.request.content
             let id = Self.snoozePrefix + response.notification.request.identifier
             let request = UNNotificationRequest(identifier: id, content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 300, repeats: false))
             try? await center.add(request)
         default:
-            await MainActor.run { onOpenEvent?(event, time) }
+            await MainActor.run { onOpenEvent?(id, fireAt) }
         }
     }
 

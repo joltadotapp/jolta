@@ -405,6 +405,10 @@ final class CalendarModel {
         busyMonth = nil
         ahead = [:]
         load()
+        if let open = detailEvent {
+            let same = events.first { $0.record.calendarId == open.record.calendarId && $0.record.uid == open.record.uid && $0.record.time == open.record.time }
+            if let same { openDetail(same) } else { closeDetail() }
+        }
         reloadToday()
         refreshNextMeeting()
         onChange?()

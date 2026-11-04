@@ -1232,7 +1232,13 @@ impl Core {
     }
 
     pub fn remove_account(&self, account_id: i64) -> Result<()> {
-        Ok(self.running_engine()?.remove_account(AccountId(account_id))?)
+        let account = AccountId(account_id);
+        let calendars = self.jolta.store.read(|c| store::account_calendars(c, account))?;
+        self.running_engine()?.remove_account(account)?;
+        if !calendars.is_empty() {
+            self.calendar_changed(calendars.iter().map(|c| c.id));
+        }
+        Ok(())
     }
 
     /// Adds an iCloud, Fastmail or other IMAP account after checking the

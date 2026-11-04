@@ -92,6 +92,8 @@ pub struct OccurrenceRecord {
     /// The changed occurrence when one was changed, else the series.
     pub event_id: i64,
     pub calendar_id: i64,
+    /// With the calendar and the time, names the occurrence across syncs.
+    pub uid: String,
     pub color: Option<String>,
     pub title: String,
     pub location: String,
@@ -383,6 +385,7 @@ impl Core {
             .map(|o| OccurrenceRecord {
                 event_id: o.event_id.0,
                 calendar_id: o.calendar_id.0,
+                uid: o.uid,
                 color: o.color,
                 title: o.title,
                 location: o.location,
@@ -483,6 +486,13 @@ impl Core {
             .collect())
     }
 
+    /// The reminder `id` that fires at `fire_at`, as it stands now: a sync
+    /// may have replaced its event's row since it was scheduled. None when
+    /// the event moved or went, or its calendar is hidden or silent.
+    pub fn calendar_reminder(&self, id: String, fire_at: i64) -> Result<Option<ReminderRecord>> {
+        Ok(self.calendar_reminders(fire_at, fire_at + 1)?.into_iter().find(|r| r.id == id))
+    }
+
     /// The online meeting to join at `now`: one starting within 10 minutes,
     /// else the one running, else the next within a week.
     pub fn next_meeting(&self, now: i64) -> Result<Option<NextMeetingRecord>> {
@@ -504,7 +514,7 @@ impl Core {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.calendars().clone())
     }
 
-    fn calendar_changed(&self, ids: impl IntoIterator<Item = CalendarId>) {
+    pub(crate) fn calendar_changed(&self, ids: impl IntoIterator<Item = CalendarId>) {
         self.listener.on_event(CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() });
     }
 }

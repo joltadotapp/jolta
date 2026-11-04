@@ -271,6 +271,10 @@ fn a_feed_from_subscription_to_removal() {
         reminders.iter().map(|r| &r.id).collect::<Vec<_>>(),
         "rewritten rows keep their reminder ids"
     );
+    let delivered = &reminders[0];
+    assert_ne!(delivered.event_id, renamed[0].event_id, "the sync replaced the event's row");
+    let now = app.core.calendar_reminder(delivered.id.clone(), delivered.fire_at).unwrap().expect("a delivered reminder still resolves");
+    assert_eq!((now.event_id, now.title.as_str()), (renamed[0].event_id, "Daily standup"), "a notification acts on today's row, not the one it was scheduled with");
     assert!(app.events.seen("calendar synced"));
 
     let five_before = at(day(0), "08:55", brussels).timestamp();
@@ -280,6 +284,7 @@ fn a_feed_from_subscription_to_removal() {
 
     app.core.set_calendar_notify(info.id, false).unwrap();
     assert!(app.core.calendar_reminders(from, to).unwrap().is_empty(), "notifications off");
+    assert!(app.core.calendar_reminder(delivered.id.clone(), delivered.fire_at).unwrap().is_none(), "a snoozed reminder of a silenced calendar resolves to nothing");
 
     app.core.remove_calendar(info.id).unwrap();
     assert!(week(&app, monday, here).is_empty());

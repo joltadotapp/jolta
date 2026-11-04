@@ -370,6 +370,9 @@ pub struct OccurrenceRow {
     /// The override when this occurrence was changed, else the series.
     pub event_id: EventId,
     pub calendar_id: CalendarId,
+    /// With the calendar and the bounds, names the occurrence across syncs,
+    /// which replace event rows and their ids.
+    pub uid: String,
     pub color: Option<String>,
     pub title: String,
     pub location: String,
@@ -392,7 +395,7 @@ impl OccurrenceRow {
 
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
-     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy";
+     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -406,6 +409,7 @@ fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     Ok(OccurrenceRow {
         event_id: r.get(0)?,
         calendar_id: r.get(1)?,
+        uid: r.get(16)?,
         color: r.get(2)?,
         title: r.get(3)?,
         location: r.get(4)?,

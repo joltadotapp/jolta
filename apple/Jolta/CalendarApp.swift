@@ -5,12 +5,17 @@ import AppKit
 extension AppModel {
     func startCalendar() {
         calendar.onChange = { [weak self] in self?.scheduleReminders() }
-        notifier.onOpenEvent = { [weak self] id, time in
-            self?.showMainWindow()
-            self?.mode = .calendar
-            self?.calendar.reveal(eventID: id, time: time)
+        notifier.onOpenEvent = { [weak self] id, fireAt in
+            guard let self else { return }
+            showMainWindow()
+            mode = .calendar
+            guard let r = reminder(id, fireAt) else { return notify("That event changed or is no longer in Jolta") }
+            calendar.reveal(eventID: r.eventId, time: r.time)
         }
-        notifier.onJoin = { [weak self] id, time in self?.join(eventID: id, time: time) }
+        notifier.onJoin = { [weak self] id, fireAt in
+            guard let self, let r = reminder(id, fireAt) else { return }
+            join(eventID: r.eventId, time: r.time)
+        }
         KeyRouter.shared.calendarHandler = { [weak self] event in self?.handleCalendarKey(event) ?? false }
         scheduleReminders()
         // The 48 hours ahead move on; pick up reminders that came into range.
@@ -46,7 +51,7 @@ extension AppModel {
             if calendar.hasNoCalendars, !UserDefaults.standard.bool(forKey: Self.key("CalendarIntroDone")) { showsCalendarIntro = true }
         } else {
             calendar.closeDetail()
-            requestListFocus()
+            if compose == nil { requestListFocus() }
         }
     }
 
@@ -65,7 +70,7 @@ extension AppModel {
             guard !Task.isCancelled else { return }
             let now = Int64(Date.now.timeIntervalSince1970)
             guard let reminders = try? core.calendarReminders(from: now, to: now + 48 * 3600) else { return }
-            await notifier.schedule(reminders: reminders)
+            await notifier.schedule(reminders: reminders) { id, fireAt in (try? core.calendarReminder(id: id, fireAt: fireAt)) != nil }
         }
     }
 
@@ -98,6 +103,12 @@ extension AppModel {
                 notify("Couldn't subscribe: \(error)")
             }
         }
+    }
+
+    /// A delivered or snoozed reminder as it stands now: syncs replace the
+    /// event rows it was scheduled with.
+    private func reminder(_ id: String, _ fireAt: Int64) -> ReminderRecord? {
+        (try? core.calendarReminder(id: id, fireAt: fireAt)) ?? nil
     }
 
     private func join(eventID: Int64, time: OccurrenceTime?) {

@@ -115,7 +115,8 @@ final class AppModel {
     /// The last action, shown briefly with its undo key.
     private(set) var toast: Toast?
     /// The message being written, shown in place of the reader.
-    var compose: ComposeData?
+    /// Compose lives in mail mode; starting one from calendar mode goes there.
+    var compose: ComposeData? { didSet { if compose != nil, mode == .calendar { mode = .mail } } }
     /// The AI settings, and the models that can run on this Mac.
     private(set) var ai: AiSettingsInfo
     private(set) var localModels: [LocalModelInfo] = []
@@ -190,6 +191,7 @@ final class AppModel {
         power.start(core: core)
         AddressBook.load(into: core)
         notifier.onOpen = { [weak self] threadID in
+            self?.mode = .mail
             self?.source = .unifiedInbox
             self?.open(threadID: threadID)
         }
