@@ -1549,6 +1549,23 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// The calendar's copy of the series took the cancellation; it has no
+    /// override for the occurrence the mail invites to.
+    #[test]
+    fn a_cancelled_series_in_the_calendar_replaces_an_occurrences_invitation() {
+        let (j, calendar) = jolta("card-series-copy-cancel");
+        let one = version("o", "standup", "REQUEST", 1, "20261104T080000Z", "RECURRENCE-ID:20261117T083000Z\r\nDTSTART:20261118T133000Z\r\nDTEND:20261118T134500Z\r\nSUMMARY:Standup\r\n");
+        let id = import(&j, one.as_bytes());
+        let series = version("s", "standup", "REQUEST", 0, "20261104T070000Z", "DTSTART:20261110T083000Z\r\nDTEND:20261110T084500Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n");
+        let mut master = invitation::find(series.as_bytes(), &[ME.into()]).remove(0).event;
+        master.status = EventStatus::Cancelled;
+        j.store.write(|tx| store::apply_item(tx, calendar, "standup.ics", None, &[master], None, &Horizon::around(now(), Brussels))).unwrap();
+        let c = stored_card(&j, id, &one);
+        assert_eq!((c.outdated, &c.answering), (true, &None));
+        assert_eq!(notes(&c)[0], "The organizer has since cancelled this meeting");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     #[test]
     fn an_occurrence_named_in_another_zone_is_the_same_occurrence() {
         let (j, _) = jolta("card-occurrence-zones");

@@ -196,6 +196,14 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
             before = Some((version, events));
         }
     }
+    // A series the calendar holds cancelled cancels each of its occurrences.
+    if rid.is_some()
+        && sent.method != Method::Cancel
+        && let Some(master) = store::stored_event(seen.conn, uid, None, Some(seen.account), seen.here)?
+        && master.event.status == EventStatus::Cancelled
+    {
+        newest = Some((Version { sequence: master.event.sequence, stamp: None }, Method::Cancel));
+    }
 
     // One occurrence moved for the first time: the series said where it was.
     if let (None, Some(rid)) = (&before, rid) {
