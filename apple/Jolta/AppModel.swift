@@ -54,6 +54,14 @@ struct AccountSection: Identifiable {
 @Observable
 final class AppModel {
     let core: Core
+    let calendar: CalendarModel
+    /// Mail or the full calendar (⌘1, ⌘2).
+    var mode: AppMode = .mail { didSet { if mode != oldValue { modeChanged() } } }
+    /// Today's calendar beside the mail, toggled with ⇧C.
+    var showsDayPanel = UserDefaults.standard.bool(forKey: "DayPanel") { didSet { UserDefaults.standard.set(showsDayPanel, forKey: "DayPanel") } }
+    /// The first open of calendar mode with no calendar on asks which to show.
+    var showsCalendarIntro = false
+    @ObservationIgnored var reminderTask: Task<Void, Never>?
     private(set) var accounts: [AccountSection] = []
     var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
@@ -166,6 +174,7 @@ final class AppModel {
     init() throws {
         let bridge = EventBridge()
         core = try Core.open(dataDir: Self.dataDirectory, listener: bridge)
+        calendar = CalendarModel(core: core)
         ai = try core.aiSettings()
         localModels = core.localModels()
         Task { [weak self] in
@@ -185,6 +194,7 @@ final class AppModel {
         if accounts.contains(where: { $0.account.provider != "Synthetic" }) {
             notifier.requestPermission()
         }
+        startCalendar()
         // Launch arguments for checking the app from scripts:
         // `-JoltaSearch "subject:x" -JoltaOpenFirst YES`.
         let defaults = UserDefaults.standard
@@ -202,8 +212,12 @@ final class AppModel {
                 }
             }
         }
-        // `-JoltaSettings ai` opens the settings window on that page, for screenshots.
-        if defaults.string(forKey: "JoltaSettings") == "ai" { settingsRequest = .ai }
+        // `-JoltaSettings ai|calendar` opens the settings window on that page, for screenshots.
+        switch defaults.string(forKey: "JoltaSettings") {
+        case "ai": settingsRequest = .ai
+        case "calendar": settingsRequest = .calendar
+        default: break
+        }
         // `-JoltaPalette commands|snooze|move|themes` opens the palette, for screenshots.
         switch defaults.string(forKey: "JoltaPalette") {
         case "commands": palette = .commands
@@ -506,8 +520,11 @@ final class AppModel {
         case .modelChanged(let id, let state):
             if let i = localModels.firstIndex(where: { $0.id == id }) { localModels[i].state = state }
             if case .ready = state, ai.provider == .local, ai.localModel == id { reloadAI() }
-        case .calendarChanged, .calendarSynced:
-            break
+        case .calendarChanged:
+            calendar.reloadCalendars()
+            calendar.refresh()
+        case .calendarSynced:
+            calendar.reloadCalendars()
         }
     }
 
