@@ -863,7 +863,7 @@ pub(crate) mod tests {
     use chrono_tz::Europe::Brussels;
 
     use super::*;
-    use crate::calendar::invitation::tests::{ME, jolta, mail};
+    use crate::calendar::invitation::tests::{ME, import, jolta, mail};
     use crate::calendar::{CalendarId, Local, invitation};
 
     fn now() -> DateTime<Utc> {
@@ -1321,6 +1321,20 @@ pub(crate) mod tests {
         master.recurrence.as_mut().unwrap().exdates.push(rid);
         hold("standup.ics", vec![master]);
         assert_eq!(stored_card(&j, id, &one).removing, None, "the series leaves that occurrence out already");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn an_occurrence_named_in_another_zone_is_the_same_occurrence() {
+        let (j, _) = jolta("card-occurrence-zones");
+        let utc = "RECURRENCE-ID:20261117T083000Z\r\nDTSTART:20261117T083000Z\r\nDTEND:20261117T084500Z\r\nSUMMARY:Standup\r\n";
+        let first = version("o1", "standup", "REQUEST", 1, "20261104T080000Z", utc);
+        let m1 = import(&j, first.as_bytes());
+        let brussels = "RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\nDTSTART;TZID=Europe/Brussels:20261118T140000\r\n\
+                        DTEND;TZID=Europe/Brussels:20261118T141500\r\nSUMMARY:Standup\r\n";
+        import(&j, version("o2", "standup", "REQUEST", 2, "20261104T090000Z", brussels).as_bytes());
+        let old = stored_card(&j, m1, &first);
+        assert!(old.outdated && old.answering.is_none(), "09:30 Brussels is 08:30 UTC: the later mail replaces it");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

@@ -193,6 +193,17 @@ pub(super) fn moment_text(m: &Moment) -> String {
     }
 }
 
+/// The moment `moment_text` wrote.
+pub(super) fn text_moment(text: &str) -> Option<Moment> {
+    let (wall, zone) = match text.split_once(' ') {
+        Some((wall, tz)) => (wall, Zone::Tz(tz.parse().ok()?)),
+        None if text.len() == 8 => return NaiveDate::parse_from_str(text, "%Y%m%d").ok().map(Moment::Date),
+        None => (text, Zone::Floating),
+    };
+    let wall = chrono::NaiveDateTime::parse_from_str(wall, "%Y%m%dT%H%M%S").ok()?;
+    Some(Moment::Time(crate::calendar::Local { wall, zone }))
+}
+
 /// Replaces the events of one remote object and rebuilds the occurrences of
 /// every series it touched. An unchanged ETag skips the work, so applying the
 /// same batch twice is harmless. False when nothing changed.

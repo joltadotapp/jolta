@@ -5,7 +5,7 @@
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::calendar::moment_text;
+use super::calendar::{moment_text, text_moment};
 use crate::calendar::invitation::{Invitation, Method};
 use crate::calendar::series::copy_rank;
 use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response};
@@ -215,17 +215,28 @@ pub struct VersionRow {
 
 /// The requests, additions and cancellations for this UID and recurrence
 /// id in the account's messages other than `skip`, highest SEQUENCE first.
-pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, skip: MessageId) -> Result<Vec<VersionRow>> {
+/// A recurrence id matches the same moment written in another zone.
+pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, skip: MessageId, here: Tz) -> Result<Vec<VersionRow>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT i.message_id, i.method, i.sequence, m.blob FROM invitation i JOIN message m ON m.id = i.message_id
-         WHERE i.uid = ?1 AND i.recurrence_id = ?2 AND m.account_id = ?3 AND i.message_id != ?4
+        "SELECT i.message_id, i.method, i.sequence, m.blob, i.recurrence_id FROM invitation i JOIN message m ON m.id = i.message_id
+         WHERE i.uid = ?1 AND (i.recurrence_id = '') = ?2 AND m.account_id = ?3 AND i.message_id != ?4
            AND i.method IN ('REQUEST', 'ADD', 'CANCEL') AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')
-         ORDER BY i.sequence DESC, i.message_id DESC LIMIT 20",
+         ORDER BY i.sequence DESC, i.message_id DESC",
     )?;
-    let rows = stmt.query_map(params![uid, recurrence_id.map(moment_text).unwrap_or_default(), account, skip], |r| {
-        Ok(VersionRow { message: r.get(0)?, method: r.get(1)?, sequence: r.get(2)?, blob: r.get(3)? })
+    let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account, skip], |r| {
+        Ok((VersionRow { message: r.get(0)?, method: r.get(1)?, sequence: r.get(2)?, blob: r.get(3)? }, r.get::<_, String>(4)?))
     })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut out = Vec::new();
+    for row in rows {
+        let (row, rid) = row?;
+        if recurrence_id.is_none_or(|want| text_moment(&rid).is_some_and(|m| m.names(want, here))) {
+            out.push(row);
+        }
+        if out.len() == 20 {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Mail from the address that the user answered, through the partial

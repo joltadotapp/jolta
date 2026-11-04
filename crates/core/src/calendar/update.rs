@@ -160,7 +160,7 @@ fn occurrence_before(seen: &Seen, uid: &str, rid: &Moment) -> Result<Option<Even
 /// without reading it.
 fn mails(seen: &Seen, uid: &str, rid: Option<&Moment>, this: Version) -> Result<Vec<(Method, Vec<EventData>, Version)>> {
     let mut out = Vec::new();
-    for row in store::invitation_versions(seen.conn, seen.account, uid, rid, seen.message)? {
+    for row in store::invitation_versions(seen.conn, seen.account, uid, rid, seen.message, seen.here)? {
         if row.sequence > this.sequence {
             out.push((row.method, Vec::new(), Version { sequence: row.sequence, stamp: None }));
             continue;
