@@ -385,7 +385,7 @@ enum ReaderStyle {
       overflow: hidden; text-overflow: ellipsis; }
     .jolta-sigline { display: none; }
     .jolta-message[open] .jolta-sigline { display: block; flex-basis: 100%; color: var(--tx3); font-size: 12.5px;
-      overflow: hidden; text-overflow: ellipsis; }
+      line-height: 18px; white-space: normal; }
     .jolta-message[open] .jolta-sigline.jolta-warn { color: var(--acc); }
     .jolta-notice { margin: 0 0 18px; color: var(--tx2); }
     .jolta-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
