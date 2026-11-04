@@ -79,6 +79,8 @@ One model covers Gmail labels, IMAP folders and Graph folders. A message belongs
 
 Calendars have their own tables (`calendar`, `event`, `occurrence`), written by `store/calendar.rs`. The views read only `occurrence`.
 
+Invitations in mail (`calendar/invitation.rs`) get one `invitation` row per event that a message's `text/calendar`, `application/ics` or `.ics` part names: its UID, recurrence id, sequence, iTIP method and organizer, written whenever a body is stored (`store/invitations.rs`). A message reaches its event through the UID, so syncs that replace event rows need no update there. Bodies stored before this table existed get one background pass (`engine::scan_invitations`), for mail of the last 400 days. The reader builds an invitation card per event from the message itself (`calendar/card.rs`, HTML in `render/invitation.rs`): times in the Mac's zone, the answer from the calendar's copy, overlaps from `occurrence`, and a warning when the user never wrote to the organizer. Descriptions stay out of the card.
+
 Raw RFC 822 messages are stored as files in the data folder (`~/Library/Application Support/Jolta/blobs`), named by SHA-256. The SQLite file sits next to them, outside the app group container, because macOS keeps the unsandboxed `jolta` CLI out of that container; the sandboxed app reaches the folder through a `home-relative-path` exception. Headers and snippets go to SQLite on first sync; bodies download on demand and in the background for recent mail.
 
 ## Sync
