@@ -58,6 +58,23 @@ pub struct EventCard {
     /// Set on a cancellation whose meeting the calendar of the account it
     /// came to still holds.
     pub removing: Option<Removing>,
+    /// Set on a guest's proposal for a new time; `when` is the time proposed.
+    pub proposal: Option<Proposed>,
+}
+
+/// A guest's proposal for a new time, which the organizer can decline.
+/// Accepting it changes the meeting, which happens in the calendar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Proposed {
+    /// The meeting's time now: "Thu 12 Nov · 16:00 to 16:45". None when the
+    /// account has neither a calendar copy nor a request that says.
+    pub now: Option<String>,
+    /// "Bo Nilsson".
+    pub proposer: String,
+    /// Decline proposal, for the meeting's organizer, until it is declined.
+    pub declining: Option<MessageId>,
+    /// Jolta sent the organizer's no.
+    pub declined: bool,
 }
 
 /// What Remove from calendar needs.
@@ -287,7 +304,10 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let mut notes = Vec::new();
     match method {
         Method::Cancel => notes.push(Note { text: "Cancelled by the organizer".into(), warn: true }),
-        Method::Counter => notes.push(Note { text: with_comment(format!("{} proposed this new time", first_attendee(said)), said), warn: false }),
+        Method::Counter => {
+            let who = update::proposer(said, cx.sender).map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false));
+            notes.push(Note { text: with_comment(format!("{who} proposed this new time"), said), warn: false });
+        }
         Method::DeclineCounter => notes.push(Note { text: "The organizer kept the original time".into(), warn: false }),
         Method::Refresh => notes.push(Note { text: format!("{} asked for the latest version", first_attendee(said)), warn: false }),
         Method::Add => notes.push(Note { text: "Adds dates to a repeating event".into(), warn: false }),
@@ -302,6 +322,13 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     if history.not_from_organizer {
         notes.push(Note { text: "This isn't from the meeting's organizer".into(), warn: true });
     }
+    if history.not_from_guest {
+        let text = match update::organizer(conn, cx.account, cx.me, &sent.uid)? {
+            Some(_) => "This isn't from one of the meeting's guests",
+            None => "Jolta has no copy of this meeting to check this proposal against",
+        };
+        notes.push(Note { text: text.into(), warn: true });
+    }
     if method != Method::Cancel && stranger(conn, said, cx)? {
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
@@ -309,7 +336,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let receiver = store::account(conn, cx.account)?.address;
     let alone = sent.recurrence_id.is_some();
     // Another sender's message about the meeting answers nothing in it.
-    let trusted = !history.not_from_organizer;
+    let trusted = !history.not_from_organizer && !history.not_from_guest;
     let mut answering = (current && trusted && answerable(method, sent, &receiver)).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
@@ -333,6 +360,8 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     if let (Some(a), Some(Bounds::Utc { start, end })) = (answering.as_mut(), bounds) {
         a.new_time = Some(if takes_proposals(conn, invitation, answered.as_ref(), cx)? { NewTime::Open { start, end } } else { NewTime::Refused });
     }
+
+    let proposal = if method == Method::Counter && current && trusted { Some(proposed(conn, said, &history.before, &receiver, cx)?) } else { None };
 
     let held = method == Method::Cancel && current && held(conn, sent, cx)?;
     let removing = if held && trusted { removable(conn, sent, cx)? } else { None };
@@ -371,6 +400,27 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         availability,
         answering,
         removing,
+        proposal,
+    })
+}
+
+/// What the organizer sees of a guest's proposal: the meeting's time now,
+/// from the account's calendar copy else the request before it, and
+/// Decline proposal when the account the proposal came to organizes it.
+fn proposed(conn: &Connection, counter: &EventData, before: &[EventData], receiver: &str, cx: &Context) -> Result<Proposed> {
+    let copy = store::stored_series(conn, &counter.uid, Some(cx.account))?;
+    let series = if copy.is_empty() { before } else { &copy };
+    let now = match &counter.recurrence_id {
+        Some(rid) => series::occurrence(series, rid, cx.here).into_iter().collect(),
+        None => series.to_vec(),
+    };
+    let organizes = counter.organizer.as_ref().is_some_and(|o| o.address.trim().eq_ignore_ascii_case(receiver));
+    let declined = store::calendar_answer_to(conn, cx.message)?.is_some();
+    Ok(Proposed {
+        now: Lines::of(&now, cx).map(|l| l.when()),
+        proposer: update::proposer(counter, cx.sender).map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false)),
+        declining: (organizes && !declined).then_some(cx.message),
+        declined,
     })
 }
 

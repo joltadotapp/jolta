@@ -12,7 +12,7 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 
 use super::invitation::{self, Invitation, Method};
-use super::{CalendarSource, EventData, EventStatus, Moment, recur, series};
+use super::{Attendee, CalendarSource, EventData, EventStatus, Moment, recur, series};
 use crate::blobs::Blobs;
 use crate::model::{AccountId, MessageId};
 use crate::{Result, store};
@@ -89,6 +89,8 @@ pub struct History {
     /// from someone else than the organizer it names. It is no version of
     /// the meeting, and the other mails are none of its versions.
     pub not_from_organizer: bool,
+    /// A proposal for a new time that isn't a guest's: see `from_guest`.
+    pub not_from_guest: bool,
 }
 
 /// Where the card's message stands among the versions of its event.
@@ -150,6 +152,9 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
     if organizers && !sent.event.organizer.as_ref().is_some_and(|named| sent_by(seen.me, organizer.as_deref(), &named.address, seen.sender)) {
         return Ok(History { not_from_organizer: true, ..History::default() });
     }
+    if sent.method == Method::Counter && !from_guest(seen, organizer.as_deref(), &sent.event)? {
+        return Ok(History { not_from_guest: true, ..History::default() });
+    }
 
     let mut versions = mails(seen, organizer.as_deref(), uid, rid.as_ref(), this)?;
     if rid.is_some() {
@@ -208,7 +213,41 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
     if let (None, Some(rid)) = (&before, rid) {
         before = occurrence_before(seen, organizer.as_deref(), uid, &rid)?.map(|e| (Version { sequence: e.sequence, stamp: None }, vec![e]));
     }
-    Ok(History { newer: newest.map(|(_, method)| method), before: before.map(|(_, events)| events).unwrap_or_default(), not_from_organizer: false })
+    Ok(History { newer: newest.map(|(_, method)| method), before: before.map(|(_, events)| events).unwrap_or_default(), ..History::default() })
+}
+
+/// Who proposes in a COUNTER: the guest it names that sent it, else the
+/// first it names.
+pub fn proposer<'a>(counter: &'a EventData, from: &str) -> Option<&'a Attendee> {
+    let same = |a: &Attendee| a.person.address.trim().eq_ignore_ascii_case(from.trim());
+    counter.attendees.iter().find(|a| same(a)).or(counter.attendees.first())
+}
+
+/// Whether a COUNTER is a guest's proposal: it names the meeting's
+/// organizer, as `organizer` established it, and comes from its proposer,
+/// or from a provider sending for them, who is a guest of the meeting on
+/// the account's calendar copy or on one of the organizer's requests. A
+/// meeting the account knows nothing of has no guests to check against.
+fn from_guest(seen: &Seen, organizer: Option<&str>, counter: &EventData) -> Result<bool> {
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    let Some(organizer) = organizer else { return Ok(false) };
+    if !counter.organizer.as_ref().is_some_and(|o| same(&o.address, organizer)) {
+        return Ok(false);
+    }
+    let Some(proposer) = proposer(counter, seen.sender).map(|a| a.person.address.clone()) else { return Ok(false) };
+    if !same(&proposer, seen.sender) && !SENDS_FOR_ORGANIZERS.iter().any(|s| same(s, seen.sender)) {
+        return Ok(false);
+    }
+    let guest = |events: &[EventData]| events.iter().flat_map(|e| &e.attendees).any(|a| same(&a.person.address, &proposer));
+    if guest(&store::stored_series(seen.conn, &counter.uid, Some(seen.account))?) {
+        return Ok(true);
+    }
+    let everything = Version { sequence: i64::MAX, stamp: None };
+    let mut requests = mails(seen, Some(organizer), &counter.uid, None, everything)?;
+    if let Some(rid) = &counter.recurrence_id {
+        requests.extend(mails(seen, Some(organizer), &counter.uid, Some(rid), everything)?);
+    }
+    Ok(requests.iter().any(|(method, events, _)| *method != Method::Cancel && guest(events)))
 }
 
 /// Whether the account's calendar copy of an event or series, cancelled,

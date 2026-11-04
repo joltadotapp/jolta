@@ -720,6 +720,13 @@ mod tests {
         assert_eq!(sender, "me@example.com");
         let attendees: Vec<&str> = ics.lines().filter(|l| l.starts_with("ATTENDEE")).collect();
         assert_eq!(attendees, ["ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com"], "{ics}");
+
+        run(&j, proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 16:00")).unwrap();
+        let (sender, ..) = &outbox(&j)[0];
+        let ics = reply_ics(&outbox(&j)[0].3);
+        assert!(ics.contains("METHOD:COUNTER") && sender == "me@example.com", "{ics}");
+        let attendees: Vec<&str> = ics.lines().filter(|l| l.starts_with("ATTENDEE")).collect();
+        assert_eq!(attendees, ["ATTENDEE;PARTSTAT=TENTATIVE:mailto:me@example.com"], "a proposal too speaks for the receiving account alone");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

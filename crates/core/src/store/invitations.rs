@@ -174,6 +174,20 @@ pub fn outbox_mail(conn: &Connection, account: AccountId, message_id: &str) -> R
     Ok(row.map(|(id, state)| if state == "queued" { ReplyMail::Waiting(id) } else { ReplyMail::Sent(id) }))
 }
 
+/// The calendar mail Jolta sent in answer to a message, such as the no to
+/// a proposal, while the outbox still means to send it or has sent it. A
+/// reply the user wrote has a draft; this one has none.
+pub fn calendar_answer_to(conn: &Connection, message: MessageId) -> Result<Option<ReplyMail>> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, state FROM outbox WHERE replying_to = ?1 AND draft_id IS NULL AND state IN ('queued', 'sent') ORDER BY id DESC LIMIT 1",
+            [message],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(id, state)| if state == "queued" { ReplyMail::Waiting(id) } else { ReplyMail::Sent(id) }))
+}
+
 /// Keeps the answer the user gave an event's invitation on an account:
 /// the whole event, or with `recurrence_id` one occurrence, with the
 /// version answered (the event or occurrence, or a series with its changed

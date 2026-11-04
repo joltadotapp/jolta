@@ -173,7 +173,8 @@ fn event(
     };
 
     let organizer = comp.property(&Prop::Organizer).and_then(person);
-    let reply_comment = (method == Some("REPLY")).then(|| prop_text(comp, &Prop::Comment)).flatten();
+    // A reply or a proposal carries its one guest's note as COMMENT.
+    let reply_comment = matches!(method, Some("REPLY" | "COUNTER")).then(|| prop_text(comp, &Prop::Comment)).flatten();
     let mut attendees: Vec<Attendee> =
         comp.properties(&Prop::Attendee).filter_map(|e| attendee(e, me)).collect();
     if let ([only], Some(comment)) = (attendees.as_mut_slice(), reply_comment)
