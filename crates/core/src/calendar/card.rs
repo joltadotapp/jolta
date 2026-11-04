@@ -9,6 +9,7 @@ use rusqlite::Connection;
 
 use super::detail::{city, instant_only, offset, range};
 use super::invitation::{Invitation, Method};
+use super::recur::Source;
 use super::series::{self, Horizon};
 use super::{Bounds, EventData, EventStatus, MeetingProvider, Person, Response, Role, Span, Zone, meeting, recur, tz};
 use crate::{Result, store};
@@ -123,11 +124,13 @@ pub fn cards(conn: &Connection, invitations: &[Invitation], cx: &Context) -> Res
 
 fn event(conn: &Connection, method: Method, events: &[EventData], cx: &Context) -> Result<EventCard> {
     let master = events.iter().find(|e| e.recurrence_id.is_none());
-    let shown = master.unwrap_or(&events[0]);
-    let span = next_span(master, events, cx);
+    let (shown, span) = next(master, events, cx);
     let (when, elsewhere) = when(&span, shown, cx);
     let bounds = span.bounds(cx.here);
-    let stored = store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), cx.here)?;
+    let stored = match store::stored_event(conn, &shown.uid, shown.recurrence_id.as_ref(), cx.here)? {
+        None if shown.recurrence_id.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, cx.here)?,
+        found => found,
+    };
 
     let mut notes = Vec::new();
     match method {
@@ -215,17 +218,27 @@ fn reply(e: &EventData, cx: &Context) -> ReplyCard {
     }
 }
 
-/// The occurrence a card is about: the event itself, or for a series the
-/// next occurrence that hasn't ended, or its last one when all have.
-fn next_span(master: Option<&EventData>, events: &[EventData], cx: &Context) -> Span {
-    let Some(m) = master.filter(|m| m.recurrence.is_some()) else { return events[0].span };
-    let overrides: Vec<EventData> = events.iter().filter(|e| e.recurrence_id.is_some()).cloned().collect();
-    let placed = series::place(Some(m), &overrides, &Horizon::around(cx.now, cx.here));
+/// The occurrence a card is about, with the event that describes it: the
+/// event itself, or for a series the next occurrence that hasn't ended, or
+/// its last one when all have. A changed occurrence brings its own place,
+/// link and guests.
+fn next<'a>(master: Option<&'a EventData>, events: &'a [EventData], cx: &Context) -> (&'a EventData, Span) {
+    let Some(m) = master.filter(|m| m.recurrence.is_some()) else {
+        let e = master.unwrap_or(&events[0]);
+        return (e, e.span);
+    };
+    let overrides: Vec<&EventData> = events.iter().filter(|e| e.recurrence_id.is_some()).collect();
+    let owned: Vec<EventData> = overrides.iter().map(|&e| e.clone()).collect();
+    let placed = series::place(Some(m), &owned, &Horizon::around(cx.now, cx.here));
     let ended = |s: &Span| match s.bounds(cx.here) {
         Bounds::Utc { end, .. } => end <= cx.now,
         Bounds::Days { end, .. } => day(end) <= cx.now.with_timezone(&cx.here).date_naive(),
     };
-    placed.iter().map(|o| o.span).find(|s| !ended(s)).or(placed.last().map(|o| o.span)).unwrap_or(m.span)
+    let Some(o) = placed.iter().find(|o| !ended(&o.span)).or(placed.last()) else { return (m, m.span) };
+    match o.source {
+        Source::Master => (m, o.span),
+        Source::Override(i) => (overrides[i], o.span),
+    }
 }
 
 /// "Thu 5 Nov · 16:00 to 16:45" here, and the event's own clock when it
@@ -633,6 +646,22 @@ mod tests {
         assert_eq!(c.location, None, "the Zoom link is the Join button");
         assert_eq!(c.join.unwrap().provider, "Zoom");
         assert_eq!(cards_of(&j, mail!("series.eml")).len(), 1, "a series and its changed occurrence are one card");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_moved_occurrence_shows_its_own_place() {
+        let (j, _) = jolta("card-moved");
+        let mut raw = String::from_utf8(mail!("series.eml").to_vec()).unwrap();
+        for (old, new) in [("LOCATION:https://us02web.zoom.us/j/81234567890?pwd=abc123", "LOCATION:Room B"), ("SUMMARY:Team standup", "SUMMARY:Standup in person")] {
+            let at = raw.rfind(old).unwrap();
+            raw.replace_range(at..at + old.len(), new);
+        }
+        let c = event_card(&j, raw.as_bytes());
+        assert_eq!(c.when, "Thu 5 Nov · 10:00 to 10:15");
+        assert_eq!((c.title.as_str(), c.location.as_deref()), ("Standup in person", Some("Room B")));
+        assert_eq!(c.join, None, "the series' Zoom link isn't this occurrence's");
+        assert_eq!(c.repeat.as_deref(), Some("Weekly on Tuesday and Thursday, until 17 December 2026"), "still part of the series");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 }
