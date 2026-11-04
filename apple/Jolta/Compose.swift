@@ -153,7 +153,7 @@ struct ComposeView: View {
                     HStack(spacing: 8) {
                         ForEach(Array(draft.wrappedValue.attachments.enumerated()), id: \.offset) { i, file in
                             HStack(spacing: 8) {
-                                Image(systemName: "doc").foregroundStyle(Color(Theme.text3))
+                                FileIcon(core: model.core, name: file.name, mimeType: file.mimeType)
                                 Text(file.name).lineLimit(1)
                                 Button { model.compose?.attachments.remove(at: i); scheduleSave() } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
@@ -299,5 +299,33 @@ extension ComposeData {
     var isEmpty: Bool {
         to.isEmpty && cc.isEmpty && bcc.isEmpty && subject.isEmpty && attachments.isEmpty
             && body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// An attachment's format icon, drawn from the core's SVG so the reader and
+/// compose show the same one.
+struct FileIcon: View {
+    let core: Core
+    let name: String
+    let mimeType: String
+
+    var body: some View {
+        let outline = Self.hex(Theme.text3)
+        let svg = core.fileIconSvg(name: name, mimeType: mimeType, outline: outline)
+        if let image = NSImage(data: Data(svg.utf8)) {
+            Image(nsImage: image).frame(width: 20, height: 24)
+        } else {
+            Image(systemName: "doc").foregroundStyle(Color(Theme.text3))
+        }
+    }
+
+    /// A theme color as `#rrggbb` in the app's current appearance.
+    private static func hex(_ color: NSColor) -> String {
+        var out = "#888888"
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            guard let c = color.usingColorSpace(.sRGB) else { return }
+            out = String(format: "#%02x%02x%02x", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
+        }
+        return out
     }
 }

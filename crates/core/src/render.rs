@@ -24,6 +24,8 @@ pub struct Rendered {
     pub remote_images: u32,
     /// The same count per message, in the order they were given.
     pub remote_by_message: Vec<u32>,
+    /// The last message with attachments listed, for Save all from the keyboard.
+    pub files_message: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -513,29 +515,39 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let mut body = String::new();
     let mut css = String::new();
     let mut remote_by_message = Vec::with_capacity(messages.len());
+    let mut files_message = None;
     let clean_builder = sanitizer();
     for m in messages {
         let (html, styles) = extract_styles(&body_html(m.raw));
         let mut clean = clean_builder.clean(&html).to_string().replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
         let wide = has_layout(&clean);
-        // Images the body shows inline aren't attachments to the reader.
-        let files: Vec<Attachment> = attachments(m.raw)
-            .into_iter()
-            .filter(|f| !f.content_id.as_ref().is_some_and(|c| clean.contains(&format!("cid:{}/{c}", m.id))))
-            .collect();
+        let files = listed(m.raw, &clean, m.id);
         if !files.is_empty() {
-            clean.push_str("<div class=\"jolta-files\">");
+            files_message = Some(m.id);
+            // Above the text, so a file is seen before reading and reached
+            // without scrolling past quoted mail.
+            let mut row = String::from("<div class=\"jolta-files\">");
             for f in &files {
-                clean.push_str(&format!(
-                    "<a class=\"jolta-file\" href=\"x-attachment:{}/{}\"><b>{}</b><small>{}</small></a>",
+                row.push_str(&format!(
+                    "<a class=\"jolta-file\" href=\"x-attachment:{}/{}\">{}<span><b>{}</b><small>{}</small></span></a>",
                     m.id,
                     f.index,
+                    crate::file_icon::svg(&f.name, &f.mime_type, "currentColor"),
                     escape(&f.name),
                     human_size(f.size)
                 ));
             }
-            clean.push_str("</div>");
+            if files.len() > 1 {
+                row.push_str(&format!("<a class=\"jolta-save-all\" href=\"x-attachment:{}/all\">Save all {}</a>", m.id, files.len()));
+            }
+            row.push_str("</div>");
+            clean.insert_str(0, &row);
         }
+        let clip = if files.is_empty() {
+            String::new()
+        } else {
+            format!("<span class=\"jolta-clip\" title=\"{n} attachment{s}\">{CLIP}{n}</span>", n = files.len(), s = if files.len() > 1 { "s" } else { "" })
+        };
         remote_by_message.push(clean.matches(&format!("src=\"{REMOTE_SCHEME}:")).count() as u32);
         let scope = format!("#m{}", m.id);
         for s in &styles {
@@ -544,7 +556,7 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
         css.push_str(&dark_attribute_rules(&clean, &scope));
         body.push_str(&format!(
             "<details class=\"jolta-message\"{open}><summary><span class=\"jolta-from\">{from}</span>{vip}\
-             <span class=\"jolta-snippet\">{snippet}</span><span class=\"jolta-date\">{date}</span>\
+             <span class=\"jolta-snippet\">{snippet}</span>{clip}<span class=\"jolta-date\">{date}</span>\
              <div class=\"jolta-to\">to {to}</div></summary><div class=\"jolta-body{layout}\" id=\"m{id}\">{clean}</div></details>",
             open = if m.open { " open" } else { "" },
             from = escape(m.from),
@@ -556,7 +568,46 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
             layout = if wide { " jolta-wide" } else { "" },
         ));
     }
-    Rendered { html: document(app_css, &css, &body), remote_images: remote_by_message.iter().sum(), remote_by_message }
+    Rendered { html: document(app_css, &css, &body), remote_images: remote_by_message.iter().sum(), remote_by_message, files_message }
+}
+
+/// A paperclip for a collapsed message's summary line.
+const CLIP: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"11\" height=\"11\" viewBox=\"0 0 16 16\" aria-hidden=\"true\">\
+<path d=\"M13.5 7.5 8 13a3.5 3.5 0 0 1-5-5l6-6a2.3 2.3 0 0 1 3.3 3.3l-6 6a1.1 1.1 0 0 1-1.6-1.6L10 4.4\" fill=\"none\" \
+stroke=\"currentColor\" stroke-width=\"1.4\" stroke-linecap=\"round\"/></svg>";
+
+/// The attachments the reader lists for a message: every one except images
+/// its text already shows inline. `clean` is the sanitised body.
+fn listed(raw: &[u8], clean: &str, id: i64) -> Vec<Attachment> {
+    attachments(raw)
+        .into_iter()
+        .filter(|f| !f.content_id.as_ref().is_some_and(|c| clean.contains(&format!("cid:{id}/{c}"))))
+        .collect()
+}
+
+/// Writes the attachments the reader lists for a message into `dir`. A name
+/// already there gets " 2", " 3" before its extension. Returns the paths.
+pub fn save_listed(raw: &[u8], id: i64, dir: &std::path::Path) -> crate::Result<Vec<std::path::PathBuf>> {
+    let clean = sanitizer().clean(&body_html(raw)).to_string().replace("src=\"cid:", &format!("src=\"cid:{id}/"));
+    let mut saved = Vec::new();
+    for f in listed(raw, &clean, id) {
+        let Some((name, _, bytes)) = attachment_bytes(raw, f.index as usize) else { continue };
+        let name = name.replace(['/', ':'], "-");
+        let name = if name.trim().is_empty() || name.starts_with('.') { format!("attachment {}", f.index + 1) } else { name };
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+            _ => (name.clone(), String::new()),
+        };
+        let mut path = dir.join(&name);
+        let mut n = 2;
+        while path.exists() {
+            path = dir.join(format!("{stem} {n}{ext}"));
+            n += 1;
+        }
+        std::fs::write(&path, bytes)?;
+        saved.push(path);
+    }
+    Ok(saved)
 }
 
 fn document(app_css: &str, css: &str, body: &str) -> String {
@@ -618,6 +669,51 @@ input[value^="a"] { background: url(http://evil.test/5) }
 <svg><image href="http://evil.test/18"/></svg>
 </body></html>
 "#;
+
+    fn with_files(names: &[&str]) -> Vec<u8> {
+        let mut raw = String::from("From: a@example.com\r\nTo: b@example.com\r\nSubject: s\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n");
+        for n in names {
+            raw.push_str(&format!("--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"{n}\"\r\n\r\nbytes of {n}\r\n"));
+        }
+        raw.push_str("--b--\r\n");
+        raw.into_bytes()
+    }
+
+    fn message(id: i64, raw: &[u8], open: bool) -> MessageView<'_> {
+        MessageView { id, from: "a", to: "b", date: "d", snippet: "s", raw, open, vip: false }
+    }
+
+    #[test]
+    fn files_sit_above_the_text_with_save_all_for_several() {
+        let two = with_files(&["Offer.pdf", "Budget.xlsx"]);
+        let one = with_files(&["notes.md"]);
+        let r = render_thread(&[message(1, &two, false), message(2, &one, true)], "");
+        let body = |id: i64| {
+            let start = r.html.find(&format!("id=\"m{id}\">")).unwrap();
+            r.html[start..].split("</details>").next().unwrap().to_string()
+        };
+        let first = body(1);
+        assert!(first.find("jolta-files").unwrap() < first.find("See attached.").unwrap(), "files come before the text");
+        assert!(first.contains(">PDF</text>") && first.contains(">XLS</text>"));
+        assert!(first.contains("href=\"x-attachment:1/all\">Save all 2</a>"));
+        assert!(!body(2).contains("Save all"), "one file needs no Save all");
+        assert!(r.html.contains("title=\"2 attachments\""), "the collapsed message counts its files");
+        assert_eq!(r.files_message, Some(2), "the last message with files");
+    }
+
+    #[test]
+    fn save_listed_writes_each_file_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("jolta-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Offer.pdf"), b"older").unwrap();
+        let saved = save_listed(&with_files(&["Offer.pdf", "a/b.txt"]), 1, &dir).unwrap();
+        let names: Vec<String> = saved.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["Offer 2.pdf", "a-b.txt"]);
+        assert_eq!(std::fs::read(dir.join("Offer.pdf")).unwrap(), b"older");
+        assert_eq!(std::fs::read(dir.join("Offer 2.pdf")).unwrap(), b"bytes of Offer.pdf");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn dark_text_gets_a_dark_mode_color() {

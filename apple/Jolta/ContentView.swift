@@ -847,7 +847,8 @@ struct ReaderColumn: View {
                     SummaryCard(summary: summary, label: model.ai.label) { model.openSettings(.ai) }
                         .animation(.easeInOut(duration: 0.2), value: summary.state)
                 }
-                ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment, onUnsubscribe: model.unsubscribe)
+                ReaderView(thread: thread, core: model.core, onAttachment: model.openAttachment,
+                           onSaveAll: { model.saveAttachments(message: $0) }, onUnsubscribe: model.unsubscribe)
             } else {
                 Text(model.cursor.count == 0 ? "Nothing here" : "")
                     .foregroundStyle(Color(Theme.text3))

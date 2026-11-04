@@ -755,6 +755,28 @@ final class AppModel {
         }
     }
 
+    /// Saves a message's attachments into a folder the user picks, Downloads
+    /// first, and shows them in the Finder.
+    func saveAttachments(message: Int64) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Save Here"
+        panel.message = "Choose a folder for the attachments."
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let dir = panel.url else { return }
+        Task {
+            do {
+                let saved = try await core.saveAttachments(messageId: message, directory: dir.path)
+                show(Toast(text: "Saved \(saved.count) attachment\(saved.count == 1 ? "" : "s") to \(dir.lastPathComponent)", undo: nil))
+                NSWorkspace.shared.activateFileViewerSelecting(saved.map { URL(fileURLWithPath: $0) })
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+        }
+    }
+
     /// A message with nothing to undo.
     func notify(_ text: String) {
         show(Toast(text: text, undo: nil))

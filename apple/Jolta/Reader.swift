@@ -18,6 +18,11 @@ final class ReaderPage {
         get { links.onAttachment }
         set { links.onAttachment = newValue }
     }
+    /// Called for Save all under a message's attachments.
+    var onSaveAll: ((Int64) -> Void)? {
+        get { links.onSaveAll }
+        set { links.onSaveAll = newValue }
+    }
     private let links = LinkActions()
     private static var ruleList: WKContentRuleList?
 
@@ -162,6 +167,7 @@ private struct RemoteImages: URLSchemeHandler {
 @MainActor
 private final class LinkActions {
     var onAttachment: ((Int64, UInt32) -> Void)?
+    var onSaveAll: ((Int64) -> Void)?
 }
 
 @MainActor
@@ -179,8 +185,12 @@ private struct Decider: WebPage.NavigationDeciding {
         }
         if action.navigationType == .linkActivated, let url, url.scheme == "x-attachment" {
             let parts = url.absoluteString.dropFirst("x-attachment:".count).split(separator: "/")
-            if parts.count == 2, let message = Int64(parts[0]), let index = UInt32(parts[1]) {
-                links.onAttachment?(message, index)
+            if parts.count == 2, let message = Int64(parts[0]) {
+                if parts[1] == "all" {
+                    links.onSaveAll?(message)
+                } else if let index = UInt32(parts[1]) {
+                    links.onAttachment?(message, index)
+                }
             }
             return .cancel
         }
@@ -206,6 +216,7 @@ struct ReaderView: View {
     let thread: ThreadView
     let core: Core
     let onAttachment: (Int64, UInt32) -> Void
+    var onSaveAll: (Int64) -> Void = { _ in }
     var onUnsubscribe: () -> Void = {}
     @State private var reader = ReaderPage()
     @State private var imagesLoaded = false
@@ -320,6 +331,7 @@ struct ReaderView: View {
         }
         .onAppear {
             reader.onAttachment = onAttachment
+            reader.onSaveAll = onSaveAll
             reader.images.core = core
             render()
             // `-JoltaLoadImages YES` loads remote images at once, for checking from scripts.
@@ -338,7 +350,7 @@ enum ReaderStyle {
     }
 
     private static func variables(_ t: ThemeTokens) -> String {
-        [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("acc", t.accent)]
+        [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("fill", t.fill), ("acc", t.accent)]
             .map { "--\($0.0):#\(String(format: "%06x", $0.1));" }
             .joined(separator: " ")
     }
@@ -372,10 +384,17 @@ enum ReaderStyle {
     .jolta-body.jolta-wide { max-width: 100%; width: fit-content; margin: 0 auto; overflow-x: auto; }
     .jolta-body a { color: inherit; text-decoration-color: var(--tx3); }
     .jolta-quote { color: var(--tx3); }
-    .jolta-files { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
-    .jolta-file { display: flex; flex-direction: column; justify-content: center; height: 44px; padding: 0 14px;
-      border-radius: 10px; box-shadow: inset 0 0 0 1px var(--line2); text-decoration: none; color: var(--tx); cursor: default; }
+    .jolta-files { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 18px; }
+    .jolta-file { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 12px 0 9px; max-width: 100%;
+      border-radius: 9px; box-shadow: inset 0 0 0 1px var(--line2); text-decoration: none; color: var(--tx); cursor: default; }
+    .jolta-file svg { flex: none; color: var(--tx3); }
+    .jolta-file span { display: flex; flex-direction: column; min-width: 0; }
     .jolta-file b { font-weight: 500; font-size: 12.5px; line-height: 16px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .jolta-file small { color: var(--tx3); font-size: 11.5px; line-height: 15px; }
+    .jolta-save-all { margin-left: 4px; padding: 4px 8px; border-radius: 7px; font-size: 12.5px; color: var(--tx2);
+      text-decoration: none; cursor: default; }
+    .jolta-save-all:hover, .jolta-file:hover { background: var(--fill); }
+    .jolta-clip { display: inline-flex; align-items: center; gap: 3px; color: var(--tx3); font-size: 11.5px; margin-right: 10px; }
+    .jolta-message[open] .jolta-clip { display: none; }
     """
 }

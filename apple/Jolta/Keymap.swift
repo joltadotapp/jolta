@@ -7,7 +7,7 @@ enum Command: String, CaseIterable, Identifiable {
     case next, previous, open, search
     case archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
-    case toggleVIP, unsubscribe, summarize, nextSection, help
+    case toggleVIP, unsubscribe, summarize, saveAttachments, nextSection, help
     case goInbox, goStarred, goSnoozed, goSent, goDrafts, goArchive
 
     var id: String { rawValue }
@@ -34,6 +34,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .toggleVIP: "!"
         case .unsubscribe: "⌘U"
         case .summarize: "⌘J"
+        case .saveAttachments: "d"
         case .nextSection: "⇥"
         case .help: "?"
         case .goInbox: "g i"
@@ -66,6 +67,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .toggleVIP: "Mark sender as VIP or not"
         case .unsubscribe: "Unsubscribe and archive"
         case .summarize: "Summarize conversation"
+        case .saveAttachments: "Save attachments…"
         case .nextSection: "Next inbox section"
         case .help: "Keyboard shortcuts"
         case .goInbox: "Go to Inbox"
@@ -98,6 +100,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .toggleVIP: "checkmark.seal"
         case .unsubscribe: "envelope.badge.minus"
         case .summarize: "sparkles"
+        case .saveAttachments: "arrow.down.doc"
         case .nextSection: "rectangle.split.3x1"
         case .help: "keyboard"
         case .goInbox: "tray"
@@ -112,7 +115,7 @@ enum Command: String, CaseIterable, Identifiable {
     /// Whether the command acts on the conversation under the cursor.
     var needsThread: Bool {
         switch self {
-        case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .open: true
+        case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
         default: false
         }
     }
@@ -146,6 +149,8 @@ extension AppModel {
         case .toggleVIP: toggleVIP()
         case .unsubscribe: unsubscribe()
         case .summarize: if searchFocused { searchWithAI() } else { summarizeOpenThread() }
+        case .saveAttachments:
+            if let message = openThread?.filesMessageId { saveAttachments(message: message) } else { notify("No attachments in this conversation") }
         case .help: showsHelp.toggle()
         case .goInbox: source = .unifiedInbox
         case .goStarred: source = .starred

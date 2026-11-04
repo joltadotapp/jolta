@@ -107,6 +107,8 @@ pub struct ThreadView {
     pub images_trusted: bool,
     /// The conversation comes from a mailing list that can be left.
     pub mailing_list: bool,
+    /// The last message whose attachments the reader lists, for Save all.
+    pub files_message_id: Option<i64>,
 }
 
 #[derive(uniffi::Enum)]
@@ -732,6 +734,7 @@ impl Core {
             message_count: detail.messages.len() as u32,
             html: detail.rendered.html,
             remote_images: detail.rendered.remote_images,
+            files_message_id: detail.rendered.files_message,
             image_sender: detail.image_sender.unwrap_or_default(),
             images_trusted: detail.images_trusted,
             mailing_list: self.jolta.store.read(|c| {
@@ -1066,6 +1069,27 @@ impl Core {
             .map_err(|e| CoreError::Failed { message: e.to_string() })?
             .map(|(name, mime_type, bytes)| AttachmentData { name, mime_type, bytes })
             .map_err(Into::into)
+    }
+
+    /// Saves the attachments the reader lists for a message (all but images
+    /// its text shows) into `directory`, and returns the paths written.
+    pub async fn save_attachments(&self, message_id: i64, directory: String) -> Result<Vec<String>> {
+        let jolta = self.jolta.clone();
+        self.runtime
+            .spawn(async move {
+                let raw = jolta_core::imap::message_source(&jolta, MessageId(message_id)).await?;
+                let saved = jolta_core::render::save_listed(&raw, message_id, std::path::Path::new(&directory))?;
+                Ok::<_, jolta_core::Error>(saved.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map_err(Into::into)
+    }
+
+    /// An icon for a file, as SVG: its format's short name on a page, with a
+    /// muted color band per format family. `outline` is a CSS color.
+    pub fn file_icon_svg(&self, name: String, mime_type: String, outline: String) -> String {
+        jolta_core::file_icon::svg(&name, &mime_type, &outline)
     }
 
     pub fn sections(&self) -> Result<Vec<SectionInfo>> {

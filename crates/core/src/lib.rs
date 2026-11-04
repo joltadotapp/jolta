@@ -4,6 +4,7 @@ pub mod blobs;
 pub mod calendar;
 pub mod compose;
 pub mod engine;
+pub mod file_icon;
 pub mod graph;
 pub mod imap;
 pub mod mcp;
