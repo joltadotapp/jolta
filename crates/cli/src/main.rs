@@ -799,8 +799,9 @@ fn mail_parser_text(raw: &[u8]) -> String {
     if e.subject.is_empty() && e.from_addr.is_empty() {
         return String::from_utf8_lossy(raw).into_owned();
     }
+    let signature = jolta_core::smime::inspect(raw, &e.from_addr).detail().map(|d| format!("Signature: {d}\n")).unwrap_or_default();
     format!(
-        "From: {} <{}>\nTo: {}\n{}Subject: {}\n\n{}",
+        "From: {} <{}>\nTo: {}\n{}Subject: {}\n{signature}\n{}",
         e.from_name,
         e.from_addr,
         e.to,
