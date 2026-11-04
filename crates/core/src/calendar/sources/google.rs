@@ -416,19 +416,22 @@ fn own_entry<T>(attendees: &[T], is_self: impl Fn(&T) -> bool, email: impl Fn(&T
 }
 
 /// The event's attendee list with the user's own entry answered. On a copy
-/// the user added for another account (`own_calendar` false), the entry
-/// Google marks `self` is the calendar's account, not the one invited.
+/// the user added for another account (`own_calendar` false) the invited
+/// address is the user's entry, and the one Google marks `self`, the
+/// calendar's account that its import needs as a guest, shows the same.
 fn answered(event: &Value, me: &str, own_calendar: bool, rsvp: &Rsvp) -> Result<Vec<Value>> {
     let mut attendees = event["attendees"].as_array().cloned().unwrap_or_default();
     let own = own_entry(&attendees, |a| own_calendar && a["self"] == true, |a| a["email"].as_str().unwrap_or_default(), &[me.to_string()])
         .ok_or_else(|| Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")))?;
-    let own = &mut attendees[own];
-    own["responseStatus"] = json!(match rsvp.answer.response() {
-        Response::Accepted => "accepted",
-        Response::Tentative => "tentative",
-        _ => "declined",
-    });
-    own["comment"] = json!(rsvp.note.clone().unwrap_or_default());
+    let shown = attendees.iter().position(|a| a["self"] == true).filter(|_| !own_calendar);
+    for i in std::iter::once(own).chain(shown) {
+        attendees[i]["responseStatus"] = json!(match rsvp.answer.response() {
+            Response::Accepted => "accepted",
+            Response::Tentative => "tentative",
+            _ => "declined",
+        });
+        attendees[i]["comment"] = json!(rsvp.note.clone().unwrap_or_default());
+    }
     Ok(attendees)
 }
 
@@ -848,10 +851,16 @@ mod tests {
         ]));
         assert_eq!(statuses(&answered(&shared, "me@example.com", true, &accept).unwrap()), ["needsAction", "accepted"]);
         assert_eq!(marked(&mapped(shared.clone())), [false, true]);
+        let added = event(json!([
+            {"email": "me@example.com", "responseStatus": "needsAction"},
+            {"email": "owner@example.com", "self": true, "responseStatus": "needsAction"},
+            {"email": "ann@example.com", "responseStatus": "accepted"}
+        ]));
+        let decline = Rsvp { answer: Answer::Decline, ..accept.clone() };
         assert_eq!(
-            statuses(&answered(&shared, "me@example.com", false, &accept).unwrap()),
-            ["accepted", "needsAction"],
-            "a copy added for the invited address answers as that address, not as the calendar's account"
+            statuses(&answered(&added, "me@example.com", false, &decline).unwrap()),
+            ["declined", "declined", "accepted"],
+            "the calendar's own entry, which Google's import needs, shows the same answer; the organizer's stays"
         );
 
         let own = event(json!([

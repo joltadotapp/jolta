@@ -187,7 +187,7 @@ pub async fn menu(jolta: &Jolta, message: MessageId) -> Result<Vec<Choice>> {
 pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>) -> Result<Added> {
     let o = offered(jolta, message).await?;
     if o.card.adding.is_none() {
-        return Err(Error::Other("This meeting is in your calendar already.".into()));
+        return Err(Error::Other("This meeting is in your calendar already, or Jolta has no calendar to add it to.".into()));
     }
     let uid = o.sent.event.uid.clone();
     let organizer = o.sent.event.organizer.as_ref().map(|p| p.address.clone());
@@ -234,7 +234,7 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
 pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
     let o = offered(jolta, message).await?;
     if o.card.updating.is_none() {
-        return Err(Error::Other("Your calendar's copy of this meeting needs no update from this message.".into()));
+        return Err(Error::Other("Your calendar's copy already has this version of the meeting.".into()));
     }
     let (account, uid, here) = (o.account, o.sent.event.uid.clone(), tz::here());
     let rid = o.sent.event.recurrence_id;
@@ -332,14 +332,21 @@ async fn offered(jolta: &Jolta, message: MessageId) -> Result<Offered> {
             let receiver = store::account(c, account)?.address;
             let invitations = invitation::find(&raw, &every);
             let cx = card::Context { message, account, me: &every, sender: &sender, now: Utc::now(), here: tz::here(), blobs: &blobs };
-            let card = card::cards(c, &invitations, &cx)?
+            let cards: Vec<EventCard> = card::cards(c, &invitations, &cx)?
                 .into_iter()
-                .find_map(|card| match card {
-                    Card::Event(e) if e.adding.is_some() || e.updating.is_some() => Some(e),
-                    _ => None,
+                .filter_map(|card| match card {
+                    Card::Event(e) => Some(e),
+                    Card::Reply(_) => None,
                 })
-                .ok_or_else(|| Error::Other("Jolta adds an invitation only from its organizer, while the account it came to has no copy of it.".into()))?;
-            let uid = card.adding.as_ref().map(|a| a.uid.clone()).or(card.updating.as_ref().map(|u| u.uid.clone())).expect("one of them");
+                .collect();
+            let first = cards.iter().position(|e| e.adding.is_some() || e.updating.is_some()).unwrap_or(0);
+            let card = cards.into_iter().nth(first).ok_or_else(|| Error::Other("This message has no invitation to add.".into()))?;
+            let uid = match (&card.adding, &card.updating, &card.answering) {
+                (Some(a), _, _) => a.uid.clone(),
+                (_, Some(u), _) => u.uid.clone(),
+                (_, _, Some(a)) => a.uid.clone(),
+                _ => return Err(Error::Other("Jolta adds and updates an invitation only from its organizer, while it is the newest version.".into())),
+            };
             let mut mine: Vec<&Invitation> = invitations.iter().filter(|i| i.event.uid == uid).collect();
             mine.sort_by_key(|i| i.event.recurrence_id.is_some());
             let sent = (*mine.first().expect("the card's invitation")).clone();
