@@ -93,6 +93,8 @@ pub struct ThreadRow {
     pub has_attachments: bool,
     pub vip: bool,
     pub needs_reply: bool,
+    /// Set when the conversation carries an invitation: the calendar mark.
+    pub invitation: Option<calendar::InvitationState>,
 }
 
 #[derive(uniffi::Record)]
@@ -706,6 +708,7 @@ impl Core {
                 has_attachments: r.has_attachments,
                 vip: r.vip,
                 needs_reply: r.needs_reply,
+                invitation: r.invitation.map(Into::into),
             })
             .collect())
     }
@@ -825,7 +828,10 @@ impl Core {
                 Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
                 Event::AgentActivity => CoreEvent::AgentActivity,
                 Event::SendFailed(message) => CoreEvent::SendFailed { message },
-                Event::CalendarsChanged(ids) => CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() },
+                Event::CalendarsChanged(ids) => {
+                    *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() }
+                }
                 Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
             };
             listener.on_event(event);

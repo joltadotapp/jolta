@@ -13,7 +13,7 @@ use jolta_ffi::{Core, CoreEvent, CoreListener, ListSort, SortKey, ThreadRow};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-const BY_DATE: ListSort = ListSort { key: SortKey::Date, reversed: false };
+pub const BY_DATE: ListSort = ListSort { key: SortKey::Date, reversed: false };
 
 pub fn unique() -> u64 {
     NEXT.fetch_add(1, Ordering::SeqCst)

@@ -11,9 +11,11 @@ use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use jolta_core::calendar::{scheduler, tz};
 use jolta_core::MailboxRole;
-use jolta_ffi::calendar::{AnswerOptions, CalendarKind, EventResponse, EventTime, InvitationAnswer, MeetingProvider, OccurrenceRecord, OccurrenceTime};
+use jolta_ffi::calendar::{
+    AnswerOptions, CalendarKind, EventResponse, EventTime, InvitationAnswer, InvitationState, MeetingProvider, OccurrenceRecord, OccurrenceTime,
+};
 
-use crate::fixture::{App, Mail, block_on};
+use crate::fixture::{App, BY_DATE, Mail, block_on};
 
 /// Serves whatever `body` holds at any path, one connection per request.
 struct Feed {
@@ -347,6 +349,60 @@ fn an_invitation_answered_from_the_reader() {
     let later = app.open(thread);
     let shown: Vec<(i64, bool)> = later.invitations.iter().map(|i| (i.message_id, i.expanded)).collect();
     assert_eq!(shown, [(message.0, false)], "the invitation is listed, collapsed");
+}
+
+/// An invitation part for `uid` from `organizer` to the test account, on
+/// `day` from 14:00 to 15:00 UTC.
+fn invitation(uid: &str, organizer: &str, day: NaiveDate, method: &str, sequence: u32) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20261101T000000Z\r\nSEQUENCE:{sequence}\r\n\
+         DTSTART:{}Z\r\nDTEND:{}Z\r\nSUMMARY:{uid}\r\nORGANIZER:mailto:{organizer}\r\n\
+         ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@test.invalid\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        stamp(day, "14:00"),
+        stamp(day, "15:00")
+    )
+}
+
+/// The list marks conversations with an invitation and shows the answer
+/// state of requests; `is:invite` finds the ones still to answer, and both
+/// change once the reader's card answers one.
+#[test]
+fn invitations_in_the_list_and_is_invite() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let monday = next_monday(tz::here());
+    let lastweek = monday - chrono::Duration::days(14);
+    let deliver = |subject: &str, from: &str, ics: String| {
+        app.deliver(&me, MailboxRole::Inbox, &Mail::new(from, "me@test.invalid", subject, "Details inside.").attach("invite.ics", &ics))
+    };
+    let review = deliver("Design review", "ann@test.invalid", invitation("review", "ann@test.invalid", monday, "REQUEST", 0));
+    deliver("Old retro", "ann@test.invalid", invitation("retro", "ann@test.invalid", lastweek, "REQUEST", 0));
+    deliver("My planning", "me@test.invalid", invitation("planning", "me@test.invalid", monday, "REQUEST", 0));
+    deliver("Offsite", "bo@test.invalid", invitation("offsite", "bo@test.invalid", monday, "REQUEST", 0));
+    deliver("Offsite cancelled", "bo@test.invalid", invitation("offsite", "bo@test.invalid", monday, "CANCEL", 1));
+    app.deliver(&me, MailboxRole::Inbox, &Mail::new("cy@test.invalid", "me@test.invalid", "Lunch?", "No calendar here."));
+
+    let states = |app: &App| -> Vec<(String, Option<InvitationState>)> { app.list("in:inbox").into_iter().map(|r| (r.subject, r.invitation)).collect() };
+    assert_eq!(
+        states(&app),
+        [
+            ("Lunch?".into(), None),
+            ("Offsite cancelled".into(), Some(InvitationState::Cancelled)),
+            ("Offsite".into(), Some(InvitationState::Cancelled)),
+            ("My planning".into(), Some(InvitationState::Plain)),
+            ("Old retro".into(), Some(InvitationState::Plain)),
+            ("Design review".into(), Some(InvitationState::Unanswered)),
+        ]
+    );
+    assert_eq!(app.subjects("-is:invite in:inbox").len(), 5);
+    assert_eq!(app.subjects("is:invite"), ["Design review"]);
+
+    let options = AnswerOptions { note: String::new(), notify: true, occurrence_only: false };
+    block_on(app.core.answer_invitation(review.0, InvitationAnswer::Accept, options)).expect("the answer goes out");
+    assert!(app.events.seen("calendar changed"), "the app reloads its list on this");
+    assert_eq!(app.core.list_count("is:invite".into(), BY_DATE).unwrap(), 0, "the cached order went with the answer");
+    let answered = app.list("in:inbox").into_iter().find(|r| r.message_id == review.0).unwrap();
+    assert_eq!(answered.invitation, Some(InvitationState::Answered { response: EventResponse::Accepted }));
 }
 
 #[test]

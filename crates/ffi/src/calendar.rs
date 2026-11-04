@@ -34,6 +34,28 @@ mirror!(CalendarAccess <- cal::Access { Owner, Write, Read, FreeBusy });
 mirror!(EventStatus <- cal::EventStatus { Confirmed, Tentative, Cancelled });
 mirror!(ShowAs <- cal::ShowAs { Free, Tentative, Busy, OutOfOffice, Elsewhere });
 mirror!(EventResponse <- cal::Response { NeedsAction, Accepted, Tentative, Declined, Delegated });
+
+/// What a list row shows for its conversation's invitation, beside the
+/// calendar mark: the answer to a request, or a cancellation.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationState {
+    Unanswered,
+    Answered { response: EventResponse },
+    Cancelled,
+    /// The mark alone.
+    Plain,
+}
+
+impl From<store::InvitationState> for InvitationState {
+    fn from(s: store::InvitationState) -> Self {
+        match s {
+            store::InvitationState::Unanswered => InvitationState::Unanswered,
+            store::InvitationState::Answered(r) => InvitationState::Answered { response: r.into() },
+            store::InvitationState::Cancelled => InvitationState::Cancelled,
+            store::InvitationState::Plain => InvitationState::Plain,
+        }
+    }
+}
 mirror!(AttendeeRole <- cal::Role { Required, Optional, Chair, Room, Resource, Fyi });
 mirror!(EventVisibility <- cal::Visibility { Default, Public, Private, Confidential });
 mirror!(MeetingProvider <- cal::MeetingProvider {
@@ -611,7 +633,10 @@ impl Core {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.calendars().clone())
     }
 
+    /// List rows show answers from the calendars, so the cached list order
+    /// goes too: `is:invite` changes with them.
     pub(crate) fn calendar_changed(&self, ids: impl IntoIterator<Item = CalendarId>) {
+        *self.order.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.listener.on_event(CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() });
     }
 }
