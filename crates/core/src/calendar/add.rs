@@ -251,18 +251,18 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
     }
     let (account, uid, here) = (o.account, o.sent.event.uid.clone(), tz::here());
     let rid = o.sent.event.recurrence_id;
-    let (event, before) = jolta
+    let ((event, scope), before) = jolta
         .store
         .read_async({
             let uid = uid.clone();
             move |c| {
-                let event = copied(c, account, &uid, rid.as_ref(), here)?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?;
+                let found = copy_target(c, account, &uid, rid.as_ref(), here)?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?;
                 let written = store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default();
-                Ok((event, written))
+                Ok((found, written))
             }
         })
         .await?;
-    let (calendar, mut target) = rsvp::target_of(jolta, event.event_id, &Scope::Series).await?;
+    let (calendar, mut target) = rsvp::target_of(jolta, event, &scope).await?;
     target.me = o.receiver.clone();
     let source = sync::calendar_source(jolta, &calendar).await?;
     let id = calendar.id;

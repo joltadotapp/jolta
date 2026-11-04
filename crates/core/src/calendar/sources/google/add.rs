@@ -1,6 +1,7 @@
 //! Add to calendar and Update in your calendar on Google: `events.import`,
-//! which keeps the invitation's UID as `iCalUID` and emails nobody, then
-//! patches with `sendUpdates=none` and the event's ETag. The import is a
+//! which keeps the invitation's UID as `iCalUID` and emails nobody, again
+//! with the event's ETag for a newer version, and patches with
+//! `sendUpdates=none` for an answer. The import is a
 //! private copy (`privateCopy`), so nothing done to it later reaches the
 //! organizer either. Google imports an event only into the calendar of its
 //! organizer or a guest (its 400 on the Microsoft 365 test account's
@@ -40,46 +41,56 @@ impl Google {
 
     /// Imports the newer version over the copy, which Google matches by
     /// its UID. A guest can't patch a private copy's time or title (Google's
-    /// 403, 2026-11-04), and the import takes no ETag, so the copy is read
-    /// first and left alone unless it is still the version Jolta read.
+    /// 403, 2026-11-04), so each import carries the ETag of the event it
+    /// writes over, which `events.import` honours with a 412 for another one
+    /// (2026-11-05).
     pub async fn replace(&self, calendar: &Calendar, target: &Target, copy: &NewCopy<'_>) -> Result<Replaced> {
-        let url = format!("{BASE}/calendars/{}/events/{}", encode(&calendar.remote_id), encode(&target.event.remote_id));
-        let (status, body) = self.get(&url).await?;
-        if matches!(status, 404 | 410) {
-            return Err(Error::Other("The meeting is no longer in your calendar.".into()));
-        }
-        if !(200..300).contains(&status) {
-            return Err(failure(status, &body));
-        }
-        let now: Value = parse(&body)?;
-        let same = match &target.event.etag {
-            Some(etag) => now["etag"].as_str() == Some(etag.as_str()),
-            None => now["sequence"].as_i64().unwrap_or(0) == target.event.data.sequence,
-        };
-        if !same || now["status"] == "cancelled" {
-            return Ok(Replaced::Changed);
-        }
-        let whole = copy.master().or_else(|| copy.events.first().filter(|_| target.event.data.recurrence.is_none()));
-        if let Some(e) = whole {
-            self.import(calendar, e, copy).await?;
-        }
-        if target.event.data.recurrence.is_some() {
-            for o in copy.overrides() {
-                self.import(calendar, o, copy).await?;
+        for (e, etag) in imports(target, copy, tz::here())? {
+            let (status, reply) = self.send_import(calendar, e, copy, etag).await?;
+            match status {
+                200..300 => {}
+                412 => return Ok(Replaced::Changed),
+                404 | 410 => return Err(Error::Other("The meeting is no longer in your calendar.".into())),
+                _ => return Err(failure(status, &reply)),
             }
         }
         Ok(Replaced::Written(None))
     }
 
     async fn import(&self, calendar: &Calendar, e: &EventData, copy: &NewCopy<'_>) -> Result<Value> {
-        let body = event_body(e, copy, &self.account.address, tz::here());
-        let url = format!("{BASE}/calendars/{}/events/import", encode(&calendar.remote_id));
-        let (status, reply) = self.request(reqwest::Method::POST, &url, Some(&body), None).await?;
+        let (status, reply) = self.send_import(calendar, e, copy, None).await?;
         if !(200..300).contains(&status) {
             return Err(failure(status, &reply));
         }
         parse(&reply)
     }
+
+    async fn send_import(&self, calendar: &Calendar, e: &EventData, copy: &NewCopy<'_>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
+        let body = event_body(e, copy, &self.account.address, tz::here());
+        let url = format!("{BASE}/calendars/{}/events/import", encode(&calendar.remote_id));
+        self.request(reqwest::Method::POST, &url, Some(&body), if_match).await
+    }
+}
+
+/// The imports that write `copy` over `target`, each with the ETag Google
+/// must still hold for the event it replaces: the series or single event
+/// Jolta read, and the changed occurrence the target names when Jolta holds
+/// it. Google checks a changed occurrence against its own ETag, so one the
+/// copy holds unchanged has none to give.
+fn imports<'a>(target: &'a Target, copy: &'a NewCopy<'a>, here: Tz) -> Result<Vec<(&'a EventData, Option<&'a str>)>> {
+    let etag = target.event.etag.as_deref().ok_or_else(|| Error::Other("Jolta hasn't read this copy back from Google yet. Try again in a minute.".into()))?;
+    let repeats = target.event.data.recurrence.is_some();
+    let mut out = Vec::new();
+    if let Some(e) = copy.master().or_else(|| copy.events.first().filter(|_| !repeats)) {
+        out.push((e, Some(etag)));
+    }
+    if repeats {
+        for o in copy.overrides() {
+            let stored = target.occurrence.as_ref().filter(|t| o.recurrence_id.is_some_and(|rid| rid.names(&t.recurrence_id, here))).and_then(|t| t.stored.as_ref());
+            out.push((o, stored.and_then(|s| s.etag.as_deref())));
+        }
+    }
+    Ok(out)
 }
 
 /// The event as `events.import` takes it: the invitation's UID, times in
@@ -224,6 +235,34 @@ mod tests {
         assert_eq!(v["originalStartTime"], json!({ "dateTime": "2026-11-17T09:30:00", "timeZone": "Europe/Brussels" }), "Google files it under the series");
         assert_eq!(v["status"], "cancelled");
         assert!(v.get("recurrence").is_none());
+    }
+
+    /// Update writes only over what Jolta read: each import names the ETag
+    /// Google must still hold, the series' or the changed occurrence's own.
+    #[test]
+    fn every_import_of_an_update_is_conditional_where_jolta_holds_an_etag() {
+        use crate::calendar::EventId;
+        use crate::calendar::rsvp::{Occurrence, Stored};
+        let stored = |data: &EventData, etag: Option<&str>| Stored { id: EventId(1), remote_id: "r".into(), etag: etag.map(str::to_string), raw: None, data: data.clone() };
+        let series = ical::read(SERIES, &[]).unwrap();
+        let moved = SERIES
+            .replace("RRULE:FREQ=WEEKLY;BYDAY=TU\r\nEXDATE;TZID=Europe/Brussels:20261124T093000\r\n", "RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\n")
+            .replace("20261110T09", "20261117T10");
+        let occurrence = ical::read(&moved, &[]).unwrap();
+        let copy = |events| NewCopy { uid: "standup@example.com", text: SERIES, events, me: "me@icloud.example", answer: None };
+        let conditions = |target: &Target, events| imports(target, &copy(events), Brussels).map(|list| list.into_iter().map(|(e, etag)| (e.recurrence_id.is_some(), etag.map(str::to_string))).collect::<Vec<_>>());
+
+        let whole = Target { event: stored(&series[0], Some("\"1\"")), occurrence: None, me: "me@gmail.example".into() };
+        assert_eq!(conditions(&whole, &series).unwrap(), [(false, Some("\"1\"".into()))], "the series Jolta read");
+        let rid = occurrence[0].recurrence_id.unwrap();
+        let changed = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: Some(stored(&occurrence[0], Some("\"7\""))) }), ..whole.clone() };
+        assert_eq!(conditions(&changed, &occurrence).unwrap(), [(true, Some("\"7\"".into()))], "Google checks a changed occurrence against its own ETag");
+        let unchanged = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: None }), ..whole.clone() };
+        assert_eq!(conditions(&unchanged, &occurrence).unwrap(), [(true, None)], "an occurrence without an event of its own has no ETag");
+        let alone = Target { event: stored(&occurrence[0], Some("\"3\"")), occurrence: None, me: "me@gmail.example".into() };
+        assert_eq!(conditions(&alone, &occurrence).unwrap(), [(true, Some("\"3\"".into()))], "an occurrence the copy holds without its series");
+        let unread = Target { event: stored(&series[0], None), ..whole };
+        assert!(conditions(&unread, &series).unwrap_err().to_string().contains("hasn't read this copy"), "no write without an ETag to hold it to");
     }
 
     #[test]
