@@ -109,8 +109,9 @@ pub struct ThreadView {
     pub mailing_list: bool,
     /// The last message whose attachments the reader lists, for Save all.
     pub files_message_id: Option<i64>,
-    /// The newest invitation in the conversation the user can answer.
-    pub invitation: Option<calendar::InvitationInfo>,
+    /// Every invitation in the conversation the user can answer, oldest
+    /// first. Y, M and N answer the last one whose message is expanded.
+    pub invitations: Vec<calendar::InvitationInfo>,
 }
 
 #[derive(uniffi::Enum)]
@@ -739,7 +740,7 @@ impl Core {
             files_message_id: detail.rendered.files_message,
             image_sender: detail.image_sender.unwrap_or_default(),
             images_trusted: detail.images_trusted,
-            invitation: detail.invitation.map(Into::into),
+            invitations: detail.invitations.into_iter().map(Into::into).collect(),
             mailing_list: self.jolta.store.read(|c| {
                 Ok(c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM message WHERE thread_id = ?1 AND list_unsubscribe IS NOT NULL)",

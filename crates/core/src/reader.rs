@@ -33,14 +33,17 @@ pub struct ThreadDetail {
     pub image_sender: Option<String>,
     /// Whether every message with remote images comes from a trusted sender.
     pub images_trusted: bool,
-    /// The newest invitation the user can answer, which Y, M and N answer.
-    pub invitation: Option<OpenInvitation>,
+    /// Every invitation the user can answer, oldest first. Y, M and N answer
+    /// the last one whose message is expanded.
+    pub invitations: Vec<OpenInvitation>,
 }
 
 #[derive(Clone, Debug)]
 pub struct OpenInvitation {
     pub answering: card::Answering,
     pub answer: Option<crate::calendar::Response>,
+    /// Whether its message starts expanded, its card on screen.
+    pub expanded: bool,
 }
 
 pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, Vec<ThreadMessage>)> {
@@ -121,11 +124,17 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
         .collect();
     let protections: Vec<Protection> = messages.iter().zip(&raws).map(|(m, raw)| smime::inspect(raw, &m.from_addr)).collect();
     let cards = invitation_cards(jolta, &messages, &raws).await?;
-    let invitation = cards.iter().rev().flatten().find_map(|c| match c {
-        Card::Event(e) => e.answering.clone().map(|answering| OpenInvitation { answering, answer: e.answer }),
-        Card::Reply(_) => None,
-    });
     let last = messages.len().saturating_sub(1);
+    let open = |i: usize| i == last || !messages[i].flags.has(Flags::SEEN);
+    let invitations = cards
+        .iter()
+        .enumerate()
+        .flat_map(|(i, cards)| cards.iter().map(move |c| (i, c)))
+        .filter_map(|(i, c)| match c {
+            Card::Event(e) => e.answering.clone().map(|answering| OpenInvitation { answering, answer: e.answer, expanded: open(i) }),
+            Card::Reply(_) => None,
+        })
+        .collect();
     let views: Vec<MessageView> = messages
         .iter()
         .enumerate()
@@ -136,7 +145,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             date: &names[i].1,
             snippet: &m.snippet,
             raw: &raws[i],
-            open: i == last || !m.flags.has(Flags::SEEN),
+            open: open(i),
             vip: m.vip,
             protection: &protections[i],
             cards: &cards[i],
@@ -158,7 +167,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
             .await?;
     let image_sender = (senders.len() == 1).then(|| senders.remove(0));
-    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitation })
+    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitations })
 }
 
 /// The invitation cards of each message, empty for most.

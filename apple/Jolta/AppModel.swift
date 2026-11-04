@@ -108,6 +108,11 @@ final class AppModel {
     var pendingAnswer: InvitationAnswer?
     /// The note field or the scope menu under the open card, when one is up.
     var rsvpPanel: RsvpPanel?
+    /// The card the choices, the panel and the pending answer belong to.
+    var rsvpMessage: Int64?
+    /// Messages of the open conversation the user expanded (true) or
+    /// collapsed, as the reader reports them.
+    var expandedMessages: [Int64: Bool] = [:]
     var selectedThreadID: Int64?
     /// Threads selected in the list, in list order. With more than one,
     /// actions apply to all of them and the reader shows how many.
@@ -849,6 +854,8 @@ final class AppModel {
         if selectedThreadID != threadID {
             answerChoices = AnswerChoices()
             rsvpPanel = nil
+            rsvpMessage = nil
+            expandedMessages = [:]
         }
         selectedThreadID = threadID
         selectedThreads = [threadID]

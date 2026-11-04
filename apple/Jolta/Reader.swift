@@ -28,6 +28,11 @@ final class ReaderPage {
         get { links.onRsvp }
         set { links.onRsvp = newValue }
     }
+    /// Called when a message is expanded (true) or collapsed.
+    var onToggle: ((Int64, Bool) -> Void)? {
+        get { links.onToggle }
+        set { links.onToggle = newValue }
+    }
     private let links = LinkActions()
     private static var ruleList: WKContentRuleList?
 
@@ -40,6 +45,16 @@ final class ReaderPage {
         if let rules = Self.ruleList {
             config.userContentController.add(rules)
         }
+        // In the app's own script world, which runs with the page's
+        // JavaScript off: every expand and collapse of a message, by its id.
+        let toggles = """
+        document.addEventListener("toggle", (e) => {
+          const body = e.target.matches?.("details.jolta-message") && e.target.querySelector(":scope > .jolta-body");
+          if (body) webkit.messageHandlers.toggle.postMessage({ id: body.id.slice(1), open: e.target.open });
+        }, true);
+        """
+        config.userContentController.addUserScript(WKUserScript(source: toggles, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient))
+        config.userContentController.add(ToggleMessages(links: links), contentWorld: .defaultClient, name: "toggle")
         page = WebPage(configuration: config, navigationDecider: Decider(links: links))
     }
 
@@ -60,7 +75,8 @@ final class ReaderPage {
         }
     }
 
-    func show(html: String) {
+    /// Loads a rendered conversation; `then` runs once it has loaded.
+    func show(html: String, then done: (@MainActor () -> Void)? = nil) {
         var html = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"jolta-images\">") : html
         // Here rather than in the core's `appCss`: a page loads again, with
         // images, from HTML rendered before the theme last changed.
@@ -68,7 +84,8 @@ final class ReaderPage {
             html.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>", at: head.lowerBound)
         }
         let events = page.load(html: html, baseURL: URL(string: "about:blank")!)
-        guard UserDefaults.standard.bool(forKey: "JoltaReaderDebug") else { return }
+        let debug = UserDefaults.standard.bool(forKey: "JoltaReaderDebug")
+        guard debug || done != nil else { return }
         Task {
             var log = "html \(html.count) chars\n"
             do {
@@ -76,11 +93,26 @@ final class ReaderPage {
             } catch {
                 log += "load error \(error)\n"
             }
+            done?()
+            guard debug else { return }
             let probe = try? await page.callJavaScript("return [document.body ? document.body.innerText.length : -1, getComputedStyle(document.body).color, innerWidth, innerHeight].join(' ')")
             log += "probe \(String(describing: probe))\nurl \(String(describing: page.url))\n"
             try? log.write(toFile: AppModel.dataDirectory + "/readerdebug.txt", atomically: true, encoding: .utf8)
             try? html.write(toFile: AppModel.dataDirectory + "/readerdebug.html", atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Expands or collapses messages by id, as the user left them before
+    /// the page loaded again.
+    func expand(_ states: [Int64: Bool]) {
+        let script = """
+        for (const [id, open] of Object.entries(states)) {
+          const details = document.getElementById("m" + id)?.closest("details.jolta-message");
+          if (details) details.open = open;
+        }
+        """
+        let states = Dictionary(uniqueKeysWithValues: states.map { (String($0.key), $0.value) })
+        Task { _ = try? await page.callJavaScript(script, arguments: ["states": states]) }
     }
 
     /// Swaps the theme's colors into the page on screen. The app's own
@@ -174,6 +206,21 @@ private final class LinkActions {
     var onAttachment: ((Int64, UInt32) -> Void)?
     var onSaveAll: ((Int64) -> Void)?
     var onRsvp: ((Int64, String) -> Void)?
+    var onToggle: ((Int64, Bool) -> Void)?
+}
+
+/// The toggle script's messages: `{id, open}` for one message.
+private final class ToggleMessages: NSObject, WKScriptMessageHandler {
+    let links: LinkActions
+
+    init(links: LinkActions) {
+        self.links = links
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let id = (body["id"] as? String).flatMap(Int64.init), let open = body["open"] as? Bool else { return }
+        MainActor.assumeIsolated { links.onToggle?(id, open) }
+    }
 }
 
 @MainActor
@@ -264,24 +311,23 @@ struct ReaderView: View {
             trustOverride = nil
         }
         reader.images.allowsRemote = imagesLoaded || trusted
-        reader.show(html: thread.html)
-        if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil {
-            Task {
-                try? await Task.sleep(for: .milliseconds(150))
-                reflect()
-            }
+        let expanded = model.expandedMessages
+        reader.show(html: thread.html) {
+            if !expanded.isEmpty { reader.expand(expanded) }
+            if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
         }
     }
 
     /// The open card's choices and pending answer, marked on the page.
     private func reflect() {
-        guard let invitation = thread.invitation else { return }
+        guard let invitation = model.activeInvitation else { return }
         let chosen = model.pendingAnswer ?? invitation.answer?.invitationAnswer
         reader.reflect(message: invitation.messageId, chosen: chosen, sending: model.pendingAnswer != nil,
                        choices: model.answerChoices, day: invitation.occurrenceDay)
     }
 
     private func rsvp(_ message: Int64, _ action: String) {
+        model.rsvpMessage = message
         if let answer = InvitationAnswer(name: action) {
             return model.answerInvitation(answer, message: message)
         }
@@ -301,7 +347,7 @@ struct ReaderView: View {
     }
 
     @ViewBuilder private var rsvpPanel: some View {
-        if let panel = model.rsvpPanel, let invitation = thread.invitation {
+        if let panel = model.rsvpPanel, let invitation = model.activeInvitation {
             let anchor = panel.anchor
             Group {
                 switch panel {
@@ -414,6 +460,7 @@ struct ReaderView: View {
             reader.onAttachment = onAttachment
             reader.onSaveAll = onSaveAll
             reader.onRsvp = { rsvp($0, $1) }
+            reader.onToggle = { model.expandedMessages[$0] = $1 }
             reader.images.core = core
             render()
             // `-JoltaLoadImages YES` loads remote images at once, for checking from scripts.

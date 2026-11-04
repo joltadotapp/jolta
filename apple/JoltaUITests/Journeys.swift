@@ -69,9 +69,11 @@ final class Journeys: XCTestCase {
     /// Y, M and N answer the invitation in the open conversation. The test
     /// account has no calendar and no server, so each answer is a reply
     /// mail that waits in the outbox, and the card shows the answer given.
+    /// With the invitation's message collapsed, its card is off screen, and
+    /// the keys and the palette leave it alone.
     func testAnswerInvitationWithKeys() throws {
         let app = try launch()
-        text(app, "Invitation: Design crit").click()
+        text(app, "Re: Invitation: Design crit").click()
         app.typeKey(.return, modifierFlags: [])
         let reader = app.webViews.firstMatch
         let body = reader.staticTexts.matching(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@", "Shall we go", "Shall we go")).firstMatch
@@ -86,6 +88,26 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(link("Accept").waitForExistence(timeout: 5) && !link("Accepted").exists)
         app.typeKey("n", modifierFlags: [])
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "n declines")
+
+        let header = reader.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", "Ann Organizer", "Ann Organizer")).firstMatch
+        header.click()
+        XCTAssertTrue(link("Declined").waitForNonExistence(timeout: 5), "the invitation's message collapses")
+        app.typeKey("y", modifierFlags: [])
+        XCTAssertFalse(text(app, "Accepted. Jolta emailed Ann.").waitForExistence(timeout: 3), "y answers no card off screen")
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
+        app.typeText("invitation")
+        XCTAssertFalse(paletteRow(app, "Accept invitation").waitForExistence(timeout: 2), "the palette offers no answer either")
+        app.typeKey(.escape, modifierFlags: [])
+
+        header.click()
+        XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "expanded again, the card is back")
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("Accept invitation")
+        XCTAssertTrue(paletteRow(app, "Accept invitation").waitForExistence(timeout: 5), "the palette offers the answers again")
+        app.typeKey(.escape, modifierFlags: [])
+        app.typeKey("y", modifierFlags: [])
+        XCTAssertTrue(link("Accepted").waitForExistence(timeout: 5), "y accepts the card on screen")
     }
 
     /// Keys typed while the palette is open go to the palette, never to the

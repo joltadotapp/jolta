@@ -319,8 +319,8 @@ fn an_invitation_answered_from_the_reader() {
     let thread = app.thread_of(message);
 
     let before = app.open(thread);
-    let invitation = before.invitation.expect("an invitation to answer");
-    assert_eq!((invitation.message_id, invitation.answer, invitation.organizer.as_str()), (message.0, None, "Ann"));
+    let invitation = before.invitations.first().expect("an invitation to answer");
+    assert_eq!((invitation.message_id, invitation.answer, invitation.organizer.as_str(), invitation.expanded), (message.0, None, "Ann", true));
     assert!(before.html.contains(&format!("href=\"x-rsvp:{}/accept\"", message.0)), "the card has the buttons");
     assert!(!before.html.contains("jolta-chosen"));
 
@@ -331,14 +331,22 @@ fn an_invitation_answered_from_the_reader() {
     assert_eq!(app.count("SELECT count(*) FROM outbox"), 1, "one reply, to the organizer only");
 
     let after = app.open(thread);
-    assert_eq!(after.invitation.and_then(|i| i.answer), Some(EventResponse::Accepted));
+    assert_eq!(after.invitations[0].answer, Some(EventResponse::Accepted));
     assert!(after.html.contains("jolta-rsvp-accept jolta-chosen"), "the card shows the answer given");
 
     let quiet = AnswerOptions { note: String::new(), notify: false, occurrence_only: false };
     let toast = block_on(app.core.answer_invitation(message.0, InvitationAnswer::Decline, quiet)).unwrap();
     assert_eq!(toast, "Declined without telling Ann.");
-    assert_eq!(app.count("SELECT count(*) FROM outbox"), 1, "Don't send a reply sends nothing");
-    assert_eq!(app.open(thread).invitation.and_then(|i| i.answer), Some(EventResponse::Declined));
+    assert_eq!(app.count("SELECT count(*) FROM outbox"), 0, "Don't send a reply sends nothing and takes back the Accept still waiting");
+    assert_eq!(app.open(thread).invitations[0].answer, Some(EventResponse::Declined));
+
+    // Read, and followed by an ordinary reply, the invitation starts
+    // collapsed, so Y, M and N have no card on screen to answer.
+    app.jolta.store.write(|tx| Ok(tx.execute("UPDATE message SET flags = flags | 1 WHERE id = ?1", [message.0])?)).unwrap();
+    app.deliver(&me, MailboxRole::Inbox, &Mail::reply(&mail, "bo@test.invalid", "See you there."));
+    let later = app.open(thread);
+    let shown: Vec<(i64, bool)> = later.invitations.iter().map(|i| (i.message_id, i.expanded)).collect();
+    assert_eq!(shown, [(message.0, false)], "the invitation is listed, collapsed");
 }
 
 #[test]

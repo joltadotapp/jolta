@@ -72,14 +72,27 @@ extension EventResponse {
 }
 
 extension AppModel {
-    /// Answers the invitation on a card, the newest one in the open
-    /// conversation unless a card's own button names its message.
+    /// The invitation Y, M and N answer: the last one whose message is
+    /// expanded, so its card is on screen.
+    var shownInvitation: InvitationInfo? {
+        openThread?.invitations.last { expandedMessages[$0.messageId] ?? $0.expanded }
+    }
+
+    /// The card the choices and the panel apply to: the one last used,
+    /// else the one Y, M and N answer.
+    var activeInvitation: InvitationInfo? {
+        openThread?.invitations.first { $0.messageId == rsvpMessage } ?? shownInvitation
+    }
+
+    /// Answers the invitation on a card: the one a card's own button names,
+    /// else the one on screen. Without a card on screen it does nothing.
     func answerInvitation(_ answer: InvitationAnswer, message: Int64? = nil) {
-        guard let invitation = openThread?.invitation else { return notify("No invitation to answer in this conversation") }
-        guard pendingAnswer == nil, let threadID = openThread?.threadId else { return }
-        let messageID = message ?? invitation.messageId
+        let invitation = if let message { openThread?.invitations.first { $0.messageId == message } } else { shownInvitation }
+        guard let invitation, pendingAnswer == nil, let threadID = openThread?.threadId else { return }
+        let messageID = invitation.messageId
         let choices = answerChoices
         rsvpPanel = nil
+        rsvpMessage = messageID
         pendingAnswer = answer
         Task {
             do {

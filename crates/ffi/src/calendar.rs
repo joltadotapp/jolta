@@ -212,10 +212,12 @@ impl From<InvitationAnswer> for rsvp::Answer {
     }
 }
 
-/// The invitation the open conversation's keys answer.
+/// An invitation in the open conversation the user can answer.
 #[derive(uniffi::Record)]
 pub struct InvitationInfo {
     pub message_id: i64,
+    /// Whether its message starts expanded; the reader reports changes.
+    pub expanded: bool,
     pub answer: Option<EventResponse>,
     /// For a series, the occurrence the card shows: "Thu 5 Nov". None for
     /// an invitation to one occurrence, which has no scope to choose.
@@ -228,6 +230,7 @@ impl From<jolta_core::reader::OpenInvitation> for InvitationInfo {
     fn from(i: jolta_core::reader::OpenInvitation) -> Self {
         InvitationInfo {
             message_id: i.answering.message.0,
+            expanded: i.expanded,
             answer: i.answer.map(Into::into),
             occurrence_day: i.answering.occurrence.filter(|o| !o.alone).map(|o| o.day),
             organizer: i.answering.organizer,
