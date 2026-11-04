@@ -35,6 +35,12 @@ final class Journeys: XCTestCase {
         app.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", string, string)).firstMatch
     }
 
+    /// A palette row by any of its texts: VoiceOver reads a row as one
+    /// button labelled with them all ("Graphite Dark, Dark, Dark mode").
+    private func paletteRow(_ app: XCUIApplication, _ string: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", string)).firstMatch
+    }
+
     private func visible(_ app: XCUIApplication, _ subject: String) -> Bool {
         text(app, subject).exists
     }
@@ -110,7 +116,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         app.typeText("theme")
         app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(text(app, "Back to Commands").waitForExistence(timeout: 5), "Change Theme… opens the theme list in the same palette")
+        XCTAssertTrue(paletteRow(app, "Back to Commands").waitForExistence(timeout: 5), "Change Theme… opens the theme list in the same palette")
     }
 
     private func commandField(_ app: XCUIApplication) -> XCUIElement {
@@ -131,7 +137,7 @@ final class Journeys: XCTestCase {
         XCTAssertGreaterThan(distance(previewed, listed), 6, "moving the selection to another theme previews it behind the palette")
 
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Esc closes the theme list")
+        XCTAssertTrue(paletteRow(app, "Back to Commands").waitForNonExistence(timeout: 5), "Esc closes the theme list")
         let reverted = listColor(app, "After Esc") { self.distance($0, graphite) <= 3 }
         XCTAssertLessThanOrEqual(distance(reverted, graphite), 3, "Esc puts back the theme that was in use")
 
@@ -140,20 +146,20 @@ final class Journeys: XCTestCase {
         app.typeKey(.downArrow, modifierFlags: [])
         _ = listColor(app, "Previewing before choosing") { self.distance($0, listed) > 6 }
         app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on a theme closes the palette")
+        XCTAssertTrue(paletteRow(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on a theme closes the palette")
         let chosen = listColor(app, "Chosen theme, palette closed") { self.distance($0, graphite) > 6 }
         XCTAssertGreaterThan(distance(chosen, graphite), 6, "the chosen theme stays after the palette closes")
 
         openThemes(app)
-        XCTAssertTrue(text(app, "Dark mode").exists && text(app, "Light mode").exists, "the theme list marks the theme for each appearance")
+        XCTAssertTrue(paletteRow(app, "Dark mode").exists && paletteRow(app, "Light mode").exists, "the theme list marks the theme for each appearance")
         for _ in 0..<5 { app.typeKey(.upArrow, modifierFlags: []) }
         app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(text(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on Back to Commands leaves the theme list")
+        XCTAssertTrue(paletteRow(app, "Back to Commands").waitForNonExistence(timeout: 5), "Enter on Back to Commands leaves the theme list")
         XCTAssertTrue(commandField(app).waitForExistence(timeout: 5), "the palette shows the commands again")
 
         app.typeText("theme")
         app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(text(app, "Back to Commands").waitForExistence(timeout: 5), "the theme list opens again")
+        XCTAssertTrue(paletteRow(app, "Back to Commands").waitForExistence(timeout: 5), "the theme list opens again")
         app.typeKey(.delete, modifierFlags: [])
         XCTAssertTrue(commandField(app).waitForExistence(timeout: 5), "⌫ in the empty field goes back to the commands")
         app.typeKey(.escape, modifierFlags: [])
@@ -176,8 +182,8 @@ final class Journeys: XCTestCase {
         XCTAssertGreaterThan(distance(always, graphite), 40, "the theme of the other mode shows")
 
         openThemes(app)
-        XCTAssertTrue(text(app, "Always").exists, "the theme list marks the theme shown always")
-        XCTAssertTrue(text(app, "Match macOS Appearance").exists, "the theme list offers matching macOS again")
+        XCTAssertTrue(paletteRow(app, "Always").exists, "the theme list marks the theme shown always")
+        XCTAssertTrue(paletteRow(app, "Match macOS Appearance").exists, "the theme list offers matching macOS again")
         app.typeKey(.escape, modifierFlags: [])
 
         app.typeKey("k", modifierFlags: .command)
