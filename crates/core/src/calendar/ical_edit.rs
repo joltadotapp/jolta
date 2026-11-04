@@ -159,6 +159,25 @@ impl Object {
         }
     }
 
+    /// Every VEVENT with this UID: the master and its overrides.
+    pub fn events_mut(&mut self, uid: &str) -> Vec<&mut Component> {
+        fn collect<'a>(nodes: &'a mut [Node], uid: &str, out: &mut Vec<&'a mut Component>) {
+            for node in nodes {
+                let Node::Component(c) = node else { continue };
+                if c.name == "VEVENT" {
+                    if c.prop("UID").is_some_and(|p| p.text() == uid) {
+                        out.push(c);
+                    }
+                } else if c.name == "VCALENDAR" {
+                    collect(&mut c.nodes, uid, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        collect(&mut self.nodes, uid, &mut out);
+        out
+    }
+
     /// Adds `event` (an override of one occurrence) right after the master
     /// with the same UID. False when there's no master.
     pub fn add_after_master(&mut self, event: Component) -> bool {

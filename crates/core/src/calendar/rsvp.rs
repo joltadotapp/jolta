@@ -211,9 +211,10 @@ fn target(rows: Vec<Row>, event: EventId, scope: &Scope, here: Tz, me: String) -
     }
 }
 
-/// Sets the answer on the stored events it covers: the whole series, the
-/// changed occurrence, or a new override for an occurrence answered on its
-/// own, stored under the remote id the answer `landed` on.
+/// Sets the answer on the stored events it covers: the whole series (each
+/// override the user is on), the changed occurrence, or a new override for
+/// an occurrence answered on its own, stored under the remote id the answer
+/// `landed` on.
 fn record(conn: &Connection, calendar: super::CalendarId, target: &Target, rsvp: &Rsvp, landed: &str, here: Tz) -> Result<()> {
     let uid = &target.event.data.uid;
     let mine = |data: &EventData| with_answer(data, rsvp, &target.me);
@@ -224,7 +225,7 @@ fn record(conn: &Connection, calendar: super::CalendarId, target: &Target, rsvp:
                 stmt.query_map(params![calendar, uid], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
             for (id, data) in rows {
                 let data: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}")))?;
-                if data.status != EventStatus::Cancelled {
+                if data.status != EventStatus::Cancelled && (id == target.event.id || data.attendees.iter().any(|a| a.is_me)) {
                     store::set_event_data(conn, id, &mine(&data))?;
                 }
             }
@@ -368,10 +369,11 @@ fn is_me(p: &Prop, me: &str) -> bool {
 /// The answer written into a CalDAV resource: the user's ATTENDEE line in the
 /// VEVENT with `uid` and `recurrence_id` gets the PARTSTAT, and with a note
 /// the X-RESPONSE-COMMENT Jolta reads and the comment Apple's servers pass
-/// to the organizer. An occurrence without an override gets one, copied from
-/// the master. Not notifying sets SCHEDULE-AGENT=CLIENT on the ORGANIZER
-/// line, which tells a scheduling server not to send the reply (RFC 6638
-/// section 7.1). Every other line stays byte for byte.
+/// to the organizer. Answering a series (no `recurrence_id`) answers every
+/// override the user is on too. An occurrence without an override gets one,
+/// copied from the master. Not notifying sets SCHEDULE-AGENT=CLIENT on the
+/// ORGANIZER line, which tells a scheduling server not to send the reply
+/// (RFC 6638 section 7.1). Every other line stays byte for byte.
 pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Moment>, me: &str, rsvp: &Rsvp, here: Tz) -> Result<String> {
     let mut obj = Object::parse(text);
     let written = match recurrence_id {
@@ -387,34 +389,47 @@ pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Momen
             }
         }
     };
-    let ev = obj
-        .event_mut(uid, written.as_deref())
-        .ok_or_else(|| Error::Other(format!("the calendar object has no event {uid}")))?;
+    if obj.event(uid, written.as_deref()).is_none() {
+        return Err(Error::Other(format!("the calendar object has no event {uid}")));
+    }
     let partstat = rsvp.answer.partstat();
     let note = rsvp.note.as_deref().map(|n| n.replace(['\r', '\n'], " "));
-    let matched = ev.update("ATTENDEE", |p| is_me(p, me), |p| {
-        p.set_param("PARTSTAT", partstat);
-        match &note {
-            Some(n) => p.set_param("X-RESPONSE-COMMENT", n),
-            None => p.remove_param("X-RESPONSE-COMMENT"),
+    let mut answered = false;
+    for ev in obj.events_mut(uid) {
+        let target = ev.prop("RECURRENCE-ID").map(|p| p.value().trim()) == written.as_deref().map(str::trim);
+        if !target && written.is_some() {
+            continue;
         }
-    });
-    if matched == 0 {
+        let matched = ev.update("ATTENDEE", |p| is_me(p, me), |p| {
+            p.set_param("PARTSTAT", partstat);
+            match &note {
+                Some(n) => p.set_param("X-RESPONSE-COMMENT", n),
+                None => p.remove_param("X-RESPONSE-COMMENT"),
+            }
+        });
+        if matched == 0 {
+            continue;
+        }
+        answered |= target;
+        match &rsvp.note {
+            Some(n) => ev.set_text("X-CALENDARSERVER-PRIVATE-COMMENT", n),
+            None => {
+                ev.remove("X-CALENDARSERVER-PRIVATE-COMMENT");
+            }
+        }
+        if target {
+            ev.update("ORGANIZER", |_| true, |p| {
+                if !rsvp.notify {
+                    p.set_param("SCHEDULE-AGENT", "CLIENT");
+                } else if p.param("SCHEDULE-AGENT").is_some_and(|a| a.eq_ignore_ascii_case("CLIENT")) {
+                    p.remove_param("SCHEDULE-AGENT");
+                }
+            });
+        }
+    }
+    if !answered {
         return Err(Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")));
     }
-    match &rsvp.note {
-        Some(n) => ev.set_text("X-CALENDARSERVER-PRIVATE-COMMENT", n),
-        None => {
-            ev.remove("X-CALENDARSERVER-PRIVATE-COMMENT");
-        }
-    }
-    ev.update("ORGANIZER", |_| true, |p| {
-        if !rsvp.notify {
-            p.set_param("SCHEDULE-AGENT", "CLIENT");
-        } else if p.param("SCHEDULE-AGENT").is_some_and(|a| a.eq_ignore_ascii_case("CLIENT")) {
-            p.remove_param("SCHEDULE-AGENT");
-        }
-    });
     Ok(obj.to_string())
 }
 
@@ -580,16 +595,62 @@ mod tests {
     }
 
     #[test]
-    fn answering_a_series_changes_only_my_attendee_line() {
+    fn answering_a_series_answers_every_occurrence_and_nothing_else() {
         let text = fixture!("outlook-series.ics");
         let out = answer_in_ical(text, OUTLOOK_UID, None, ME, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &out);
-        assert_eq!(removed, ["ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Koen Test:mailto:koen@example.org"]);
-        assert_eq!(added, ["ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE;CN=Koen Test:mailto:koen@example.org"]);
+        let mine_before = "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Koen Test:mailto:koen@example.org";
+        let mine_after = "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE;CN=Koen Test:mailto:koen@example.org";
+        assert_eq!(removed, [mine_before, mine_before], "the master's line and the moved occurrence's");
+        assert_eq!(added, [mine_after, mine_after]);
         let events = read_events(&out);
-        assert_eq!(mine(&events, None), (Response::Accepted, String::new()));
-        let moved = events.iter().find(|e| e.recurrence_id.is_some()).unwrap();
-        assert_eq!(moved.my_response(), Some(Response::NeedsAction), "the moved occurrence keeps its own answer");
+        let answers: Vec<Option<Response>> = events.iter().map(EventData::my_response).collect();
+        assert_eq!(answers, [Some(Response::Accepted), Some(Response::Accepted)], "the master and the moved occurrence");
+    }
+
+    #[test]
+    fn a_series_answer_is_stored_as_the_server_holds_it() {
+        let fixture = fixture!("outlook-series.ics");
+        let cut = fixture.rfind("mailto:koen@example.org").unwrap();
+        let text = format!("{}mailto:someone@example.org{}", &fixture[..cut], &fixture[cut + "mailto:koen@example.org".len()..]);
+        let here = Europe::Brussels;
+        let rsvp = rsvp(Answer::Accept, None, true);
+        let server = answer_in_ical(&text, OUTLOOK_UID, None, ME, &rsvp, here).unwrap();
+        let on_server: Vec<Option<Response>> = read_events(&server).iter().map(EventData::my_response).collect();
+        assert_eq!(on_server, [Some(Response::Accepted), None], "the moved occurrence doesn't invite the user");
+
+        let dir = std::env::temp_dir().join(format!("jolta-rsvp-series-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store::Store::open(&dir.join("jolta.sqlite")).unwrap();
+        let stored = store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account (id, kind, address, username, secret_ref, created, calendar)
+                     VALUES (1, 'imap', 'koen@example.org', 'koen', 'a1', 0, 1)",
+                )?;
+                let remote = store::RemoteCalendar {
+                    remote_id: "/cal/work/".into(),
+                    name: "Work".into(),
+                    color: None,
+                    zone: None,
+                    access: super::super::Access::Owner,
+                    primary: true,
+                    refresh: None,
+                };
+                let calendar = store::sync_calendar_list(tx, crate::AccountId(1), CalendarSource::CalDav, &[remote])?[0].id;
+                store::apply_item(tx, calendar, "/cal/work/plan.ics", Some("\"1\""), &read_events(&text), None, &Horizon::around(Utc::now(), here))?;
+                let master: EventId = tx.query_row("SELECT id FROM event WHERE recurrence_id = ''", [], |r| r.get(0))?;
+                let (_, rows, me) = series_of(tx, master)?;
+                let target = target(rows, master, &Scope::Series, here, me)?;
+                record(tx, calendar, &target, &rsvp, &target.event.remote_id, here)?;
+                let mut stmt = tx.prepare("SELECT data FROM event ORDER BY recurrence_id")?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows.iter().map(|d| serde_json::from_str::<EventData>(d).unwrap().my_response()).collect::<Vec<_>>())
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stored, on_server);
     }
 
     #[test]
@@ -597,7 +658,7 @@ mod tests {
         let text = fixture!("outlook-series.ics");
         let out = answer_in_ical(text, OUTLOOK_UID, None, ME, &rsvp(Answer::Maybe, Some("Wat later,\nsorry"), false), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &out);
-        assert_eq!(removed.len(), 2, "{removed:?}");
+        assert_eq!(removed.len(), 3, "both of my lines and the master's ORGANIZER: {removed:?}");
         assert!(added.contains(&"ORGANIZER;CN=Sofie Janssens;SCHEDULE-AGENT=CLIENT:mailto:sofie.janssens@example.com".to_string()), "{added:?}");
         assert!(added.contains(&"X-CALENDARSERVER-PRIVATE-COMMENT:Wat later\\,\\nsorry".to_string()), "{added:?}");
         assert_eq!(mine(&read_events(&out), None), (Response::Tentative, "Wat later, sorry".into()));
