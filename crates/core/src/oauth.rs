@@ -264,7 +264,8 @@ fn authorize_url(
         (Provider::Microsoft, Ask::Account) => params.push(("prompt", "select_account")),
         (Provider::Microsoft, Ask::Calendar) => {}
     }
-    if provider == Provider::Google && ask == Ask::Calendar {
+    // Signing in to Google again keeps calendar access granted earlier.
+    if provider == Provider::Google {
         params.push(("include_granted_scopes", "true"));
     }
     if let Some(address) = address {
@@ -598,7 +599,8 @@ mod tests {
         assert_eq!(p["redirect_uri"], "http://127.0.0.1:8765/");
         let add = params(&authorize_url(Provider::Google, "cid", "http://127.0.0.1:1/", "v", "st", Ask::Account, None));
         assert_eq!(add["scope"], "openid email profile https://mail.google.com/", "adding an account asks for mail only");
-        assert!(!add.contains_key("include_granted_scopes") && !add.contains_key("login_hint"));
+        assert_eq!(add["include_granted_scopes"], "true", "signing in again keeps a calendar grant");
+        assert!(!add.contains_key("login_hint"));
     }
 
     #[test]

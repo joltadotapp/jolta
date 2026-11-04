@@ -250,7 +250,7 @@ impl GraphCalendar {
     fn failure(&self, status: u16, json: &Value) -> Error {
         let code = json["error"]["code"].as_str().unwrap_or_default();
         if status == 403 && code == "ErrorAccessDenied" {
-            return Error::Auth(format!("Jolta has no calendar access for {} yet. Turn calendar on for it to grant it.", self.account.address));
+            return Error::Auth(format!("Microsoft gave Jolta no calendar access for {}. Turn calendar off and on again for it to ask.", self.account.address));
         }
         let message = json["error"]["message"].as_str().unwrap_or(code);
         Error::Other(format!("Microsoft Graph {status}: {message}"))

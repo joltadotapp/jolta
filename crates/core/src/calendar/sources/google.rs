@@ -198,7 +198,7 @@ impl Google {
             return match status {
                 401 => Err(Error::Auth(format!("Google refused the sign-in for {}. Sign in again.", self.account.address))),
                 403 if reason(&body).as_deref() == Some("insufficientPermissions") => Err(Error::Auth(format!(
-                    "Jolta has no calendar access for {} yet. Turn calendar on for it to grant it.",
+                    "Google gave Jolta no calendar access for {}. Turn calendar off and on again for it to ask.",
                     self.account.address
                 ))),
                 _ => Ok((status, body)),
