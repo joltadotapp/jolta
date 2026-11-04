@@ -3,7 +3,8 @@
 //! (RFC 6578), with the collection's ctag and the resources' ETags for
 //! servers without it. The one write is a PUT that answers an invitation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use quick_xml::escape::escape;
@@ -25,6 +26,7 @@ const HOME: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns
 const DEFAULT_CALENDAR: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:schedule-default-calendar-URL/></d:prop></d:propfind>"#;
 const CALENDARS: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:resourcetype/><d:displayname/><a:calendar-color/><c:supported-calendar-component-set/><d:current-user-privilege-set/><cs:getctag/><d:sync-token/></d:prop></d:propfind>"#;
 const CTAG: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop><cs:getctag/></d:prop></d:propfind>"#;
+const ADDRESSES: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-user-address-set/></d:prop></d:propfind>"#;
 const ETAGS: &str = r#"<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getetag/></d:prop></d:propfind>"#;
 
 pub struct CalDav {
@@ -33,8 +35,8 @@ pub struct CalDav {
     password: String,
     /// Where discovery starts, in order.
     starts: Vec<Url>,
-    /// The user's own addresses, to find their answer on invitations.
-    me: Vec<String>,
+    /// The account's address.
+    address: String,
     fastmail: bool,
     /// The start is a guess from the address's domain, not a known server.
     guessed: bool,
@@ -114,7 +116,7 @@ impl CalDav {
             username: account.username.clone(),
             password: secrets::password(&account.secret_ref)?,
             starts,
-            me: vec![account.address.clone()],
+            address: account.address.clone(),
             fastmail,
             guessed,
         })
@@ -209,7 +211,7 @@ impl CalDav {
         }
         Err(match last {
             Some(e) if !self.guessed => e,
-            _ => no_server(&self.me[0]),
+            _ => no_server(&self.address),
         })
     }
 
@@ -318,9 +320,37 @@ impl CalDav {
         Ok(Listing { members, gone: Vec::new(), complete: true, cursor: next })
     }
 
+    /// The user's own addresses, to find them on invitations: the
+    /// account's, and the principal's calendar-user-address-set (RFC 6638),
+    /// which holds its aliases. Asked for once per run; without an answer
+    /// the account's address stands alone.
+    async fn me(&self) -> Vec<String> {
+        let key = format!("{} {}", self.username, self.starts[0]);
+        if let Some(known) = KNOWN_ADDRESSES.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return known.clone();
+        }
+        let found = async {
+            let principal = self.principal().await?;
+            let (_, ms) = self.propfind(&principal, "0", ADDRESSES).await?;
+            Ok::<_, Error>(mail_addresses(&ms))
+        };
+        match found.await {
+            Ok(found) => {
+                let me = with_aliases(&self.address, found);
+                KNOWN_ADDRESSES.lock().unwrap_or_else(|e| e.into_inner()).insert(key, me.clone());
+                me
+            }
+            Err(e) => {
+                tracing::warn!("the CalDAV addresses of {}: {e}", self.address);
+                vec![self.address.clone()]
+            }
+        }
+    }
+
     /// The changed resources' iCalendar data, in batches.
     async fn multiget(&self, url: &Url, hrefs: &[String]) -> Result<Vec<Change>> {
         let mut out = Vec::with_capacity(hrefs.len());
+        let me = if hrefs.is_empty() { Vec::new() } else { self.me().await };
         for chunk in hrefs.chunks(MULTIGET_BATCH) {
             let hrefs: String = chunk.iter().map(|h| format!("<d:href>{}</d:href>", escape(h.as_str()))).collect();
             let body = format!(
@@ -340,7 +370,7 @@ impl CalDav {
                 let Some(data) = r.prop(CALDAV, "calendar-data").map(|p| p.text.as_str()) else {
                     return Err(Error::Other(format!("CalDAV multiget on {url}: no data for {remote_id} ({:?})", r.status)));
                 };
-                match ical::read(data, &self.me) {
+                match ical::read(data, &me) {
                     Ok(events) => out.push(Change::Upsert {
                         remote_id,
                         etag: r.prop_text(DAV, "getetag").map(str::to_string),
@@ -363,6 +393,7 @@ impl CalDav {
         let url = join(&collection, &path_escape(&target.event.remote_id))?;
         let rid = target.recurrence_id();
         let here = crate::calendar::tz::here();
+        let me = self.me().await;
         let mut current = target.event.raw.as_ref().map(|raw| (String::from_utf8_lossy(raw).into_owned(), target.event.etag.clone()));
         for attempt in 0..2 {
             let (text, etag) = match current.take() {
@@ -375,7 +406,7 @@ impl CalDav {
                     (reply.body, reply.etag)
                 }
             };
-            let edited = rsvp::answer_in_ical(&text, &target.event.data.uid, rid.as_ref(), &self.me[0], rsvp, here)?;
+            let edited = rsvp::answer_in_ical(&text, &target.event.data.uid, rid.as_ref(), &me, rsvp, here)?;
             let mut headers = vec![("Content-Type", "text/calendar; charset=utf-8")];
             if let Some(etag) = &etag {
                 headers.push(("If-Match", etag));
@@ -399,6 +430,36 @@ fn path_escape(path: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// Each CalDAV account's addresses, by login and server, once `CalDav::me`
+/// has asked for them.
+static KNOWN_ADDRESSES: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
+
+/// The mail addresses in a calendar-user-address-set. The set also holds
+/// the principal's URLs and a urn:uuid, which aren't addresses.
+fn mail_addresses(ms: &MultiStatus) -> Vec<String> {
+    ms.responses
+        .iter()
+        .filter_map(|r| r.prop(CALDAV, "calendar-user-address-set"))
+        .flat_map(|set| set.all(DAV, "href"))
+        .filter_map(|href| {
+            let href = href.text.trim();
+            href.get(..7).filter(|scheme| scheme.eq_ignore_ascii_case("mailto:")).map(|_| href[7..].to_string())
+        })
+        .filter(|address| address.contains('@'))
+        .collect()
+}
+
+/// The account's address first, then the others it doesn't already hold.
+fn with_aliases(address: &str, found: Vec<String>) -> Vec<String> {
+    let mut me = vec![address.to_string()];
+    for a in found {
+        if !me.iter().any(|m| m.eq_ignore_ascii_case(&a)) {
+            me.push(a);
+        }
+    }
+    me
 }
 
 /// The password goes to the hosts discovery started from, on the scheme it
@@ -555,6 +616,24 @@ mod tests {
 
     fn names(list: &[RemoteCalendar]) -> Vec<(&str, &str, Option<&str>, Access, bool)> {
         list.iter().map(|c| (c.remote_id.as_str(), c.name.as_str(), c.color.as_deref(), c.access, c.primary)).collect()
+    }
+
+    #[test]
+    fn the_principals_addresses_hold_the_aliases() {
+        let reply = r#"<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:"><response><href>/1234567890/principal/</href><propstat><prop>
+ <calendar-user-address-set xmlns="urn:ietf:params:xml:ns:caldav">
+  <href xmlns="DAV:" preferred="1">mailto:koen@icloud.example</href>
+  <href xmlns="DAV:">MAILTO:koen.alias@icloud.example</href>
+  <href xmlns="DAV:">mailto:Koen@Example.org</href>
+  <href xmlns="DAV:">https://p42-caldav.icloud.com:443/1234567890/principal/</href>
+  <href xmlns="DAV:">/1234567890/principal/</href>
+  <href xmlns="DAV:">urn:uuid:1234567890</href>
+ </calendar-user-address-set>
+</prop><status>HTTP/1.1 200 OK</status></propstat></response></multistatus>"#;
+        let found = mail_addresses(&dav::multistatus(reply).unwrap());
+        assert_eq!(found, ["koen@icloud.example", "koen.alias@icloud.example", "Koen@Example.org"]);
+        assert_eq!(with_aliases("koen@example.org", found), ["koen@example.org", "koen@icloud.example", "koen.alias@icloud.example"]);
     }
 
     #[test]

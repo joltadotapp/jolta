@@ -362,12 +362,12 @@ fn value_like(like: &Prop, moment: &Moment, here: Tz) -> Option<String> {
     }
 }
 
-fn is_me(p: &Prop, me: &str) -> bool {
-    p.address().or(p.param("EMAIL")).is_some_and(|a| a.eq_ignore_ascii_case(me))
+fn is_me(p: &Prop, me: &[impl AsRef<str>]) -> bool {
+    p.address().or(p.param("EMAIL")).is_some_and(|a| me.iter().any(|m| a.eq_ignore_ascii_case(m.as_ref())))
 }
 
-/// The answer written into a CalDAV resource: the user's ATTENDEE line in the
-/// VEVENT with `uid` and `recurrence_id` gets the PARTSTAT, and with a note
+/// The answer written into a CalDAV resource: the user's ATTENDEE line, the
+/// one with any of the addresses in `me`, in the VEVENT with `uid` and `recurrence_id` gets the PARTSTAT, and with a note
 /// the X-RESPONSE-COMMENT Jolta reads and the comment Apple's servers pass
 /// to the organizer. Answering a series (no `recurrence_id`) answers every
 /// override the user is on too. An occurrence without an override gets one,
@@ -375,7 +375,7 @@ fn is_me(p: &Prop, me: &str) -> bool {
 /// ORGANIZER line of the resource, which tells a scheduling server not to
 /// send the reply; RFC 6638 section 7.1 asks for the same value on all of
 /// them. Every other line stays byte for byte.
-pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Moment>, me: &str, rsvp: &Rsvp, here: Tz) -> Result<String> {
+pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Moment>, me: &[impl AsRef<str>], rsvp: &Rsvp, here: Tz) -> Result<String> {
     let mut obj = Object::parse(text);
     let written = match recurrence_id {
         None => None,
@@ -427,6 +427,7 @@ pub(crate) fn answer_in_ical(text: &str, uid: &str, recurrence_id: Option<&Momen
         }
     }
     if !answered {
+        let me = me.first().map_or("", AsRef::as_ref);
         return Err(Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")));
     }
     Ok(obj.to_string())
@@ -510,7 +511,7 @@ pub fn imip_reply(invitation: &str, me: &str, answer: Answer, note: Option<&str>
     }
     reply.add(Prop::new("DTSTAMP", &format!("{}Z", Utc::now().format("%Y%m%dT%H%M%S"))));
     reply.add(organizer.clone());
-    let mut attendee = event.props().find(|p| p.is("ATTENDEE") && is_me(p, me)).cloned().unwrap_or_else(|| Prop::new("ATTENDEE", &format!("mailto:{me}")));
+    let mut attendee = event.props().find(|p| p.is("ATTENDEE") && is_me(p, &[me])).cloned().unwrap_or_else(|| Prop::new("ATTENDEE", &format!("mailto:{me}")));
     attendee.set_param("PARTSTAT", answer.partstat());
     for stale in ["RSVP", "SCHEDULE-STATUS", "X-RESPONSE-COMMENT"] {
         attendee.remove_param(stale);
@@ -596,7 +597,7 @@ mod tests {
     #[test]
     fn answering_a_series_answers_every_occurrence_and_nothing_else() {
         let text = fixture!("outlook-series.ics");
-        let out = answer_in_ical(text, OUTLOOK_UID, None, ME, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
+        let out = answer_in_ical(text, OUTLOOK_UID, None, &[ME], &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &out);
         let mine_before = "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Koen Test:mailto:koen@example.org";
         let mine_after = "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE;CN=Koen Test:mailto:koen@example.org";
@@ -614,7 +615,7 @@ mod tests {
         let text = format!("{}mailto:someone@example.org{}", &fixture[..cut], &fixture[cut + "mailto:koen@example.org".len()..]);
         let here = Europe::Brussels;
         let rsvp = rsvp(Answer::Accept, None, true);
-        let server = answer_in_ical(&text, OUTLOOK_UID, None, ME, &rsvp, here).unwrap();
+        let server = answer_in_ical(&text, OUTLOOK_UID, None, &[ME], &rsvp, here).unwrap();
         let on_server: Vec<Option<Response>> = read_events(&server).iter().map(EventData::my_response).collect();
         assert_eq!(on_server, [Some(Response::Accepted), None], "the moved occurrence doesn't invite the user");
 
@@ -655,14 +656,14 @@ mod tests {
     #[test]
     fn a_note_and_no_reply() {
         let text = fixture!("outlook-series.ics");
-        let out = answer_in_ical(text, OUTLOOK_UID, None, ME, &rsvp(Answer::Maybe, Some("Wat later,\nsorry"), false), Europe::Brussels).unwrap();
+        let out = answer_in_ical(text, OUTLOOK_UID, None, &[ME], &rsvp(Answer::Maybe, Some("Wat later,\nsorry"), false), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &out);
         assert_eq!(removed.len(), 4, "both of my lines and both ORGANIZER lines: {removed:?}");
         assert!(added.contains(&"ORGANIZER;CN=Sofie Janssens;SCHEDULE-AGENT=CLIENT:mailto:sofie.janssens@example.com".to_string()), "{added:?}");
         assert!(added.contains(&"X-CALENDARSERVER-PRIVATE-COMMENT:Wat later\\,\\nsorry".to_string()), "{added:?}");
         assert_eq!(mine(&read_events(&out), None), (Response::Tentative, "Wat later, sorry".into()));
 
-        let again = answer_in_ical(&out, OUTLOOK_UID, None, ME, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
+        let again = answer_in_ical(&out, OUTLOOK_UID, None, &[ME], &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
         assert!(!again.contains("SCHEDULE-AGENT") && !again.contains("COMMENT"), "answering again with a reply undoes both");
         assert_eq!(mine(&read_events(&again), None), (Response::Accepted, String::new()));
     }
@@ -672,7 +673,7 @@ mod tests {
         let text = fixture!("outlook-series.ics");
         let paris = Zone::Tz(Tz::Europe__Paris);
         let rid = Moment::Time(at("2026-12-01 10:00", paris));
-        let out = answer_in_ical(text, OUTLOOK_UID, Some(&rid), ME, &rsvp(Answer::Decline, None, true), Europe::Brussels).unwrap();
+        let out = answer_in_ical(text, OUTLOOK_UID, Some(&rid), &[ME], &rsvp(Answer::Decline, None, true), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &out);
         assert_eq!(removed, Vec::<String>::new(), "the master and the moved occurrence stay as they were");
         assert!(added.contains(&"RECURRENCE-ID;TZID=Romance Standard Time:20261201T100000".to_string()), "{added:?}");
@@ -687,7 +688,7 @@ mod tests {
         assert_eq!(over.span, Span::Timed { start: at("2026-12-01 10:00", paris), end: at("2026-12-01 10:30", paris) });
 
         let rid = Moment::Time(at("2026-11-17 10:00", paris));
-        let moved = answer_in_ical(text, OUTLOOK_UID, Some(&rid), ME, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
+        let moved = answer_in_ical(text, OUTLOOK_UID, Some(&rid), &[ME], &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
         let (removed, added) = changed(text, &moved);
         assert_eq!((removed.len(), added.len()), (1, 1), "the stored override is answered, not copied again");
         assert_eq!(mine(&read_events(&moved), Some(rid)).0, Response::Accepted);
@@ -702,19 +703,27 @@ mod tests {
             let events: Vec<&Component> = obj.calendar().unwrap().components().filter(|c| c.name() == "VEVENT").collect();
             events.iter().map(|e| e.prop("ORGANIZER").unwrap().param("SCHEDULE-AGENT").map(str::to_string)).collect()
         };
-        let quiet = answer_in_ical(text, OUTLOOK_UID, Some(&rid), ME, &rsvp(Answer::Decline, None, false), Europe::Brussels).unwrap();
+        let quiet = answer_in_ical(text, OUTLOOK_UID, Some(&rid), &[ME], &rsvp(Answer::Decline, None, false), Europe::Brussels).unwrap();
         assert_eq!(organizers(&quiet), [Some("CLIENT".to_string()), Some("CLIENT".to_string()), Some("CLIENT".to_string())], "master, new override, moved one");
         let answers: Vec<Option<Response>> = read_events(&quiet).iter().map(EventData::my_response).collect();
         assert_eq!(answers, [Some(Response::NeedsAction), Some(Response::Declined), Some(Response::NeedsAction)], "only the occurrence is answered");
 
-        let loud = answer_in_ical(&quiet, OUTLOOK_UID, Some(&rid), ME, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
+        let loud = answer_in_ical(&quiet, OUTLOOK_UID, Some(&rid), &[ME], &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
         assert_eq!(organizers(&loud), [None, None, None]);
+    }
+
+    #[test]
+    fn an_invitation_to_another_of_my_addresses_is_answered() {
+        let text = fixture!("outlook-series.ics");
+        let me = ["koen@icloud.example", "KOEN@example.org"];
+        let out = answer_in_ical(text, OUTLOOK_UID, None, &me, &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap();
+        assert_eq!(mine(&read_events(&out), None).0, Response::Accepted);
     }
 
     #[test]
     fn someone_not_invited_cannot_answer() {
         let text = fixture!("outlook-series.ics");
-        let err = answer_in_ical(text, OUTLOOK_UID, None, "stranger@example.org", &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap_err();
+        let err = answer_in_ical(text, OUTLOOK_UID, None, &["stranger@example.org"], &rsvp(Answer::Accept, None, true), Europe::Brussels).unwrap_err();
         assert!(err.to_string().contains("isn't on this meeting's guest list"), "{err}");
     }
 
