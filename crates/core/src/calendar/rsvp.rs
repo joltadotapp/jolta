@@ -73,6 +73,10 @@ pub struct Rsvp {
     /// isn't told.
     pub notify: bool,
     pub scope: Scope,
+    /// A new time proposed with a Maybe or a Decline, which Graph sends as
+    /// `proposedNewTime`. The other providers have no field for it; Jolta
+    /// mails those a COUNTER.
+    pub proposal: Option<Proposal>,
 }
 
 /// A stored event, as a source needs it to answer.
@@ -831,7 +835,7 @@ mod tests {
     const OUTLOOK_UID: &str = "040000008200E00074C5B7101A82E00800000000A1B2C3D4E5F6D901000000000000000010000000F00DFACEB00C4B6A9E2F5B3D8C7A6E51";
 
     fn rsvp(answer: Answer, note: Option<&str>, notify: bool) -> Rsvp {
-        Rsvp { event: EventId(1), answer, note: note.map(str::to_string), notify, scope: Scope::Series }
+        Rsvp { event: EventId(1), answer, note: note.map(str::to_string), notify, scope: Scope::Series, proposal: None }
     }
 
     /// Content lines that differ between two texts, unfolded, as (removed, added).

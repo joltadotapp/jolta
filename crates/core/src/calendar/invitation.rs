@@ -36,6 +36,8 @@ pub struct Invitation {
     pub dated: bool,
     /// The DTSTAMP, which orders two versions with the same SEQUENCE.
     pub stamp: Option<DateTime<Utc>>,
+    /// False when the organizer takes no proposals for a new time.
+    pub proposals: bool,
 }
 
 impl Method {
@@ -112,9 +114,9 @@ pub fn in_message(msg: &MessageRef, me: &[String]) -> Vec<Invitation> {
             },
             None => Method::Publish,
         };
-        for ical::Sent { event, dated, stamp } in ical::read_invitation(&text, me).unwrap_or_default() {
+        for ical::Sent { event, dated, stamp, proposals } in ical::read_invitation(&text, me).unwrap_or_default() {
             if (dated || method.names_without_start()) && seen.insert((event.uid.clone(), event.recurrence_id)) {
-                out.push(Invitation { method, event, dated, stamp });
+                out.push(Invitation { method, event, dated, stamp, proposals });
             }
         }
     }

@@ -8,13 +8,19 @@
 //! SCHEDULE-AGENT=CLIENT, and Jolta mails the reply; other CalDAV servers
 //! get the same, so none of them sends a second one. Without a copy in a
 //! calendar Jolta answers through, the reply mail is all there is.
+//!
+//! A new time goes with a Maybe or a Decline, for the occurrence the card
+//! shows. Microsoft 365 sends it with the answer (`proposedNewTime`). Google
+//! has no field for it, so Google sends the answer and Jolta mails an iMIP
+//! COUNTER; a CalDAV copy is answered quietly and Jolta mails the COUNTER,
+//! which carries the answer too; without a copy the COUNTER is all there is.
 
 use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::card::{self, Card};
-use super::rsvp::{self, Answer, ImipReply, Rsvp, Scope};
+use super::card::{self, Card, NewTime};
+use super::rsvp::{self, Answer, ImipReply, Proposal, Rsvp, Scope};
 use super::{Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Person, Response, invitation, series, tz};
 use crate::compose::Built;
 use crate::model::{AccountId, MessageId};
@@ -39,6 +45,9 @@ pub struct Request {
     /// Only the occurrence the card or the detail shows. A single event
     /// ignores it.
     pub occurrence_only: bool,
+    /// A new time for the event, or for a series the occurrence the card
+    /// shows, with a Maybe or a Decline. Only from a card.
+    pub proposal: Option<Proposal>,
 }
 
 /// What one answer does.
@@ -47,15 +56,21 @@ pub struct Plan {
     /// Answer the calendar's copy through its provider; `Some(true)` lets
     /// the provider tell the organizer.
     pub provider: Option<bool>,
-    /// Jolta sends the iMIP reply mail itself.
+    /// Jolta sends the iMIP mail itself: the reply, or with a new time the
+    /// COUNTER.
     pub mail: bool,
 }
 
 /// Who tells the organizer, from the source of the calendar's copy of the
-/// event (None without one).
-pub fn plan(copy: Option<CalendarSource>, notify: bool) -> Result<Plan> {
+/// event (None without one), and whether a new time goes with the answer.
+pub fn plan(copy: Option<CalendarSource>, notify: bool, proposing: bool) -> Result<Plan> {
+    if proposing && !notify {
+        return Err(Error::Other("A new time goes to the organizer, so it can't go with Don't send a reply.".into()));
+    }
     match copy {
-        Some(CalendarSource::Google | CalendarSource::Graph) => Ok(Plan { provider: Some(notify), mail: false }),
+        Some(CalendarSource::Graph) => Ok(Plan { provider: Some(notify), mail: false }),
+        // Google's API has no proposals: Google sends the answer, Jolta the new time.
+        Some(CalendarSource::Google) => Ok(Plan { provider: Some(notify), mail: proposing }),
         Some(CalendarSource::CalDav) => Ok(Plan { provider: Some(false), mail: notify }),
         Some(CalendarSource::EventKit) => {
             Err(Error::Other("Answer this invitation in the Calendar app: macOS doesn't let other apps answer for its calendars.".into()))
@@ -81,7 +96,7 @@ pub struct Outcome {
 /// Jolta answers through.
 pub fn can_answer(account: &str, calendar: &Calendar, e: &EventData) -> bool {
     let theirs = e.organizer.as_ref().is_some_and(|o| !o.address.trim().eq_ignore_ascii_case(account));
-    theirs && e.my_response().is_some() && plan(Some(calendar.source), true).is_ok_and(|p| p.provider.is_some())
+    theirs && e.my_response().is_some() && plan(Some(calendar.source), true, false).is_ok_and(|p| p.provider.is_some())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -111,6 +126,8 @@ struct Resolved {
     shown: Option<Response>,
     /// The version answered, as `store::remember_answer` keeps it.
     version: Vec<EventData>,
+    /// Whether the card offers a new time; None from the calendar's detail.
+    new_time: Option<NewTime>,
 }
 
 /// Answers, tells the organizer the way `plan` says, and keeps the answer
@@ -126,8 +143,14 @@ pub async fn answer(jolta: &Jolta, req: &Request) -> Result<Outcome> {
 /// `answer` as at `now`, which picks the occurrence a series' card shows.
 async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<Outcome> {
     let here = tz::here();
+    let proposing = req.proposal.is_some();
+    if proposing && req.answer == Answer::Accept {
+        return Err(Error::Other("A new time goes with Maybe or Decline, not with Accept.".into()));
+    }
     let r = match &req.subject {
-        Subject::Message(id) => from_message(jolta, *id, req.occurrence_only, now, here).await?,
+        // A series gets a new time for the occurrence shown, never as a whole.
+        Subject::Message(id) => from_message(jolta, *id, req.occurrence_only || proposing, now, here).await?,
+        Subject::Event { .. } if proposing => return Err(Error::Other("Propose a new time from the invitation's card in mail.".into())),
         Subject::Event { id, at } => {
             let (id, at, only) = (*id, *at, req.occurrence_only);
             let mut r = jolta.store.read_async(move |c| from_event(c, id, at.filter(|_| only), here)).await?;
@@ -136,7 +159,14 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             r
         }
     };
-    let plan = plan(r.copy.map(|c| c.source), req.notify)?;
+    if proposing {
+        match r.new_time {
+            Some(NewTime::Open { .. }) => {}
+            Some(NewTime::Refused) => return Err(Error::Other(format!("{} doesn't take proposals for a new time for this meeting.", who(&r)))),
+            None => return Err(Error::Other("This meeting lasts all day; Jolta proposes new times for meetings with a start and an end time.".into())),
+        }
+    }
+    let plan = plan(r.copy.map(|c| c.source), req.notify, proposing)?;
     let rid = r.occurrence.as_ref().map(|(rid, _)| *rid);
 
     let (account, uid) = (r.account, r.uid.clone());
@@ -146,15 +176,21 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     let mail = if plan.mail {
         let text = r.text.as_deref().ok_or_else(|| Error::Other("Jolta has no copy of this invitation to reply to.".into()))?;
         let reply = ImipReply { invitation: text, from: &r.from, me: &r.me, answer: req.answer, note: req.note.as_deref(), occurrence: rid };
-        Some(rsvp::imip_reply(&reply, here)?)
+        Some(match &req.proposal {
+            Some(p) => rsvp::imip_counter(&reply, p, here)?,
+            None => rsvp::imip_reply(&reply, here)?,
+        })
     } else {
         None
     };
+    // A new time the provider sends goes out each time it is asked for; a
+    // mailed one goes out once, and the answer only when it changed.
+    let carries = proposing && !plan.mail;
     if let (Some(notify), Some(copy)) = (plan.provider, r.copy)
-        && !again(&given, r.shown, before.as_ref())
+        && (carries || !again(&given, r.shown, before.as_ref()))
     {
         let scope = rid.map_or(Scope::Series, Scope::Occurrence);
-        rsvp::answer(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope }).await?;
+        rsvp::answer(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
     }
 
     let blob = mail.as_ref().map(|m| jolta.blobs.put(&m.raw)).transpose()?;
@@ -166,14 +202,33 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
         .write_async(move |tx| {
             // Read again where the outbox can't change underneath.
             let before = store::given_answer(tx, account, &uid, rid.as_ref())?;
-            let again = again(&given, shown, before.as_ref());
-            let reply = match before.and_then(|(_, reply)| reply) {
-                Some(store::ReplyMail::Waiting(id)) if again => {
+            let again = !proposing && again(&given, shown, before.as_ref());
+            let kept = before.and_then(|(_, reply)| reply);
+            // A proposal is the same mail each time it is built.
+            let same = match mail.as_ref().filter(|_| proposing) {
+                Some(m) => store::outbox_mail(tx, account, &m.message_id)?,
+                None => None,
+            };
+            let reply = match (kept, same) {
+                (kept, Some(same)) => {
+                    let id = match same {
+                        store::ReplyMail::Waiting(id) => {
+                            store::send_now(tx, id)?;
+                            id
+                        }
+                        store::ReplyMail::Sent(id) => id,
+                    };
+                    if let Some(store::ReplyMail::Waiting(other)) = kept.filter(|k| *k != same) {
+                        store::cancel_send(tx, other)?;
+                    }
+                    Some(id)
+                }
+                (Some(store::ReplyMail::Waiting(id)), None) if again => {
                     store::send_now(tx, id)?;
                     Some(id)
                 }
-                Some(store::ReplyMail::Sent(id)) if again => Some(id),
-                waiting => {
+                (Some(store::ReplyMail::Sent(id)), None) if again => Some(id),
+                (waiting, None) => {
                     if let Some(store::ReplyMail::Waiting(id)) = waiting {
                         store::cancel_send(tx, id)?;
                     }
@@ -201,9 +256,28 @@ fn queue(conn: &Connection, account: AccountId, m: &Built, blob: &str) -> Result
     store::queue_outbox(conn, account, None, blob, &m.message_id, &m.from, &m.recipients, None, 0)
 }
 
+fn who(r: &Resolved) -> &str {
+    if r.organizer.is_empty() { "the organizer" } else { &r.organizer }
+}
+
 /// "Accepted. Google told Ann.", "Declined Thu 5 Nov. Jolta emailed Ann.",
-/// "Answered maybe without telling Ann."
+/// "Answered maybe without telling Ann."; with a new time "Proposed Fri 6
+/// Nov, 14:00 to 14:45 with a maybe. Microsoft 365 told Ann."
 fn told(req: &Request, r: &Resolved, plan: Plan) -> String {
+    if let Some(p) = &req.proposal {
+        let here = tz::here();
+        let (start, end) = (p.start.with_timezone(&here), p.end.with_timezone(&here));
+        let end = if end.date_naive() == start.date_naive() { end.format("%H:%M").to_string() } else { end.format("%a %-d %b %H:%M").to_string() };
+        let when = format!("{}, {} to {end}", start.format("%a %-d %b"), start.format("%H:%M"));
+        let moved = r.occurrence.as_ref().map(|(_, day)| format!(" moving {day} to")).unwrap_or_default();
+        let with = if req.answer == Answer::Decline { "and declined" } else { "with a maybe" };
+        let done = format!("Proposed{moved} {when} {with}");
+        return match r.copy.map(|c| c.source) {
+            Some(CalendarSource::Graph) => format!("{done}. Microsoft 365 told {}.", who(r)),
+            Some(CalendarSource::Google) => format!("{done}. Google told {} your answer and Jolta emailed the new time.", who(r)),
+            _ => format!("{done}. Jolta emailed {}.", who(r)),
+        };
+    }
     let mut done = match req.answer {
         Answer::Accept => "Accepted".to_string(),
         Answer::Maybe => "Answered maybe".to_string(),
@@ -212,7 +286,7 @@ fn told(req: &Request, r: &Resolved, plan: Plan) -> String {
     if let Some((_, day)) = &r.occurrence {
         done = format!("{done} for {day}");
     }
-    let who = if r.organizer.is_empty() { "the organizer" } else { &r.organizer };
+    let who = who(r);
     match (plan.provider, r.copy.map(|c| c.source)) {
         (Some(true), Some(CalendarSource::Google)) => format!("{done}. Google told {who}."),
         (Some(true), Some(CalendarSource::Graph)) => format!("{done}. Microsoft 365 told {who}."),
@@ -274,6 +348,7 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 copy,
                 occurrence,
                 organizer: a.organizer,
+                new_time: a.new_time,
                 shown,
                 version,
             })
@@ -312,6 +387,7 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
         organizer: data.organizer.as_ref().map(short_name).unwrap_or_default(),
         shown: data.my_response(),
         version,
+        new_time: None,
         uid: data.uid,
     })
 }
@@ -366,7 +442,7 @@ mod tests {
     #[test]
     fn who_tells_the_organizer() {
         use CalendarSource::*;
-        let row = |copy, notify| plan(copy, notify).map(|p| (p.provider, p.mail)).map_err(|e| e.to_string());
+        let row = |copy, notify| plan(copy, notify, false).map(|p| (p.provider, p.mail)).map_err(|e| e.to_string());
         assert_eq!(row(Some(Google), true), Ok((Some(true), false)), "Google replies itself");
         assert_eq!(row(Some(Graph), true), Ok((Some(true), false)), "so does Exchange");
         assert_eq!(row(Some(CalDav), true), Ok((Some(false), true)), "iCloud doesn't tell an outside organizer: the copy quietly, then Jolta's mail");
@@ -382,12 +458,41 @@ mod tests {
         assert!(row(Some(EventKit), true).unwrap_err().contains("Calendar app"));
     }
 
+    #[test]
+    fn who_sends_a_new_time() {
+        use CalendarSource::*;
+        let row = |copy| plan(copy, true, true).map(|p| (p.provider, p.mail)).map_err(|e| e.to_string());
+        assert_eq!(row(Some(Graph)), Ok((Some(true), false)), "Exchange sends the answer with proposedNewTime");
+        assert_eq!(row(Some(Google)), Ok((Some(true), true)), "Google sends the answer, Jolta the COUNTER");
+        assert_eq!(row(Some(CalDav)), Ok((Some(false), true)), "the copy quietly, then the COUNTER");
+        for copy in [None, Some(Webcal), Some(Local)] {
+            assert_eq!(row(copy), Ok((None, true)), "{copy:?}: the COUNTER alone");
+        }
+        assert!(row(Some(EventKit)).unwrap_err().contains("Calendar app"));
+        assert!(plan(Some(Google), false, true).unwrap_err().to_string().contains("Don't send a reply"), "a new time always goes to the organizer");
+    }
+
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()
     }
 
     fn request(message: MessageId, answer: Answer, note: Option<&str>, notify: bool, occurrence_only: bool) -> Request {
-        Request { subject: Subject::Message(message), answer, note: note.map(str::to_string), notify, occurrence_only }
+        Request { subject: Subject::Message(message), answer, note: note.map(str::to_string), notify, occurrence_only, proposal: None }
+    }
+
+    fn proposing(message: MessageId, answer: Answer, start: &str, end: &str) -> Request {
+        let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap().and_utc();
+        Request { proposal: Some(Proposal { start: at(start), end: at(end) }), ..request(message, answer, None, true, false) }
+    }
+
+    /// The COUNTER's method, DTSTART and PARTSTAT, from a queued mail.
+    fn counter_of(raw: &[u8]) -> (String, String, String) {
+        let msg = MessageParser::default().parse(raw).unwrap();
+        let part = msg.parts().find(|p| p.is_content_type("text", "calendar")).unwrap();
+        let ics = String::from_utf8_lossy(&part.decoded()).into_owned();
+        let line = |prefix: &str| ics.lines().find_map(|l| l.strip_prefix(prefix)).unwrap_or_default().to_string();
+        let partstat = ics.split("PARTSTAT=").nth(1).and_then(|p| p.split([':', ';']).next()).unwrap_or_default().to_string();
+        (part.content_type().unwrap().attribute("method").unwrap_or_default().to_string(), line("DTSTART:"), partstat)
     }
 
     fn run(j: &Jolta, req: Request) -> Result<Outcome> {
@@ -793,6 +898,81 @@ mod tests {
         let own = import(&j, own.as_bytes());
         assert!(run(&j, request(own, Answer::Accept, None, true, false)).is_err(), "the user's own meeting");
         assert!(outbox(&j).is_empty());
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Without a calendar copy the COUNTER is the answer: it goes to the
+    /// organizer once, a changed time replaces one still waiting, and the
+    /// card keeps the answer that went with it.
+    #[test]
+    fn a_new_time_without_a_copy_is_one_counter_mail() {
+        let (j, _) = jolta("respond-propose");
+        let message = import(&j, mail!("google-request.eml"));
+        let done = run(&j, proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45")).unwrap();
+        assert_eq!((done.mailed_from, done.calendar), (Some(AccountId(1)), None));
+        assert!(done.text.starts_with("Proposed Fri 13 Nov, ") && done.text.ends_with(" with a maybe. Jolta emailed Ann."), "{}", done.text);
+
+        let sent = outbox(&j);
+        assert_eq!(sent.len(), 1);
+        let (sender, recipients, delay, raw) = &sent[0];
+        assert_eq!((sender.as_str(), recipients.as_str(), *delay), ("me@example.com", "ann@example.com", 0), "to the organizer only, at once");
+        assert_eq!(counter_of(raw), ("COUNTER".into(), "20261113T150000Z".into(), "TENTATIVE".into()));
+        assert_eq!(card_answer(&j, message, mail!("google-request.eml")), Some(Response::Tentative), "the card shows the answer that went with it");
+
+        run(&j, proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45")).unwrap();
+        assert_eq!(replies(&j).len(), 1, "the same proposal twice is one mail");
+        set_outbox(&j, "UPDATE outbox SET attempts = 1, send_after = unixepoch() + 30");
+        run(&j, proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45")).unwrap();
+        assert_eq!(replies(&j)[0].1, 0, "a retry after a failed send sends the waiting one now");
+
+        run(&j, proposing(message, Answer::Decline, "2026-11-13 16:00", "2026-11-13 16:45")).unwrap();
+        let sent = outbox(&j);
+        assert_eq!(sent.len(), 1, "a new time replaces the proposal still waiting");
+        assert_eq!(counter_of(&sent[0].3), ("COUNTER".into(), "20261113T160000Z".into(), "DECLINED".into()));
+
+        set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+        run(&j, proposing(message, Answer::Decline, "2026-11-13 16:00", "2026-11-13 16:45")).unwrap();
+        assert_eq!(outbox(&j).len(), 1, "the organizer has this proposal already");
+        run(&j, request(message, Answer::Decline, None, true, false)).unwrap();
+        assert_eq!(outbox(&j).len(), 1, "the proposal carried this Decline already");
+        run(&j, request(message, Answer::Accept, None, true, false)).unwrap();
+        assert_eq!(outbox(&j).len(), 2, "a new answer after a proposal is a reply of its own");
+        assert_eq!(counter_of(&outbox(&j)[1].3).0, "REPLY");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_time_for_a_series_goes_to_the_occurrence_shown() {
+        let (j, _) = jolta("respond-propose-series");
+        let message = import(&j, mail!("series.eml"));
+        let done = run(&j, proposing(message, Answer::Maybe, "2026-11-05 13:00", "2026-11-05 13:15")).unwrap();
+        assert!(done.text.starts_with("Proposed moving Thu 5 Nov to Thu 5 Nov, "), "{}", done.text);
+        let ics = reply_ics(&outbox(&j)[0].3);
+        assert!(ics.contains("METHOD:COUNTER") && ics.contains("RECURRENCE-ID;TZID=Europe/Brussels:20261105T093000"), "{ics}");
+        let event = &ics[ics.find("BEGIN:VEVENT").unwrap()..];
+        assert!(!event.contains("RRULE"), "never the whole series: {ics}");
+        assert_eq!(kept_answers(&j), [("20261105T093000 Europe/Brussels".to_string(), "tentative".to_string())], "kept for the occurrence");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_time_is_refused_before_anything_goes_out() {
+        let (j, _) = jolta("respond-propose-refused");
+        let message = import(&j, mail!("google-request.eml"));
+        let refused = |req: Request| run(&j, req).unwrap_err().to_string();
+        assert!(refused(proposing(message, Answer::Accept, "2026-11-13 15:00", "2026-11-13 15:45")).contains("not with Accept"));
+        assert!(refused(Request { notify: false, ..proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45") }).contains("Don't send a reply"));
+        assert!(refused(proposing(message, Answer::Maybe, "2026-11-13 15:45", "2026-11-13 15:00")).contains("ends before it starts"));
+        let detail = Request { subject: Subject::Event { id: EventId(1), at: None }, ..proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45") };
+        assert!(refused(detail).contains("card in mail"));
+
+        let raw = "From: ann@example.com\r\nTo: me@example.com\r\nSubject: s\r\nMessage-ID: <fixed@example.com>\r\n\
+                   Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:fixed\r\n\
+                   DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Board\r\nX-MICROSOFT-DISALLOW-COUNTER:TRUE\r\n\
+                   ORGANIZER;CN=Ann:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let fixed = import(&j, raw.as_bytes());
+        assert!(refused(proposing(fixed, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 16:00")).contains("Ann doesn't take proposals"));
+        assert!(outbox(&j).is_empty() && kept_answers(&j).is_empty(), "nothing sent, nothing kept");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 }

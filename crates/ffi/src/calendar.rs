@@ -300,7 +300,7 @@ pub struct NextMeetingRecord {
 impl Core {
     async fn respond(&self, subject: respond::Subject, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
         let note = Some(options.note.trim().to_string()).filter(|n| !n.is_empty());
-        let request = respond::Request { subject, answer: answer.into(), note, notify: options.notify, occurrence_only: options.occurrence_only };
+        let request = respond::Request { subject, answer: answer.into(), note, notify: options.notify, occurrence_only: options.occurrence_only, proposal: None };
         let jolta = self.jolta.clone();
         let outcome = self
             .runtime

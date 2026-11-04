@@ -39,6 +39,9 @@ pub struct Sent {
     /// DTSTAMP: when the organizer sent this version. It orders two
     /// versions with the same SEQUENCE.
     pub stamp: Option<DateTime<chrono::Utc>>,
+    /// False when the organizer takes no proposals for a new time:
+    /// Outlook's `X-MICROSOFT-DISALLOW-COUNTER:TRUE`.
+    pub proposals: bool,
 }
 
 /// Every VEVENT in an invitation in mail.
@@ -237,7 +240,8 @@ fn event(
         Some(Value::PartialDateTime(dt)) => utc(dt),
         _ => None,
     });
-    Some(Sent { event, dated: start.is_some(), stamp })
+    let proposals = !x_props(comp, "X-MICROSOFT-DISALLOW-COUNTER").filter_map(upper).any(|v| v == "TRUE");
+    Some(Sent { event, dated: start.is_some(), stamp, proposals })
 }
 
 fn span(comp: &ICalendarComponent, start: Moment, zones: &mut Zones<'_>) -> Span {

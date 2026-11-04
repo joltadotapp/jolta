@@ -80,6 +80,18 @@ pub struct Answering {
     pub occurrence: Option<ShownOccurrence>,
     /// "Ann", whom the answer tells.
     pub organizer: String,
+    /// Propose new time, for a meeting with a start and an end time; None
+    /// for one that lasts all day.
+    pub new_time: Option<NewTime>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewTime {
+    /// The panel starts from the time shown, the occurrence's for a series.
+    Open { start: DateTime<Utc>, end: DateTime<Utc> },
+    /// The organizer takes no proposals: Outlook's setting, in the mail or
+    /// on the account's Microsoft 365 copy.
+    Refused,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -298,7 +310,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let alone = sent.recurrence_id.is_some();
     // Another sender's message about the meeting answers nothing in it.
     let trusted = !history.not_from_organizer;
-    let answering = (current && trusted && answerable(method, sent, &receiver)).then(|| Answering {
+    let mut answering = (current && trusted && answerable(method, sent, &receiver)).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
         occurrence: occurrence.filter(|_| repeats || alone).map(|(e, span)| ShownOccurrence {
@@ -310,6 +322,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
             alone,
         }),
         organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, &[], true)),
+        new_time: None,
     });
     // An invitation the user answers is answered in the calendars of the
     // account it came to; another account's copy may be the organizer's own.
@@ -317,6 +330,9 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         Some(a) => (store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?, copy(Some(cx.account))?),
         None => (None, stored.clone()),
     };
+    if let (Some(a), Some(Bounds::Utc { start, end })) = (answering.as_mut(), bounds) {
+        a.new_time = Some(if takes_proposals(conn, invitation, answered.as_ref(), cx)? { NewTime::Open { start, end } } else { NewTime::Refused });
+    }
 
     let held = method == Method::Cancel && current && held(conn, sent, cx)?;
     let removing = if held && trusted { removable(conn, sent, cx)? } else { None };
@@ -356,6 +372,17 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         answering,
         removing,
     })
+}
+
+/// Whether the organizer takes proposals for a new time: the invitation
+/// says nothing against it, nor does the account's Microsoft 365 copy.
+fn takes_proposals(conn: &Connection, sent: &Invitation, copy: Option<&store::StoredEvent>, cx: &Context) -> Result<bool> {
+    if !sent.proposals {
+        return Ok(false);
+    }
+    let Some(copy) = copy.filter(|c| c.source == super::CalendarSource::Graph) else { return Ok(true) };
+    let blob: Option<String> = conn.query_row("SELECT blob FROM event WHERE id = ?1", [copy.event_id], |r| r.get(0))?;
+    Ok(blob.and_then(|hash| cx.blobs.get(&hash).ok()).is_none_or(|raw| super::sources::graph::takes_proposals(&raw)))
 }
 
 /// Whether the account's calendar still holds the cancelled event, or the
@@ -910,6 +937,33 @@ pub(crate) mod tests {
         assert_eq!(strip.busy.len(), 1, "lunch is outside the strip");
         assert!(strip.busy[0].conflict && strip.busy[0].title == "Standup");
         assert_eq!((strip.this.left, strip.this.width), (40.0, 15.0));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn propose_new_time_starts_from_the_time_shown_unless_the_organizer_refuses() {
+        let (j, calendar) = jolta("card-new-time");
+        let at = |h, m| Utc.with_ymd_and_hms(2026, 11, 12, h, m, 0).unwrap();
+        let new_time = |raw: &[u8]| event_card(&j, raw).answering.expect("answerable").new_time;
+        assert_eq!(new_time(mail!("google-request.eml")), Some(NewTime::Open { start: at(15, 0), end: at(15, 45) }));
+
+        let copy = invitation::find(mail!("google-request.eml"), &[ME.into()]).remove(0).event;
+        let blob = j.blobs.put(br#"{"id":"AAMk","allowNewTimeProposals":false}"#).unwrap();
+        j.store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET source = 'graph' WHERE id = ?1", [calendar])?;
+                store::apply_item(tx, calendar, "AAMk", None, &[copy.clone()], Some(&blob), &Horizon::around(now(), Brussels))
+            })
+            .unwrap();
+        assert_eq!(new_time(mail!("google-request.eml")), Some(NewTime::Refused), "the Microsoft 365 copy says the organizer takes none");
+
+        let from_ann = |lines: &str| format!("From: ann@example.com\r\n{}", request(&format!("ORGANIZER;CN=Ann:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\n{lines}")));
+        let all_day = from_ann("")
+            .replace("DTSTART:20261112T150000Z", "DTSTART;VALUE=DATE:20261112")
+            .replace("DTEND:20261112T160000Z", "DTEND;VALUE=DATE:20261113");
+        assert_eq!(new_time(all_day.as_bytes()), None, "a day-long meeting gets no new time");
+        let refused = from_ann("X-MICROSOFT-DISALLOW-COUNTER:TRUE\r\n");
+        assert_eq!(new_time(refused.as_bytes()), Some(NewTime::Refused), "Outlook's own setting in the mail");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

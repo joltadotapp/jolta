@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn the_answer_buttons_show_the_answer_given() {
-        let answering = Answering { message: MessageId(7), uid: "u".into(), occurrence: None, organizer: "Ann <b>".into() };
+        let answering = Answering { message: MessageId(7), uid: "u".into(), occurrence: None, organizer: "Ann <b>".into(), new_time: None };
         let with = |answer: Option<Response>, answering: Option<Answering>| card(&Card::Event(EventCard { answer, answering, join: None, ..hostile() }));
         let chosen = |html: &str| html.matches("jolta-chosen").count();
 

@@ -407,6 +407,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 note,
                 notify: !no_reply,
                 occurrence_only: occurrence,
+                proposal: None,
             };
             let t = Instant::now();
             let done = respond::answer(jolta, &request).await?;
@@ -462,7 +463,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 Scope::Occurrence(rid) => format!("the occurrence of {}", moment_text(rid)),
             };
             let t = Instant::now();
-            rsvp::answer(jolta, &Rsvp { event, answer, note, notify: !no_reply, scope }).await?;
+            rsvp::answer(jolta, &Rsvp { event, answer, note, notify: !no_reply, scope, proposal: None }).await?;
             println!(
                 "{} {what} of {title:?} in {:.2} s; {}.",
                 match answer {

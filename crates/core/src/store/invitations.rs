@@ -161,6 +161,19 @@ pub enum ReplyMail {
     Sent(i64),
 }
 
+/// The mail with `message_id` in the account's outbox, while it still
+/// means to send it or has sent it.
+pub fn outbox_mail(conn: &Connection, account: AccountId, message_id: &str) -> Result<Option<ReplyMail>> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, state FROM outbox WHERE account_id = ?1 AND message_id = ?2 AND state IN ('queued', 'sent') ORDER BY id DESC LIMIT 1",
+            params![account, message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(id, state)| if state == "queued" { ReplyMail::Waiting(id) } else { ReplyMail::Sent(id) }))
+}
+
 /// Keeps the answer the user gave an event's invitation on an account:
 /// the whole event, or with `recurrence_id` one occurrence, with the
 /// version answered (the event or occurrence, or a series with its changed
