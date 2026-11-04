@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate};
 use jolta_core::calendar::scheduler::Scheduler;
-use jolta_core::calendar::{self as cal, Bounds, CalendarId, EventId, detail, remind, remove, respond, rsvp, sync, tz};
+use jolta_core::calendar::card::NewTime;
+use jolta_core::calendar::{self as cal, Bounds, CalendarId, EventId, detail, proposal, remind, remove, respond, rsvp, sync, tz};
 use jolta_core::{AccountId, store};
 
 use crate::{AccountInfo, Core, CoreError, CoreEvent, Result};
@@ -246,6 +247,15 @@ pub struct InvitationInfo {
     pub occurrence_day: Option<String>,
     /// "Ann".
     pub organizer: String,
+    /// Where Propose new time starts: the time the card shows, in unix
+    /// seconds. None when the card doesn't offer it.
+    pub new_time: Option<TimeSlot>,
+}
+
+#[derive(uniffi::Record, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeSlot {
+    pub start: i64,
+    pub end: i64,
 }
 
 impl From<jolta_core::reader::OpenInvitation> for InvitationInfo {
@@ -256,7 +266,27 @@ impl From<jolta_core::reader::OpenInvitation> for InvitationInfo {
             answer: i.answer.map(Into::into),
             occurrence_day: i.answering.occurrence.filter(|o| !o.alone).map(|o| o.day),
             organizer: i.answering.organizer,
+            new_time: match i.answering.new_time {
+                Some(NewTime::Open { start, end }) => Some(TimeSlot { start: start.timestamp(), end: end.timestamp() }),
+                Some(NewTime::Refused) | None => None,
+            },
         }
+    }
+}
+
+/// A guest's proposal in the open conversation that the user, its
+/// meeting's organizer, can decline.
+#[derive(uniffi::Record)]
+pub struct ProposalInfo {
+    pub message_id: i64,
+    /// "Bo Nilsson".
+    pub proposer: String,
+    pub expanded: bool,
+}
+
+impl From<jolta_core::reader::OpenProposal> for ProposalInfo {
+    fn from(p: jolta_core::reader::OpenProposal) -> Self {
+        ProposalInfo { message_id: p.message.0, proposer: p.proposer, expanded: p.expanded }
     }
 }
 
@@ -298,9 +328,9 @@ pub struct NextMeetingRecord {
 }
 
 impl Core {
-    async fn respond(&self, subject: respond::Subject, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
+    async fn respond(&self, subject: respond::Subject, answer: InvitationAnswer, options: AnswerOptions, proposal: Option<rsvp::Proposal>) -> Result<String> {
         let note = Some(options.note.trim().to_string()).filter(|n| !n.is_empty());
-        let request = respond::Request { subject, answer: answer.into(), note, notify: options.notify, occurrence_only: options.occurrence_only, proposal: None };
+        let request = respond::Request { subject, answer: answer.into(), note, notify: options.notify, occurrence_only: options.occurrence_only, proposal };
         let jolta = self.jolta.clone();
         let outcome = self
             .runtime
@@ -320,7 +350,32 @@ impl Core {
     /// Answers the invitation on a message's card. Returns the words for the
     /// toast: "Accepted. Jolta emailed Ann."
     pub async fn answer_invitation(&self, message_id: i64, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
-        self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options).await
+        self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options, None).await
+    }
+
+    /// Proposes a new time, in unix seconds, with a Maybe or a Decline for
+    /// the invitation on a message's card: for a series, the occurrence it
+    /// shows. Returns the words for the toast: "Proposed Fri 6 Nov, 14:00 to
+    /// 14:45 with a maybe. Jolta emailed Ann."
+    pub async fn propose_new_time(&self, message_id: i64, answer: InvitationAnswer, start: i64, end: i64, note: String) -> Result<String> {
+        let at = |t: i64| DateTime::from_timestamp(t, 0).ok_or_else(|| CoreError::Failed { message: format!("{t} is no time") });
+        let proposal = rsvp::Proposal { start: at(start)?, end: at(end)? };
+        let options = AnswerOptions { note, notify: true, occurrence_only: true };
+        self.respond(respond::Subject::Message(jolta_core::MessageId(message_id)), answer, options, Some(proposal)).await
+    }
+
+    /// Declines the guest's proposal on a message's card, as its Decline
+    /// proposal link does. Returns the words for the toast: "Declined Bo's
+    /// proposal. Jolta emailed Bo."
+    pub async fn decline_proposal(&self, message_id: i64) -> Result<String> {
+        let jolta = self.jolta.clone();
+        let done = self
+            .runtime
+            .spawn(async move { proposal::decline(&jolta, jolta_core::MessageId(message_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.running_engine()?.wake(done.mailed_from);
+        Ok(done.text)
     }
 
     /// Takes the meeting a cancellation's card names out of the calendar,
@@ -341,7 +396,7 @@ impl Core {
     /// for `calendar_event`.
     pub async fn answer_event(&self, event_id: i64, time: Option<OccurrenceTime>, answer: InvitationAnswer, options: AnswerOptions) -> Result<String> {
         let at = time.map(Bounds::try_from).transpose()?;
-        self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options).await
+        self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options, None).await
     }
 
     /// Every account with its calendar switch and calendars, then the

@@ -36,6 +36,18 @@ pub struct ThreadDetail {
     /// Every invitation the user can answer, oldest first. Y, M and N answer
     /// the last one whose message is expanded.
     pub invitations: Vec<OpenInvitation>,
+    /// Every guest's proposal the user can decline as the organizer, oldest
+    /// first. N declines the last one whose message is expanded when no
+    /// invitation is on screen.
+    pub proposals: Vec<OpenProposal>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenProposal {
+    pub message: crate::MessageId,
+    /// "Bo Nilsson".
+    pub proposer: String,
+    pub expanded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +147,15 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             Card::Reply(_) => None,
         })
         .collect();
+    let proposals = cards
+        .iter()
+        .enumerate()
+        .flat_map(|(i, cards)| cards.iter().map(move |c| (i, c)))
+        .filter_map(|(i, c)| match c {
+            Card::Event(e) => e.proposal.as_ref().and_then(|p| p.declining.map(|message| OpenProposal { message, proposer: p.proposer.clone(), expanded: open(i) })),
+            Card::Reply(_) => None,
+        })
+        .collect();
     let views: Vec<MessageView> = messages
         .iter()
         .enumerate()
@@ -167,7 +188,7 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
             .await?;
     let image_sender = (senders.len() == 1).then(|| senders.remove(0));
-    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitations })
+    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitations, proposals })
 }
 
 /// The invitation cards of each message, empty for most.
