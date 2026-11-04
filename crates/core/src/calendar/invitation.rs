@@ -11,7 +11,7 @@ use mail_parser::{MessageParser, MessagePart, MessageRef};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 use super::recur::{self, Window};
-use super::{EventData, Span, ical, tz};
+use super::{EventData, Moment, Span, ical, tz};
 use crate::model::text_enum;
 
 text_enum!(Method {
@@ -132,6 +132,29 @@ pub fn calendar_text(raw: &[u8], uid: &str) -> Option<String> {
         .filter(is_calendar)
         .map(|part| String::from_utf8_lossy(&part.decoded()).into_owned())
         .find(|text| ical::read_invitation(text, &[]).unwrap_or_default().iter().any(|s| s.event.uid == uid))
+}
+
+/// The calendar part of a raw message that sends `method` for the event
+/// `uid` at `rid`, as `in_message` reads it.
+pub fn part_text(raw: &[u8], method: Method, uid: &str, rid: Option<&Moment>, here: Tz) -> Option<String> {
+    let raw = crate::smime::readable(raw);
+    let msg = MessageParser::new().parse(&raw[..])?;
+    msg.parts()
+        .filter(is_calendar)
+        .map(|part| part.decoded())
+        .filter(|bytes| bytes.len() <= MAX_PART)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .filter(|text| ical::method(text).and_then(|m| m.parse::<Method>().ok()) == Some(method))
+        .find(|text| ical::read_invitation(text, &[]).unwrap_or_default().iter().any(|s| s.dated && s.event.uid == uid && same_occurrence(s.event.recurrence_id.as_ref(), rid, here)))
+}
+
+/// Whether two RECURRENCE-IDs, or their absence, name the same event.
+fn same_occurrence(a: Option<&Moment>, b: Option<&Moment>, here: Tz) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.names(b, here),
+        _ => false,
+    }
 }
 
 /// Whether a raw message may hold a calendar part, without parsing it: its

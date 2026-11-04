@@ -75,6 +75,11 @@ pub struct Proposed {
     pub declining: Option<MessageId>,
     /// Jolta sent the organizer's no.
     pub declined: bool,
+    /// The proposal checked, which Decline proposal answers: its UID and
+    /// RECURRENCE-ID, and the proposing guest's address.
+    pub uid: String,
+    pub recurrence_id: Option<Moment>,
+    pub address: String,
 }
 
 /// What Remove from calendar needs.
@@ -370,7 +375,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     }
 
     let proposal = match &countered_now {
-        Some(now) if current && trusted => Some(proposed(conn, said, now, &receiver, cx)?),
+        Some(now) if current && trusted => Some(proposed(conn, sent, now, &receiver, cx)?),
         _ => None,
     };
     // A declined proposal's time no longer needs its conflicts.
@@ -426,11 +431,15 @@ fn countered(conn: &Connection, counter: &EventData, before: &[EventData], cx: &
 fn proposed(conn: &Connection, counter: &EventData, now: &[EventData], receiver: &str, cx: &Context) -> Result<Proposed> {
     let organizes = update::organizer(conn, cx.account, cx.me, &counter.uid)?.is_some_and(|o| o.trim().eq_ignore_ascii_case(receiver));
     let declined = store::calendar_answer_to(conn, cx.message)?.is_some();
+    let guest = update::proposer(counter, cx.sender);
     Ok(Proposed {
         now: Lines::of(now, cx).map(|l| l.when()),
-        proposer: update::proposer(counter, cx.sender).map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false)),
+        proposer: guest.map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false)),
         declining: (organizes && !declined).then_some(cx.message),
         declined,
+        uid: counter.uid.clone(),
+        recurrence_id: counter.recurrence_id,
+        address: guest.map(|a| a.person.address.clone()).unwrap_or_default(),
     })
 }
 

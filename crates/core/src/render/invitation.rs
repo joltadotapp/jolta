@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn a_proposal_shows_the_time_now_and_decline_proposal() {
-        let proposed = |declining: Option<MessageId>, declined| Proposed { now: Some("Thu 12 Nov · 16:00 to 17:00".into()), proposer: "Bo <i>".into(), declining, declined };
+        let proposed = |declining: Option<MessageId>, declined| Proposed { now: Some("Thu 12 Nov · 16:00 to 17:00".into()), proposer: "Bo <i>".into(), declining, declined, uid: "plan".into(), recurrence_id: None, address: "bo@example.com".into() };
         let with = |p: Proposed| card(&Card::Event(EventCard { label: "New time proposed", answer: None, join: None, proposal: Some(p), ..hostile() }));
 
         let open = with(proposed(Some(MessageId(9)), false));

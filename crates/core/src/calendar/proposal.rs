@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::OptionalExtension;
 
 use super::card::{self, Card};
-use super::{invitation, rsvp, tz, update};
+use super::{invitation, rsvp, tz};
 use crate::model::{AccountId, MessageId};
 use crate::{Error, Jolta, Result, imap, store};
 
@@ -42,21 +42,27 @@ pub async fn decline(jolta: &Jolta, message: MessageId) -> Result<Declined> {
             let every: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
             let from = store::account(c, account)?.address;
             let invitations = invitation::find(&raw, &every);
-            let cx = card::Context { message, account, me: &every, sender: &sender, now: Utc::now(), here: tz::here(), blobs: &blobs };
-            let (uid, proposal, title) = card::cards(c, &invitations, &cx)?
+            let here = tz::here();
+            let cx = card::Context { message, account, me: &every, sender: &sender, now: Utc::now(), here, blobs: &blobs };
+            let (proposal, title) = card::cards(c, &invitations, &cx)?
                 .into_iter()
                 .find_map(|card| match card {
-                    Card::Event(e) => e.proposal.map(|p| (invitations.iter().find(|i| i.method == invitation::Method::Counter).map(|i| i.event.clone()), p, e.title)),
+                    Card::Event(e) => e.proposal.map(|p| (p, e.title)),
                     Card::Reply(_) => None,
                 })
                 .ok_or_else(|| Error::Other("This message has no proposal to decline.".into()))?;
             if proposal.declining.is_none() && !proposal.declined {
                 return Err(Error::Other("Only the meeting's organizer can decline this proposal.".into()));
             }
-            let counter = uid.ok_or_else(|| Error::Other("This message has no proposal to decline.".into()))?;
-            let to = update::proposer(&counter, &sender).map(|a| a.person.address.clone()).ok_or_else(|| Error::Other("The proposal names no guest.".into()))?;
-            let text = invitation::calendar_text(&raw, &counter.uid).ok_or_else(|| Error::Other("Jolta has no copy of this proposal to answer.".into()))?;
-            Ok((from.clone(), proposal, rsvp::imip_decline_counter(&text, &from, &to, &title)?))
+            if proposal.address.is_empty() {
+                return Err(Error::Other("The proposal names no guest.".into()));
+            }
+            // The proposal the card checked, never another one in the mail.
+            let rid = proposal.recurrence_id.as_ref();
+            let text = invitation::part_text(&raw, invitation::Method::Counter, &proposal.uid, rid, here)
+                .ok_or_else(|| Error::Other("Jolta has no copy of this proposal to answer.".into()))?;
+            let built = rsvp::imip_decline_counter(&text, &proposal.uid, rid, &from, &proposal.address, &title, here)?;
+            Ok((from, proposal, built))
         })
         .await?;
 
@@ -163,7 +169,15 @@ mod tests {
         assert_eq!(notes(&c), ["Bo Nilsson proposed this new time: \"Thursday is full\""]);
         assert_eq!(
             c.proposal,
-            Some(Proposed { now: Some("Thu 12 Nov · 16:00 to 17:00".into()), proposer: "Bo Nilsson".into(), declining: Some(message), declined: false }),
+            Some(Proposed {
+                now: Some("Thu 12 Nov · 16:00 to 17:00".into()),
+                proposer: "Bo Nilsson".into(),
+                declining: Some(message),
+                declined: false,
+                uid: "plan".into(),
+                recurrence_id: None,
+                address: "bo@example.com".into()
+            }),
             "set against the meeting's time now"
         );
         let a = c.availability.expect("the proposed time's conflicts");
@@ -231,6 +245,54 @@ mod tests {
         let forged = no("d2", "eve@example.com");
         let c = card_of(&j, import(&j, forged.as_bytes()), &forged);
         assert!(notes(&c).contains(&"This isn't from the meeting's organizer"), "{:?}", notes(&c));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Bo's mail holds a COUNTER naming Eve before Bo's own: for a meeting
+    /// the account doesn't know, or for an occurrence of Bo's meeting, as an
+    /// event of the same calendar part or as a calendar part of its own. The
+    /// no answers the proposal the card checked, Bo's.
+    #[test]
+    fn decline_proposal_answers_the_proposal_the_card_checked() {
+        let (j, calendar) = jolta("proposal-checked");
+        my_meeting(&j, calendar);
+        let event = |uid: &str, guest: &str| {
+            format!(
+                "BEGIN:VEVENT\r\nUID:{uid}\r\nSEQUENCE:1\r\nDTSTAMP:20261104T100000Z\r\nDTSTART:20261113T140000Z\r\nDTEND:20261113T150000Z\r\n\
+                 SUMMARY:Planning\r\nORGANIZER;CN=Me:mailto:me@example.com\r\nATTENDEE;PARTSTAT=TENTATIVE:mailto:{guest}\r\nEND:VEVENT\r\n"
+            )
+        };
+        let counter = |events: &str| format!("BEGIN:VCALENDAR\r\nMETHOD:COUNTER\r\n{events}END:VCALENDAR\r\n");
+        let head = |id: &str, kind: &str| {
+            format!("From: bo@example.com\r\nTo: me@example.com\r\nSubject: New time proposed: Planning\r\nMessage-ID: <{id}@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: {kind}\r\n\r\n")
+        };
+        let part = |ics: String| format!("--b\r\nContent-Type: text/calendar; method=COUNTER\r\n\r\n{ics}\r\n");
+        let bos = event("plan", "bo@example.com");
+        let elsewhere = event("other", "eve@example.com");
+        let occurrence = event("plan", "eve@example.com").replace("SEQUENCE:1\r\n", "SEQUENCE:1\r\nRECURRENCE-ID:20261112T150000Z\r\n");
+        for (id, eves) in [("other", elsewhere), ("occurrence", occurrence)] {
+            let one_part = format!("{}{}", head(&format!("{id}-1"), "text/calendar; method=COUNTER"), counter(&format!("{eves}{bos}")));
+            let two_parts = format!("{}{}{}--b--\r\n", head(&format!("{id}-2"), "multipart/mixed; boundary=b"), part(counter(&eves)), part(counter(&bos)));
+            for raw in [one_part, two_parts] {
+                let message = import(&j, raw.as_bytes());
+                run(decline(&j, message)).unwrap();
+            }
+        }
+        let sent: Vec<(String, bool)> = j
+            .store
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT recipients, blob FROM outbox ORDER BY id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|(to, blob)| {
+                let raw = String::from_utf8_lossy(&j.blobs.get(&blob).unwrap()).into_owned();
+                (to, raw.contains("UID:plan") && !raw.contains("RECURRENCE-ID"))
+            })
+            .collect();
+        assert_eq!(sent, vec![("bo@example.com".to_string(), true); 4], "to Bo, about Bo's proposal");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
