@@ -530,6 +530,35 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// A copy added to a calendar of the account the invitation came to, as
+    /// Microsoft 365 holds one: the user's own event without guests. It is
+    /// no copy of the account's own: Ann stays the organizer, the answer goes
+    /// by mail, and the card and the list show the answer the mail gave.
+    #[test]
+    fn a_copy_added_to_the_receiving_accounts_own_calendar_is_only_the_added_copy() {
+        let (j, own) = jolta("add-own-calendar");
+        let v1 = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        let id = import(&j, v1.as_bytes());
+        let mut copy = events_of(&v1);
+        copy[0].organizer = Some(Person { address: ME.into(), name: String::new() });
+        copy[0].attendees.clear();
+        hold(&j, own, "copy", &copy);
+        added(&j, own, "sync", "copy", &v1);
+        let given = store::GivenAnswer { answer: Response::Accepted, note: String::new(), notify: true };
+        j.store.write(|tx| store::remember_answer(tx, AccountId(1), "sync", None, &given, &events_of(&v1), None)).unwrap();
+
+        let routed = j.store.read(|c| store::stored_event(c, "sync", None, Some(AccountId(1)), Brussels)).unwrap();
+        assert_eq!(routed, None, "an answer finds no copy of the account's own to answer through, so it goes by mail");
+        let c = card_of(&j, id, &v1);
+        assert!(c.answering.is_some(), "Ann still organizes it: {:?}", c.notes);
+        assert_eq!(c.answer, Some(Response::Accepted), "the answer the mail gave");
+        let thread = j.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [id], |r| r.get::<_, crate::model::ThreadId>(0))?)).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap();
+        let listed = j.store.read(|c| store::thread_invitations(c, &[thread], now, Brussels)).unwrap();
+        assert_eq!(listed.get(&thread), Some(&store::InvitationState::Answered(Response::Accepted)));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// The organizer the copy was added from stays the meeting's, also once
     /// the mail it came in is gone: a stranger reusing the UID at a higher
     /// SEQUENCE changes and removes nothing.

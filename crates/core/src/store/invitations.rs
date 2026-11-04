@@ -92,16 +92,22 @@ pub struct StoredEvent {
     pub event: EventData,
 }
 
+/// An account's own copy of a meeting is never one the user added with Add
+/// to calendar, in whichever account's calendar: that copy is answered by
+/// mail and never decides who organizes the meeting.
+const NOT_ADDED: &str = "NOT EXISTS (SELECT 1 FROM added_copy a WHERE a.calendar_id = e.calendar_id AND (a.uid = e.uid OR a.remote_id = e.remote_id))";
+
 /// The event with this UID and recurrence id in a shown calendar, of
-/// `account` only when one is given. A recurrence id matches the same
-/// moment written in another zone, as `Moment::names` decides. A meeting in
-/// several calendars gives the copy the views show.
+/// `account` only when one is given, and then never a copy the user added
+/// (`NOT_ADDED`). A recurrence id matches the same moment written in
+/// another zone, as `Moment::names` decides. A meeting in several calendars
+/// gives the copy the views show.
 pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, account: Option<AccountId>, here: Tz) -> Result<Option<StoredEvent>> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR c.account_id = ?3)",
-    )?;
+         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR (c.account_id = ?3 AND {NOT_ADDED}))"
+    ))?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account], |r| {
         let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
         Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, source, r.get::<_, String>(4)?))
@@ -123,13 +129,13 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
 
 /// Every stored event of the series with this UID, the master and its
 /// overrides, from the one calendar the views show it from, of `account`
-/// only when one is given.
+/// only when one is given, and then never a copy the user added.
 pub fn stored_series(conn: &Connection, uid: &str, account: Option<AccountId>) -> Result<Vec<EventData>> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR c.account_id = ?2)",
-    )?;
+         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR (c.account_id = ?2 AND {NOT_ADDED}))"
+    ))?;
     let rows = stmt
         .query_map(params![uid, account], |r| {
             let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);

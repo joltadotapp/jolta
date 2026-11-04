@@ -87,7 +87,8 @@ pub fn added_event(conn: &Connection, account: AccountId, uid: &str, recurrence_
 }
 
 /// The copy of an invitation to `account` that is the user's: the one in
-/// the account's own calendars, else the one the user added elsewhere.
+/// the account's own calendars, else the one the user added, which may be
+/// in those calendars too.
 pub fn own_or_added(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, account: AccountId, here: Tz) -> Result<Option<StoredEvent>> {
     match super::stored_event(conn, uid, recurrence_id, Some(account), here)? {
         Some(own) => Ok(Some(own)),
