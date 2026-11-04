@@ -118,6 +118,8 @@ pub enum Gone {
     /// Jolta deleted it. A CalDAV occurrence leaves through a new version
     /// of its series, given here to store.
     Deleted(Option<Change>),
+    /// The copy changed on the server since Jolta read it, so Jolta left it.
+    Changed,
 }
 
 /// One request with an account's calendar sign-in, for `jolta dev http`:

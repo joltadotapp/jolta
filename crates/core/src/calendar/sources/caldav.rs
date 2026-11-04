@@ -434,7 +434,8 @@ impl CalDav {
     /// on its series, the whole event by a DELETE. A scheduling server
     /// (RFC 6638) replies for an attendee whose copy loses an event, so the
     /// copy first gets SCHEDULE-AGENT=CLIENT on its ORGANIZER, which stops
-    /// that. A server that doesn't schedule ignores it.
+    /// that. A server that doesn't schedule ignores it. A copy that changed
+    /// since Jolta read it may have been reinstated, so a 412 stops there.
     pub async fn remove(&self, calendar: &Calendar, target: &Target) -> Result<Gone> {
         let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
         let url = join(&collection, &path_escape(&target.event.remote_id))?;
@@ -475,7 +476,7 @@ impl CalDav {
                     }
                     // The DELETE goes with the ETag of what was just written.
                     200..300 => current = reply.etag.map(|etag| (edited, Some(etag))),
-                    412 => {}
+                    412 => return Ok(Gone::Changed),
                     404 | 410 => return Ok(Gone::Already),
                     status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
                 }
@@ -485,7 +486,7 @@ impl CalDav {
             let reply = self.exchange("DELETE", &url, &headers, "").await?;
             match reply.status {
                 200..300 | 404 | 410 => return Ok(Gone::Deleted(None)),
-                412 => {}
+                412 => return Ok(Gone::Changed),
                 status => return Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
             }
         }
@@ -622,6 +623,60 @@ fn cached(event: &rsvp::Stored) -> Option<(String, Option<String>)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A copy that changed on the server since the last sync may have been
+    /// reinstated: the 412 stops the removal, with no second try.
+    #[tokio::test]
+    async fn a_copy_changed_since_the_sync_is_left_alone() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            // A retry would find the meeting reinstated and delete it.
+            for answer in ["412 Precondition Failed", "200 OK", "204 No Content", "204 No Content"] {
+                let Ok(Ok((mut socket, _))) = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await else { break };
+                let mut request = vec![0; 16384];
+                let n = socket.read(&mut request).await.unwrap();
+                seen.push(String::from_utf8_lossy(&request[..n]).lines().next().unwrap_or_default().to_string());
+                let body = if answer == "200 OK" { "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nORGANIZER:mailto:ann@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n" } else { "" };
+                let reply = format!("HTTP/1.1 {answer}\r\nETag: \"2\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        let start = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let dav = CalDav { http: http_client(false).unwrap(), username: "me".into(), password: "pw".into(), starts: vec![start], address: "me@example.com".into(), fastmail: false, guessed: false };
+        let calendar = Calendar {
+            id: crate::calendar::CalendarId(1),
+            account_id: None,
+            source: crate::calendar::CalendarSource::CalDav,
+            remote_id: format!("http://127.0.0.1:{port}/cal/"),
+            name: "Home".into(),
+            color: None,
+            zone: None,
+            access: Access::Owner,
+            shown: true,
+            counts_as_busy: true,
+            notify: false,
+            default_reminder: None,
+            is_default: true,
+            cursor: None,
+            refresh: None,
+            synced: None,
+        };
+        let text = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nORGANIZER:mailto:ann@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let stored = rsvp::Stored {
+            id: crate::calendar::EventId(1),
+            remote_id: "a.ics".into(),
+            etag: Some("\"1\"".into()),
+            raw: Some(text.as_bytes().to_vec()),
+            data: crate::calendar::EventData::new("a", crate::calendar::Span::AllDay { start: chrono::NaiveDate::MIN, end: chrono::NaiveDate::MIN }),
+        };
+        let target = Target { event: stored, occurrence: None, me: "me@example.com".into() };
+        assert_eq!(dav.remove(&calendar, &target).await.unwrap(), Gone::Changed);
+        assert_eq!(server.await.unwrap(), ["PUT /cal/a.ics HTTP/1.1"], "no GET, PUT or DELETE after the 412");
+    }
 
     #[test]
     fn stored_text_without_an_etag_is_fetched_again() {

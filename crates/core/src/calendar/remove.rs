@@ -91,6 +91,10 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
         Gone::Deleted(_) | Gone::Already => {
             sync::sync_calendar(jolta, id).await?;
         }
+        Gone::Changed => {
+            sync::sync_calendar(jolta, id).await?;
+            return Err(Error::Other(said(&calendar, &gone, None)));
+        }
     }
     Ok(Removed { text: said(&calendar, &gone, removing.occurrence.as_ref().map(|(_, day)| day.as_str())), calendar: id })
 }
@@ -136,6 +140,7 @@ fn said(calendar: &Calendar, gone: &Gone, day: Option<&str>) -> String {
         (Gone::Already, CalendarSource::Graph) => "Microsoft 365 had already cancelled it in your calendar.".into(),
         (Gone::Already, CalendarSource::Google) => "Google had already removed it from your calendar.".into(),
         (Gone::Already, _) => "It was already gone from your calendar.".into(),
+        (Gone::Changed, _) => "The meeting changed; check it again.".into(),
         (Gone::Deleted(_), _) => match day {
             Some(day) => format!("Removed {day} from your calendar."),
             None => "Removed from your calendar.".into(),
