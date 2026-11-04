@@ -256,7 +256,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         })
     };
     let stored = copy(None)?;
-    let seen = update::Seen { conn, blobs: cx.blobs, account: cx.account, message: cx.message, me: cx.me, here: cx.here };
+    let seen = update::Seen { conn, blobs: cx.blobs, account: cx.account, message: cx.message, sender: cx.sender, me: cx.me, here: cx.here };
     let history = update::history(&seen, invitation)?;
     // An older version only points to the newer one: its time, link and
     // answers are out of date.
@@ -280,13 +280,18 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         None if update && changes.is_empty() => notes.extend(retitled(&history.before, sent)),
         None => {}
     }
+    if history.not_from_organizer {
+        notes.push(Note { text: "This isn't from the meeting's organizer".into(), warn: true });
+    }
     if method != Method::Cancel && stranger(conn, said, cx)? {
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
 
     let receiver = store::account(conn, cx.account)?.address;
     let alone = sent.recurrence_id.is_some();
-    let answering = (current && answerable(method, sent, &receiver)).then(|| Answering {
+    // Another sender's message about the meeting answers nothing in it.
+    let trusted = !history.not_from_organizer;
+    let answering = (current && trusted && answerable(method, sent, &receiver)).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
         occurrence: occurrence.filter(|_| repeats || alone).map(|(e, span)| ShownOccurrence {
@@ -306,7 +311,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         None => (None, stored.clone()),
     };
 
-    let removing = if method == Method::Cancel && current { removable(conn, sent, cx)? } else { None };
+    let removing = if method == Method::Cancel && current && trusted { removable(conn, sent, cx)? } else { None };
     if method == Method::Cancel && current && removing.is_none() && store::account_calendar_on(conn, cx.account)? {
         notes.push(Note { text: "Not in your calendar".into(), warn: false });
     }
@@ -889,10 +894,17 @@ pub(crate) mod tests {
         Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()
     }
 
+    /// The From address of a raw message.
+    fn from_of(raw: &[u8]) -> String {
+        let msg = mail_parser::MessageParser::default().parse(raw);
+        msg.and_then(|m| m.from().and_then(|f| f.first()).and_then(|a| a.address()).map(str::to_string)).unwrap_or_default()
+    }
+
     fn cards_of(j: &crate::Jolta, raw: &[u8]) -> Vec<Card> {
         let me = [ME.to_string()];
         let found = invitation::find(raw, &me);
-        let cx = Context { message: MessageId(1), account: AccountId(1), me: &me, sender: "sender@example.com", now: now(), here: Brussels, blobs: &j.blobs };
+        let sender = from_of(raw);
+        let cx = Context { message: MessageId(1), account: AccountId(1), me: &me, sender: &sender, now: now(), here: Brussels, blobs: &j.blobs };
         j.store.read(|c| cards(c, &found, &cx)).unwrap()
     }
 
@@ -1122,7 +1134,8 @@ pub(crate) mod tests {
     fn stored_card(j: &crate::Jolta, message: MessageId, raw: &str) -> EventCard {
         let me = [ME.to_string()];
         let found = invitation::find(raw.as_bytes(), &me);
-        let cx = Context { message, account: AccountId(1), me: &me, sender: "ann@example.com", now: now(), here: Brussels, blobs: &j.blobs };
+        let sender = from_of(raw.as_bytes());
+        let cx = Context { message, account: AccountId(1), me: &me, sender: &sender, now: now(), here: Brussels, blobs: &j.blobs };
         match j.store.read(|c| cards(c, &found, &cx)).unwrap().remove(0) {
             Card::Event(e) => e,
             other => panic!("{other:?}"),
@@ -1369,6 +1382,76 @@ pub(crate) mod tests {
         let c = stored_card(&j, id, &raw);
         assert_eq!((c.label, c.answer), ("Invitation", Some(Response::Accepted)), "the copy is this version, not an earlier one");
         assert!(c.changes.is_empty());
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// `raw` from `from`, naming `organizer` as the ORGANIZER.
+    fn sent_as(raw: &str, from: &str, organizer: &str) -> String {
+        raw.replace("From: ann@example.com", &format!("From: {from}")).replace("ORGANIZER;CN=Ann Dupont:mailto:ann@example.com", &format!("ORGANIZER:mailto:{organizer}"))
+    }
+
+    #[test]
+    fn only_the_organizers_mail_is_a_version_of_the_meeting() {
+        let (j, calendar) = jolta("card-organizer");
+        let real = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", V1);
+        let m1 = import(&j, real.as_bytes());
+        let stranger = sent_as(&version("x1", "sync", "REQUEST", 100, "20261104T090000Z", V1), "eve@example.net", "eve@example.net");
+        let x1 = import(&j, stranger.as_bytes());
+        let posing = sent_as(&version("x2", "sync", "REQUEST", 101, "20261104T090000Z", V1), "eve@example.net", "ann@example.com");
+        let x2 = import(&j, posing.as_bytes());
+        let c = stored_card(&j, m1, &real);
+        assert!(!c.outdated && c.answering.is_some(), "neither a stranger's SEQUENCE 100 nor one naming Ann replaces Ann's invitation");
+        for (id, raw) in [(x1, &stranger), (x2, &posing)] {
+            let fake = stored_card(&j, id, raw);
+            assert_eq!(fake.notes[0], Note { text: "This isn't from the meeting's organizer".into(), warn: true });
+            assert_eq!((fake.answering, fake.changes.is_empty()), (None, true));
+        }
+
+        let mut copy = invitation::find(real.as_bytes(), &[ME.into()]).remove(0).event;
+        copy.attendees.iter_mut().for_each(|a| a.response = Response::Accepted);
+        j.store.write(|tx| store::apply_item(tx, calendar, "sync.ics", None, &[copy], None, &Horizon::around(now(), Brussels))).unwrap();
+        let cancel = sent_as(&version("x3", "sync", "CANCEL", 102, "20261104T100000Z", V1), "eve@example.net", "ann@example.com");
+        let x3 = import(&j, cancel.as_bytes());
+        let fake = stored_card(&j, x3, &cancel);
+        assert_eq!(fake.removing, None, "a cancellation from someone else removes nothing");
+        assert!(notes(&fake).contains(&"This isn't from the meeting's organizer"));
+        assert!(!stored_card(&j, m1, &real).outdated, "nor cancels Ann's meeting");
+
+        let google = sent_as(&version("v2", "sync", "REQUEST", 1, "20261104T110000Z", V1), "calendar-notification@google.com", "ann@example.com");
+        let v2 = import(&j, google.as_bytes());
+        assert!(stored_card(&j, m1, &real).outdated, "Google sends for Ann");
+        assert!(!notes(&stored_card(&j, v2, &google)).contains(&"This isn't from the meeting's organizer"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The copy's SEQUENCE says it is newer, whatever it changed.
+    #[test]
+    fn a_newer_or_cancelled_copy_replaces_the_mail() {
+        let (j, calendar) = jolta("card-copy-newer");
+        let raw = version("v1", "sync", "REQUEST", 1, "20261104T080000Z", V1);
+        let id = import(&j, raw.as_bytes());
+        let store_copy = |seq: i64, title: &str, status: EventStatus| {
+            let mut e = invitation::find(version("c", "sync", "REQUEST", seq, "20261104T090000Z", &V1.replace("SUMMARY:Sync", title)).as_bytes(), &[ME.into()]).remove(0).event;
+            e.status = status;
+            j.store.write(|tx| store::apply_item(tx, calendar, "sync.ics", None, &[e], None, &Horizon::around(now(), Brussels))).unwrap();
+        };
+        store_copy(2, "SUMMARY:Weekly sync", EventStatus::Confirmed);
+        let c = stored_card(&j, id, &raw);
+        assert_eq!((c.outdated, c.answering.is_none()), (true, true), "a new title at SEQUENCE 2");
+        store_copy(1, "SUMMARY:Sync", EventStatus::Cancelled);
+        assert_eq!(notes(&stored_card(&j, id, &raw))[0], "The organizer has since cancelled this meeting");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_series_cancellation_replaces_an_occurrences_invitation() {
+        let (j, _) = jolta("card-series-cancel");
+        let one = version("o", "standup", "REQUEST", 1, "20261104T080000Z", "RECURRENCE-ID:20261117T083000Z\r\nDTSTART:20261118T133000Z\r\nDTEND:20261118T134500Z\r\nSUMMARY:Standup\r\n");
+        let id = import(&j, one.as_bytes());
+        import(&j, version("x", "standup", "CANCEL", 2, "20261104T090000Z", "DTSTART:20261110T083000Z\r\nDTEND:20261110T084500Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n").as_bytes());
+        let c = stored_card(&j, id, &one);
+        assert_eq!((c.outdated, &c.answering), (true, &None));
+        assert_eq!(notes(&c)[0], "The organizer has since cancelled this meeting");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

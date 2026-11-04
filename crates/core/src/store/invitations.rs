@@ -209,6 +209,10 @@ pub struct VersionRow {
     pub message: MessageId,
     pub method: Method,
     pub sequence: i64,
+    /// The ORGANIZER's address, empty without one.
+    pub organizer: String,
+    /// The mail's From address.
+    pub from: String,
     /// The stored body.
     pub blob: Option<String>,
 }
@@ -218,13 +222,14 @@ pub struct VersionRow {
 /// A recurrence id matches the same moment written in another zone.
 pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, skip: MessageId, here: Tz) -> Result<Vec<VersionRow>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT i.message_id, i.method, i.sequence, m.blob, i.recurrence_id FROM invitation i JOIN message m ON m.id = i.message_id
+        "SELECT i.message_id, i.method, i.sequence, i.organizer, m.from_addr, m.blob, i.recurrence_id FROM invitation i JOIN message m ON m.id = i.message_id
          WHERE i.uid = ?1 AND (i.recurrence_id = '') = ?2 AND m.account_id = ?3 AND i.message_id != ?4
            AND i.method IN ('REQUEST', 'ADD', 'CANCEL') AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')
          ORDER BY i.sequence DESC, i.message_id DESC",
     )?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account, skip], |r| {
-        Ok((VersionRow { message: r.get(0)?, method: r.get(1)?, sequence: r.get(2)?, blob: r.get(3)? }, r.get::<_, String>(4)?))
+        let row = VersionRow { message: r.get(0)?, method: r.get(1)?, sequence: r.get(2)?, organizer: r.get(3)?, from: r.get(4)?, blob: r.get(5)? };
+        Ok((row, r.get::<_, String>(6)?))
     })?;
     let mut out = Vec::new();
     for row in rows {
@@ -232,11 +237,20 @@ pub fn invitation_versions(conn: &Connection, account: AccountId, uid: &str, rec
         if recurrence_id.is_none_or(|want| text_moment(&rid).is_some_and(|m| m.names(want, here))) {
             out.push(row);
         }
-        if out.len() == 20 {
-            break;
-        }
     }
     Ok(out)
+}
+
+/// The ORGANIZER and From of the account's requests for this UID, the
+/// whole event's and its occurrences', earliest first.
+pub fn request_senders(conn: &Connection, account: AccountId, uid: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT i.organizer, m.from_addr FROM invitation i JOIN message m ON m.id = i.message_id
+         WHERE i.uid = ?1 AND m.account_id = ?2 AND i.method = 'REQUEST' AND (m.blob IS NULL OR m.blob NOT LIKE 'synth:%')
+         ORDER BY m.date, m.id",
+    )?;
+    let rows = stmt.query_map(params![uid, account], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Mail from the address that the user answered, through the partial
