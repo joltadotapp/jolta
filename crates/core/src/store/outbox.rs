@@ -167,6 +167,12 @@ pub fn cancel_send(conn: &Connection, id: i64) -> Result<Option<i64>> {
     Ok(draft)
 }
 
+/// Makes a waiting message due now, for a retry the user asked for.
+pub fn send_now(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("UPDATE outbox SET send_after = min(send_after, ?2) WHERE id = ?1 AND state = 'queued'", params![id, now()])?;
+    Ok(())
+}
+
 pub fn due_outbox(conn: &Connection, account: AccountId) -> Result<Vec<OutboxItem>> {
     let mut stmt = conn.prepare(
         "SELECT id, account_id, draft_id, blob, message_id, sender, recipients, replying_to, attempts

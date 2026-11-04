@@ -110,19 +110,58 @@ pub fn stored_series(conn: &Connection, uid: &str) -> Result<Vec<EventData>> {
         .collect()
 }
 
+/// An answer as the user gave it from Jolta.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GivenAnswer {
+    pub answer: Response,
+    /// Empty without one.
+    pub note: String,
+    /// False for "Don't send a reply".
+    pub notify: bool,
+}
+
+/// The reply mail an answer queued, while the outbox still means to send
+/// it or has sent it. One that failed for good or was taken back is none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplyMail {
+    Waiting(i64),
+    Sent(i64),
+}
+
 /// Keeps the answer the user gave an event's invitation on an account:
-/// the whole event, or with `recurrence_id` one occurrence.
-pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, answer: Response) -> Result<()> {
+/// the whole event, or with `recurrence_id` one occurrence, with the outbox
+/// row of its reply mail.
+pub fn remember_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>, given: &GivenAnswer, reply: Option<i64>) -> Result<()> {
     conn.execute(
-        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (account_id, uid, recurrence_id) DO UPDATE SET answer = excluded.answer",
-        params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), answer],
+        "INSERT INTO invitation_answer (account_id, uid, recurrence_id, answer, note, notify, reply) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (account_id, uid, recurrence_id) DO UPDATE SET answer = excluded.answer, note = excluded.note,
+           notify = excluded.notify, reply = excluded.reply",
+        params![account, uid, recurrence_id.map(moment_text).unwrap_or_default(), given.answer, given.note, given.notify, reply],
     )?;
     // A whole series answered again replaces what was said for single occurrences.
     if recurrence_id.is_none() {
         conn.execute("DELETE FROM invitation_answer WHERE account_id = ?1 AND uid = ?2 AND recurrence_id != ''", params![account, uid])?;
     }
     Ok(())
+}
+
+/// The answer kept for exactly this event or occurrence, and its reply mail.
+pub fn given_answer(conn: &Connection, account: AccountId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<(GivenAnswer, Option<ReplyMail>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT a.answer, a.note, a.notify, o.id, o.state FROM invitation_answer a LEFT JOIN outbox o ON o.id = a.reply
+             WHERE a.account_id = ?1 AND a.uid = ?2 AND a.recurrence_id = ?3",
+            params![account, uid, recurrence_id.map(moment_text).unwrap_or_default()],
+            |r| {
+                let reply = match (r.get::<_, Option<i64>>(3)?, r.get::<_, Option<String>>(4)?.as_deref()) {
+                    (Some(id), Some("queued")) => Some(ReplyMail::Waiting(id)),
+                    (Some(id), Some("sent")) => Some(ReplyMail::Sent(id)),
+                    _ => None,
+                };
+                Ok((GivenAnswer { answer: r.get(0)?, note: r.get(1)?, notify: r.get(2)? }, reply))
+            },
+        )
+        .optional()?)
 }
 
 /// The answer kept for an occurrence, else for its whole event.

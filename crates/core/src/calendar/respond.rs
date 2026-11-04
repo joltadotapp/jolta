@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::card::{self, Card};
 use super::rsvp::{self, Answer, ImipReply, Rsvp, Scope};
-use super::{Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Person, invitation, tz};
+use super::{Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Person, Response, invitation, tz};
 use crate::compose::Built;
 use crate::model::{AccountId, MessageId};
 use crate::{Error, Jolta, Result, imap, store};
@@ -107,11 +107,16 @@ struct Resolved {
     occurrence: Option<(Moment, String)>,
     /// "Ann".
     organizer: String,
+    /// The answer the card or the detail shows now.
+    shown: Option<Response>,
 }
 
 /// Answers, tells the organizer the way `plan` says, and keeps the answer
 /// for the card. The reply mail is built before the provider is asked, so
-/// an invitation Jolta can't reply to changes nothing anywhere.
+/// an invitation Jolta can't reply to changes nothing anywhere. The same
+/// answer again, said the same way, tells the organizer nothing new: a
+/// reply still waiting goes now, and one sent stays the only one. Any
+/// other answer takes back a reply still waiting.
 pub async fn answer(jolta: &Jolta, req: &Request) -> Result<Outcome> {
     answer_at(jolta, req, Utc::now()).await
 }
@@ -132,6 +137,10 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     let plan = plan(r.copy.map(|c| c.source), req.notify)?;
     let rid = r.occurrence.as_ref().map(|(rid, _)| *rid);
 
+    let (account, uid) = (r.account, r.uid.clone());
+    let given = store::GivenAnswer { answer: req.answer.response(), note: req.note.clone().unwrap_or_default(), notify: req.notify };
+    let before = jolta.store.read_async(move |c| store::given_answer(c, account, &uid, rid.as_ref())).await?;
+
     let mail = if plan.mail {
         let text = r.text.as_deref().ok_or_else(|| Error::Other("Jolta has no copy of this invitation to reply to.".into()))?;
         let reply = ImipReply { invitation: text, from: &r.from, me: &r.me, answer: req.answer, note: req.note.as_deref(), occurrence: rid };
@@ -139,25 +148,49 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     } else {
         None
     };
-    if let (Some(notify), Some(copy)) = (plan.provider, r.copy) {
+    if let (Some(notify), Some(copy)) = (plan.provider, r.copy)
+        && !again(&given, r.shown, before.as_ref())
+    {
         let scope = rid.map_or(Scope::Series, Scope::Occurrence);
         rsvp::answer(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope }).await?;
     }
 
     let blob = mail.as_ref().map(|m| jolta.blobs.put(&m.raw)).transpose()?;
-    let (account, uid, response) = (r.account, r.uid.clone(), req.answer.response());
+    let uid = r.uid.clone();
+    let shown = r.shown;
     jolta
         .store
         .write_async(move |tx| {
-            store::remember_answer(tx, account, &uid, rid.as_ref(), response)?;
-            if let (Some(m), Some(blob)) = (&mail, &blob) {
-                queue(tx, account, m, blob)?;
-            }
-            Ok(())
+            // Read again where the outbox can't change underneath.
+            let before = store::given_answer(tx, account, &uid, rid.as_ref())?;
+            let again = again(&given, shown, before.as_ref());
+            let reply = match before.and_then(|(_, reply)| reply) {
+                Some(store::ReplyMail::Waiting(id)) if again => {
+                    store::send_now(tx, id)?;
+                    Some(id)
+                }
+                Some(store::ReplyMail::Sent(id)) if again => Some(id),
+                waiting => {
+                    if let Some(store::ReplyMail::Waiting(id)) = waiting {
+                        store::cancel_send(tx, id)?;
+                    }
+                    match (&mail, &blob) {
+                        (Some(m), Some(blob)) => Some(queue(tx, account, m, blob)?),
+                        _ => None,
+                    }
+                }
+            };
+            store::remember_answer(tx, account, &uid, rid.as_ref(), &given, reply)
         })
         .await?;
     let calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
     Ok(Outcome { text: told(req, &r, plan), mailed_from: plan.mail.then_some(r.account), calendar })
+}
+
+/// The answer kept, given again the same way, to an invitation that still
+/// shows it: an answer changed elsewhere since isn't the same.
+fn again(given: &store::GivenAnswer, shown: Option<Response>, before: Option<&(store::GivenAnswer, Option<store::ReplyMail>)>) -> bool {
+    shown == Some(given.answer) && before.is_some_and(|(b, _)| b == given)
 }
 
 /// The reply goes out at once: there is no undo for an answer yet.
@@ -207,10 +240,11 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
             let a = card::cards(c, &invitations, &cx)?
                 .into_iter()
                 .find_map(|card| match card {
-                    Card::Event(e) => e.answering,
+                    Card::Event(e) => e.answering.map(|a| (a, e.answer)),
                     Card::Reply(_) => None,
                 })
                 .ok_or_else(|| Error::Other("This message has no invitation to answer.".into()))?;
+            let (a, shown) = a;
             let sent = invitations.iter().find(|i| i.event.uid == a.uid && i.event.recurrence_id.is_none()).or(invitations.iter().find(|i| i.event.uid == a.uid));
             // The copy in the calendars of the account the invitation came
             // to: another account's may be the organizer's own.
@@ -235,6 +269,7 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                 copy,
                 occurrence: a.occurrence.filter(|o| o.alone || occurrence_only).map(|o| (o.recurrence_id, o.day)),
                 organizer: a.organizer,
+                shown,
             })
         })
         .await
@@ -264,11 +299,12 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
         account,
         from,
         me,
-        uid: data.uid,
         copy: Some(Copy { event, calendar: calendar.id, source: calendar.source }),
         text: None,
         occurrence,
         organizer: data.organizer.as_ref().map(short_name).unwrap_or_default(),
+        shown: data.my_response(),
+        uid: data.uid,
     })
 }
 
@@ -386,6 +422,67 @@ mod tests {
         assert!(ics.contains("PARTSTAT=TENTATIVE") && ics.contains("COMMENT:Ten minutes late"), "{ics}");
 
         assert_eq!(card_answer(&j, message, mail!("google-request.eml")), Some(Response::Tentative), "the card shows the answer kept");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// (state, seconds until it goes, PARTSTAT and COMMENT) of each outbox row.
+    fn replies(j: &Jolta) -> Vec<(String, i64, String)> {
+        let rows: Vec<(String, i64, String)> = j
+            .store
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT state, send_after - unixepoch(), blob FROM outbox ORDER BY id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        rows.into_iter()
+            .map(|(state, wait, blob)| {
+                let ics = reply_ics(&j.blobs.get(&blob).unwrap());
+                let said: Vec<&str> = ics.lines().filter_map(|l| l.split_once("PARTSTAT=").map(|(_, p)| p.split([':', ';']).next().unwrap()).or(l.strip_prefix("COMMENT:"))).collect();
+                (state, wait.max(0), said.join(" "))
+            })
+            .collect()
+    }
+
+    fn set_outbox(j: &Jolta, sql: &str) {
+        j.store.write(|tx| Ok(tx.execute_batch(sql)?)).unwrap();
+    }
+
+    /// The same answer again keeps the reply already on its way or sent;
+    /// a changed answer, note or reply choice replaces one still waiting.
+    #[test]
+    fn the_same_answer_again_sends_one_reply() {
+        let (j, _) = jolta("respond-again");
+        let message = import(&j, mail!("google-request.eml"));
+        let again = |answer, note, notify| run(&j, request(message, answer, note, notify, false)).unwrap();
+
+        again(Answer::Accept, None, true);
+        again(Answer::Accept, None, true);
+        assert_eq!(replies(&j), [("queued".into(), 0, "ACCEPTED".into())], "one reply for two Accepts");
+
+        set_outbox(&j, "UPDATE outbox SET attempts = 1, send_after = unixepoch() + 30");
+        again(Answer::Accept, None, true);
+        assert_eq!(replies(&j), [("queued".into(), 0, "ACCEPTED".into())], "a retry after a failed send sends the waiting reply now");
+
+        again(Answer::Decline, None, true);
+        assert_eq!(replies(&j), [("queued".into(), 0, "DECLINED".into())], "a changed answer replaces the reply still waiting");
+        again(Answer::Decline, Some("Away"), true);
+        assert_eq!(replies(&j), [("queued".into(), 0, "DECLINED Away".into())], "so does a note");
+
+        set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+        again(Answer::Decline, Some("Away"), true);
+        assert_eq!(replies(&j).len(), 1, "the organizer has this answer already");
+        again(Answer::Accept, None, true);
+        assert_eq!(replies(&j)[1], ("queued".into(), 0, "ACCEPTED".into()), "a new answer after a sent one sends");
+
+        again(Answer::Accept, None, false);
+        assert_eq!(replies(&j).len(), 1, "Don't send a reply takes back the waiting reply");
+        again(Answer::Accept, None, true);
+        set_outbox(&j, "UPDATE outbox SET state = 'failed' WHERE state = 'queued'");
+        again(Answer::Accept, None, true);
+        again(Answer::Accept, None, true);
+        let states: Vec<String> = replies(&j).into_iter().map(|(state, ..)| state).collect();
+        assert_eq!(states, ["sent", "failed", "queued"], "a reply that failed for good is sent again, once");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
