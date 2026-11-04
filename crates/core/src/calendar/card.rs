@@ -340,7 +340,10 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
             }
             stored if current => match remembered {
                 Some((answer, reply)) => {
-                    let holds = reply.is_none_or(|r| version_of(message, &r, cx).is_none_or(|now| update::reply_holds(&r, now, cx.here)));
+                    let holds = match &reply {
+                        Some(r) => reply_holds(&seen, r, message, said, cx)?,
+                        None => true,
+                    };
                     Some(if holds { answer } else { Response::NeedsAction })
                 }
                 None => stored.and_then(|s| s.event.my_response()),
@@ -404,16 +407,32 @@ fn title(method: Method, shown: &EventData, before: &[EventData]) -> String {
     }
 }
 
-/// The answer given from Jolta to this invitation, and the event its reply
-/// mail answered, which says the version.
-fn remembered(conn: &Connection, a: &Answering, cx: &Context) -> Result<Option<(Response, Option<EventData>)>> {
+/// The answer given from Jolta to this invitation, and its reply mail,
+/// which says the version answered.
+fn remembered(conn: &Connection, a: &Answering, cx: &Context) -> Result<Option<(Response, Option<Invitation>)>> {
     let rid = a.occurrence.as_ref().map(|o| &o.recurrence_id);
     let Some(answer) = store::remembered_answer(conn, cx.account, &a.uid, rid)? else { return Ok(None) };
     let reply = store::remembered_reply(conn, cx.account, &a.uid, rid)?
         .and_then(|hash| cx.blobs.get(&hash).ok())
-        .and_then(|raw| invitation::find(&raw, cx.me).into_iter().find(|i| i.method == Method::Reply && i.event.uid == a.uid))
-        .map(|i| i.event);
+        .and_then(|raw| invitation::find(&raw, cx.me).into_iter().find(|i| i.method == Method::Reply && i.event.uid == a.uid));
     Ok(Some((answer, reply)))
+}
+
+/// Whether the answer `reply` sent holds for this message: for the event
+/// it answered, and when the card shows a changed occurrence and the reply
+/// answered its series, for the series' occurrence at that recurrence id.
+fn reply_holds(seen: &update::Seen, reply: &Invitation, message: &[EventData], said: &EventData, cx: &Context) -> Result<bool> {
+    let r = &reply.event;
+    let event = match version_of(message, r, cx) {
+        Some(now) => update::answer_holds(&update::answered_by(seen, reply, now)?, None, now, cx.here),
+        None => true,
+    };
+    let occurrence = match (r.recurrence_id, said.recurrence_id) {
+        (None, Some(rid)) => series::occurrence_span(&r.span, &rid, cx.here)
+            .is_some_and(|span| update::answer_holds(&EventData { recurrence_id: Some(rid), recurrence: None, span, ..r.clone() }, None, said, cx.here)),
+        _ => true,
+    };
+    Ok(event && occurrence)
 }
 
 /// The event in this message that `other`, a version of the same event or

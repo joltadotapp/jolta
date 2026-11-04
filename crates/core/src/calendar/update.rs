@@ -42,11 +42,29 @@ pub fn answer_holds(answered: &EventData, source: Option<CalendarSource>, now: &
     (answered.sequence >= now.sequence && source != Some(CalendarSource::Graph)) || same_time(answered, now, here)
 }
 
-/// Whether an answer still holds for `now` when the reply mail that sent it
-/// is all Jolta has of the version answered: the reply carries that
-/// version's SEQUENCE, start and end, not its repeat rule.
-pub fn reply_holds(reply: &EventData, now: &EventData, here: Tz) -> bool {
-    reply.sequence >= now.sequence || reply.span.bounds(here) == now.span.bounds(here)
+/// The version of an event a reply mail answered. The reply carries its
+/// SEQUENCE, start and end; for a series the repeat rule comes from the
+/// account's request it answered, the latest at that SEQUENCE sent before
+/// the reply. Without that request the rule counts as kept.
+pub fn answered_by(seen: &Seen, reply: &Invitation, now: &EventData) -> Result<EventData> {
+    let r = &reply.event;
+    let recurrence = match r.recurrence_id {
+        Some(_) => None,
+        None => {
+            let at = Version { sequence: r.sequence, stamp: None };
+            let before_reply = |v: &Version| v.sequence == r.sequence && reply.stamp.is_none_or(|sent| v.stamp.is_none_or(|s| s <= sent));
+            let request = mails(seen, &r.uid, None, at)?
+                .into_iter()
+                .filter(|(method, _, v)| *method == Method::Request && before_reply(v))
+                .max_by_key(|(_, _, v)| *v)
+                .and_then(|(_, events, _)| events.into_iter().find(|e| e.recurrence_id.is_none()));
+            match request {
+                Some(request) => request.recurrence,
+                None => now.recurrence.clone(),
+            }
+        }
+    };
+    Ok(EventData { recurrence, ..r.clone() })
 }
 
 /// The same start, end and repeat rule. EXDATEs don't count: an

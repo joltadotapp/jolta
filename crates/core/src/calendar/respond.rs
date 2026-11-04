@@ -680,6 +680,50 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// The reply mail names no repeat rule: the request it answered does.
+    #[test]
+    fn a_new_repeat_rule_asks_again() {
+        use crate::calendar::card::tests::version;
+        let (j, _) = jolta("respond-rule");
+        let series = "DTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\nSUMMARY:Sync\r\n";
+        let weekly = version("v1", "sync", "REQUEST", 0, "20261104T080000Z", &format!("{series}RRULE:FREQ=WEEKLY\r\n"));
+        let m1 = import(&j, weekly.as_bytes());
+        run(&j, request(m1, Answer::Accept, None, true, false)).unwrap();
+        set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+
+        let retitled = version("v2", "sync", "REQUEST", 1, "20261104T090000Z", &format!("{}RRULE:FREQ=WEEKLY;INTERVAL=1\r\n", series.replace("Sync", "Team sync")));
+        let m2 = import(&j, retitled.as_bytes());
+        assert_eq!(card_answer(&j, m2, retitled.as_bytes()), Some(Response::Accepted), "the same rule written out");
+        let daily = version("v3", "sync", "REQUEST", 2, "20261104T100000Z", &format!("{series}RRULE:FREQ=DAILY\r\n"));
+        let m3 = import(&j, daily.as_bytes());
+        assert_eq!(card_answer(&j, m3, daily.as_bytes()), Some(Response::NeedsAction), "weekly became daily");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The series answer covers an occurrence invited to alone while it
+    /// stays where the series has it.
+    #[test]
+    fn a_moved_occurrence_asks_again_after_its_series_was_answered() {
+        use crate::calendar::card::tests::version;
+        let (j, _) = jolta("respond-series-occurrence");
+        let series = version("s", "standup", "REQUEST", 0, "20261104T080000Z", "DTSTART:20261110T083000Z\r\nDTEND:20261110T084500Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n");
+        let m = import(&j, series.as_bytes());
+        run(&j, request(m, Answer::Accept, None, true, false)).unwrap();
+        set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+
+        let occurrence = |id: &str, start: &str, title: &str| {
+            let lines = format!("RECURRENCE-ID:20261117T083000Z\r\nDTSTART:{start}\r\nDTEND:{}\r\nSUMMARY:{title}\r\n", start.replace("3000Z", "4500Z"));
+            version(id, "standup", "REQUEST", 1, "20261104T090000Z", &lines)
+        };
+        let renamed = occurrence("o1", "20261117T083000Z", "Standup with demo");
+        let m1 = import(&j, renamed.as_bytes());
+        assert_eq!(card_answer(&j, m1, renamed.as_bytes()), Some(Response::Accepted), "at the series' time");
+        let moved = occurrence("o2", "20261118T133000Z", "Standup");
+        let m2 = import(&j, moved.as_bytes());
+        assert_eq!(card_answer(&j, m2, moved.as_bytes()), Some(Response::NeedsAction), "moved a day and five hours");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     #[test]
     fn only_invitations_to_the_user_have_answers() {
         let (j, _) = jolta("respond-refused");
