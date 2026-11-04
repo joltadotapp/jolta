@@ -223,7 +223,6 @@ pub enum InvitationState {
 
 /// One `invitation` row with what its state depends on.
 struct Named {
-    message: MessageId,
     thread: ThreadId,
     account: AccountId,
     receiver: String,
@@ -235,21 +234,20 @@ struct Named {
     ends: i64,
 }
 
-const NAMED: &str = "SELECT i.message_id, m.thread_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends
+const NAMED: &str = "SELECT m.thread_id, m.account_id, a.address, i.uid, i.recurrence_id, i.sequence, i.method, i.organizer, i.ends
      FROM invitation i JOIN message m ON m.id = i.message_id JOIN account a ON a.id = m.account_id";
 
 fn named(r: &Row) -> rusqlite::Result<Named> {
     Ok(Named {
-        message: r.get(0)?,
-        thread: r.get(1)?,
-        account: r.get(2)?,
-        receiver: r.get(3)?,
-        uid: r.get(4)?,
-        recurrence_id: r.get(5)?,
-        sequence: r.get(6)?,
-        method: r.get(7)?,
-        organizer: r.get(8)?,
-        ends: r.get(9)?,
+        thread: r.get(0)?,
+        account: r.get(1)?,
+        receiver: r.get(2)?,
+        uid: r.get(3)?,
+        recurrence_id: r.get(4)?,
+        sequence: r.get(5)?,
+        method: r.get(6)?,
+        organizer: r.get(7)?,
+        ends: r.get(8)?,
     })
 }
 
@@ -276,21 +274,18 @@ pub fn thread_invitations(conn: &Connection, threads: &[ThreadId], now: DateTime
     Ok(out)
 }
 
-/// The messages with a request the user still has to answer, for
-/// `is:invite`: an event to come, from an organizer other than the
-/// account it came to, neither answered nor cancelled.
-pub fn unanswered_invitations(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Vec<MessageId>> {
-    let mut stmt = conn.prepare_cached(&format!(
-        "{NAMED} WHERE i.method = 'REQUEST' AND i.ends > ?1 ORDER BY i.message_id, i.recurrence_id != ''"
-    ))?;
-    let rows = stmt.query_map([now.timestamp()], named)?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut out: Vec<MessageId> = Vec::new();
-    for n in rows {
-        if out.last() != Some(&n.message) && state(conn, &n, now, here)? == InvitationState::Unanswered {
-            out.push(n.message);
-        }
-    }
-    Ok(out)
+/// The conversations whose invitation shows "Not answered", for
+/// `is:invite`. Only a request for an event to come can, so those
+/// conversations are the ones to ask `thread_invitations` about.
+pub fn unanswered_threads(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Vec<ThreadId>> {
+    let threads = conn
+        .prepare_cached(
+            "SELECT DISTINCT m.thread_id FROM invitation i JOIN message m ON m.id = i.message_id WHERE i.method = 'REQUEST' AND i.ends > ?1",
+        )?
+        .query_map([now.timestamp()], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<ThreadId>>>()?;
+    let shown = thread_invitations(conn, &threads, now, here)?;
+    Ok(threads.into_iter().filter(|t| shown.get(t) == Some(&InvitationState::Unanswered)).collect())
 }
 
 /// A request is answered in the calendars of the account it came to, as
@@ -480,8 +475,17 @@ mod tests {
             .unwrap()
     }
 
+    /// The messages of the conversations `is:invite` finds.
     fn open(jolta: &crate::Jolta, now: DateTime<Utc>) -> Vec<MessageId> {
-        jolta.store.read(|c| unanswered_invitations(c, now, chrono_tz::Europe::Brussels)).unwrap()
+        jolta
+            .store
+            .read(|c| {
+                let threads = unanswered_threads(c, now, chrono_tz::Europe::Brussels)?;
+                let ids = serde_json::to_string(&threads.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers");
+                let mut stmt = c.prepare("SELECT id FROM message WHERE thread_id IN (SELECT value FROM json_each(?1)) ORDER BY id")?;
+                Ok(stmt.query_map([ids], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap()
     }
 
     fn copy_answered(jolta: &crate::Jolta, calendar: CalendarId, response: Response) {
@@ -552,6 +556,43 @@ mod tests {
         let endless = String::from_utf8_lossy(mail!("series.eml")).replace(";UNTIL=20261217T225959Z", "").replace("standup-series@", "endless@");
         let endless = crate::calendar::invitation::find(endless.as_bytes(), &[]).remove(0);
         assert_eq!(endless.ends(chrono_tz::Europe::Brussels), Some(DateTime::<Utc>::MAX_UTC));
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    /// A request from Ann for `uid`, from `start` to `end` in UTC, as
+    /// message `id` answering `parent`.
+    fn request(id: &str, parent: &str, uid: &str, start: &str, end: &str, sequence: i64) -> Vec<u8> {
+        format!(
+            "From: ann@example.com\r\nTo: me@example.com\r\nSubject: Sync\r\nMessage-ID: <{id}>\r\nIn-Reply-To: <{parent}>\r\n\
+             Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{uid}\r\n\
+             SUMMARY:Sync\r\nDTSTART:{start}\r\nDTEND:{end}\r\nSEQUENCE:{sequence}\r\nORGANIZER:mailto:ann@example.com\r\n\
+             ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn count(jolta: &crate::Jolta, query: &str) -> u32 {
+        jolta.store.read(|c| crate::search::query_count(c, &crate::search::parse(query)?)).unwrap()
+    }
+
+    #[test]
+    fn is_invite_and_its_negation_split_conversations() {
+        let (jolta, _) = jolta("is-invite-thread");
+        import(&jolta, &request("q1@example.com", "", "sync-1", "20991112T150000Z", "20991112T160000Z", 0));
+        import(&jolta, b"From: me@example.com\r\nTo: ann@example.com\r\nSubject: Re: Sync\r\nMessage-ID: <r1@example.com>\r\nIn-Reply-To: <q1@example.com>\r\n\r\nSure.\r\n");
+        assert_eq!(count(&jolta, "is:invite"), 1);
+        assert_eq!(count(&jolta, "-is:invite"), 0, "the reply is in a conversation that is:invite finds");
+        std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+    }
+
+    #[test]
+    fn is_invite_reads_the_invitation_the_list_shows() {
+        let (jolta, _) = jolta("is-invite-shown");
+        import(&jolta, &request("q2@example.com", "", "sync-2", "20991112T150000Z", "20991112T160000Z", 0));
+        let update = import(&jolta, &request("q3@example.com", "q2@example.com", "sync-2", "20011112T150000Z", "20011112T160000Z", 1));
+        assert_eq!(shown(&jolta, update, Utc::now()), Some(InvitationState::Plain), "the update moved it into the past");
+        assert_eq!(count(&jolta, "is:invite"), 0);
+        assert_eq!(count(&jolta, "-is:invite"), 1);
         std::fs::remove_dir_all(&jolta.data_dir).unwrap();
     }
 

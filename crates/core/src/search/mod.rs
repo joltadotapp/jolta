@@ -159,9 +159,9 @@ fn plan(conn: &Connection, q: &Query) -> Result<Sql> {
             TermKind::Is(Status::Notification) => NOTIFICATION.into(),
             TermKind::Is(Status::NeedsReply) => crate::ai::triage::NEEDS_REPLY.into(),
             TermKind::Is(Status::Invite) => {
-                let ids = crate::store::unanswered_invitations(conn, chrono::Utc::now(), tz::here())?;
-                let p = sql.param(serde_json::to_string(&ids.iter().map(|m| m.0).collect::<Vec<_>>()).expect("numbers"));
-                format!("m.id IN (SELECT value FROM json_each(?{p}))")
+                let ids = crate::store::unanswered_threads(conn, chrono::Utc::now(), tz::here())?;
+                let p = sql.param(serde_json::to_string(&ids.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers"));
+                format!("m.thread_id IN (SELECT value FROM json_each(?{p}))")
             }
             TermKind::Category(c) => {
                 let p = sql.param(c.clone());
