@@ -322,6 +322,14 @@ impl Engine {
         password.and(smtp)
     }
 
+    /// Deletes stored files nothing names any more, such as a calendar's
+    /// event sources after calendar is turned off. Files younger than
+    /// `BLOB_MIN_AGE` stay, so a sync writing one right now keeps it.
+    pub fn collect_blobs_later(&self) {
+        let jolta = self.jolta.clone();
+        self.runtime.spawn_blocking(move || jolta.collect_blobs(BLOB_MIN_AGE));
+    }
+
     pub fn calendars(&self) -> &Arc<Scheduler> {
         &self.calendars
     }

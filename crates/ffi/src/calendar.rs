@@ -268,6 +268,9 @@ impl Core {
         if !on {
             let ids = self.jolta.store.read(|c| store::account_calendars(c, account))?;
             sync::disable(&self.jolta, account)?;
+            if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                engine.collect_blobs_later();
+            }
             self.calendar_changed(ids.iter().map(|c| c.id));
             return Ok(Vec::new());
         }
