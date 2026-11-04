@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 
 use super::recur::{self, Occurrence, Source, Window};
-use super::{EventData, EventStatus, Response, ShowAs};
+use super::{CalendarId, CalendarSource, EventData, EventStatus, Response, ShowAs};
 
 /// How far the occurrence table reaches, and the zone floating times and
 /// all-day events are placed in.
@@ -77,4 +77,41 @@ pub fn place(master: Option<&EventData>, overrides: &[EventData], horizon: &Hori
 /// Whether the event blocks time, before the calendar's own "counts as busy".
 pub fn busy(e: &EventData) -> bool {
     e.show_as != ShowAs::Free && e.status != EventStatus::Cancelled && e.my_response() != Some(Response::Declined)
+}
+
+/// Which copy of a meeting found in several calendars Jolta keeps; lower
+/// wins. First the organizer's own copy, in a calendar on the provider the
+/// UID comes from: the other copies are converted invitations, whose titles
+/// can be the invitation mail's subject. Then the default calendar, then
+/// the calendar added first, so the choice never flips.
+pub fn copy_rank(uid: &str, source: CalendarSource, is_default: bool, calendar: CalendarId) -> (bool, bool, i64) {
+    let origin = if uid.to_ascii_lowercase().ends_with("@google.com") {
+        Some(CalendarSource::Google)
+    } else if uid.len() >= 32 && uid[..32].eq_ignore_ascii_case(OUTLOOK_ID) {
+        Some(CalendarSource::Graph)
+    } else {
+        None
+    };
+    (origin != Some(source), !is_default, calendar.0)
+}
+
+/// How every Outlook Global Object ID starts ([MS-OXCICAL] 2.1.3.1.1.20.26).
+const OUTLOOK_ID: &str = "040000008200E00074C5B7101A82E008";
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    #[test]
+    fn the_organizers_copy_then_the_default_calendar_then_the_oldest() {
+        let pick = |uid: &str, copies: &[(CalendarSource, bool, i64)]| {
+            copies.iter().min_by_key(|(s, d, c)| copy_rank(uid, *s, *d, CalendarId(*c))).unwrap().2
+        };
+        let both = [(CalendarSource::Graph, false, 1), (CalendarSource::Google, false, 6)];
+        assert_eq!(pick("1c7g18fd92ki@google.com", &both), 6, "made in Google Calendar");
+        assert_eq!(pick("040000008200E00074C5B7101A82E00800000000ABCDEF", &both), 1, "made in Outlook");
+        let unknown = [(CalendarSource::Graph, false, 1), (CalendarSource::Google, true, 6)];
+        assert_eq!(pick("5F1A2B3C-ICLOUD", &unknown), 6, "neither: the default calendar");
+        assert_eq!(pick("5F1A2B3C-ICLOUD", &both), 1, "then the calendar added first");
+    }
 }

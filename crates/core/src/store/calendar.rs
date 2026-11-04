@@ -398,7 +398,7 @@ impl OccurrenceRow {
 
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
-     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid";
+     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -460,20 +460,26 @@ pub fn occurrences(conn: &Connection, from: NaiveDate, to: NaiveDate, here: Tz) 
     ))?;
     let rows = stmt.query_map(
         params![from_utc, to_utc, longest_utc.unwrap_or(0), from_day, to_day, longest_days.unwrap_or(0)],
-        occurrence_row,
+        |r| {
+            let row = occurrence_row(r)?;
+            let rank = crate::calendar::series::copy_rank(&row.uid, r.get(17)?, r.get(18)?, row.calendar_id);
+            Ok((row, rank))
+        },
     )?;
     let mut out: Vec<OccurrenceRow> = Vec::new();
     // The same meeting arrives through two accounts, such as a Google
-    // invitation to an address whose calendar is in Microsoft 365. The
-    // calendar added first keeps it, so the choice holds across queries.
+    // invitation to an address whose calendar is in Microsoft 365; it is
+    // listed once, as the copy `copy_rank` picks.
+    let mut ranks = Vec::new();
     let mut seen: HashMap<(String, Bounds), usize> = HashMap::new();
     for row in rows {
-        let row = row?;
+        let (row, rank) = row?;
         match seen.get(&(row.uid.clone(), row.bounds)) {
             Some(&i) => {
                 let (copies, busy) = (out[i].copies + 1, out[i].busy || row.busy);
-                if row.calendar_id < out[i].calendar_id {
+                if rank < ranks[i] {
                     out[i] = row;
+                    ranks[i] = rank;
                 }
                 out[i].copies = copies;
                 out[i].busy = busy;
@@ -481,6 +487,7 @@ pub fn occurrences(conn: &Connection, from: NaiveDate, to: NaiveDate, here: Tz) 
             None => {
                 seen.insert((row.uid.clone(), row.bounds), out.len());
                 out.push(row);
+                ranks.push(rank);
             }
         }
     }
@@ -758,7 +765,7 @@ mod tests {
     fn a_meeting_in_two_calendars_shows_and_reminds_once() {
         let s = store("copies");
         let first = work_calendar(&s);
-        let second = s.write(|tx| add_calendar(tx, CalendarSource::Local, &remote("shared", false))).unwrap().id;
+        let second = s.write(|tx| add_calendar(tx, CalendarSource::Google, &remote("shared", false))).unwrap().id;
         s.write(|tx| set_calendar_shown(tx, second, true)).unwrap();
         let alarm = crate::calendar::Alarm { trigger: crate::calendar::AlarmTrigger::MinutesBefore(10), email: false };
         let meeting = |title: &str| EventData { title: title.into(), alarms: vec![alarm], ..EventData::new("abc@google.com", timed("2026-11-17 14:00", 60)) };
@@ -766,11 +773,15 @@ mod tests {
         apply(&s, first, "o1", None, &[meeting("Invitation: Klium x Speed Kit")]);
         let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
         let rows = s.read(|c| occurrences(c, day(17), day(18), Brussels)).unwrap();
-        assert_eq!(rows.iter().map(|o| (o.title.as_str(), o.calendar_id, o.copies)).collect::<Vec<_>>(), [("Invitation: Klium x Speed Kit", first, 2)]);
+        assert_eq!(
+            rows.iter().map(|o| (o.title.as_str(), o.calendar_id, o.copies)).collect::<Vec<_>>(),
+            [("Klium x Speed Kit", second, 2)],
+            "a meeting made in Google Calendar keeps its Google copy, though the other calendar came first"
+        );
         let fires = s
             .read(|c| crate::calendar::remind::between(c, Utc.with_ymd_and_hms(2026, 11, 17, 0, 0, 0).unwrap(), Utc.with_ymd_and_hms(2026, 11, 18, 0, 0, 0).unwrap(), Brussels))
             .unwrap();
-        assert_eq!(fires.iter().map(|r| r.calendar_id).collect::<Vec<_>>(), [first], "one reminder, from the same calendar the view shows");
+        assert_eq!(fires.iter().map(|r| r.calendar_id).collect::<Vec<_>>(), [second], "one reminder, from the copy the view shows");
     }
 
     #[test]

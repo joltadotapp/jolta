@@ -45,7 +45,8 @@ pub fn between(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>, here: 
     let mut stmt = conn.prepare_cached(
         "SELECT e.uid, o.event_id, o.calendar_id, e.title, e.location, o.start_utc, o.end_utc, o.start_day, o.end_day,
                 e.meeting_provider, e.join_url,
-                json_extract(a.value, '$.trigger.MinutesBefore'), json_extract(a.value, '$.trigger.At')
+                json_extract(a.value, '$.trigger.MinutesBefore'), json_extract(a.value, '$.trigger.At'),
+                c.source, c.is_default
          FROM occurrence o JOIN calendar c ON c.id = o.calendar_id JOIN event e ON e.id = o.event_id,
               json_each(e.data, '$.alarms') a
          WHERE ((o.start_utc >= ?1 AND o.start_utc < ?2) OR (o.start_day >= ?3 AND o.start_day <= ?4))
@@ -77,11 +78,12 @@ pub fn between(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>, here: 
             bounds,
             meeting,
         };
-        Ok((uid, trigger, reminder))
+        let rank = super::series::copy_rank(&uid, r.get(13)?, r.get(14)?, reminder.calendar_id);
+        Ok((uid, trigger, rank, reminder))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (uid, trigger, mut reminder) = row?;
+        let (uid, trigger, rank, mut reminder) = row?;
         let start = match reminder.bounds {
             Bounds::Utc { start, .. } => start,
             Bounds::Days { start, .. } => {
@@ -97,13 +99,12 @@ pub fn between(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>, here: 
             continue;
         }
         reminder.id = reminder_id(reminder.calendar_id, &uid, &reminder.bounds, trigger);
-        out.push((uid, reminder));
+        out.push((uid, rank, reminder));
     }
-    // A meeting in two calendars reminds once, from the calendar added
-    // first, as the views show it.
-    out.sort_by(|(ua, a), (ub, b)| (ua, a.fire_at, a.calendar_id).cmp(&(ub, b.fire_at, b.calendar_id)));
-    out.dedup_by(|(ua, a), (ub, b)| ua == ub && a.bounds == b.bounds && a.fire_at == b.fire_at);
-    let mut out: Vec<Reminder> = out.into_iter().map(|(_, r)| r).collect();
+    // A meeting in two calendars reminds once, from the copy the views show.
+    out.sort_by(|(ua, ra, a), (ub, rb, b)| (ua, a.fire_at, ra).cmp(&(ub, b.fire_at, rb)));
+    out.dedup_by(|(ua, _, a), (ub, _, b)| ua == ub && a.bounds == b.bounds && a.fire_at == b.fire_at);
+    let mut out: Vec<Reminder> = out.into_iter().map(|(_, _, r)| r).collect();
     out.sort_by(|a, b| (a.fire_at, &a.id).cmp(&(b.fire_at, &b.id)));
     Ok(out)
 }
