@@ -25,7 +25,7 @@ const MULTIGET_BATCH: usize = 50;
 const PRINCIPAL: &str = r#"<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
 const HOME: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-home-set/><c:schedule-inbox-URL/></d:prop></d:propfind>"#;
 const DEFAULT_CALENDAR: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:schedule-default-calendar-URL/></d:prop></d:propfind>"#;
-const CALENDARS: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:resourcetype/><d:displayname/><a:calendar-color/><c:supported-calendar-component-set/><d:current-user-privilege-set/><cs:getctag/><d:sync-token/></d:prop></d:propfind>"#;
+const CALENDARS: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:resourcetype/><d:displayname/><a:calendar-color/><c:supported-calendar-component-set/><d:current-user-privilege-set/><d:owner/><cs:getctag/><d:sync-token/></d:prop></d:propfind>"#;
 const CTAG: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop><cs:getctag/></d:prop></d:propfind>"#;
 const ADDRESSES: &str = r#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-user-address-set/></d:prop></d:propfind>"#;
 const ETAGS: &str = r#"<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getetag/></d:prop></d:propfind>"#;
@@ -235,7 +235,7 @@ impl CalDav {
             None => None,
         };
         let (at, ms) = self.propfind(&home, "1", CALENDARS).await?;
-        calendars(&at, &ms, default.as_ref())
+        calendars(&at, &ms, default.as_ref(), &principal)
     }
 
     pub async fn sync(&self, calendar: &Calendar, known: &Known) -> Result<SyncBatch> {
@@ -583,7 +583,7 @@ fn is_collection(r: &dav::Response) -> bool {
 /// The event calendars in a calendar home's depth-1 listing. Task lists and
 /// other collections are left out. The primary one is the server's default
 /// for invitations, else the first the user owns, else the first writable.
-fn calendars(at: &Url, ms: &MultiStatus, default: Option<&Url>) -> Result<Vec<RemoteCalendar>> {
+fn calendars(at: &Url, ms: &MultiStatus, default: Option<&Url>, principal: &Url) -> Result<Vec<RemoteCalendar>> {
     let mut out = Vec::new();
     for r in &ms.responses {
         let is_calendar = r.prop(DAV, "resourcetype").is_some_and(|t| t.child(CALDAV, "calendar").is_some());
@@ -602,7 +602,7 @@ fn calendars(at: &Url, ms: &MultiStatus, default: Option<&Url>) -> Result<Vec<Re
             name,
             color: r.prop_text(APPLE, "calendar-color").and_then(super::webcal::hex_color),
             zone: None,
-            access: access(r),
+            access: access(r, principal),
             primary: false,
             refresh: None,
         });
@@ -619,17 +619,25 @@ fn calendars(at: &Url, ms: &MultiStatus, default: Option<&Url>) -> Result<Vec<Re
     Ok(out)
 }
 
-/// RFC 3744 privileges: `all` is the owner's, any write privilege allows
-/// editing, `read` only reading, and `read-free-busy` alone only free/busy.
-fn access(r: &dav::Response) -> Access {
+/// A calendar whose DAV:owner is the account's principal is the user's own,
+/// whatever privileges it lists: Fastmail gives its default calendar no
+/// `all`. One owned by another principal is shared, at most writable.
+/// Without an owner, RFC 3744 privileges decide: `all` is the owner's, any
+/// write privilege allows editing, `read` only reading, and
+/// `read-free-busy` alone only free/busy.
+fn access(r: &dav::Response, principal: &Url) -> Access {
     let privileges: Vec<&str> = r
         .prop(DAV, "current-user-privilege-set")
         .map(|set| set.all(DAV, "privilege").flat_map(|p| p.children.iter().map(|c| c.name.as_str())).collect())
         .unwrap_or_default();
     let has = |name: &str| privileges.contains(&name);
-    if has("all") {
+    let key = |href: &str| href_key(href).trim_end_matches('/').to_string();
+    let owner = r.prop_href(DAV, "owner").map(key);
+    if owner.as_ref().is_some_and(|o| *o == key(principal.as_str())) {
         Access::Owner
-    } else if has("write") || has("write-content") || has("bind") {
+    } else if has("all") && owner.is_none() {
+        Access::Owner
+    } else if has("all") || has("write") || has("write-content") || has("bind") {
         Access::Write
     } else if has("read") || privileges.is_empty() {
         Access::Read
@@ -820,6 +828,7 @@ mod tests {
   <A:calendar-color>#3a429c</A:calendar-color>
   <C:supported-calendar-component-set><C:comp name="VEVENT"/><C:comp name="VTODO"/></C:supported-calendar-component-set>
   <D:current-user-privilege-set><D:privilege><D:read/></D:privilege><D:privilege><D:write-content/></D:privilege><D:privilege><D:bind/></D:privilege></D:current-user-privilege-set>
+  <D:owner><D:href>/dav/principals/user/me%40example.com</D:href></D:owner>
   <D:sync-token>https://example.com/ns/sync/4711</D:sync-token>
  </D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
  <D:propstat><D:prop><CS:getctag/></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>
@@ -829,6 +838,14 @@ mod tests {
   <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
   <D:displayname>Work</D:displayname>
   <D:current-user-privilege-set><D:privilege><D:all/></D:privilege></D:current-user-privilege-set>
+ </D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+</D:response>
+<D:response><D:href>/dav/calendars/user/me%40example.com/ann.example.com.c4d5/</D:href>
+ <D:propstat><D:prop>
+  <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
+  <D:displayname>Ann's calendar</D:displayname>
+  <D:current-user-privilege-set><D:privilege><D:all/></D:privilege></D:current-user-privilege-set>
+  <D:owner><D:href>/dav/principals/user/ann%40example.com/</D:href></D:owner>
  </D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
 </D:response>
 </D:multistatus>"##;
@@ -873,7 +890,8 @@ mod tests {
     #[test]
     fn icloud_calendar_home() {
         let at = Url::parse("https://p42-caldav.icloud.com:443/1234567890/calendars/").unwrap();
-        let list = calendars(&at, &dav::multistatus(ICLOUD_HOME).unwrap(), None).unwrap();
+        let principal = Url::parse("https://p42-caldav.icloud.com/1234567890/principal/").unwrap();
+        let list = calendars(&at, &dav::multistatus(ICLOUD_HOME).unwrap(), None, &principal).unwrap();
         assert_eq!(
             names(&list),
             [
@@ -894,14 +912,16 @@ mod tests {
     fn fastmail_calendar_home_with_the_servers_default() {
         let at = Url::parse("https://caldav.fastmail.com/dav/calendars/user/me%40example.com/").unwrap();
         let default = Url::parse("https://caldav.fastmail.com/dav/calendars/user/me@example.com/Default/").unwrap();
-        let list = calendars(&at, &dav::multistatus(FASTMAIL_HOME).unwrap(), Some(&default)).unwrap();
+        let principal = Url::parse("https://caldav.fastmail.com/dav/principals/user/me@example.com/").unwrap();
+        let list = calendars(&at, &dav::multistatus(FASTMAIL_HOME).unwrap(), Some(&default), &principal).unwrap();
         assert_eq!(
             names(&list),
             [
-                ("https://caldav.fastmail.com/dav/calendars/user/me%40example.com/Default/", "Calendar", Some("#3a429c"), Access::Write, true),
+                ("https://caldav.fastmail.com/dav/calendars/user/me%40example.com/Default/", "Calendar", Some("#3a429c"), Access::Owner, true),
                 ("https://caldav.fastmail.com/dav/calendars/user/me%40example.com/b7c1d2e3/", "Work", None, Access::Owner, false),
+                ("https://caldav.fastmail.com/dav/calendars/user/me%40example.com/ann.example.com.c4d5/", "Ann's calendar", None, Access::Write, false),
             ],
-            "the default for invitations wins over the first owned calendar, matched across escapes"
+            "the default for invitations wins over the first owned calendar, matched across escapes; the owner decides, not the privileges"
         );
     }
 
