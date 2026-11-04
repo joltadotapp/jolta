@@ -1,7 +1,7 @@
 //! CalDAV (RFC 4791) for iCloud, Fastmail and other servers: discovery
 //! (RFC 6764), the calendar list, and sync through sync-collection
 //! (RFC 6578), with the collection's ctag and the resources' ETags for
-//! servers without it. Read-only: PROPFIND and REPORT, nothing else.
+//! servers without it. The one write is a PUT that answers an invitation.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::dav::{self, APPLE, CALDAV, CALENDARSERVER, DAV, MultiStatus, href_key};
 use super::{Change, Known, SyncBatch, http_client, http_error, vanished};
+use crate::calendar::rsvp::{self, Rsvp, Target};
 use crate::calendar::{Access, Calendar, ical};
 use crate::store::RemoteCalendar;
 use crate::{Account, Error, Result, secrets};
@@ -85,6 +86,7 @@ struct Reply {
     /// Where the answer came from after redirects; hrefs resolve against it.
     url: Url,
     body: String,
+    etag: Option<String>,
 }
 
 impl CalDav {
@@ -125,18 +127,21 @@ impl CalDav {
         self.starts.iter().any(|s| s.host_str() == url.host_str() || (icloud(s) && icloud(url)))
     }
 
-    /// One request, following redirects with the same method and body.
+    /// A WebDAV request with an XML body.
     async fn send(&self, method: &str, url: &Url, depth: &str, body: &str) -> Result<Reply> {
+        self.exchange(method, url, &[("Depth", depth), ("Content-Type", "application/xml; charset=utf-8")], body).await
+    }
+
+    /// One request, following redirects with the same method and body.
+    async fn exchange(&self, method: &str, url: &Url, headers: &[(&str, &str)], body: &str) -> Result<Reply> {
         let method = reqwest::Method::from_bytes(method.as_bytes()).expect("a valid method");
         let mut url = url.clone();
         let mut attempts = 0;
         for _ in 0..10 {
-            let mut req = self
-                .http
-                .request(method.clone(), url.clone())
-                .header("Depth", depth)
-                .header("Content-Type", "application/xml; charset=utf-8")
-                .body(body.to_string());
+            let mut req = self.http.request(method.clone(), url.clone()).body(body.to_string());
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
             if self.trusted(&url) {
                 req = req.basic_auth(&self.username, Some(&self.password));
             }
@@ -157,8 +162,9 @@ impl CalDav {
             if status == 401 {
                 return Err(Error::Auth(self.refused(&url)));
             }
+            let etag = header("ETag");
             let body = resp.text().await.map_err(http_error)?;
-            return Ok(Reply { status, url, body });
+            return Ok(Reply { status, url, body, etag });
         }
         Err(Error::Other(format!("CalDAV {url}: too many redirects")))
     }
@@ -350,6 +356,52 @@ impl CalDav {
         }
         Ok(out)
     }
+
+    /// Writes the user's PARTSTAT into the resource and PUTs it back with
+    /// `If-Match`; the server's scheduling (RFC 6638) sends the organizer the
+    /// reply. The stored copy is edited first; when the server has a newer
+    /// one (412), that one is fetched and edited instead.
+    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<String> {
+        let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
+        let url = join(&collection, &path_escape(&target.event.remote_id))?;
+        let rid = target.recurrence_id();
+        let here = crate::calendar::tz::here();
+        let mut current = target.event.raw.as_ref().map(|raw| (String::from_utf8_lossy(raw).into_owned(), target.event.etag.clone()));
+        for attempt in 0..2 {
+            let (text, etag) = match current.take() {
+                Some(stored) => stored,
+                None => {
+                    let reply = self.exchange("GET", &url, &[], "").await?;
+                    if reply.status != 200 {
+                        return Err(Error::Other(format!("CalDAV GET {url}: {}", reply.status)));
+                    }
+                    (reply.body, reply.etag)
+                }
+            };
+            let edited = rsvp::answer_in_ical(&text, &target.event.data.uid, rid.as_ref(), &self.me[0], rsvp, here)?;
+            let mut headers = vec![("Content-Type", "text/calendar; charset=utf-8")];
+            if let Some(etag) = &etag {
+                headers.push(("If-Match", etag));
+            }
+            let reply = self.exchange("PUT", &url, &headers, &edited).await?;
+            match reply.status {
+                200..300 => return Ok(target.event.remote_id.clone()),
+                412 if attempt == 0 => continue,
+                status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+}
+
+/// A stored resource path, decoded by `href_key`, escaped again for a URL.
+fn path_escape(path: &str) -> String {
+    path.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b'@' | b':' | b'+' | b'=' | b',' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b';' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn no_server(address: &str) -> Error {

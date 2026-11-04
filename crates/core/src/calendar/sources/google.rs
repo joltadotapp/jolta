@@ -2,7 +2,8 @@
 //! with `singleEvents=false`, so a series arrives as its master and its
 //! overrides and Jolta expands it. After the first full listing a sync
 //! token brings only what changed; Google answers 410 when the token
-//! expired, and the calendar is listed in full again. Read-only.
+//! expired, and the calendar is listed in full again. The one write is
+//! answering an invitation.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
@@ -10,10 +11,11 @@ use std::time::Duration;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{Change, Known, SyncBatch, encode, http_client, http_error, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
+use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
     Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingProvider, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
@@ -181,12 +183,23 @@ impl Google {
         Ok(Google { http: http_client(true)?, account: account.clone() })
     }
 
-    /// A GET with the account's token. Rate limits and brief outages are
-    /// retried; the caller reads every other status.
     async fn get(&self, url: &str) -> Result<(u16, Vec<u8>)> {
+        self.request(reqwest::Method::GET, url, None, None).await
+    }
+
+    /// A request with the account's token. Rate limits and brief outages
+    /// are retried; the caller reads every other status.
+    async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
         for attempt in 0..5u32 {
             let token = oauth::access_token(&self.account).await?;
-            let resp = self.http.get(url).bearer_auth(&token).send().await.map_err(http_error)?;
+            let mut req = self.http.request(method.clone(), url).bearer_auth(&token);
+            if let Some(body) = body {
+                req = req.header("Content-Type", "application/json").body(body.to_string());
+            }
+            if let Some(etag) = if_match {
+                req = req.header("If-Match", etag);
+            }
+            let resp = req.send().await.map_err(http_error)?;
             let status = resp.status().as_u16();
             let retry_after = resp.headers().get("Retry-After").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
             let body = resp.bytes().await.map_err(http_error)?.to_vec();
@@ -293,6 +306,77 @@ impl Google {
         }
         Ok(uids)
     }
+
+    /// Patches the user's own attendee entry (`responseStatus`, `comment`)
+    /// with `sendUpdates`, guarded by the event's ETag. The entry is read
+    /// fresh first, because a patch replaces the whole attendee list; when
+    /// the event changes in between, Google answers 412 and it is read again.
+    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<String> {
+        let id = match &target.occurrence {
+            None => target.event.remote_id.clone(),
+            Some(Occurrence { stored: Some(s), .. }) => s.remote_id.clone(),
+            Some(Occurrence { recurrence_id, stored: None }) => self.instance(calendar, &target.event.remote_id, recurrence_id).await?,
+        };
+        let url = format!("{BASE}/calendars/{}/events/{}", encode(&calendar.remote_id), encode(&id));
+        let send = if rsvp.notify { "all" } else { "none" };
+        for attempt in 0..3 {
+            let event: Value = parse(&self.get_ok(&url).await?)?;
+            let attendees = answered(&event, &self.account.address, rsvp)?;
+            let (status, body) = self
+                .request(reqwest::Method::PATCH, &format!("{url}?sendUpdates={send}"), Some(&json!({ "attendees": attendees })), event["etag"].as_str())
+                .await?;
+            match status {
+                200..300 => return Ok(id),
+                412 if attempt < 2 => continue,
+                _ => return Err(failure(status, &body)),
+            }
+        }
+        unreachable!("the last attempt returns")
+    }
+
+    /// The id of the occurrence of series `master` that `rid` names. Google
+    /// lists instances by their time, so the day around it is searched for
+    /// the one whose original start matches.
+    async fn instance(&self, calendar: &Calendar, master: &str, rid: &Moment) -> Result<String> {
+        let here = tz::here();
+        let fallback = Zone::Tz(calendar.zone.as_deref().and_then(tz::zone).unwrap_or(chrono_tz::UTC));
+        let at = match rid {
+            Moment::Time(local) => local.instant(here),
+            Moment::Date(day) => tz::instant(day.and_time(chrono::NaiveTime::MIN), here),
+        };
+        let stamp = |t: DateTime<chrono::Utc>| encode(&t.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        let url = format!(
+            "{BASE}/calendars/{}/events/{}/instances?timeMin={}&timeMax={}&maxResults=50",
+            encode(&calendar.remote_id),
+            encode(master),
+            stamp(at - chrono::Duration::hours(36)),
+            stamp(at + chrono::Duration::hours(36)),
+        );
+        let page: EventsPage = parse(&self.get_ok(&url).await?)?;
+        page.items
+            .into_iter()
+            .filter_map(|item| serde_json::from_value::<GoogleEvent>(item).ok())
+            .find(|g| g.original_start_time.as_ref().and_then(|w| moment(w, fallback)).is_some_and(|m| m.names(rid, here)))
+            .map(|g| g.id)
+            .ok_or_else(|| Error::NotFound("Google has no occurrence of this series at that time".into()))
+    }
+}
+
+/// The event's attendee list with the user's own entry answered. Google's
+/// `self` flag marks it; the address is the fallback.
+fn answered(event: &Value, me: &str, rsvp: &Rsvp) -> Result<Vec<Value>> {
+    let mut attendees = event["attendees"].as_array().cloned().unwrap_or_default();
+    let own = attendees
+        .iter_mut()
+        .find(|a| a["self"] == true || a["email"].as_str().is_some_and(|e| e.eq_ignore_ascii_case(me)))
+        .ok_or_else(|| Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")))?;
+    own["responseStatus"] = json!(match rsvp.answer.response() {
+        Response::Accepted => "accepted",
+        Response::Tentative => "tentative",
+        _ => "declined",
+    });
+    own["comment"] = json!(rsvp.note.clone().unwrap_or_default());
+    Ok(attendees)
 }
 
 /// Pages through one sync. A refused token starts again without one.

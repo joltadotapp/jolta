@@ -29,7 +29,7 @@ async fn account_source(jolta: &Jolta, account: &Account) -> Result<Source> {
     }
 }
 
-async fn calendar_source(jolta: &Jolta, calendar: &Calendar) -> Result<Source> {
+pub(super) async fn calendar_source(jolta: &Jolta, calendar: &Calendar) -> Result<Source> {
     match (calendar.source, calendar.account_id) {
         (CalendarSource::Webcal, _) => Ok(Source::Webcal(Webcal::new(&calendar.remote_id)?)),
         (CalendarSource::CalDav | CalendarSource::Google | CalendarSource::Graph, Some(id)) => {

@@ -1,4 +1,5 @@
-//! Microsoft 365 calendars through Microsoft Graph. Read-only.
+//! Microsoft 365 calendars through Microsoft Graph. The one write is
+//! answering an invitation.
 //!
 //! Graph hands out a calendar's events as instances (`calendarView`), with
 //! a delta query that tracks the window from 2 years back to 3 years
@@ -20,6 +21,7 @@ use serde_json::{Value, json};
 
 use super::{Change, Known, SyncBatch, encode, http_client, http_error, vanished};
 use crate::calendar::meeting::{self, Entry, EntryKind};
+use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
     Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingProvider, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
@@ -397,6 +399,63 @@ impl GraphCalendar {
             }
         }
         Ok(out)
+    }
+
+    /// `accept`, `tentativelyAccept` or `decline` with the note as
+    /// `comment` and `sendResponse`. Exchange sends the organizer the reply.
+    pub async fn answer(&self, target: &Target, rsvp: &Rsvp) -> Result<String> {
+        let id = match &target.occurrence {
+            None => target.event.remote_id.clone(),
+            Some(Occurrence { stored: Some(s), .. }) => s.remote_id.clone(),
+            Some(Occurrence { recurrence_id, stored: None }) => self.instance(&target.event, recurrence_id).await?,
+        };
+        let action = match rsvp.answer {
+            Answer::Accept => "accept",
+            Answer::Maybe => "tentativelyAccept",
+            Answer::Decline => "decline",
+        };
+        let body = json!({ "comment": rsvp.note.clone().unwrap_or_default(), "sendResponse": rsvp.notify });
+        let (status, reply) = self.request("POST", &format!("/me/events/{}/{action}", encode(&id)), Some(&body), &[]).await?;
+        if !(200..300).contains(&status) {
+            return Err(self.failure(status, &reply));
+        }
+        Ok(id)
+    }
+
+    /// The id of the occurrence of `master` that `rid` names, from the
+    /// series' instances around it. An all-day occurrence's original start
+    /// is midnight in the series' own zone.
+    async fn instance(&self, master: &Stored, rid: &Moment) -> Result<String> {
+        let here = tz::here();
+        let raw: Value = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or(Value::Null);
+        let zone = zone_of(raw["originalStartTimeZone"].as_str(), self.here);
+        let at = match rid {
+            Moment::Time(local) => local.instant(here),
+            Moment::Date(day) => tz::instant(day.and_time(NaiveTime::MIN), zone),
+        };
+        let stamp = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let url = format!(
+            "/me/events/{}/instances?startDateTime={}&endDateTime={}&$select=id,originalStart",
+            encode(&master.remote_id),
+            stamp(at - chrono::Duration::hours(36)),
+            stamp(at + chrono::Duration::hours(36)),
+        );
+        let page = self.get_ok(&url).await?;
+        page["value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|i| {
+                let Some(start) = i["originalStart"].as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()) else { return false };
+                let start = start.to_utc();
+                let original = match rid {
+                    Moment::Date(_) => Moment::Date(start.with_timezone(&zone).date_naive()),
+                    Moment::Time(_) => Moment::Time(Local { wall: start.naive_utc(), zone: Zone::Tz(chrono_tz::UTC) }),
+                };
+                original.names(rid, here)
+            })
+            .and_then(|i| i["id"].as_str().map(str::to_string))
+            .ok_or_else(|| Error::NotFound("Microsoft 365 has no occurrence of this series at that time".into()))
     }
 }
 

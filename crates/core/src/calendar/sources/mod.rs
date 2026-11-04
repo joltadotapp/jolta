@@ -10,6 +10,7 @@ pub mod webcal;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use super::rsvp::{Rsvp, Target};
 use super::{Calendar, CalendarSource, EventData};
 use crate::store::RemoteCalendar;
 use crate::{Error, Result};
@@ -68,6 +69,17 @@ impl Source {
             Source::Webcal(s) => s.sync(calendar, known).await,
             Source::Google(s) => s.sync(calendar, known).await,
             Source::Graph(s) => s.sync(calendar, known).await,
+        }
+    }
+
+    /// Sends an answer to an invitation. Returns the remote id of the
+    /// object it landed on: the event, or the occurrence answered alone.
+    pub async fn answer(&self, calendar: &Calendar, target: &Target, rsvp: &Rsvp) -> Result<String> {
+        match self {
+            Source::CalDav(s) => s.answer(calendar, target, rsvp).await,
+            Source::Google(s) => s.answer(calendar, target, rsvp).await,
+            Source::Graph(s) => s.answer(target, rsvp).await,
+            Source::Webcal(_) => Err(Error::Other("This event is in a subscribed calendar, which is read-only, so it can't be answered.".into())),
         }
     }
 }
