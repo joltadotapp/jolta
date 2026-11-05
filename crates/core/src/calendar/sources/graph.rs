@@ -1265,24 +1265,26 @@ mod tests {
         );
     }
 
-    /// `Recorded`'s calendar listed by its instances, as a calendar view
-    /// lists a series, whose master Microsoft 365 now refuses to give by id.
-    struct Refused;
+    /// Microsoft 365 after `Recorded`'s round: a calendar view or the next
+    /// delta round lists `listing`, and a GET of a series by id answers
+    /// `master`.
+    struct Later {
+        listing: Vec<Value>,
+        master: u16,
+    }
 
-    impl Api for Refused {
-        async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)> {
+    impl Api for Later {
+        async fn request(&self, method: &str, url: &str, body: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
             if method == "POST" && url == "/$batch" {
                 let responses: Vec<Value> = body.unwrap()["requests"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|r| json!({"id": r["id"], "status": 403, "body": {"error": {"code": "ErrorAccessDenied"}}}))
+                    .map(|r| json!({"id": r["id"], "status": self.master, "body": {"error": {"code": "refused"}}}))
                     .collect();
                 return Ok((200, json!({ "responses": responses })));
             }
-            let (status, mut page) = Recorded.request(method, url, body, headers).await?;
-            page["value"].as_array_mut().unwrap().retain(|e| e["type"] != "seriesMaster");
-            Ok((status, page))
+            Ok((200, json!({ "value": self.listing, "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta?$deltatoken=t2" })))
         }
 
         fn failure(&self, status: u16, _: &Value) -> Error {
@@ -1294,32 +1296,56 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_full_round_keeps_an_exception_it_returns_when_its_series_is_refused() {
-        use crate::calendar::series::Horizon;
-        use crate::calendar::sync;
-        use crate::store::{self, Store};
+    /// A store holding `Recorded`'s first round: a weekly series whose 17
+    /// November occurrence moved to 15:00.
+    struct Synced {
+        store: crate::store::Store,
+        calendar: crate::calendar::CalendarId,
+        cursor: Option<String>,
+        /// The moved occurrence as delta lists it.
+        moved: Value,
+    }
 
-        let dir = std::env::temp_dir().join(format!("jolta-graph-refused-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let s = Store::open(&dir.join("jolta.sqlite")).unwrap();
-        let remote = RemoteCalendar { remote_id: "C1".into(), name: "Calendar".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None };
-        let cal = s
-            .write(|tx| {
-                tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (1, 'graph', 'me@example.com', 'me', 'a1', 0, 1)")?;
-                store::sync_calendar_list(tx, crate::AccountId(1), crate::calendar::CalendarSource::Graph, &[remote])
-            })
-            .unwrap()[0]
-            .id;
-        let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 4, 0, 0, 0).unwrap(), Europe::Brussels);
-        let sync_with = |batch: SyncBatch| {
+    impl Synced {
+        async fn new(name: &str) -> Synced {
+            let dir = std::env::temp_dir().join(format!("jolta-graph-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = crate::store::Store::open(&dir.join("jolta.sqlite")).unwrap();
+            let remote = RemoteCalendar { remote_id: "C1".into(), name: "Calendar".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None };
+            let calendar = store
+                .write(|tx| {
+                    tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (1, 'graph', 'me@example.com', 'me', 'a1', 0, 1)")?;
+                    crate::store::sync_calendar_list(tx, crate::AccountId(1), crate::calendar::CalendarSource::Graph, &[remote])
+                })
+                .unwrap()[0]
+                .id;
+            let mut synced = Synced { store, calendar, cursor: None, moved: Value::Null };
+            synced.cursor = synced.round(&Recorded, None).await;
+            synced
+        }
+
+        /// Syncs one round and gives the cursor it ends on.
+        async fn round(&mut self, api: &impl Api, cursor: Option<&str>) -> Option<String> {
+            let known = self.store.read(|c| crate::store::known_items(c, self.calendar)).unwrap();
+            let batch = read(api, "C1", cursor, &known, "me@example.com").await.unwrap();
             let changes: Vec<(Change, Option<String>)> = batch.changes.into_iter().map(|c| (c, None)).collect();
-            s.write(|tx| sync::apply(tx, cal, &changes, &horizon)).unwrap();
-        };
-        let november = || -> Vec<String> {
+            if let Some(raw) = changes.iter().find_map(|(c, _)| match c {
+                Change::Upsert { remote_id, raw: Some(raw), .. } if remote_id == "X1" => Some(raw),
+                _ => None,
+            }) {
+                self.moved = serde_json::from_slice(raw).unwrap();
+            }
+            let horizon = crate::calendar::series::Horizon::around(Utc.with_ymd_and_hms(2026, 11, 4, 0, 0, 0).unwrap(), Europe::Brussels);
+            self.store.write(|tx| crate::calendar::sync::apply(tx, self.calendar, &changes, &horizon)).unwrap();
+            batch.cursor
+        }
+
+        /// The start of every occurrence in November, in Brussels.
+        fn november(&self) -> Vec<String> {
             let from = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
-            s.read(|c| store::occurrences(c, from, from.checked_add_months(Months::new(1)).unwrap(), Europe::Brussels))
+            self.store
+                .read(|c| crate::store::occurrences(c, from, from.checked_add_months(Months::new(1)).unwrap(), Europe::Brussels))
                 .unwrap()
                 .into_iter()
                 .map(|o| match o.bounds {
@@ -1327,14 +1353,33 @@ mod tests {
                     crate::calendar::Bounds::Days { start, .. } => start.to_string(),
                 })
                 .collect()
-        };
+        }
+    }
 
-        sync_with(read(&Recorded, "C1", None, &Known::new(), "me@example.com").await.unwrap());
-        assert_eq!(november(), ["11-10 10:00", "11-17 15:00", "11-24 10:00"]);
+    #[tokio::test]
+    async fn a_full_round_keeps_an_exception_it_returns_when_its_series_is_refused() {
+        let mut s = Synced::new("refused-full").await;
+        assert_eq!(s.november(), ["11-10 10:00", "11-17 15:00", "11-24 10:00"]);
+        s.round(&Later { listing: vec![s.moved.clone()], master: 403 }, None).await;
+        assert_eq!(s.november(), ["11-17 15:00"], "the series Graph won't give goes; the moved occurrence the round returned stays");
+    }
 
-        let known = s.read(|c| store::known_items(c, cal)).unwrap();
-        sync_with(read(&Refused, "C1", None, &known, "me@example.com").await.unwrap());
-        assert_eq!(november(), ["11-17 15:00"], "the series Graph won't give goes; the moved occurrence the round returned stays");
+    #[tokio::test]
+    async fn a_series_graph_only_refuses_leaves_its_moved_occurrence_in_place() {
+        let mut s = Synced::new("refused-delta").await;
+        let cursor = s.cursor.clone();
+        let elsewhere = json!({"@removed": {"reason": "deleted"}, "id": "an-occurrence"});
+        s.round(&Later { listing: vec![elsewhere], master: 403 }, cursor.as_deref()).await;
+        assert_eq!(s.november(), ["11-17 15:00"], "a refusal says nothing about the moved occurrence, which the round didn't name");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_series_keeps_an_occurrence_the_same_round_returns() {
+        let mut s = Synced::new("deleted").await;
+        let cursor = s.cursor.clone();
+        let deleted = json!({"@removed": {"reason": "deleted"}, "id": "M1"});
+        s.round(&Later { listing: vec![s.moved.clone(), deleted], master: 404 }, cursor.as_deref()).await;
+        assert_eq!(s.november(), ["11-17 15:00"], "the round listed the moved occurrence, so it stays");
     }
 
     /// A weekly all-day series from Brussels as Microsoft 365 recorded it on
