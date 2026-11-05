@@ -104,10 +104,10 @@ pub async fn sync_calendar(jolta: &Jolta, id: CalendarId) -> Result<SyncReport> 
             Ok((change, blob))
         })
         .collect::<Result<Vec<_>>>()?;
-    let horizon = Horizon::now();
     let report = jolta
         .store
         .write_async(move |tx| {
+            let horizon = Horizon::now();
             let report = apply(tx, id, &changes, &horizon)?;
             store::set_calendar_cursor(tx, id, batch.cursor.as_deref(), batch.refresh)?;
             Ok(report)

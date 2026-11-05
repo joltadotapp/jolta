@@ -331,41 +331,23 @@ fn item_uids(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Every series in the store, as (calendar, UID), for rebuilding all
-/// occurrences when the window moves or the Mac's zone changes.
-pub fn series_keys(conn: &Connection) -> Result<Vec<(CalendarId, String)>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT calendar_id, uid FROM event ORDER BY calendar_id, uid")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+/// The series, as (calendar, UID), whose occurrences were placed in another
+/// zone than `zone`, with a window starting before `oldest`, or never.
+pub fn stale_series(conn: &Connection, zone: Tz, oldest: i64) -> Result<Vec<(CalendarId, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT e.calendar_id, e.uid FROM event e
+         LEFT JOIN series_built b ON b.calendar_id = e.calendar_id AND b.uid = e.uid
+         WHERE b.uid IS NULL OR b.zone <> ?1 OR b.start < ?2
+         ORDER BY e.calendar_id, e.uid",
+    )?;
+    let rows = stmt.query_map(params![zone.name(), oldest], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The window start and zone the whole occurrence table was last rebuilt
-/// with. Syncs rebuild only the series they touch, so this is the oldest
-/// window any series may still have.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Built {
-    pub start: i64,
-    pub zone: String,
-}
-
-pub fn occurrences_built(conn: &Connection) -> Result<Option<Built>> {
-    let raw: Option<String> =
-        conn.query_row("SELECT value FROM setting WHERE key = 'calendar_occurrences'", [], |r| r.get(0)).optional()?;
-    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
-}
-
-pub fn set_occurrences_built(conn: &Connection, horizon: &Horizon) -> Result<()> {
-    let built = Built { start: horizon.window.start.timestamp(), zone: horizon.here.name().to_string() };
-    conn.execute(
-        "INSERT INTO setting (key, value) VALUES ('calendar_occurrences', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        [serde_json::to_string(&built).expect("a horizon serializes")],
-    )?;
-    Ok(())
-}
-
 /// Rewrites the occurrences of one series from all its events in the
-/// calendar. `occurrence.busy` holds the event's own answer; readers combine
-/// it with the calendar's "counts as busy", so changing that needs no rewrite.
+/// calendar, and records the horizon they were placed with beside them.
+/// `occurrence.busy` holds the event's own answer; readers combine it with
+/// the calendar's "counts as busy", so changing that needs no rewrite.
 pub fn rebuild_series(conn: &Connection, calendar: CalendarId, uid: &str, horizon: &Horizon) -> Result<()> {
     conn.prepare_cached(
         "DELETE FROM occurrence WHERE series_id IN (SELECT id FROM event WHERE calendar_id = ?1 AND uid = ?2)",
@@ -416,6 +398,15 @@ pub fn rebuild_series(conn: &Connection, calendar: CalendarId, uid: &str, horizo
             end_day,
             series::busy(event)
         ])?;
+    }
+    if master.is_none() && overrides.is_empty() {
+        conn.prepare_cached("DELETE FROM series_built WHERE calendar_id = ?1 AND uid = ?2")?.execute(params![calendar, uid])?;
+    } else {
+        conn.prepare_cached(
+            "INSERT INTO series_built (calendar_id, uid, start, zone) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (calendar_id, uid) DO UPDATE SET start = excluded.start, zone = excluded.zone",
+        )?
+        .execute(params![calendar, uid, horizon.window.start.timestamp(), horizon.here.name()])?;
     }
     Ok(())
 }

@@ -4,9 +4,10 @@
 //! One task syncs every shown calendar that is due: account calendars every
 //! 5 minutes and right after `sync_now`, feeds at their refresh interval.
 //! Up to four calendars sync at once, and a failure backs off only that
-//! calendar. Each round also checks the occurrence table: when its window
-//! start is more than 30 days behind, or the Mac moved to another zone,
-//! every series is expanded again from the stored events, without network.
+//! calendar. Each round also checks the occurrence table: every series whose
+//! window start is more than 30 days behind, or that was placed in another
+//! zone than the Mac's, is expanded again from the stored events, without
+//! network.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -171,23 +172,14 @@ fn backoff(attempts: u32, every: Duration) -> Duration {
     Duration::from_secs(60 << attempts.saturating_sub(1).min(10)).min(every)
 }
 
-/// Expands every series again from the stored events when the table's
-/// window start is more than 30 days behind `now` minus a year, or it was
-/// built in another zone than `here` (floating events and all-day ordering
-/// depend on it). Returns the calendars it rebuilt.
+/// Expands again from the stored events every series whose window start is
+/// more than 30 days behind `now` minus a year, or that was placed in another
+/// zone than `here` (floating events and all-day ordering depend on it).
+/// Returns the calendars it rebuilt.
 pub async fn refresh_occurrences(jolta: &Jolta, now: DateTime<Utc>, here: Tz) -> Result<Vec<CalendarId>> {
     let horizon = Horizon::around(now, here);
-    let built = jolta.store.read_async(store::occurrences_built).await?;
     let oldest = (horizon.window.start - WINDOW_SLACK).timestamp();
-    if built.is_some_and(|b| b.zone == here.name() && b.start >= oldest) {
-        return Ok(Vec::new());
-    }
-    let keys = jolta.store.read_async(store::series_keys).await?;
-    // Without events there is nothing to rebuild, and a mail-only user's
-    // store gets no calendar write at every start.
-    if keys.is_empty() {
-        return Ok(Vec::new());
-    }
+    let keys = jolta.store.read_async(move |c| store::stale_series(c, here, oldest)).await?;
     for batch in keys.chunks(REBUILD_BATCH) {
         let batch = batch.to_vec();
         jolta
@@ -195,7 +187,6 @@ pub async fn refresh_occurrences(jolta: &Jolta, now: DateTime<Utc>, here: Tz) ->
             .write_async(move |tx| batch.iter().try_for_each(|(c, uid)| store::rebuild_series(tx, *c, uid, &horizon)))
             .await?;
     }
-    jolta.store.write_async(move |tx| store::set_occurrences_built(tx, &horizon)).await?;
     let mut calendars: Vec<CalendarId> = keys.into_iter().map(|(c, _)| c).collect();
     calendars.dedup();
     Ok(calendars)
@@ -245,8 +236,7 @@ mod tests {
             .unwrap();
         assert_eq!(starts(&jolta), [Brussels.from_local_datetime(&wall).unwrap().timestamp()]);
 
-        assert_eq!(refresh_occurrences(&jolta, now, Brussels).await.unwrap().len(), 1, "never built before: rebuilt once");
-        assert!(refresh_occurrences(&jolta, now, Brussels).await.unwrap().is_empty(), "same zone and day: nothing to do");
+        assert!(refresh_occurrences(&jolta, now, Brussels).await.unwrap().is_empty(), "stored in this zone today: nothing to do");
 
         assert_eq!(refresh_occurrences(&jolta, now, New_York).await.unwrap().len(), 1);
         assert_eq!(starts(&jolta), [New_York.from_local_datetime(&wall).unwrap().timestamp()], "the floating event moved");
@@ -256,8 +246,52 @@ mod tests {
         let much_later = now + Days::days(400);
         assert_eq!(refresh_occurrences(&jolta, much_later, New_York).await.unwrap().len(), 1);
         assert!(starts(&jolta).is_empty(), "a year and a month on, the event left the window");
-        let built = jolta.store.read(store::occurrences_built).unwrap().unwrap();
-        assert_eq!((built.start, built.zone.as_str()), ((much_later - Days::days(365)).timestamp(), "America/New_York"));
+        assert!(refresh_occurrences(&jolta, much_later, New_York).await.unwrap().is_empty(), "the new window was kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An answer that left before the Mac moved to New York and comes back
+    /// after the rebuild there writes its series in Brussels; the next round
+    /// still moves that series to New York.
+    #[tokio::test]
+    async fn a_series_written_in_the_old_zone_after_a_rebuild_is_rebuilt() {
+        let dir = std::env::temp_dir().join(format!("jolta-cal-late-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let jolta = Jolta::open(&dir).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 12, 0, 0).unwrap();
+        let wall = chrono::NaiveDate::from_ymd_opt(2026, 11, 9).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let floating = Local { wall, zone: Zone::Floating };
+        let event = |uid: &str| EventData::new(uid, Span::Timed { start: floating, end: Local { wall: wall + Days::hours(1), ..floating } });
+        let feed = RemoteCalendar {
+            remote_id: "feed".into(),
+            name: "Feed".into(),
+            color: None,
+            zone: None,
+            access: Access::Read,
+            primary: true,
+            refresh: None,
+        };
+        let cal = jolta
+            .store
+            .write(|tx| {
+                let cal = store::add_calendar(tx, CalendarSource::Local, &feed)?;
+                for uid in ["a", "b"] {
+                    store::apply_item(tx, cal.id, uid, None, &[event(uid)], None, &Horizon::around(now, Brussels))?;
+                }
+                Ok(cal.id)
+            })
+            .unwrap();
+        refresh_occurrences(&jolta, now, Brussels).await.unwrap();
+        assert_eq!(refresh_occurrences(&jolta, now, New_York).await.unwrap(), [cal]);
+
+        jolta.store.write(|tx| store::apply_item(tx, cal, "a", None, &[event("a")], None, &Horizon::around(now, Brussels))).unwrap();
+        let (brussels, new_york) =
+            (Brussels.from_local_datetime(&wall).unwrap().timestamp(), New_York.from_local_datetime(&wall).unwrap().timestamp());
+        assert_eq!(starts(&jolta), [brussels, new_york], "the late write placed its series in Brussels");
+
+        assert_eq!(refresh_occurrences(&jolta, now, New_York).await.unwrap(), [cal], "the late series is rebuilt");
+        assert_eq!(starts(&jolta), [new_york, new_york]);
+        assert!(refresh_occurrences(&jolta, now, New_York).await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

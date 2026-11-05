@@ -243,7 +243,7 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
         .store
         .write_async(move |tx| {
             if let Some(Change::Upsert { remote_id, etag, events, .. }) = &change {
-                store::apply_item(tx, id, remote_id, etag.as_deref(), events, blob.as_deref(), &Horizon::around(Utc::now(), tz::here()))?;
+                store::apply_item(tx, id, remote_id, etag.as_deref(), events, blob.as_deref(), &Horizon::now())?;
             }
             store::remember_added(tx, account, &uid, &AddedCopy { calendar_id: id, remote_id, organizer: established, written })?;
             store::set_last_added_calendar(tx, id)
@@ -292,7 +292,7 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
         }
         Replaced::Written(Some(Change::Upsert { remote_id, etag, events, raw })) => {
             let blob = raw.as_ref().map(|r| jolta.blobs.put(r)).transpose()?;
-            jolta.store.write_async(move |tx| store::apply_item(tx, id, &remote_id, etag.as_deref(), &events, blob.as_deref(), &Horizon::around(Utc::now(), here)).map(|_| ())).await?;
+            jolta.store.write_async(move |tx| store::apply_item(tx, id, &remote_id, etag.as_deref(), &events, blob.as_deref(), &Horizon::now()).map(|_| ())).await?;
         }
         Replaced::Written(_) => {
             sync::sync_calendar(jolta, id).await?;
@@ -314,7 +314,6 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
 /// answer just sent by mail, telling nobody: the whole event, or the
 /// occurrence `rid`. Returns the calendar that changed, None without a copy.
 pub(crate) async fn follow(jolta: &Jolta, account: AccountId, uid: &str, rid: Option<Moment>, answer: Answer) -> Result<Option<CalendarId>> {
-    let here = tz::here();
     let Some((calendar, mut target, event, scope)) = added_target(jolta, account, uid, rid).await? else { return Ok(None) };
     target.me = jolta.store.read_async(move |c| store::account(c, account)).await?.address;
     let source = sync::calendar_source(jolta, &calendar).await?;
@@ -323,7 +322,7 @@ pub(crate) async fn follow(jolta: &Jolta, account: AccountId, uid: &str, rid: Op
     match source.follow(&calendar, &target, &rsvp).await? {
         Some(Change::Upsert { remote_id, etag, events, raw }) => {
             let blob = raw.as_ref().map(|r| jolta.blobs.put(r)).transpose()?;
-            jolta.store.write_async(move |tx| store::apply_item(tx, id, &remote_id, etag.as_deref(), &events, blob.as_deref(), &Horizon::around(Utc::now(), here)).map(|_| ())).await?;
+            jolta.store.write_async(move |tx| store::apply_item(tx, id, &remote_id, etag.as_deref(), &events, blob.as_deref(), &Horizon::now()).map(|_| ())).await?;
         }
         _ => {
             sync::sync_calendar(jolta, id).await?;
