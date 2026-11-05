@@ -1179,6 +1179,79 @@ mod tests {
         );
     }
 
+    /// Microsoft 365 as recorded on 2026-11-05: a weekly series at 10:00 in
+    /// Brussels whose 17 November occurrence was moved to 15:00. Delta leaves
+    /// `originalStart` out of an exception unless `$select` names it.
+    struct Recorded;
+
+    impl Api for Recorded {
+        async fn request(&self, method: &str, url: &str, body: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            let master = json!({
+                "id": "M1", "changeKey": "ck1", "type": "seriesMaster", "iCalUId": "040000008200E00074C5B7101A82E008SERIES",
+                "subject": "Weekly probe", "isAllDay": false, "seriesMasterId": null, "occurrenceId": null,
+                "start": {"dateTime": "2026-11-10T09:00:00.0000000", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-10T09:30:00.0000000", "timeZone": "UTC"},
+                "originalStartTimeZone": "Romance Standard Time", "originalEndTimeZone": "Romance Standard Time",
+                "recurrence": {
+                    "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["tuesday"], "firstDayOfWeek": "monday"},
+                    "range": {"type": "numbered", "startDate": "2026-11-10", "numberOfOccurrences": 4, "recurrenceTimeZone": "Romance Standard Time"}
+                },
+                "isOrganizer": true, "isReminderOn": false, "showAs": "busy"
+            });
+            if method == "POST" && url == "/$batch" {
+                let mut by_id = master.clone();
+                by_id["cancelledOccurrences"] = json!([]);
+                let responses: Vec<Value> =
+                    body.unwrap()["requests"].as_array().unwrap().iter().map(|r| json!({"id": r["id"], "status": 200, "body": by_id})).collect();
+                return Ok((200, json!({ "responses": responses })));
+            }
+            assert!(url.contains("/calendarView/delta?"), "only delta is asked: {url}");
+            let mut exception = json!({
+                "id": "X1", "changeKey": "ckx", "type": "exception", "seriesMasterId": "M1",
+                "iCalUId": "040000008200E00074C5B7101A82E00807EA0B11INSTANCE", "occurrenceId": "OID.M1.2026-11-17",
+                "subject": "Weekly probe", "isAllDay": false, "isCancelled": false,
+                "start": {"dateTime": "2026-11-17T14:00:00.0000000", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-17T14:30:00.0000000", "timeZone": "UTC"},
+                "originalStartTimeZone": "Romance Standard Time", "originalEndTimeZone": "Romance Standard Time",
+                "isOrganizer": true, "isReminderOn": false, "showAs": "busy"
+            });
+            let selected = url.split(['?', '&']).find_map(|p| p.strip_prefix("$select=")).unwrap_or_default();
+            if selected.split(',').any(|f| f == "originalStart") {
+                exception["originalStart"] = json!("2026-11-17T09:00:00Z");
+            }
+            Ok((200, json!({ "value": [master, exception], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta?$deltatoken=t1" })))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    #[tokio::test]
+    async fn a_moved_occurrence_from_delta_replaces_its_series_occurrence() {
+        let batch = read(&Recorded, "C1", None, &Known::new(), "me@example.com").await.unwrap();
+        let events: BTreeMap<String, EventData> = batch
+            .changes
+            .into_iter()
+            .filter_map(|c| match c {
+                Change::Upsert { remote_id, mut events, .. } => Some((remote_id, events.remove(0))),
+                Change::Remove { .. } => None,
+            })
+            .collect();
+        let (master, moved) = (&events["M1"], &events["X1"]);
+        let brussels = |s: &str| Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(ROMANCE) };
+        assert_eq!((moved.uid.as_str(), moved.recurrence_id.clone()), (master.uid.as_str(), Some(Moment::Time(brussels("2026-11-17 10:00")))));
+        assert_eq!(
+            starts(master, std::slice::from_ref(moved), (2026, 11), 1),
+            ["2026-11-10 10:00", "2026-11-17 15:00", "2026-11-24 10:00"],
+            "17 November shows once, at its new time"
+        );
+    }
+
     #[test]
     fn deletions_and_a_master_graph_cannot_give() {
         let known: Known = [("S1", "a"), ("X9", "b"), ("O7", "c"), ("M9", "d")].into_iter().map(|(k, v)| (k.to_string(), Some(v.to_string()))).collect();
