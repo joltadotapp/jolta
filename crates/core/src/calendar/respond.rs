@@ -1062,4 +1062,52 @@ mod tests {
         assert!(outbox(&j).is_empty() && kept_answers(&j).is_empty(), "nothing sent, nothing kept");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
+
+    /// A copy the user added with Add to calendar, here in the receiving
+    /// account's own CalDAV calendar, is never the account's own copy: the
+    /// new time goes as a COUNTER from the receiving account, and the copy
+    /// quietly takes the answer that went with it, keeping its own time.
+    #[tokio::test]
+    async fn a_new_time_goes_by_mail_and_the_added_copy_follows() {
+        use crate::calendar::sources::caldav::tests::caldav_server;
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta("respond-propose-added");
+        let raw = mail!("google-request.eml");
+        let message = import(&j, raw);
+        let me = [crate::calendar::invitation::tests::ME.to_string()];
+        let sent = invitation::find(raw, &me).remove(0);
+        let uid = sent.event.uid.clone();
+        let (_, at_server, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None), ("204 No Content", Some("\"3\""), None)]).await;
+        let text = invitation::calendar_text(raw, &uid).unwrap();
+        let blob = j.blobs.put(text.as_bytes()).unwrap();
+        let added = store::AddedCopy { calendar_id: calendar, remote_id: "copy.ics".into(), organizer: "ann@example.com".into(), written: Vec::new() };
+        j.store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, at_server.remote_id])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&at_server.remote_id.replace("/cal/", "/")))?;
+                store::apply_item(tx, calendar, "copy.ics", Some("\"1\""), &[sent.event.clone()], Some(&blob), &series::Horizon::around(now(), tz::here()))?;
+                store::remember_added(tx, AccountId(1), &uid, &added)
+            })
+            .unwrap();
+
+        let friday = || proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45");
+        let done = answer_at(&j, &friday(), now()).await.unwrap();
+        assert_eq!((done.mailed_from, done.calendar), (Some(AccountId(1)), Some(calendar)), "{}", done.text);
+        assert!(done.text.ends_with(" with a maybe. Jolta emailed Ann."), "{}", done.text);
+        let mailed = outbox(&j);
+        assert_eq!(mailed.len(), 1);
+        let (sender, recipients, _, counter) = &mailed[0];
+        assert_eq!((sender.as_str(), recipients.as_str()), ("me@example.com", "ann@example.com"), "from the account the invitation came to");
+        assert_eq!(counter_of(counter), ("COUNTER".into(), "20261113T150000Z".into(), "TENTATIVE".into()));
+
+        let copy = j.store.read(|c| store::stored_event(c, &uid, None, None, tz::here())).unwrap().expect("the added copy");
+        assert_eq!(copy.event.my_response(), Some(Response::Tentative), "the copy follows the answer");
+        assert_eq!(copy.event.span, sent.event.span, "the proposal doesn't move the copy");
+
+        answer_at(&j, &friday(), now()).await.unwrap();
+        assert_eq!(outbox(&j).len(), 1, "the same proposal again is no second mail");
+        assert_eq!(server.await.unwrap(), ["PUT /cal/copy.ics If-Match \"1\"", "PUT /cal/copy.ics If-Match \"2\""], "each time quietly, over the version Jolta holds");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
 }
