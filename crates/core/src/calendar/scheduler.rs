@@ -261,6 +261,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An answer that left before the Mac moved to New York and comes back
+    /// after the rebuild there writes its series in Brussels; the next round
+    /// still moves that series to New York.
+    #[tokio::test]
+    async fn a_series_written_in_the_old_zone_after_a_rebuild_is_rebuilt() {
+        let dir = std::env::temp_dir().join(format!("jolta-cal-late-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let jolta = Jolta::open(&dir).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 4, 12, 0, 0).unwrap();
+        let wall = chrono::NaiveDate::from_ymd_opt(2026, 11, 9).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let floating = Local { wall, zone: Zone::Floating };
+        let event = |uid: &str| EventData::new(uid, Span::Timed { start: floating, end: Local { wall: wall + Days::hours(1), ..floating } });
+        let feed = RemoteCalendar {
+            remote_id: "feed".into(),
+            name: "Feed".into(),
+            color: None,
+            zone: None,
+            access: Access::Read,
+            primary: true,
+            refresh: None,
+        };
+        let cal = jolta
+            .store
+            .write(|tx| {
+                let cal = store::add_calendar(tx, CalendarSource::Local, &feed)?;
+                for uid in ["a", "b"] {
+                    store::apply_item(tx, cal.id, uid, None, &[event(uid)], None, &Horizon::around(now, Brussels))?;
+                }
+                Ok(cal.id)
+            })
+            .unwrap();
+        refresh_occurrences(&jolta, now, Brussels).await.unwrap();
+        assert_eq!(refresh_occurrences(&jolta, now, New_York).await.unwrap(), [cal]);
+
+        jolta.store.write(|tx| store::apply_item(tx, cal, "a", None, &[event("a")], None, &Horizon::around(now, Brussels))).unwrap();
+        let (brussels, new_york) =
+            (Brussels.from_local_datetime(&wall).unwrap().timestamp(), New_York.from_local_datetime(&wall).unwrap().timestamp());
+        assert_eq!(starts(&jolta), [brussels, new_york], "the late write placed its series in Brussels");
+
+        assert_eq!(refresh_occurrences(&jolta, now, New_York).await.unwrap(), [cal], "the late series is rebuilt");
+        assert_eq!(starts(&jolta), [new_york, new_york]);
+        assert!(refresh_occurrences(&jolta, now, New_York).await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn failures_back_off_up_to_the_interval() {
         let waits: Vec<u64> = (1..=6).map(|n| backoff(n, ACCOUNT_EVERY).as_secs()).collect();
