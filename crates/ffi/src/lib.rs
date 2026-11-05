@@ -244,6 +244,8 @@ pub enum CoreEvent {
     CalendarChanged { calendar_ids: Vec<i64> },
     /// A calendar sync ended. `error` is None when it reached the server.
     CalendarSynced { calendar_id: i64, error: Option<String> },
+    /// File responses automatically archived replies; `tokens` undo it.
+    ResponsesFiled { text: String, tokens: Vec<i64> },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -885,6 +887,7 @@ impl Core {
                     CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() }
                 }
                 Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
+                Event::ResponsesFiled { op, text } => CoreEvent::ResponsesFiled { text, tokens: vec![op.0] },
             };
             listener.on_event(event);
         });

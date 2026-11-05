@@ -524,6 +524,19 @@ impl Core {
         Ok(self.calendars()?.accounts.into_iter().find(|a| a.account.id == account_id).map(|a| a.calendars).unwrap_or_default())
     }
 
+    /// Whether File responses automatically is on: a guest's reply to a
+    /// meeting the receiving account organizes that says nothing beyond its
+    /// answer goes to the archive.
+    pub fn file_responses(&self) -> Result<bool> {
+        Ok(self.jolta.store.read(store::file_responses_since)?.is_some())
+    }
+
+    /// Turned on, it files replies that arrive from now on, never the mail
+    /// already there.
+    pub fn set_file_responses(&self, on: bool) -> Result<()> {
+        Ok(self.jolta.store.write(|tx| store::set_file_responses(tx, on, chrono::Utc::now().timestamp()))?)
+    }
+
     /// Showing a calendar syncs it; hiding one stops its syncs and takes it
     /// out of every view.
     pub fn set_calendar_shown(&self, calendar_id: i64, shown: bool) -> Result<()> {

@@ -144,6 +144,12 @@ pub enum CalCommand {
     /// Print the invitation cards of a message as the reader shows them,
     /// with what an update struck through as ~~old~~.
     Card { message: i64 },
+    /// Turn File responses automatically on or off, as Settings › Calendar
+    /// does, or print whether it is on. `jolta watch` files the replies.
+    FileResponses {
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+    },
     /// Take the meeting a cancellation names out of the calendar, as its
     /// card's Remove from calendar does.
     Remove { message: i64 },
@@ -233,6 +239,17 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             jolta.store.write(|tx| store::set_calendar_shown(tx, id, shown))?;
             let c = jolta.store.read(|c| store::calendar(c, id))?;
             println!("{} is {}.", c.name, if shown { "shown; run `jolta cal sync` to fetch it" } else { "hidden" });
+            Ok(())
+        }
+        CalCommand::FileResponses { state } => {
+            if let Some(state) = state {
+                let now = chrono::Utc::now().timestamp();
+                jolta.store.write(|tx| store::set_file_responses(tx, matches!(state, OnOff::On), now))?;
+            }
+            match jolta.store.read(store::file_responses_since)? {
+                Some(since) => println!("File responses automatically is on, for replies arriving since {}.", chrono::DateTime::from_timestamp(since, 0).unwrap_or_default()),
+                None => println!("File responses automatically is off."),
+            }
             Ok(())
         }
         CalCommand::Subscribe { url } => {

@@ -62,6 +62,9 @@ pub enum Event {
     CalendarsChanged(Vec<crate::calendar::CalendarId>),
     /// A calendar sync ended; `error` says why it failed.
     CalendarSynced { calendar: crate::calendar::CalendarId, error: Option<String> },
+    /// File responses automatically archived replies with this op, which
+    /// `undo` takes back; `text` is the toast's.
+    ResponsesFiled { op: OpId, text: String },
 }
 
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -530,7 +533,26 @@ impl Engine {
         if let Link::Imap(session, caps) = link {
             self.file_sent_copies(account, session, *caps, &sent).await?;
         }
+        self.file_responses(account.id).await;
         self.announce(account.id, report.new_messages, started).await
+    }
+
+    /// Files the replies to the account's own meetings that say nothing
+    /// beyond their answer, when File responses automatically is on, before
+    /// any of them is announced as new mail. A failure here doesn't stop
+    /// the sync.
+    async fn file_responses(&self, account: AccountId) {
+        let jolta = self.jolta.clone();
+        match tokio::task::spawn_blocking(move || crate::calendar::filing::file_new(&jolta, account, chrono::Utc::now())).await {
+            Ok(Ok(Some(filed))) => {
+                (self.sink)(Event::ListsChanged);
+                (self.sink)(Event::ResponsesFiled { op: filed.op, text: filed.text });
+                self.wake(account);
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => tracing::warn!("filing responses stopped: {e}"),
+            Err(e) => tracing::warn!("filing responses stopped: {e}"),
+        }
     }
 
     /// Settles due "remind me" reminders: answered threads drop theirs,
