@@ -323,7 +323,7 @@ impl Google {
         let send = if rsvp.notify { "all" } else { "none" };
         for attempt in 0..3 {
             let event: Value = parse(&self.get_ok(&url).await?)?;
-            let attendees = answered(&event, &target.me, target.me.eq_ignore_ascii_case(&self.account.address), rsvp)?;
+            let attendees = answered(&event, calendar, &self.account.address, &target.me, rsvp)?;
             let (status, body) = self
                 .request(reqwest::Method::PATCH, &format!("{url}?sendUpdates={send}"), Some(&json!({ "attendees": attendees })), event["etag"].as_str())
                 .await?;
@@ -415,15 +415,19 @@ fn own_entry<T>(attendees: &[T], is_self: impl Fn(&T) -> bool, email: impl Fn(&T
     attendees.iter().position(is_self).or_else(|| attendees.iter().position(|a| me.iter().any(|m| m.eq_ignore_ascii_case(email(a)))))
 }
 
-/// The event's attendee list with the user's own entry answered. On a copy
-/// the user added for another account (`own_calendar` false) the invited
-/// address is the user's entry, and the one Google marks `self`, the
-/// calendar's account that its import needs as a guest, shows the same.
-fn answered(event: &Value, me: &str, own_calendar: bool, rsvp: &Rsvp) -> Result<Vec<Value>> {
+/// The event's attendee list with the user's address `me` answered, on a
+/// calendar of the account with address `account`. The entry Google marks
+/// `self` is the user's only on `me`'s own calendar (`Calendar::is_own`):
+/// on a colleague's calendar it is the colleague, so the address finds the
+/// user's entry. On a copy the user added for another account the `self`
+/// entry, the calendar's account that its import needs as a guest, shows
+/// the same answer.
+fn answered(event: &Value, calendar: &Calendar, account: &str, me: &str, rsvp: &Rsvp) -> Result<Vec<Value>> {
     let mut attendees = event["attendees"].as_array().cloned().unwrap_or_default();
+    let own_calendar = calendar.is_own(me);
     let own = own_entry(&attendees, |a| own_calendar && a["self"] == true, |a| a["email"].as_str().unwrap_or_default(), &[me.to_string()])
         .ok_or_else(|| Error::Other(format!("{me} isn't on this meeting's guest list, so Jolta can't answer for it.")))?;
-    let shown = attendees.iter().position(|a| a["self"] == true).filter(|_| !own_calendar);
+    let shown = attendees.iter().position(|a| a["self"] == true).filter(|_| !me.eq_ignore_ascii_case(account));
     for i in std::iter::once(own).chain(shown) {
         attendees[i]["responseStatus"] = json!(match rsvp.answer.response() {
             Response::Accepted => "accepted",
@@ -833,8 +837,15 @@ mod tests {
         assert_eq!(e.organizer.unwrap().name, "Boss");
     }
 
+    /// Google marks a colleague's calendar's owner as its copies' self, and
+    /// gives a calendar shared with "Make changes and manage sharing" the
+    /// owner role, so only on the account's primary calendar does the self
+    /// entry answer for the user. Remove and answer refuse such a copy
+    /// before Google; a copy the user added there answers by address.
     #[test]
-    fn a_shared_calendar_answers_as_its_owner_in_the_patch_and_the_store() {
+    fn only_the_accounts_own_calendar_answers_as_its_self_entry() {
+        use crate::calendar::respond::tests::calendar_of;
+        use crate::calendar::{Access, CalendarSource};
         let event = |attendees: Value| {
             json!({
                 "id": "shared", "iCalUID": "shared@google.com", "summary": "Planning",
@@ -845,13 +856,15 @@ mod tests {
         let accept = Rsvp { event: crate::calendar::EventId(1), answer: Answer::Accept, note: None, notify: true, scope: Scope::Series, proposal: None };
         let statuses = |list: &[Value]| list.iter().map(|a| a["responseStatus"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>();
         let marked = |e: &EventData| e.attendees.iter().map(|a| a.is_me).collect::<Vec<_>>();
+        let primary = calendar_of(CalendarSource::Google, Access::Owner, "me@example.com");
+        let colleagues = calendar_of(CalendarSource::Google, Access::Owner, "owner@example.com");
 
         let shared = event(json!([
             {"email": "me@example.com", "responseStatus": "needsAction"},
             {"email": "owner@example.com", "self": true, "responseStatus": "needsAction"}
         ]));
-        assert_eq!(statuses(&answered(&shared, "me@example.com", true, &accept).unwrap()), ["needsAction", "accepted"]);
-        assert_eq!(marked(&mapped(shared.clone())), [false, true]);
+        assert_eq!(statuses(&answered(&shared, &colleagues, "me@example.com", "me@example.com", &accept).unwrap()), ["accepted", "needsAction"], "the colleague's entry stays");
+        assert_eq!(marked(&mapped(shared.clone())), [false, true], "the sync marks the owner, whom Calendar::is_own keeps out");
         let added = event(json!([
             {"email": "me@example.com", "responseStatus": "needsAction"},
             {"email": "owner@example.com", "self": true, "responseStatus": "needsAction"},
@@ -859,16 +872,21 @@ mod tests {
         ]));
         let decline = Rsvp { answer: Answer::Decline, ..accept.clone() };
         assert_eq!(
-            statuses(&answered(&added, "me@example.com", false, &decline).unwrap()),
+            statuses(&answered(&added, &colleagues, "owner@example.com", "me@example.com", &decline).unwrap()),
             ["declined", "declined", "accepted"],
-            "the calendar's own entry, which Google's import needs, shows the same answer; the organizer's stays"
+            "on another account's calendar the calendar's own entry, which Google's import needs, shows the same answer; the organizer's stays"
         );
 
+        let mine = event(json!([
+            {"email": "me@example.com", "responseStatus": "needsAction"},
+            {"email": "alias@example.com", "self": true, "responseStatus": "needsAction"}
+        ]));
+        assert_eq!(statuses(&answered(&mine, &primary, "me@example.com", "me@example.com", &accept).unwrap()), ["needsAction", "accepted"], "on the primary calendar self is the user");
         let own = event(json!([
             {"email": "boss@example.com", "responseStatus": "accepted"},
             {"email": "ME@example.com", "responseStatus": "needsAction"}
         ]));
-        assert_eq!(statuses(&answered(&own, "me@example.com", true, &accept).unwrap()), ["accepted", "accepted"], "without a self entry the address decides");
+        assert_eq!(statuses(&answered(&own, &primary, "me@example.com", "me@example.com", &accept).unwrap()), ["accepted", "accepted"], "without a self entry the address decides");
         assert_eq!(marked(&mapped(own)), [false, true]);
     }
 

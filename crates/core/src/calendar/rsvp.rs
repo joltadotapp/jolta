@@ -131,6 +131,7 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
         }
         _ => {}
     }
+    own_calendar(&calendar, &target.me)?;
     let organizer = target.event.data.organizer.as_ref().map(|o| o.address.as_str());
     if organizer.is_some_and(|o| o.eq_ignore_ascii_case(&target.me)) {
         return Err(Error::Other("You organize this meeting, so there is no invitation to answer.".into()));
@@ -148,6 +149,18 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
         _ => None,
     };
     jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
+}
+
+/// Refuses an answer through a calendar the account with address `account`
+/// doesn't own (`Calendar::is_own`): the copy there is its owner's, whom
+/// Google marks as the copy's self, so the answer would be the owner's.
+pub(crate) fn own_calendar(calendar: &Calendar, account: &str) -> Result<()> {
+    match calendar.is_own(account) {
+        true => Ok(()),
+        false => Err(Error::Other(
+            "This meeting is in a calendar shared with you, so its answer is the calendar owner's. Answer from the invitation in your mail.".into(),
+        )),
+    }
 }
 
 /// The calendar of `event`, and what a change in `scope` goes to, with the

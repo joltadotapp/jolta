@@ -14,7 +14,7 @@ use crate::calendar::recur::Source;
 use crate::calendar::rsvp::Proposal;
 use crate::calendar::series::{self, copy_rank};
 use crate::calendar::update::{self, holds};
-use crate::calendar::{CalendarId, CalendarSource, EventData, EventId, Moment, Response, tz};
+use crate::calendar::{Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, Response, tz};
 use crate::model::*;
 use crate::{Error, Result, compose};
 
@@ -104,6 +104,18 @@ const NOT_ADDED: &str = "NOT EXISTS (SELECT 1 FROM added_copy a WHERE a.calendar
 /// another zone, as `Moment::names` decides. A meeting in several calendars
 /// gives the copy the views show.
 pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, account: Option<AccountId>, here: Tz) -> Result<Option<StoredEvent>> {
+    stored_event_in(conn, uid, recurrence_id, account, here, |_| true)
+}
+
+/// `stored_event` among the calendars `keep` accepts.
+pub fn stored_event_in(
+    conn: &Connection,
+    uid: &str,
+    recurrence_id: Option<&Moment>,
+    account: Option<AccountId>,
+    here: Tz,
+    keep: impl Fn(&Calendar) -> bool,
+) -> Result<Option<StoredEvent>> {
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
          FROM event e JOIN calendar c ON c.id = e.calendar_id
@@ -116,7 +128,7 @@ pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>
     let mut best: Option<((bool, bool, i64), StoredEvent)> = None;
     for row in rows {
         let (rank, event_id, calendar_id, source, data) = row?;
-        if best.as_ref().is_some_and(|(b, _)| *b <= rank) {
+        if best.as_ref().is_some_and(|(b, _)| *b <= rank) || !keep(&super::calendar(conn, calendar_id)?) {
             continue;
         }
         let event: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {event_id}: {e}")))?;

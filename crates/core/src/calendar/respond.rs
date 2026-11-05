@@ -94,10 +94,10 @@ pub struct Outcome {
 
 /// Whether an event's detail offers answers: an invitation to the user
 /// from an organizer other than the calendar's own account, in a calendar
-/// Jolta answers through.
+/// of the account's own (`Calendar::is_own`) that Jolta answers through.
 pub fn can_answer(account: &str, calendar: &Calendar, e: &EventData) -> bool {
     let theirs = e.organizer.as_ref().is_some_and(|o| !o.address.trim().eq_ignore_ascii_case(account));
-    theirs && e.my_response().is_some() && plan(Some(calendar.source), true, false).is_ok_and(|p| p.provider.is_some())
+    calendar.is_own(account) && theirs && e.my_response().is_some() && plan(Some(calendar.source), true, false).is_ok_and(|p| p.provider.is_some())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -341,11 +341,14 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
             let (a, shown) = a;
             let sent = invitations.iter().find(|i| i.event.uid == a.uid && i.event.recurrence_id.is_none()).or(invitations.iter().find(|i| i.event.uid == a.uid));
             // The copy in the calendars of the account the invitation came
-            // to: another account's may be the organizer's own.
-            let copy = match store::stored_event(c, &a.uid, None, Some(account), here)? {
+            // to: another account's may be the organizer's own. A copy in a
+            // calendar shared with the account is its owner's to answer, so
+            // without one in the account's own the reply mail is the answer.
+            let own = |calendar: &Calendar| calendar.is_own(&from);
+            let copy = match store::stored_event_in(c, &a.uid, None, Some(account), here, own)? {
                 None => sent
                     .and_then(|i| i.event.recurrence_id)
-                    .map(|rid| store::stored_event(c, &a.uid, Some(&rid), Some(account), here))
+                    .map(|rid| store::stored_event_in(c, &a.uid, Some(&rid), Some(account), here, own))
                     .transpose()?
                     .flatten(),
                 found => found,
@@ -384,6 +387,7 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
     let calendar = store::calendar(conn, calendar)?;
     let account = calendar.account_id.ok_or_else(|| Error::Other("This calendar belongs to no account, so Jolta has nowhere to answer from.".into()))?;
     let from = store::account(conn, account)?.address;
+    rsvp::own_calendar(&calendar, &from)?;
     let me = addresses(&from, Some((&calendar, &data)));
     let repeats = data.recurrence.is_some() || data.recurrence_id.is_some();
     let occurrence = match at.filter(|_| repeats) {
@@ -451,7 +455,7 @@ fn short_name(p: &Person) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::TimeZone;
     use mail_parser::MessageParser;
 
@@ -765,7 +769,7 @@ mod tests {
     }
 
     /// A calendar of account 1.
-    fn calendar_of(source: CalendarSource, access: Access, remote_id: &str) -> Calendar {
+    pub(crate) fn calendar_of(source: CalendarSource, access: Access, remote_id: &str) -> Calendar {
         Calendar {
             id: CalendarId(1),
             account_id: Some(AccountId(1)),
@@ -803,6 +807,55 @@ mod tests {
         ] {
             let me = addresses("me@example.com", Some((&calendar_of(source, access, remote_id), &copy)));
             assert_eq!(me, aliases, "{source:?} calendar {remote_id} with {access:?}");
+        }
+    }
+
+    /// A copy in a calendar shared with the account is its owner's, whom
+    /// Google marks as the copy's self, even with the owner role Google
+    /// gives "Make changes and manage sharing". From mail the answer goes by
+    /// mail from the receiving account, as without a copy; the copy's detail
+    /// offers no answer, and answering it is refused before any provider.
+    #[test]
+    fn a_shared_calendars_copy_is_never_answered_through() {
+        use crate::calendar::invitation::tests::ME;
+        use crate::calendar::{Attendee, Role, rsvp};
+        let bo = Attendee { person: Person { address: "bo@example.com".into(), name: String::new() }, role: Role::Required, response: Response::NeedsAction, comment: String::new(), is_me: true };
+        for (source, access, remote_id) in [
+            (CalendarSource::Google, Access::Owner, "bo@example.com"),
+            (CalendarSource::Google, Access::Write, "bo@example.com"),
+            (CalendarSource::Graph, Access::Write, "AAMkBo"),
+            (CalendarSource::CalDav, Access::Write, "/cal/bo/"),
+        ] {
+            let (j, _) = jolta("respond-shared");
+            let message = import(&j, mail!("google-request.eml"));
+            let mut copy = invitation::find(mail!("google-request.eml"), &[ME.into()]).remove(0).event;
+            copy.attendees.iter_mut().for_each(|a| a.is_me = false);
+            copy.attendees.push(bo.clone());
+            let (calendar, event) = j
+                .store
+                .write(|tx| {
+                    let remote = store::RemoteCalendar { remote_id: remote_id.into(), name: "Bo".into(), color: None, zone: None, access, primary: true, refresh: None };
+                    let calendar = store::sync_calendar_list(tx, AccountId(1), source, &[remote])?[0].id;
+                    store::apply_item(tx, calendar, "bo", None, std::slice::from_ref(&copy), None, &series::Horizon::around(now(), tz::here()))?;
+                    let event = tx.query_row("SELECT id FROM event WHERE calendar_id = ?1", [calendar], |r| r.get(0))?;
+                    Ok((store::calendar(tx, calendar)?, event))
+                })
+                .unwrap();
+            let case = format!("{source:?} calendar {remote_id} with {access:?}");
+
+            let done = run(&j, request(message, Answer::Accept, None, true, false)).unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(done, Outcome { text: "Accepted. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None }, "{case}");
+            assert_eq!(outbox(&j)[0].0, ME, "{case}: from the receiving account");
+
+            assert!(!can_answer(ME, &calendar, &copy), "{case}: the detail offers no answer");
+            let detail = Request { subject: Subject::Event { id: event, at: None }, ..request(message, Answer::Decline, None, true, false) };
+            let err = run(&j, detail).unwrap_err().to_string();
+            assert!(err.contains("shared with you"), "{case}: {err}");
+            let direct = Rsvp { event, answer: Answer::Decline, note: None, notify: true, scope: Scope::Series, proposal: None };
+            let err = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(rsvp::answer(&j, &direct)).unwrap_err().to_string();
+            assert!(err.contains("shared with you"), "{case}: {err}");
+            assert_eq!(outbox(&j).len(), 1, "{case}: nothing more went out");
+            std::fs::remove_dir_all(&j.data_dir).unwrap();
         }
     }
 
