@@ -7,3 +7,8 @@ CREATE TABLE settled_reply (
     message_id TEXT NOT NULL,
     PRIMARY KEY (account_id, message_id)
 );
+
+-- Whether the worker has claimed an op at least once. An op that failed or
+-- was left mid-send waits as pending again but may have reached the server,
+-- so Undo gives it its inverse instead of dropping it.
+ALTER TABLE op ADD COLUMN tried INTEGER NOT NULL DEFAULT 0;

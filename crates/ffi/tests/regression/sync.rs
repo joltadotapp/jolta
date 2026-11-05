@@ -111,6 +111,44 @@ fn undo_while_the_archive_is_on_its_way() {
     assert!(!app.events.seen("action failed"));
 }
 
+/// The archive lands on the server but its OK never arrives, so the op
+/// waits again as failed; Undo then keeps it and queues the opposite move,
+/// which brings the message back to the inbox on the server and in Jolta.
+#[test]
+fn undo_after_the_archives_ok_was_lost() {
+    if !available() {
+        return;
+    }
+    use jolta_core::actions::{self, Action, Context};
+    use jolta_core::{ThreadId, store};
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "File me", "Body."));
+    let app = App::unstarted();
+    let account = server.add(&app);
+    block_on(jolta_core::imap::sync_account(&app.jolta, &account, jolta_core::imap::SyncOptions { bodies: false }, |_| {})).expect("the first sync");
+    let thread = app.list("in:inbox")[0].thread_id;
+    app.jolta.store.write(|tx| actions::perform(tx, ThreadId(thread), Action::Archive, Context::Inbox)).unwrap().expect("archived");
+    let claimed = app.jolta.store.write(|tx| store::claim_op(tx, account.id)).unwrap().expect("the worker claims the archive");
+    block_on(async {
+        let mut session = jolta_core::imap::connect_account(&account).await?;
+        let caps = jolta_core::imap::caps(&mut session).await?;
+        jolta_core::imap::apply_op(&app.jolta, &mut session, caps, &claimed).await
+    })
+    .expect("the move reaches the server");
+    assert_eq!(server.subjects("Archive"), ["File me"]);
+    app.jolta.store.write(|tx| store::fail_attempt(tx, claimed.id, "the connection dropped before the OK", false)).unwrap();
+    app.jolta.store.write(|tx| actions::undo(tx, claimed.id)).unwrap().expect("Undo queues the opposite move");
+    assert_eq!(app.subjects("in:inbox"), ["File me"]);
+
+    app.core.start().unwrap();
+    wait(20, "the undo reached the server", || server.subjects("Archive").is_empty() && server.subjects("INBOX") == ["File me"]);
+    app.core.sync_now();
+    wait(20, "nothing is left to send", || app.count("SELECT count(*) FROM op WHERE state IN ('pending', 'sending')") == 0);
+    wait(20, "the next sync keeps it in the inbox", || app.subjects("in:inbox") == ["File me"]);
+    assert!(app.subjects("in:archive").is_empty());
+    assert!(!app.events.seen("action failed"));
+}
+
 /// Changes made elsewhere (a phone, the web) show up in Jolta.
 #[test]
 fn changes_from_elsewhere_arrive() {

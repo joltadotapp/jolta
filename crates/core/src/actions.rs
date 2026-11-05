@@ -166,19 +166,20 @@ fn queue(conn: &Connection, account: AccountId, kind: &OpKind, messages: &[Messa
     Ok(Some((account, store::insert_op(conn, account, kind, &changed)?)))
 }
 
-/// Undoes an op: an unsent one is dropped and the local change reverted;
-/// one the worker has claimed, which may reach the server any moment, or a
-/// sent one gets an inverse op. Returns the op to send, if any.
+/// Undoes an op: one the worker never claimed is dropped and the local
+/// change reverted; one it claimed, which may have reached the server even
+/// when it failed and waits again, or a sent one gets an inverse op that
+/// runs after it. Returns the op to send, if any.
 pub fn undo(conn: &Connection, id: OpId) -> Result<Option<(AccountId, OpId)>> {
     let Some((op, state)) = store::op(conn, id)? else { return Ok(None) };
     match state.as_str() {
-        "pending" => {
+        "pending" if !op.tried => {
             store::revert_local(conn, &op)?;
             store::cancel_op(conn, id)?;
             forget_snooze(conn, &op)?;
             Ok(None)
         }
-        "sending" | "done" => {
+        "pending" | "sending" | "done" => {
             let Some(inverse) = op.inverse() else { return Ok(None) };
             let messages: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
             forget_snooze(conn, &op)?;
@@ -316,6 +317,36 @@ mod tests {
                 assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "a failed attempt goes back in the queue");
                 store::release_claims(c, AccountId(1))?;
                 assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "a claim left by a stopped worker");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// An op that went back in the queue after an attempt, whether the
+    /// attempt failed or a worker stopped mid-send, may have reached the
+    /// server, so Undo keeps it and queues the opposite move.
+    #[test]
+    fn undo_of_an_op_tried_before_queues_its_opposite() {
+        let (_dir, store) = store();
+        let to_work = OpKind::Move { from: MailboxId(1), to: MailboxId(3) };
+        store
+            .write(|c| {
+                for (how, failed) in [("failed", true), ("stopped", false)] {
+                    let (_, archive) = queue(c, AccountId(1), &to_work, &[MessageId(3)])?.unwrap();
+                    assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(archive));
+                    if failed {
+                        store::fail_attempt(c, archive, "the connection dropped before the OK", false)?;
+                    } else {
+                        store::release_claims(c, AccountId(1))?;
+                    }
+                    let (_, back) = undo(c, archive)?.unwrap_or_else(|| panic!("the opposite move after an attempt that {how}"));
+                    assert_eq!(store::op(c, archive)?.map(|(_, state)| state).as_deref(), Some("pending"), "the op tried before stays after it {how}");
+                    assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(archive), "it is sent again, first");
+                    store::finish_op(c, archive)?;
+                    assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "then its opposite");
+                    store::finish_op(c, back)?;
+                    assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), None, "and nothing more");
+                }
                 Ok(())
             })
             .unwrap();

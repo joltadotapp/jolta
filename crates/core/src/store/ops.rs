@@ -26,6 +26,9 @@ pub struct Op {
     /// when known.
     pub messages: Vec<(MessageId, Option<u32>)>,
     pub attempts: u32,
+    /// The worker has claimed it at least once, so it may have reached the
+    /// server, even when it is waiting again after an attempt.
+    pub tried: bool,
 }
 
 impl Op {
@@ -156,15 +159,15 @@ fn op_row(r: &rusqlite::Row) -> rusqlite::Result<Op> {
         "empty" => OpKind::Empty { mailbox: r.get(4)? },
         _ => OpKind::Flags { add: r.get(6)?, remove: r.get(7)? },
     };
-    Ok(Op { id: OpId(r.get(0)?), account: r.get(1)?, kind, messages: decode(&r.get::<_, String>(3)?), attempts: r.get(8)? })
+    Ok(Op { id: OpId(r.get(0)?), account: r.get(1)?, kind, messages: decode(&r.get::<_, String>(3)?), attempts: r.get(8)?, tried: r.get(9)? })
 }
 
-const OP_COLS: &str = "id, account_id, kind, messages, from_mailbox, to_mailbox, add_flags, remove_flags, attempts";
+const OP_COLS: &str = "id, account_id, kind, messages, from_mailbox, to_mailbox, add_flags, remove_flags, attempts, tried";
 
 pub fn op(conn: &Connection, id: OpId) -> Result<Option<(Op, String)>> {
     Ok(conn
         .query_row(&format!("SELECT {OP_COLS}, state FROM op WHERE id = ?1"), [id.0], |r| {
-            Ok((op_row(r)?, r.get::<_, String>(9)?))
+            Ok((op_row(r)?, r.get::<_, String>(10)?))
         })
         .optional()?)
 }
@@ -180,12 +183,13 @@ pub fn pending_ops(conn: &Connection, account: AccountId) -> Result<Vec<Op>> {
 }
 
 /// Claims the account's oldest waiting op for sending: from here on Undo
-/// can no longer take it back unsent and queues its inverse instead.
+/// can no longer take it back unsent and queues its inverse instead, also
+/// after the op goes back in the queue.
 pub fn claim_op(conn: &Connection, account: AccountId) -> Result<Option<Op>> {
     Ok(conn
         .query_row(
             &format!(
-                "UPDATE op SET state = 'sending'
+                "UPDATE op SET state = 'sending', tried = 1
                  WHERE id = (SELECT id FROM op WHERE account_id = ?1 AND state = 'pending' ORDER BY id LIMIT 1)
                  RETURNING {OP_COLS}"
             ),
