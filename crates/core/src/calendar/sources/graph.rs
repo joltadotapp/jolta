@@ -28,7 +28,7 @@ use crate::calendar::{
     Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
-use crate::store::RemoteCalendar;
+use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, Error, Result, oauth};
 
 const BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -243,14 +243,6 @@ impl GraphCalendar {
         unreachable!("the last attempt returns")
     }
 
-    async fn get_ok(&self, url: &str) -> Result<Value> {
-        let (status, json) = self.request("GET", url, None, &[]).await?;
-        if !(200..300).contains(&status) {
-            return Err(self.failure(status, &json));
-        }
-        Ok(json)
-    }
-
     fn failure(&self, status: u16, json: &Value) -> Error {
         let code = json["error"]["code"].as_str().unwrap_or_default();
         if status == 403 && code == "ErrorAccessDenied" {
@@ -264,7 +256,7 @@ impl GraphCalendar {
         let mut out = Vec::new();
         let mut next = Some("/me/calendars?$select=id,name,hexColor,isDefaultCalendar,canEdit,owner&$top=100".to_string());
         while let Some(url) = next {
-            let page = self.get_ok(&url).await?;
+            let page = get_ok(self, &url).await?;
             for c in page["value"].as_array().into_iter().flatten() {
                 out.push(remote_calendar(c, &self.account.address));
             }
@@ -274,133 +266,7 @@ impl GraphCalendar {
     }
 
     pub async fn sync(&self, calendar: &Calendar, known: &Known) -> Result<SyncBatch> {
-        let now = Utc::now().date_naive();
-        let month = now.format("%Y-%m").to_string();
-        let cursor: Option<Cursor> = calendar.cursor.as_deref().and_then(|c| serde_json::from_str(c).ok());
-        let (round, earlier) = match cursor {
-            Some(Cursor::Poll) => (self.poll(&calendar.remote_id, now).await?, BTreeSet::new()),
-            Some(Cursor::Delta { link, month: m, masters }) if m == month => match self.pages(&link).await? {
-                Some(round) => (round, masters),
-                None => self.first_round(&calendar.remote_id, now).await?,
-            },
-            _ => self.first_round(&calendar.remote_id, now).await?,
-        };
-        let complete = round.complete;
-        let delta_link = round.delta_link.clone();
-        let instances = parse_items(round.items);
-        let wanted = masters_to_fetch(&instances, &earlier, complete);
-        let masters = self.masters(&calendar.remote_id, &wanted).await?;
-        let (changes, masters) = batch(instances, masters, known, complete, std::slice::from_ref(&self.account.address), self.here, &earlier);
-        let cursor = match delta_link {
-            Some(link) => Cursor::Delta { link, month, masters },
-            None => Cursor::Poll,
-        };
-        Ok(SyncBatch { changes, cursor: Some(serde_json::to_string(&cursor).expect("a cursor serializes")), refresh: None })
-    }
-
-    /// A full delta round over a new window: the calendar's own delta, else
-    /// the primary calendar's when this is it, else a poll from now on.
-    async fn first_round(&self, calendar: &str, today: NaiveDate) -> Result<(Round, BTreeSet<String>)> {
-        let (from, to) = window(today);
-        let range = format!("startDateTime={from}&endDateTime={to}");
-        if let Some(round) = self.pages(&format!("/me/calendars/{}/calendarView/delta?{range}", encode(calendar))).await? {
-            return Ok((round, BTreeSet::new()));
-        }
-        let primary = self.get_ok("/me/calendar?$select=id").await?;
-        if primary["id"].as_str() == Some(calendar)
-            && let Some(round) = self.pages(&format!("/me/calendarView/delta?{range}")).await?
-        {
-            return Ok((round, BTreeSet::new()));
-        }
-        tracing::info!("Graph has no delta for calendar {calendar}; polling its window");
-        Ok((self.poll(calendar, today).await?, BTreeSet::new()))
-    }
-
-    async fn poll(&self, calendar: &str, today: NaiveDate) -> Result<Round> {
-        let (from, to) = window(today);
-        let url = format!("/me/calendars/{}/calendarView?startDateTime={from}&endDateTime={to}&$select={FIELDS}", encode(calendar));
-        let mut round = self.pages(&url).await?.ok_or_else(|| Error::Other(format!("Microsoft Graph refused the calendar view of {calendar}")))?;
-        round.complete = true;
-        round.delta_link = None;
-        Ok(round)
-    }
-
-    /// Follows `@odata.nextLink` to the end. None when Graph refuses the
-    /// request as a delta it doesn't support or a delta link it no longer
-    /// knows; the caller starts over another way.
-    async fn pages(&self, first: &str) -> Result<Option<Round>> {
-        let mut round = Round { items: Vec::new(), complete: !first.contains("deltatoken"), delta_link: None };
-        let mut next = Some(first.to_string());
-        while let Some(url) = next {
-            let (status, page) = self.request("GET", &url, None, &[]).await?;
-            match status {
-                200..300 => {}
-                400 | 404 | 405 | 410 | 501 if round.items.is_empty() => {
-                    tracing::info!("Graph refused {url}: {status} {}", page["error"]["code"]);
-                    return Ok(None);
-                }
-                _ => return Err(self.failure(status, &page)),
-            }
-            round.items.extend(page["value"].as_array().cloned().unwrap_or_default());
-            round.delta_link = page["@odata.deltaLink"].as_str().map(str::to_string);
-            next = page["@odata.nextLink"].as_str().map(str::to_string);
-        }
-        Ok(Some(round))
-    }
-
-    /// The masters by id, through JSON batches, with the fields only a GET
-    /// by id returns. A master Graph can't give maps to None.
-    async fn masters(&self, calendar: &str, ids: &BTreeSet<String>) -> Result<Masters> {
-        let mut out = Masters::new();
-        let ids: Vec<&String> = ids.iter().collect();
-        for chunk in ids.chunks(BATCH) {
-            let mut pending: Vec<&String> = chunk.to_vec();
-            for attempt in 0..4u32 {
-                let requests: Vec<Value> = pending
-                    .iter()
-                    .enumerate()
-                    .map(|(i, id)| {
-                        json!({
-                            "id": i.to_string(),
-                            "method": "GET",
-                            "url": format!("/me/calendars/{}/events/{}?$select={FIELDS},cancelledOccurrences", encode(calendar), encode(id)),
-                            "headers": {"Prefer": PREFER},
-                        })
-                    })
-                    .collect();
-                let (status, reply) =
-                    self.request("POST", "/$batch", Some(&json!({ "requests": requests })), &[]).await?;
-                if !(200..300).contains(&status) {
-                    return Err(self.failure(status, &reply));
-                }
-                let mut throttled = Vec::new();
-                let mut wait = 0;
-                for r in reply["responses"].as_array().into_iter().flatten() {
-                    let Some(id) = r["id"].as_str().and_then(|i| i.parse::<usize>().ok()).and_then(|i| pending.get(i)) else { continue };
-                    match r["status"].as_u64().unwrap_or(0) {
-                        200..300 => {
-                            let raw = serde_json::to_vec(&r["body"]).expect("JSON serializes");
-                            let master = serde_json::from_value::<GraphEvent>(r["body"].clone()).ok().map(|m| (m, raw));
-                            out.insert((*id).clone(), master);
-                        }
-                        429 | 503 | 504 if attempt < 3 => {
-                            wait = wait.max(r["headers"]["Retry-After"].as_str().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2));
-                            throttled.push(*id);
-                        }
-                        404 | 403 => {
-                            out.insert((*id).clone(), None);
-                        }
-                        status => return Err(self.failure(status as u16, &r["body"])),
-                    }
-                }
-                if throttled.is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_secs(wait.min(120))).await;
-                pending = throttled;
-            }
-        }
-        Ok(out)
+        read(self, &calendar.remote_id, calendar.cursor.as_deref(), known, &self.account.address).await
     }
 
     /// `accept`, `tentativelyAccept` or `decline` with `sendResponse`, and
@@ -460,8 +326,8 @@ impl GraphCalendar {
     }
 }
 
-/// What the writes to a copy ask of Microsoft 365: `GraphCalendar` sends
-/// them, a test answers them itself.
+/// What a sync and the writes to a copy ask of Microsoft 365:
+/// `GraphCalendar` sends it, a test answers it itself.
 pub(super) trait Api {
     async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)>;
     fn failure(&self, status: u16, json: &Value) -> Error;
@@ -483,6 +349,149 @@ impl Api for GraphCalendar {
     }
 }
 
+/// One sync of the calendar `calendar` from `cursor`, for the account `me`.
+async fn read(api: &impl Api, calendar: &str, cursor: Option<&str>, known: &Known, me: &str) -> Result<SyncBatch> {
+    let now = Utc::now().date_naive();
+    let month = now.format("%Y-%m").to_string();
+    let cursor: Option<Cursor> = cursor.and_then(|c| serde_json::from_str(c).ok());
+    let (round, earlier) = match cursor {
+        Some(Cursor::Poll) => (poll(api, calendar, now).await?, BTreeSet::new()),
+        Some(Cursor::Delta { link, month: m, masters }) if m == month => match pages(api, &link).await? {
+            Some(round) => (round, masters),
+            None => first_round(api, calendar, now).await?,
+        },
+        _ => first_round(api, calendar, now).await?,
+    };
+    let complete = round.complete;
+    let delta_link = round.delta_link.clone();
+    let instances = parse_items(round.items);
+    let wanted = masters_to_fetch(&instances, &earlier, complete);
+    let masters = fetch_masters(api, calendar, &wanted).await?;
+    let (changes, masters) = batch(instances, masters, known, complete, &[me.to_string()], api.zone(), &earlier);
+    let cursor = match delta_link {
+        Some(link) => Cursor::Delta { link, month, masters },
+        None => Cursor::Poll,
+    };
+    Ok(SyncBatch { changes, cursor: Some(serde_json::to_string(&cursor).expect("a cursor serializes")), refresh: None })
+}
+
+/// A full delta round over a new window: the calendar's own delta, else
+/// the primary calendar's when this is it, else a poll from now on.
+///
+/// Delta's own fields leave out an exception's `originalStart`, its
+/// recurrence id. The Graph docs say delta takes no `$select`, but Microsoft
+/// 365 adds the fields it names, and the delta link keeps them for the
+/// rounds that follow.
+async fn first_round(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<(Round, BTreeSet<String>)> {
+    let (from, to) = window(today);
+    let range = format!("startDateTime={from}&endDateTime={to}&$select={FIELDS}");
+    if let Some(round) = pages(api, &format!("/me/calendars/{}/calendarView/delta?{range}", encode(calendar))).await? {
+        return Ok((round, BTreeSet::new()));
+    }
+    let primary = get_ok(api, "/me/calendar?$select=id").await?;
+    if primary["id"].as_str() == Some(calendar)
+        && let Some(round) = pages(api, &format!("/me/calendarView/delta?{range}")).await?
+    {
+        return Ok((round, BTreeSet::new()));
+    }
+    tracing::info!("Graph has no delta for calendar {calendar}; polling its window");
+    Ok((poll(api, calendar, today).await?, BTreeSet::new()))
+}
+
+async fn poll(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<Round> {
+    let (from, to) = window(today);
+    let url = format!("/me/calendars/{}/calendarView?startDateTime={from}&endDateTime={to}&$select={FIELDS}", encode(calendar));
+    let mut round = pages(api, &url).await?.ok_or_else(|| Error::Other(format!("Microsoft Graph refused the calendar view of {calendar}")))?;
+    round.complete = true;
+    round.delta_link = None;
+    Ok(round)
+}
+
+/// Follows `@odata.nextLink` to the end. None when Graph refuses the
+/// request as a delta it doesn't support or a delta link it no longer
+/// knows; the caller starts over another way.
+async fn pages(api: &impl Api, first: &str) -> Result<Option<Round>> {
+    let mut round = Round { items: Vec::new(), complete: !first.contains("deltatoken"), delta_link: None };
+    let mut next = Some(first.to_string());
+    while let Some(url) = next {
+        let (status, page) = api.request("GET", &url, None, &[]).await?;
+        match status {
+            200..300 => {}
+            400 | 404 | 405 | 410 | 501 if round.items.is_empty() => {
+                tracing::info!("Graph refused {url}: {status} {}", page["error"]["code"]);
+                return Ok(None);
+            }
+            _ => return Err(api.failure(status, &page)),
+        }
+        round.items.extend(page["value"].as_array().cloned().unwrap_or_default());
+        round.delta_link = page["@odata.deltaLink"].as_str().map(str::to_string);
+        next = page["@odata.nextLink"].as_str().map(str::to_string);
+    }
+    Ok(Some(round))
+}
+
+async fn get_ok(api: &impl Api, url: &str) -> Result<Value> {
+    let (status, json) = api.request("GET", url, None, &[]).await?;
+    if !(200..300).contains(&status) {
+        return Err(api.failure(status, &json));
+    }
+    Ok(json)
+}
+
+/// The masters by id, through JSON batches, with the fields only a GET by
+/// id returns. A master Graph can't give maps to None.
+async fn fetch_masters(api: &impl Api, calendar: &str, ids: &BTreeSet<String>) -> Result<Masters> {
+    let mut out = Masters::new();
+    let ids: Vec<&String> = ids.iter().collect();
+    for chunk in ids.chunks(BATCH) {
+        let mut pending: Vec<&String> = chunk.to_vec();
+        for attempt in 0..4u32 {
+            let requests: Vec<Value> = pending
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    json!({
+                        "id": i.to_string(),
+                        "method": "GET",
+                        "url": format!("/me/calendars/{}/events/{}?$select={FIELDS},cancelledOccurrences", encode(calendar), encode(id)),
+                        "headers": {"Prefer": PREFER},
+                    })
+                })
+                .collect();
+            let (status, reply) = api.request("POST", "/$batch", Some(&json!({ "requests": requests })), &[]).await?;
+            if !(200..300).contains(&status) {
+                return Err(api.failure(status, &reply));
+            }
+            let mut throttled = Vec::new();
+            let mut wait = 0;
+            for r in reply["responses"].as_array().into_iter().flatten() {
+                let Some(id) = r["id"].as_str().and_then(|i| i.parse::<usize>().ok()).and_then(|i| pending.get(i)) else { continue };
+                match r["status"].as_u64().unwrap_or(0) {
+                    200..300 => {
+                        let raw = serde_json::to_vec(&r["body"]).expect("JSON serializes");
+                        let master = serde_json::from_value::<GraphEvent>(r["body"].clone()).ok().map(|m| (m, raw));
+                        out.insert((*id).clone(), master);
+                    }
+                    429 | 503 | 504 if attempt < 3 => {
+                        wait = wait.max(r["headers"]["Retry-After"].as_str().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2));
+                        throttled.push(*id);
+                    }
+                    404 | 403 => {
+                        out.insert((*id).clone(), None);
+                    }
+                    status => return Err(api.failure(status as u16, &r["body"])),
+                }
+            }
+            if throttled.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(wait.min(120))).await;
+            pending = throttled;
+        }
+    }
+    Ok(out)
+}
+
 /// One occurrence of a series as Graph lists it.
 pub(super) struct Instance {
     pub id: String,
@@ -495,8 +504,8 @@ pub(super) struct Instance {
 /// series' own zone.
 pub(super) async fn instance(api: &impl Api, master: &Stored, rid: &Moment) -> Result<Instance> {
     let here = tz::here();
-    let raw: Value = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or(Value::Null);
-    let zone = zone_of(raw["originalStartTimeZone"].as_str(), api.zone());
+    let series: GraphEvent = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or_default();
+    let zone = series_zone(&series, api.zone());
     let at = match rid {
         Moment::Time(local) => local.instant(here),
         Moment::Date(day) => tz::instant(day.and_time(NaiveTime::MIN), zone),
@@ -623,7 +632,7 @@ fn batch(
     earlier: &BTreeSet<String>,
 ) -> (Vec<Change>, BTreeSet<String>) {
     let mut changes = Vec::new();
-    let mut removed: BTreeSet<String> = BTreeSet::new();
+    let mut removed: BTreeMap<String, Removal> = BTreeMap::new();
     let mut present: BTreeSet<String> = BTreeSet::new();
     let referenced: BTreeSet<&str> = instances.iter().filter(|(g, _)| g.removed.is_none()).filter_map(|(g, _)| g.series_master_id.as_deref()).collect();
     let mut holding: BTreeSet<String> = if complete { BTreeSet::new() } else { earlier.clone() };
@@ -640,7 +649,7 @@ fn batch(
             None => {
                 holding.remove(id);
                 if !referenced.contains(id.as_str()) {
-                    removed.insert(id.clone());
+                    removed.entry(id.clone()).or_insert(Removal::Unlisted);
                 }
             }
         }
@@ -648,7 +657,7 @@ fn batch(
 
     for (g, raw) in instances {
         if g.removed.is_some() {
-            removed.insert(g.id);
+            removed.insert(g.id, Removal::Deleted);
             continue;
         }
         let master = g.series_master_id.as_ref().map(|id| masters.get(id).and_then(Option::as_ref).map(|(m, _)| m));
@@ -660,7 +669,7 @@ fn batch(
             // exception or a stand-in, it goes.
             ("occurrence", Some(Some(_))) => {
                 if known.contains_key(&g.id) {
-                    removed.insert(g.id);
+                    removed.entry(g.id).or_insert(Removal::Unlisted);
                 }
                 continue;
             }
@@ -676,13 +685,14 @@ fn batch(
     }
 
     if complete {
-        removed.extend(vanished(known, &present).into_iter().filter_map(|c| match c {
-            Change::Remove { remote_id } => Some(remote_id),
-            Change::Upsert { .. } => None,
-        }));
+        for change in vanished(known, &present) {
+            if let Change::Remove { remote_id, removal } = change {
+                removed.entry(remote_id).or_insert(removal);
+            }
+        }
     }
-    removed.retain(|id| !present.contains(id));
-    changes.extend(removed.into_iter().map(|remote_id| Change::Remove { remote_id }));
+    removed.retain(|id, _| !present.contains(id));
+    changes.extend(removed.into_iter().map(|(remote_id, removal)| Change::Remove { remote_id, removal }));
     (changes, holding)
 }
 
@@ -705,7 +715,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         }
     };
     let series = master.unwrap_or(g);
-    let series_zone = zone_of(series.original_start_time_zone.as_deref(), here);
+    let series_zone = series_zone(series, here);
     let recurrence_id = g.original_start.filter(|_| g.kind != "seriesMaster").map(|at| {
         let at = at.to_utc();
         if series.is_all_day {
@@ -814,6 +824,14 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
 
 fn zone_of(name: Option<&str>, here: Tz) -> Tz {
     name.and_then(tz::zone).unwrap_or(here)
+}
+
+/// The zone of a series' original starts; an all-day series' are midnight
+/// there. Graph writes an all-day series' own zone as UTC, so the rule's
+/// `recurrenceTimeZone` comes first.
+fn series_zone(series: &GraphEvent, here: Tz) -> Tz {
+    let rule = series.recurrence.as_ref().and_then(|r| r.range.recurrence_time_zone.as_deref());
+    zone_of(rule.or(series.original_start_time_zone.as_deref()), here)
 }
 
 /// A `dateTimeTimeZone` as an instant. Jolta asks for UTC; a reply in
@@ -1175,6 +1193,266 @@ mod tests {
         );
     }
 
+    /// Microsoft 365 as recorded on 2026-11-05: a weekly series at 10:00 in
+    /// Brussels whose 17 November occurrence was moved to 15:00. Delta leaves
+    /// `originalStart` out of an exception unless `$select` names it.
+    struct Recorded;
+
+    impl Api for Recorded {
+        async fn request(&self, method: &str, url: &str, body: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            let master = json!({
+                "id": "M1", "changeKey": "ck1", "type": "seriesMaster", "iCalUId": "040000008200E00074C5B7101A82E008SERIES",
+                "subject": "Weekly probe", "isAllDay": false, "seriesMasterId": null, "occurrenceId": null,
+                "start": {"dateTime": "2026-11-10T09:00:00.0000000", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-10T09:30:00.0000000", "timeZone": "UTC"},
+                "originalStartTimeZone": "Romance Standard Time", "originalEndTimeZone": "Romance Standard Time",
+                "recurrence": {
+                    "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["tuesday"], "firstDayOfWeek": "monday"},
+                    "range": {"type": "numbered", "startDate": "2026-11-10", "numberOfOccurrences": 4, "recurrenceTimeZone": "Romance Standard Time"}
+                },
+                "isOrganizer": true, "isReminderOn": false, "showAs": "busy"
+            });
+            if method == "POST" && url == "/$batch" {
+                let mut by_id = master.clone();
+                by_id["cancelledOccurrences"] = json!([]);
+                let responses: Vec<Value> =
+                    body.unwrap()["requests"].as_array().unwrap().iter().map(|r| json!({"id": r["id"], "status": 200, "body": by_id})).collect();
+                return Ok((200, json!({ "responses": responses })));
+            }
+            assert!(url.contains("/calendarView/delta?"), "only delta is asked: {url}");
+            let mut exception = json!({
+                "id": "X1", "changeKey": "ckx", "type": "exception", "seriesMasterId": "M1",
+                "iCalUId": "040000008200E00074C5B7101A82E00807EA0B11INSTANCE", "occurrenceId": "OID.M1.2026-11-17",
+                "subject": "Weekly probe", "isAllDay": false, "isCancelled": false,
+                "start": {"dateTime": "2026-11-17T14:00:00.0000000", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-17T14:30:00.0000000", "timeZone": "UTC"},
+                "originalStartTimeZone": "Romance Standard Time", "originalEndTimeZone": "Romance Standard Time",
+                "isOrganizer": true, "isReminderOn": false, "showAs": "busy"
+            });
+            let selected = url.split(['?', '&']).find_map(|p| p.strip_prefix("$select=")).unwrap_or_default();
+            if selected.split(',').any(|f| f == "originalStart") {
+                exception["originalStart"] = json!("2026-11-17T09:00:00Z");
+            }
+            Ok((200, json!({ "value": [master, exception], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta?$deltatoken=t1" })))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    #[tokio::test]
+    async fn a_moved_occurrence_from_delta_replaces_its_series_occurrence() {
+        let batch = read(&Recorded, "C1", None, &Known::new(), "me@example.com").await.unwrap();
+        let events: BTreeMap<String, EventData> = batch
+            .changes
+            .into_iter()
+            .filter_map(|c| match c {
+                Change::Upsert { remote_id, mut events, .. } => Some((remote_id, events.remove(0))),
+                Change::Remove { .. } => None,
+            })
+            .collect();
+        let (master, moved) = (&events["M1"], &events["X1"]);
+        let brussels = |s: &str| Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(ROMANCE) };
+        assert_eq!((moved.uid.as_str(), moved.recurrence_id.clone()), (master.uid.as_str(), Some(Moment::Time(brussels("2026-11-17 10:00")))));
+        assert_eq!(
+            starts(master, std::slice::from_ref(moved), (2026, 11), 1),
+            ["2026-11-10 10:00", "2026-11-17 15:00", "2026-11-24 10:00"],
+            "17 November shows once, at its new time"
+        );
+    }
+
+    /// Microsoft 365 after `Recorded`'s round: a calendar view or the next
+    /// delta round lists `listing`, and a GET of a series by id answers
+    /// `master`.
+    struct Later {
+        listing: Vec<Value>,
+        master: u16,
+    }
+
+    impl Api for Later {
+        async fn request(&self, method: &str, url: &str, body: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            if method == "POST" && url == "/$batch" {
+                let responses: Vec<Value> = body.unwrap()["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| json!({"id": r["id"], "status": self.master, "body": {"error": {"code": "refused"}}}))
+                    .collect();
+                return Ok((200, json!({ "responses": responses })));
+            }
+            Ok((200, json!({ "value": self.listing, "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta?$deltatoken=t2" })))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    /// A store holding `Recorded`'s first round: a weekly series whose 17
+    /// November occurrence moved to 15:00.
+    struct Synced {
+        store: crate::store::Store,
+        calendar: crate::calendar::CalendarId,
+        cursor: Option<String>,
+        /// The moved occurrence as delta lists it.
+        moved: Value,
+    }
+
+    impl Synced {
+        async fn new(name: &str) -> Synced {
+            let dir = std::env::temp_dir().join(format!("jolta-graph-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let store = crate::store::Store::open(&dir.join("jolta.sqlite")).unwrap();
+            let remote = RemoteCalendar { remote_id: "C1".into(), name: "Calendar".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None };
+            let calendar = store
+                .write(|tx| {
+                    tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (1, 'graph', 'me@example.com', 'me', 'a1', 0, 1)")?;
+                    crate::store::sync_calendar_list(tx, crate::AccountId(1), crate::calendar::CalendarSource::Graph, &[remote])
+                })
+                .unwrap()[0]
+                .id;
+            let mut synced = Synced { store, calendar, cursor: None, moved: Value::Null };
+            synced.cursor = synced.round(&Recorded, None).await;
+            synced
+        }
+
+        /// Syncs one round and gives the cursor it ends on.
+        async fn round(&mut self, api: &impl Api, cursor: Option<&str>) -> Option<String> {
+            let known = self.store.read(|c| crate::store::known_items(c, self.calendar)).unwrap();
+            let batch = read(api, "C1", cursor, &known, "me@example.com").await.unwrap();
+            let changes: Vec<(Change, Option<String>)> = batch.changes.into_iter().map(|c| (c, None)).collect();
+            if let Some(raw) = changes.iter().find_map(|(c, _)| match c {
+                Change::Upsert { remote_id, raw: Some(raw), .. } if remote_id == "X1" => Some(raw),
+                _ => None,
+            }) {
+                self.moved = serde_json::from_slice(raw).unwrap();
+            }
+            let horizon = crate::calendar::series::Horizon::around(Utc.with_ymd_and_hms(2026, 11, 4, 0, 0, 0).unwrap(), Europe::Brussels);
+            self.store.write(|tx| crate::calendar::sync::apply(tx, self.calendar, &changes, &horizon)).unwrap();
+            batch.cursor
+        }
+
+        /// The start of every occurrence in November, in Brussels.
+        fn november(&self) -> Vec<String> {
+            let from = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+            self.store
+                .read(|c| crate::store::occurrences(c, from, from.checked_add_months(Months::new(1)).unwrap(), Europe::Brussels))
+                .unwrap()
+                .into_iter()
+                .map(|o| match o.bounds {
+                    crate::calendar::Bounds::Utc { start, .. } => start.with_timezone(&Europe::Brussels).format("%m-%d %H:%M").to_string(),
+                    crate::calendar::Bounds::Days { start, .. } => start.to_string(),
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_round_keeps_an_exception_it_returns_when_its_series_is_refused() {
+        let mut s = Synced::new("refused-full").await;
+        assert_eq!(s.november(), ["11-10 10:00", "11-17 15:00", "11-24 10:00"]);
+        s.round(&Later { listing: vec![s.moved.clone()], master: 403 }, None).await;
+        assert_eq!(s.november(), ["11-17 15:00"], "the series Graph won't give goes; the moved occurrence the round returned stays");
+    }
+
+    #[tokio::test]
+    async fn a_series_graph_only_refuses_leaves_its_moved_occurrence_in_place() {
+        let mut s = Synced::new("refused-delta").await;
+        let cursor = s.cursor.clone();
+        let elsewhere = json!({"@removed": {"reason": "deleted"}, "id": "an-occurrence"});
+        s.round(&Later { listing: vec![elsewhere], master: 403 }, cursor.as_deref()).await;
+        assert_eq!(s.november(), ["11-17 15:00"], "a refusal says nothing about the moved occurrence, which the round didn't name");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_series_keeps_an_occurrence_the_same_round_returns() {
+        let mut s = Synced::new("deleted").await;
+        let cursor = s.cursor.clone();
+        let deleted = json!({"@removed": {"reason": "deleted"}, "id": "M1"});
+        s.round(&Later { listing: vec![s.moved.clone(), deleted], master: 404 }, cursor.as_deref()).await;
+        assert_eq!(s.november(), ["11-17 15:00"], "the round listed the moved occurrence, so it stays");
+    }
+
+    /// A weekly all-day series from Brussels as Microsoft 365 recorded it on
+    /// 2026-11-05: its own zone is UTC, its original starts are midnight on
+    /// the clock of `recurrenceTimeZone`.
+    fn all_day_series() -> Value {
+        json!({
+            "id": "M2", "changeKey": "ck2", "type": "seriesMaster", "iCalUId": "040000008200E00074C5B7101A82E008ALLDAY",
+            "subject": "Day off", "isAllDay": true,
+            "start": {"dateTime": "2026-11-12T00:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-13T00:00:00.0000000", "timeZone": "UTC"},
+            "originalStartTimeZone": "UTC", "originalEndTimeZone": "UTC",
+            "recurrence": {
+                "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["thursday"], "firstDayOfWeek": "monday"},
+                "range": {"type": "numbered", "startDate": "2026-11-12", "numberOfOccurrences": 3, "recurrenceTimeZone": "Romance Standard Time"}
+            },
+            "cancelledOccurrences": []
+        })
+    }
+
+    #[test]
+    fn an_all_day_exception_replaces_the_day_it_was_on_in_the_series_zone() {
+        let renamed = json!({
+            "id": "X2", "changeKey": "ckx2", "type": "exception", "seriesMasterId": "M2", "iCalUId": "per-instance-uid",
+            "subject": "Day off, renamed", "isAllDay": true, "originalStart": "2026-11-18T23:00:00Z",
+            "start": {"dateTime": "2026-11-19T00:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-20T00:00:00.0000000", "timeZone": "UTC"},
+            "originalStartTimeZone": "UTC", "originalEndTimeZone": "UTC"
+        });
+        let masters: Masters = [("M2".to_string(), Some(graph(all_day_series())))].into();
+        let (changes, _) = batch(vec![graph(renamed)], masters, &Known::new(), true, &[], Europe::Brussels, &BTreeSet::new());
+        let events: Vec<&EventData> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Upsert { events, .. } => Some(&events[0]),
+                Change::Remove { .. } => None,
+            })
+            .collect();
+        let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        assert_eq!(events[1].recurrence_id, Some(Moment::Date(day("2026-11-19"))), "Thursday in Brussels, not the UTC date of its midnight");
+        assert_eq!(starts(events[0], &[events[1].clone()], (2026, 11), 1), ["2026-11-12", "2026-11-19", "2026-11-26"], "19 November once");
+    }
+
+    /// Microsoft 365 listing the instances of the all-day series around a day.
+    struct Instances;
+
+    impl Api for Instances {
+        async fn request(&self, _: &str, url: &str, _: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            assert!(url.starts_with("/me/events/M2/instances?"), "{url}");
+            Ok((200, json!({ "value": [
+                {"id": "O-12", "originalStart": "2026-11-11T23:00:00Z", "changeKey": "ck2"},
+                {"id": "O-19", "originalStart": "2026-11-18T23:00:00Z", "changeKey": "ck2"}
+            ]})))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_one_day_of_an_all_day_series_finds_that_day() {
+        let raw = serde_json::to_vec(&all_day_series()).unwrap();
+        let master = Stored { id: crate::calendar::EventId(1), remote_id: "M2".into(), etag: None, raw: Some(raw), data: mapped(all_day_series()) };
+        let day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        assert_eq!(instance(&Instances, &master, &Moment::Date(day)).await.unwrap().id, "O-19");
+    }
+
     #[test]
     fn deletions_and_a_master_graph_cannot_give() {
         let known: Known = [("S1", "a"), ("X9", "b"), ("O7", "c"), ("M9", "d")].into_iter().map(|(k, v)| (k.to_string(), Some(v.to_string()))).collect();
@@ -1198,13 +1476,13 @@ mod tests {
             .iter()
             .map(|c| match c {
                 Change::Upsert { remote_id, events, .. } => format!("+{remote_id} {}", events[0].uid),
-                Change::Remove { remote_id } => format!("-{remote_id}"),
+                Change::Remove { remote_id, removal } => format!("-{remote_id} {removal:?}"),
             })
             .collect();
         assert_eq!(
             summary,
-            ["+M1 040000008200E00074C5B7101A82E008SERIES", "+O8 u8", "-M9", "-O7", "-X9", "-an-occurrence"],
-            "M9 is gone; O8's master can't be read, so the occurrence stands alone; O7 was stored and now expands from M1"
+            ["+M1 040000008200E00074C5B7101A82E008SERIES", "+O8 u8", "-M9 Unlisted", "-O7 Unlisted", "-X9 Deleted", "-an-occurrence Deleted"],
+            "M9 can't be read; O8's master can't be read, so the occurrence stands alone; O7 was stored and now expands from M1; delta deleted the others"
         );
         let Change::Upsert { events, .. } = &changes[1] else { unreachable!() };
         assert_eq!(events[0].recurrence_id, None, "a stand-in is a single event");

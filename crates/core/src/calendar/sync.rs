@@ -93,42 +93,51 @@ pub async fn sync_calendar(jolta: &Jolta, id: CalendarId) -> Result<SyncReport> 
     let known = jolta.store.read_async(move |c| store::known_items(c, id)).await?;
     let batch = source.sync(&calendar, &known).await?;
 
-    let mut changes = Vec::with_capacity(batch.changes.len());
-    for change in batch.changes {
-        changes.push(match change {
-            Change::Upsert { remote_id, etag, events, raw } => {
-                let blob = raw.map(|r| jolta.blobs.put(&r)).transpose()?;
-                (remote_id, Some((etag, events, blob)))
-            }
-            Change::Remove { remote_id } => (remote_id, None),
-        });
-    }
-    let horizon = Horizon::now();
+    let changes = batch
+        .changes
+        .into_iter()
+        .map(|mut change| {
+            let blob = match &mut change {
+                Change::Upsert { raw, .. } => raw.take().map(|r| jolta.blobs.put(&r)).transpose()?,
+                Change::Remove { .. } => None,
+            };
+            Ok((change, blob))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let report = jolta
         .store
         .write_async(move |tx| {
-            let mut report = SyncReport::default();
-            for (remote_id, change) in &changes {
-                match change {
-                    Some((etag, events, blob)) => {
-                        report.upserted += usize::from(store::apply_item(
-                            tx,
-                            id,
-                            remote_id,
-                            etag.as_deref(),
-                            events,
-                            blob.as_deref(),
-                            &horizon,
-                        )?);
-                    }
-                    None => report.removed += usize::from(store::remove_item(tx, id, remote_id, &horizon)?),
-                }
-            }
+            let horizon = Horizon::now();
+            let report = apply(tx, id, &changes, &horizon)?;
             store::set_calendar_cursor(tx, id, batch.cursor.as_deref(), batch.refresh)?;
             Ok(report)
         })
         .await?;
     Ok(SyncReport { elapsed: started.elapsed(), ..report })
+}
+
+/// Stores one round of changes, each upsert with the blob its raw JSON
+/// went to. Removals go first: a deleted series takes the rows filed under
+/// it along, and an object the same round returned is written back after.
+pub(crate) fn apply(
+    tx: &rusqlite::Connection,
+    calendar: CalendarId,
+    changes: &[(Change, Option<String>)],
+    horizon: &Horizon,
+) -> Result<SyncReport> {
+    let mut report = SyncReport::default();
+    for (change, _) in changes {
+        if let Change::Remove { remote_id, removal } = change {
+            report.removed += usize::from(store::remove_item(tx, calendar, remote_id, *removal, horizon)?);
+        }
+    }
+    for (change, blob) in changes {
+        if let Change::Upsert { remote_id, etag, events, .. } = change {
+            report.upserted +=
+                usize::from(store::apply_item(tx, calendar, remote_id, etag.as_deref(), events, blob.as_deref(), horizon)?);
+        }
+    }
+    Ok(report)
 }
 
 /// The calendars a sync covers: every shown one, since hidden calendars

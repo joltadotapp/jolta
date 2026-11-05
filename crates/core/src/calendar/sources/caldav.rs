@@ -18,7 +18,7 @@ use super::{Change, Gone, Known, SyncBatch, http_client, http_error, vanished};
 use crate::calendar::remove;
 use crate::calendar::rsvp::{self, Rsvp, Target};
 use crate::calendar::{Access, Calendar, EventData, ical};
-use crate::store::RemoteCalendar;
+use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, Error, Result, secrets};
 
 /// Resources per calendar-multiget, so one reply stays a few hundred KB.
@@ -259,7 +259,7 @@ impl CalDav {
             .map(|(href, _)| href.clone())
             .collect();
         let mut changes = self.multiget(&url, &changed).await?;
-        changes.extend(listing.gone.iter().map(|href| Change::Remove { remote_id: href_key(href) }));
+        changes.extend(listing.gone.iter().map(|href| Change::Remove { remote_id: href_key(href), removal: Removal::Deleted }));
         if listing.complete {
             let present: BTreeSet<String> = listing.members.iter().map(|(href, _)| href_key(href)).collect();
             changes.extend(vanished(known, &present));
@@ -366,7 +366,7 @@ impl CalDav {
             for r in dav::multistatus(&reply.body)?.responses {
                 let remote_id = href_key(&r.href);
                 if r.status == Some(404) {
-                    out.push(Change::Remove { remote_id });
+                    out.push(Change::Remove { remote_id, removal: Removal::Deleted });
                     continue;
                 }
                 // Skipping it would let the new sync token pass it by for good.

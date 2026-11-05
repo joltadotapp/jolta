@@ -239,7 +239,7 @@ mod tests {
             .iter()
             .map(|c| match c {
                 Change::Upsert { remote_id, events, .. } => (remote_id.as_str(), events.len()),
-                Change::Remove { remote_id } => (remote_id.as_str(), 0),
+                Change::Remove { remote_id, .. } => (remote_id.as_str(), 0),
             })
             .collect();
         assert_eq!(ids, [("a", 2), ("b", 1), ("gone", 0)]);

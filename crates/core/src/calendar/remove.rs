@@ -13,6 +13,7 @@ use rusqlite::OptionalExtension;
 use super::card::{self, Card, Removing};
 use super::ical_edit::{Component, Object, Prop};
 use super::rsvp::{self, Scope};
+use super::series::Horizon;
 use super::sources::{Change, Gone};
 use super::{Access, Calendar, CalendarId, CalendarSource, EventData, EventStatus, Moment, ical, invitation, sync, tz};
 use crate::model::{AccountId, MessageId};
@@ -52,7 +53,6 @@ pub struct Removed {
 /// it cancels.
 pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
     let (account, removing) = cancellation(jolta, message).await?;
-    let here = tz::here();
     let rid = removing.occurrence.as_ref().map(|(rid, _)| *rid);
     let uid = removing.uid.clone();
     let (calendar, target, added) = target(jolta, account, &uid, rid).await?;
@@ -76,13 +76,11 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
         Gone::Deleted(Some(Change::Upsert { remote_id, etag, events, raw })) => {
             let (remote_id, etag, events) = (remote_id.clone(), etag.clone(), events.clone());
             let blob = raw.as_ref().map(|r| jolta.blobs.put(r)).transpose()?;
-            let horizon = super::series::Horizon::around(Utc::now(), here);
-            jolta.store.write_async(move |tx| store::apply_item(tx, id, &remote_id, etag.as_deref(), &events, blob.as_deref(), &horizon).map(|_| ())).await?;
+            jolta.store.write_async(move |tx| store::apply_item(tx, id, &remote_id, etag.as_deref(), &events, blob.as_deref(), &Horizon::now()).map(|_| ())).await?;
         }
         Gone::Deleted(_) if target.occurrence.is_none() => {
             let remote_id = target.event.remote_id.clone();
-            let horizon = super::series::Horizon::around(Utc::now(), here);
-            jolta.store.write_async(move |tx| store::remove_item(tx, id, &remote_id, &horizon).map(|_| ())).await?;
+            jolta.store.write_async(move |tx| store::remove_item(tx, id, &remote_id, store::Removal::Deleted, &Horizon::now()).map(|_| ())).await?;
         }
         // The server knows what's left of the series.
         Gone::Deleted(_) | Gone::Already => {

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::rsvp::{Rsvp, Stored, Target};
 use super::{Calendar, CalendarSource, EventData};
-use crate::store::RemoteCalendar;
+use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, AccountKind, Error, Result};
 
 /// The remote objects a calendar holds, with their ETags, by remote id.
@@ -23,7 +23,7 @@ pub type Known = BTreeMap<String, Option<String>>;
 pub enum Change {
     /// Replaces every event stored under `remote_id`.
     Upsert { remote_id: String, etag: Option<String>, events: Vec<EventData>, raw: Option<Vec<u8>> },
-    Remove { remote_id: String },
+    Remove { remote_id: String, removal: Removal },
 }
 
 /// What one sync brings. Sources compare against `Known` themselves and
@@ -80,7 +80,7 @@ impl Source {
         match self {
             Source::CalDav(s) => s.answer(calendar, target, rsvp).await.map(|c| match &c {
                 Change::Upsert { remote_id, .. } => (remote_id.clone(), Some(c)),
-                Change::Remove { remote_id } => (remote_id.clone(), None),
+                Change::Remove { remote_id, .. } => (remote_id.clone(), None),
             }),
             Source::Google(s) => s.answer(calendar, target, rsvp).await.map(|r| (r, None)),
             Source::Graph(s) => s.answer(target, rsvp).await.map(|r| (r, None)),
@@ -119,7 +119,7 @@ impl Source {
         match self {
             Source::CalDav(s) => s.create(calendar, copy).await.map(|c| match &c {
                 Change::Upsert { remote_id, .. } => (remote_id.clone(), Some(c), true),
-                Change::Remove { remote_id } => (remote_id.clone(), None, true),
+                Change::Remove { remote_id, .. } => (remote_id.clone(), None, true),
             }),
             Source::Google(s) => s.create(calendar, copy).await.map(|id| (id, None, true)),
             Source::Graph(s) => s.create(calendar, copy).await.map(|(id, complete)| (id, None, complete)),
@@ -273,7 +273,7 @@ fn vanished(known: &Known, present: &BTreeSet<String>) -> Vec<Change> {
     known
         .keys()
         .filter(|id| !present.contains(*id))
-        .map(|id| Change::Remove { remote_id: id.clone() })
+        .map(|id| Change::Remove { remote_id: id.clone(), removal: Removal::Unlisted })
         .collect()
 }
 

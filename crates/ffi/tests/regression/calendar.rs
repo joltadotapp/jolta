@@ -245,11 +245,12 @@ fn a_feed_from_subscription_to_removal() {
     app.core.set_calendar_shown(info.id, true).unwrap();
     assert_eq!(week(&app, monday, here).len(), 5);
 
+    // The scheduler may move the series back at any moment after this, so
+    // only where they end up is checked here.
     let other = if here == chrono_tz::Asia::Tokyo { chrono_tz::America::New_York } else { chrono_tz::Asia::Tokyo };
     let rebuilt = block_on(scheduler::refresh_occurrences(&app.jolta, Utc::now(), other)).unwrap();
     assert_eq!(rebuilt.len(), 1, "built in another zone");
     let focus = at(day(4), "08:00", here).timestamp();
-    assert_eq!(start_of(&week(&app, monday, here), "Focus"), at(day(4), "08:00", other).timestamp(), "the floating event moved");
     app.core.sync_now();
     eventually("the scheduler rebuilds in this Mac's zone", || start_of(&week(&app, monday, here), "Focus") == focus);
     assert_eq!(start_of(&week(&app, monday, here), "Board call"), at(day(1), "10:00", chrono_tz::America::New_York).timestamp());

@@ -201,7 +201,7 @@ fn store_answer(conn: &Connection, calendar: super::CalendarId, target: &Target,
             // An answer that changed nothing on the server keeps its ETag, which
             // would make `apply_item` skip the copy read with the aliases.
             conn.execute("UPDATE event SET etag = NULL WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, landed])?;
-            store::apply_item(conn, calendar, landed, w.etag.as_deref(), &w.events, w.blob.as_deref(), &Horizon::around(Utc::now(), here)).map(|_| ())
+            store::apply_item(conn, calendar, landed, w.etag.as_deref(), &w.events, w.blob.as_deref(), &Horizon::now()).map(|_| ())
         }
         None => record(conn, calendar, target, rsvp, landed, here),
     }
@@ -306,7 +306,7 @@ fn record(conn: &Connection, calendar: super::CalendarId, target: &Target, rsvp:
             store::insert_event(conn, calendar, landed, None, &single, None)?;
         }
     }
-    store::rebuild_series(conn, calendar, uid, &Horizon::around(Utc::now(), here))
+    store::rebuild_series(conn, calendar, uid, &Horizon::now())
 }
 
 /// `data` with the user's own answer and note.
