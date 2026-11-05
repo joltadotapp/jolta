@@ -225,6 +225,7 @@ struct FindTimePanel: View {
                 .frame(height: rowHeight + 6)
             }
             }
+            .padding(.bottom, FindTimeSlots.tickRoom)
             .overlay(alignment: .topLeading) {
                 FindTimeSlots(days: info.days, slots: slots, selected: forAvailability ? nil : selected)
                     .padding(.leading, nameWidth)
@@ -441,13 +442,16 @@ struct FindTimeRow: View {
     }
 }
 
-/// The suggested times over every row: a band in the theme's neutral fill
-/// for each, and the one Return picks in the accent with a ring.
+/// The suggested times: the one Return picks as an accent band with a ring
+/// over every row, the others as ticks under the rows so they don't read as
+/// busy blocks; in Insert my availability every free time is a neutral band.
 struct FindTimeSlots: View {
     let days: [WorkingDay]
     let slots: [FindTimeSlot]
     /// None in Insert my availability, where every free time goes in.
     let selected: Int?
+
+    static let tickRoom: CGFloat = 6
 
     static func column(_ i: Int, of count: Int, in size: CGSize) -> CGRect {
         let width = size.width / CGFloat(max(count, 1))
@@ -465,14 +469,20 @@ struct FindTimeSlots: View {
         Canvas { context, size in
             let accent = Color(Theme.accent)
             let neutral = Color(Theme.fill)
+            let tickColor = Color(Theme.text3)
             for (i, day) in days.enumerated() {
-                let column = Self.column(i, of: days.count, in: size).insetBy(dx: 0, dy: 2)
+                var column = Self.column(i, of: days.count, in: size).insetBy(dx: 0, dy: 2)
+                column.size.height -= Self.tickRoom
                 for (n, s) in slots.enumerated() {
                     guard let r = Self.span(s.start, s.end, day: day, column: column) else { continue }
-                    let on = n == selected
-                    context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(on ? accent.opacity(0.26) : neutral))
-                    if on {
+                    if selected == nil {
+                        context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(neutral))
+                    } else if n == selected {
+                        context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(accent.opacity(0.26)))
                         context.stroke(Path(roundedRect: r.insetBy(dx: -1, dy: -1), cornerRadius: 5), with: .color(accent), lineWidth: 2)
+                    } else {
+                        let tick = CGRect(x: r.minX, y: r.maxY + 2, width: r.width, height: 3)
+                        context.fill(Path(roundedRect: tick, cornerRadius: 1.5), with: .color(tickColor))
                     }
                 }
             }
