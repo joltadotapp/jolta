@@ -12,7 +12,7 @@ use super::invitation::{Invitation, Method};
 use super::recur::Source;
 use super::series::{self, Horizon};
 use super::update;
-use super::{Bounds, EventData, EventStatus, MeetingProvider, Moment, Person, Response, Role, Span, Zone, meeting, recur, tz};
+use super::{Bounds, Calendar, EventData, EventStatus, MeetingProvider, Moment, Person, Response, Role, Span, Zone, meeting, recur, tz};
 use crate::blobs::Blobs;
 use crate::model::{AccountId, MessageId};
 use crate::{Result, store};
@@ -286,9 +286,14 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         Some((e, span)) if repeats && e.recurrence_id.is_none() => Some(span.start()),
         _ => shown.recurrence_id,
     };
+    // The account's copy is only in its own calendars: a copy in one shared
+    // with it is the owner's, whom Google marks as the copy's self.
+    let receiver = store::account(conn, cx.account)?.address;
+    let owned = |c: &Calendar| c.is_own(&receiver);
     let copy = |account: Option<AccountId>| -> Result<Option<store::StoredEvent>> {
-        Ok(match store::stored_event(conn, &shown.uid, at.as_ref(), account, cx.here)? {
-            None if at.is_some() && master.is_some() => store::stored_event(conn, &shown.uid, None, account, cx.here)?,
+        let kept = |c: &Calendar| account.is_none() || owned(c);
+        Ok(match store::stored_event_in(conn, &shown.uid, at.as_ref(), account, cx.here, kept)? {
+            None if at.is_some() && master.is_some() => store::stored_event_in(conn, &shown.uid, None, account, cx.here, kept)?,
             found => found,
         })
     };
@@ -300,7 +305,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let occurrence_cancelled = method != Method::Cancel
         && sent.recurrence_id.is_none()
         && at.is_some()
-        && store::stored_event(conn, &shown.uid, at.as_ref(), Some(cx.account), cx.here)?.is_some_and(|c| update::cancels(&c, sent.sequence));
+        && store::stored_event_in(conn, &shown.uid, at.as_ref(), Some(cx.account), cx.here, owned)?.is_some_and(|c| update::cancels(&c, sent.sequence));
     let newer = history.newer.or(occurrence_cancelled.then_some(Method::Cancel));
     // An older version only points to the newer one: its time, link and
     // answers are out of date.
@@ -343,7 +348,6 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
 
-    let receiver = store::account(conn, cx.account)?.address;
     let alone = sent.recurrence_id.is_some();
     // Another sender's message about the meeting answers nothing in it.
     let trusted = !history.not_from_organizer && !history.not_from_guest;

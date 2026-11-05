@@ -468,11 +468,13 @@ fn state(conn: &Connection, n: &Named, overrides: &[&Named], me: &[String], now:
     }
     let picked = pick(n, overrides, now, here)?;
     // The account's copy of the event or series, and of the occurrence shown
-    // when the calendar holds one. A series' copy answers for an occurrence
-    // without its own copy only when the message is the series'.
-    let whole = stored_event(conn, &n.uid, None, Some(n.account), here)?;
+    // when the calendar holds one, in its own calendars only, as the card
+    // finds it. A series' copy answers for an occurrence without its own
+    // copy only when the message is the series'.
+    let owned = |c: &Calendar| c.is_own(&n.receiver);
+    let whole = stored_event_in(conn, &n.uid, None, Some(n.account), here, owned)?;
     let own = match &picked.event {
-        Some(at) => stored_event(conn, &n.uid, Some(at), Some(n.account), here)?,
+        Some(at) => stored_event_in(conn, &n.uid, Some(at), Some(n.account), here, owned)?,
         None => None,
     };
     let copy_cancelled = own.iter().chain(&whole).any(|c| update::cancels(c, n.sequence));
