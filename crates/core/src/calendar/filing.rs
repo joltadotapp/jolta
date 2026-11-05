@@ -18,7 +18,7 @@ use mail_parser::{MessageParser, MessagePart};
 use rusqlite::Connection;
 
 use super::invitation::{self, Invitation, Method};
-use super::{ical, respond, tz, update};
+use super::{Access, Calendar, CalendarSource, ical, respond, tz, update};
 use crate::blobs::Blobs;
 use crate::model::{Account, AccountId};
 use crate::store::{self, OpId, UnsettledReply};
@@ -104,20 +104,32 @@ fn verdict(conn: &Connection, blobs: &Blobs, account: &Account, reply: &Unsettle
 }
 
 /// Whether a reply answers a meeting that the receiving account, by its
-/// address or an alias its calendar's copy marks, organizes, and comes from
-/// one of that meeting's guests (`update::from_guest`). A changed occurrence
-/// shares its series' organizer and guests.
+/// address or an alias its own calendar's copy marks, organizes, and comes
+/// from one of that meeting's guests (`update::from_guest`). A changed
+/// occurrence shares its series' organizer and guests.
 fn guest_answers_own_meeting(conn: &Connection, blobs: &Blobs, account: &Account, reply: &UnsettledReply, sent: &Invitation, here: Tz) -> Result<bool> {
     let uid = &sent.event.uid;
-    let copy = store::stored_series(conn, uid, Some(account.id))?;
-    let master = copy.iter().find(|e| e.recurrence_id.is_none()).or(copy.first());
-    let me = respond::addresses(&account.address, master);
+    let copy = store::stored_event(conn, uid, None, Some(account.id), here)?;
+    let own = match &copy {
+        Some(copy) => owns(&store::calendar(conn, copy.calendar_id)?, account),
+        None => false,
+    };
+    let me = respond::addresses(&account.address, copy.as_ref().filter(|_| own).map(|c| &c.event));
     let organizer = update::organizer(conn, account.id, &me, uid)?;
     if !organizer.as_ref().is_some_and(|o| me.iter().any(|m| m.trim().eq_ignore_ascii_case(o.trim()))) {
         return Ok(false);
     }
     let seen = update::Seen { conn, blobs, account: account.id, message: reply.id, sender: &reply.from_addr, me: &me, here };
     update::from_guest(&seen, organizer.as_deref(), &sent.event)
+}
+
+/// Whether the calendar is the account's own, so the attendee its copy
+/// marks as the user is an alias. A shared or delegated calendar marks its
+/// owner. Google gives a calendar shared with "Make changes and manage
+/// sharing" the owner role too, so there only the account's primary
+/// calendar, whose id is the account's address, counts.
+fn owns(calendar: &Calendar, account: &Account) -> bool {
+    calendar.access == Access::Owner && (calendar.source != CalendarSource::Google || calendar.remote_id.eq_ignore_ascii_case(&account.address))
 }
 
 /// Who wrote a reply's calendar part, by its PRODID, for the words it puts
@@ -419,6 +431,19 @@ mod tests {
         meeting(&j, calendar, "me.alias@example.com", &[ME, "me.alias@example.com"], "");
         assert!(filed(&j, &exchange("alias", "bo@example.com", "bo@example.com", Some("me.alias@example.com"), "")), "the account's alias organizes it");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Google marks a shared calendar's owner as the copy's `self`, so on
+    /// a colleague's calendar their own meeting looks like the user's.
+    #[test]
+    fn a_shared_calendars_owner_is_no_alias() {
+        for (access, source, remote_id) in [("write", "caldav", "/cal/work/"), ("owner", "google", "ann@example.com")] {
+            let (j, calendar) = setup(&format!("shared-{source}"));
+            j.store.write(|tx| Ok(tx.execute("UPDATE calendar SET access = ?1, source = ?2, remote_id = ?3", [access, source, remote_id])?)).unwrap();
+            meeting(&j, calendar, "ann@example.com", &[ME, "ann@example.com"], "");
+            assert!(!filed(&j, &exchange("ann", "bo@example.com", "bo@example.com", Some("ann@example.com"), "")), "Ann's meeting on her {source} calendar shared with {access}");
+            std::fs::remove_dir_all(&j.data_dir).unwrap();
+        }
     }
 
     #[test]
