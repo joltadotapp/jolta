@@ -441,8 +441,8 @@ struct FindTimeRow: View {
     }
 }
 
-/// The suggested times over every row: a faint band for each, and the one
-/// Return picks in the accent with a ring.
+/// The suggested times over every row: a band in the theme's neutral fill
+/// for each, and the one Return picks in the accent with a ring.
 struct FindTimeSlots: View {
     let days: [WorkingDay]
     let slots: [FindTimeSlot]
@@ -464,12 +464,13 @@ struct FindTimeSlots: View {
     var body: some View {
         Canvas { context, size in
             let accent = Color(Theme.accent)
+            let neutral = Color(Theme.fill)
             for (i, day) in days.enumerated() {
                 let column = Self.column(i, of: days.count, in: size).insetBy(dx: 0, dy: 2)
                 for (n, s) in slots.enumerated() {
                     guard let r = Self.span(s.start, s.end, day: day, column: column) else { continue }
                     let on = n == selected
-                    context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(accent.opacity(on ? 0.26 : selected == nil ? 0.16 : 0.07)))
+                    context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(on ? accent.opacity(0.26) : neutral))
                     if on {
                         context.stroke(Path(roundedRect: r.insetBy(dx: -1, dy: -1), cornerRadius: 5), with: .color(accent), lineWidth: 2)
                     }
