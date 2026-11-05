@@ -727,6 +727,22 @@ mod tests {
         assert_eq!(left, 0, "deleting the series leaves no rows");
     }
 
+    /// Graph and Google report a deleted series by its master's id alone, so
+    /// the changed occurrences filed under it go with it. An event that only
+    /// shares the UID, such as a copy added from an invitation, stays.
+    #[test]
+    fn removing_a_series_removes_the_occurrences_filed_under_it() {
+        let s = store("filed");
+        let cal = work_calendar(&s);
+        apply(&s, cal, "M1", Some("m1"), &[weekly("u1", "2026-11-03 09:00", 3)]);
+        apply(&s, cal, "X1", Some("x1"), &[EventData { master_id: Some("M1".into()), ..moved("u1", "2026-11-10 09:00", "2026-11-10 14:00") }]);
+        apply(&s, cal, "copy", Some("c1"), &[moved("u1", "2026-11-17 09:00", "2026-11-17 16:00")]);
+        assert_eq!(november(&s), pairs(&[("11-03 09:00", "Standup"), ("11-10 14:00", "Standup, moved"), ("11-17 16:00", "Standup, moved")]));
+
+        assert!(remove(&s, cal, "M1"));
+        assert_eq!(november(&s), pairs(&[("11-17 16:00", "Standup, moved")]), "the moved occurrence leaves with its series");
+    }
+
     #[test]
     fn applying_the_same_batch_twice_changes_nothing() {
         let s = store("idempotent");
