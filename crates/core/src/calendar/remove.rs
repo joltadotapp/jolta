@@ -60,12 +60,12 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
     route(calendar.source)?;
     match added {
         true => added_copy(&calendar)?,
-        false => guest_copy(&calendar, &target.event.data, std::slice::from_ref(&target.me))?,
+        false => guest_copy(&calendar, &target.me, &target.event.data, std::slice::from_ref(&target.me))?,
     }
     let source = sync::calendar_source(jolta, &calendar).await?;
     // A CalDAV server knows aliases the copy may not show.
     if !added {
-        guest_copy(&calendar, &target.event.data, &source.addresses().await)?;
+        guest_copy(&calendar, &target.me, &target.event.data, &source.addresses().await)?;
     }
     let gone = source.remove(&calendar, &target).await?;
     if added && target.occurrence.is_none() && matches!(gone, Gone::Deleted(_) | Gone::Already) {
@@ -97,12 +97,13 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
 }
 
 /// Refuses what Remove from calendar leaves alone: a copy in a calendar the
-/// account doesn't own, one the user organizes, whose delete cancels the
-/// meeting for every guest on Microsoft 365, and one that doesn't list the
-/// user as a guest. `mine` holds the account's addresses; the attendees the
-/// copy marks as the user's count too.
-pub fn guest_copy(calendar: &Calendar, event: &EventData, mine: &[String]) -> Result<()> {
-    if calendar.access != Access::Owner {
+/// account with address `account` doesn't own (`Calendar::is_own`), one the
+/// user organizes, whose delete cancels the meeting for every guest on
+/// Microsoft 365, and one that doesn't list the user as a guest. `mine`
+/// holds the account's addresses; the attendees the copy marks as the
+/// user's count too.
+pub fn guest_copy(calendar: &Calendar, account: &str, event: &EventData, mine: &[String]) -> Result<()> {
+    if !calendar.is_own(account) {
         return Err(Error::Other("This meeting is in a calendar shared with you, so Jolta leaves it to the calendar's owner.".into()));
     }
     let me: Vec<&str> = mine.iter().map(String::as_str).chain(event.attendees.iter().filter(|a| a.is_me).map(|a| a.person.address.as_str())).collect();
@@ -173,7 +174,7 @@ pub(crate) fn refusal(conn: &rusqlite::Connection, uid: &str, rid: Option<&Momen
         return Ok(added_copy(&calendar).err());
     }
     let address = store::account(conn, account)?.address;
-    Ok(guest_copy(&calendar, &copy.event, &[address]).err())
+    Ok(guest_copy(&calendar, &address, &copy.event, std::slice::from_ref(&address)).err())
 }
 
 /// "Removed from your calendar.", "Removed Thu 5 Nov from your calendar.",

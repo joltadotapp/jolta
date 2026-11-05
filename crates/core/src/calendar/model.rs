@@ -263,3 +263,18 @@ pub struct Calendar {
     /// Unix seconds of the last sync that reached the server.
     pub synced: Option<i64>,
 }
+
+impl Calendar {
+    /// Whether this calendar of the account with address `account` is the
+    /// account's own, not one shared with it or delegated to it. Only then
+    /// is the attendee its copies mark as the user one of the user's
+    /// addresses, and only then is a copy there the user's to remove.
+    /// CalDAV and Microsoft 365 sync give `Access::Owner` only to a calendar
+    /// whose DAV:owner is the account's principal, or whose Graph `owner` is
+    /// the account. Google gives its owner role to a calendar shared with
+    /// "Make changes and manage sharing" too, so there only the primary
+    /// calendar counts, whose id is the account's address.
+    pub fn is_own(&self, account: &str) -> bool {
+        self.access == Access::Owner && (self.source != CalendarSource::Google || self.remote_id.eq_ignore_ascii_case(account))
+    }
+}
