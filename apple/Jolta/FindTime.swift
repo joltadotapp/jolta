@@ -103,7 +103,7 @@ struct FindTimePanel: View {
         .background(keyField)
         .accessibilityIdentifier("find-time")
         .task {
-            minutes = Self.lengths.min { abs($0 - request.minutes) < abs($1 - request.minutes) } ?? 30
+            minutes = request.minutes > 0 ? request.minutes : 30
             await load()
         }
         .onChange(of: minutes) { suggest() }
@@ -316,9 +316,11 @@ struct FindTimePanel: View {
         selected = max(0, min(slots.count - 1, selected + delta))
     }
 
+    /// The next step down or up, from a meeting's own length too.
     private func length(_ delta: Int) {
-        let i = Self.lengths.firstIndex(of: minutes) ?? 1
-        minutes = Self.lengths[max(0, min(Self.lengths.count - 1, i + delta))]
+        if let next = delta < 0 ? Self.lengths.last(where: { $0 < minutes }) : Self.lengths.first(where: { $0 > minutes }) {
+            minutes = next
+        }
     }
 
     private func close() {
