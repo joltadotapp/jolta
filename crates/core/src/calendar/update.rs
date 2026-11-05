@@ -227,13 +227,14 @@ pub fn proposer<'a>(counter: &'a EventData, from: &str) -> Option<&'a Attendee> 
     counter.attendees.iter().find(|a| same(a)).or(counter.attendees.first())
 }
 
-/// Whether a COUNTER is a guest's proposal: it names the meeting's
+/// Whether a COUNTER or a REPLY is a guest's: it names the meeting's
 /// organizer, as `organizer` established it, or for the user's own meeting
-/// names none, as Exchange's COUNTER doesn't, and comes from its proposer,
-/// or from a provider sending for them, who is a guest of the meeting on
-/// the account's calendar copy or on one of the organizer's requests. A
-/// meeting the account knows nothing of has no guests to check against.
-fn from_guest(seen: &Seen, organizer: Option<&str>, counter: &EventData) -> Result<bool> {
+/// names none, as Exchange's COUNTER doesn't, and comes from the guest it
+/// names, or from a provider sending for them, who is a guest of the
+/// meeting on the account's calendar copy or on one of the organizer's
+/// requests. A meeting the account knows nothing of has no guests to check
+/// against.
+pub fn from_guest(seen: &Seen, organizer: Option<&str>, counter: &EventData) -> Result<bool> {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     let Some(organizer) = organizer else { return Ok(false) };
     let names = match &counter.organizer {

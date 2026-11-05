@@ -1,0 +1,37 @@
+From: Bo Nilsson <bo@example.com>
+Content-Type: multipart/alternative; boundary="Apple-Mail=_7A1C"
+Subject: Event accepted: Design crit
+Date: Wed, 04 Nov 2026 10:30:00 +0000
+Message-Id: <apple-yes@example.com>
+To: me@example.com
+Mime-Version: 1.0 (Mac OS X Mail 6.3)
+
+--Apple-Mail=_7A1C
+Content-Transfer-Encoding: 7bit
+Content-Type: text/plain; charset=us-ascii
+
+Bo Nilsson has accepted your invitation to the event: Design crit, scheduled for 13 Nov 2026 at 09:00 (GMT).
+--Apple-Mail=_7A1C
+Content-Transfer-Encoding: 7bit
+Content-Type: text/calendar; charset=utf-8; method=REPLY; name=iCal-20261104-103000.ics
+
+BEGIN:VCALENDAR
+CALSCALE:GREGORIAN
+VERSION:2.0
+METHOD:REPLY
+PRODID:-//Apple Inc.//Mac OS X 10.8.3//EN
+BEGIN:VEVENT
+DTEND:20261113T094500Z
+ORGANIZER;CN="me@example.com":mailto:me@example.com
+UID:design-crit-1113@example.com
+DTSTAMP:20261104T103000Z
+STATUS:CONFIRMED
+SEQUENCE:0
+SUMMARY:Design crit
+DTSTART:20261113T090000Z
+ATTENDEE;CN="Bo Nilsson";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICI
+ PANT;X-NUM-GUESTS=0:mailto:bo@example.com
+END:VEVENT
+END:VCALENDAR
+
+--Apple-Mail=_7A1C--

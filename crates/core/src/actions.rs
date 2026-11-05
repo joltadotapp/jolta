@@ -83,10 +83,7 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
                     .ok_or_else(|| Error::Other("This account has no inbox.".into()))?,
             };
             let to = match action {
-                // Gmail has no Archive folder: archiving leaves the message in All Mail only.
-                Action::Archive => role_mailbox(conn, account, MailboxRole::Archive)?
-                    .or(role_mailbox(conn, account, MailboxRole::All)?)
-                    .ok_or_else(|| Error::Other("This account has no Archive folder.".into()))?,
+                Action::Archive => archive_mailbox(conn, account)?,
                 Action::Trash => role_mailbox(conn, account, MailboxRole::Trash)?
                     .ok_or_else(|| Error::Other("This account has no Trash folder.".into()))?,
                 Action::MoveTo(m) => m,
@@ -116,6 +113,30 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
         }
     };
     queue(conn, account, &kind, &messages)
+}
+
+/// Where archiving puts mail. Gmail has no Archive folder: archiving
+/// leaves the message in All Mail only.
+fn archive_mailbox(conn: &Connection, account: AccountId) -> Result<MailboxId> {
+    role_mailbox(conn, account, MailboxRole::Archive)?
+        .or(role_mailbox(conn, account, MailboxRole::All)?)
+        .ok_or_else(|| Error::Other("This account has no Archive folder.".into()))
+}
+
+/// Archives these messages of the account from its inbox, as Archive does
+/// for a thread, without the rest of their threads. Returns the queued op,
+/// or `None` when none of them is in the inbox.
+pub fn archive_messages(conn: &Connection, account: AccountId, messages: &[MessageId]) -> Result<Option<(AccountId, OpId)>> {
+    let Some(from) = role_mailbox(conn, account, MailboxRole::Inbox)? else { return Ok(None) };
+    let to = archive_mailbox(conn, account)?;
+    let mut in_inbox = conn.prepare_cached("SELECT 1 FROM message_mailbox mm JOIN message m ON m.id = mm.message_id WHERE mm.message_id = ?1 AND mm.mailbox_id = ?2 AND m.account_id = ?3")?;
+    let mut moving = Vec::new();
+    for &m in messages {
+        if in_inbox.exists(params![m, from, account])? {
+            moving.push(m);
+        }
+    }
+    queue(conn, account, &OpKind::Move { from, to }, &moving)
 }
 
 /// The account's Snoozed mailbox. The first snooze adds it locally; the

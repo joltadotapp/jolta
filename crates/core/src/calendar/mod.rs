@@ -4,6 +4,7 @@
 pub mod add;
 pub mod card;
 pub mod detail;
+pub mod filing;
 pub mod ical;
 pub mod ical_edit;
 pub mod invitation;

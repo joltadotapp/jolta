@@ -419,7 +419,7 @@ fn answered(events: Vec<EventData>, rid: Option<&Moment>, here: Tz) -> Vec<Event
 
 /// The account's address, then the aliases its calendar's copy of the
 /// event marks as the user's: each sync marks only its own account's.
-fn addresses(account: &str, copy: Option<&EventData>) -> Vec<String> {
+pub(crate) fn addresses(account: &str, copy: Option<&EventData>) -> Vec<String> {
     let aliases = copy.into_iter().flat_map(|e| &e.attendees).filter(|a| a.is_me).map(|a| &a.person.address);
     let mut me = vec![account.to_string()];
     for alias in aliases {

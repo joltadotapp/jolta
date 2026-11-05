@@ -55,6 +55,12 @@ pub fn method(text: &str) -> Option<String> {
     calendars(text).iter().find_map(calendar_method)
 }
 
+/// The VCALENDAR's PRODID: who wrote it, such as
+/// `-//Google Inc//Google Calendar 70.9054//EN`.
+pub fn producer(text: &str) -> Option<String> {
+    calendars(text).iter().find_map(|cal| prop_text(cal.components.first()?, &Prop::Prodid))
+}
+
 type Detect = fn(&[Conference], Option<&str>, &str, &str) -> Option<Meeting>;
 
 pub(super) fn read_with(text: &str, me: &[String], detect: Detect) -> Result<Vec<EventData>> {
