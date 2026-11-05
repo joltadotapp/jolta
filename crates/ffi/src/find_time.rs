@@ -250,11 +250,13 @@ impl Core {
         Ok(compose::with_written(&body, &signature, &text))
     }
 
-    /// A reply to everyone on the conversation proposing the slot, on this
-    /// Mac's clock: "Would Tuesday 10 November, 14:00 to 14:30 (CET) work
-    /// for you?". It stays a draft until the user sends it.
+    /// A reply to the people Find a time looked up on the conversation
+    /// proposing the slot, on this Mac's clock: "Would Tuesday 10 November,
+    /// 14:00 to 14:30 (CET) work for you?". It stays a draft until the user
+    /// sends it.
     pub async fn reply_proposing(&self, thread_id: i64, start: i64, end: i64, utc_offset: i32) -> Result<ComposeData> {
         let mut reply = self.reply_compose(thread_id, ReplyMode::ReplyAll, utc_offset).await?;
+        (reply.to, reply.cc) = self.jolta.store.read(|c| freebusy::proposal_recipients(c, ThreadId(thread_id)))?;
         let line = availability::proposal_line(at(start), at(end), tz::here());
         reply.body = self.add_to_written(reply.body, reply.account_id, line)?;
         Ok(reply)

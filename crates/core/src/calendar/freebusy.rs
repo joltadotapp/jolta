@@ -164,6 +164,20 @@ pub fn thread_people(conn: &rusqlite::Connection, thread: ThreadId) -> Result<(A
     Ok((account, people))
 }
 
+/// Who a proposal from Find a time goes to, as To and Cc lines: the
+/// people `thread_people` looks up, the newest sender among them in To.
+pub fn proposal_recipients(conn: &rusqlite::Connection, thread: ThreadId) -> Result<(String, String)> {
+    let (_, mut people) = thread_people(conn, thread)?;
+    let mut stmt = conn.prepare_cached("SELECT from_addr FROM message WHERE thread_id = ?1 ORDER BY id DESC")?;
+    let senders = stmt.query_map([thread], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let to = match senders.iter().find_map(|s| people.iter().position(|p| p.address.eq_ignore_ascii_case(s))) {
+        Some(newest) => vec![people.remove(newest)],
+        None => std::mem::take(&mut people),
+    };
+    let line = |list: &[Person]| list.iter().map(|p| if p.name.is_empty() { p.address.clone() } else { format!("{} <{}>", p.name, p.address) }).collect::<Vec<_>>().join(", ");
+    Ok((line(&to), line(&people)))
+}
+
 /// The organizer and guests of the invitation on a message, without the
 /// user's own addresses, and the account it came to.
 pub async fn invitation_people(jolta: &Jolta, message: MessageId) -> Result<(AccountId, Vec<Person>)> {
@@ -212,6 +226,19 @@ mod tests {
             people.iter().map(|p| (p.address.as_str(), p.name.as_str())).collect::<Vec<_>>(),
             [("ann@example.com", "Ann Berg"), ("bo@example.com", "Bo"), ("cy@example.com", "Cy")]
         );
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_proposal_goes_to_everyone_looked_up_with_the_newest_other_sender_in_to() {
+        let (j, _) = jolta("find-time-recipients");
+        let first = import(&j, format!("From: Ann Berg <ann@example.com>\r\nTo: {ME}, Bo <bo@example.com>\r\nSubject: Plan\r\nMessage-ID: <a@example.com>\r\n\r\nHi\r\n").as_bytes());
+        import(&j, format!("From: Dee <dee@example.com>\r\nTo: {ME}\r\nSubject: Re: Plan\r\nIn-Reply-To: <a@example.com>\r\nMessage-ID: <b@example.com>\r\n\r\nMe too\r\n").as_bytes());
+        import(&j, format!("From: Me <{ME}>\r\nTo: ann@example.com\r\nCc: Cy <cy@example.com>\r\nSubject: Re: Plan\r\nIn-Reply-To: <b@example.com>\r\nMessage-ID: <c@example.com>\r\n\r\nYes\r\n").as_bytes());
+        let thread: ThreadId = j.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [first], |r| r.get(0))?)).unwrap();
+        let (to, cc) = j.store.read(|c| proposal_recipients(c, thread)).unwrap();
+        assert_eq!(to, "Dee <dee@example.com>", "the user wrote last, so the newest sender who isn't the user");
+        assert_eq!(cc, "Ann Berg <ann@example.com>, Bo <bo@example.com>, Cy <cy@example.com>", "Bo was only on the first message");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
