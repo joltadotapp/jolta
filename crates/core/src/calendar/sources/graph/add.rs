@@ -13,10 +13,10 @@ use chrono_tz::Tz;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::super::{NewCopy, Replaced, encode, with_join_link};
+use super::super::{NewCopy, Replaced, encode, occurrence_etag, with_join_link};
 use super::{GraphCalendar, PatternedRecurrence, rrule};
 use crate::calendar::rsvp::{Answer, Occurrence, Stored, Target};
-use crate::calendar::{Calendar, EventData, EventId, EventStatus, Local, Recurrence, Span, Zone, recur, tz};
+use crate::calendar::{Calendar, EventData, EventId, EventStatus, Local, Moment, Recurrence, Span, Zone, recur, tz};
 use crate::{Error, Result};
 
 /// PidLidGlobalObjectId and PidLidCleanGlobalObjectId, which Graph reads
@@ -42,33 +42,37 @@ impl GraphCalendar {
         let id = created["id"].as_str().ok_or_else(|| Error::Other("Microsoft 365 returned no id for the new event.".into()))?.to_string();
         if copy.master().is_some() && first.recurrence.is_some() {
             let master = Stored { id: EventId(0), remote_id: id.clone(), etag: None, raw: serde_json::to_vec(&created).ok(), data: first.clone() };
-            self.occurrences(&master, first, copy, here).await?;
+            let writes = occurrence_writes(first, copy, &[], here).expect("nothing stored to guard");
+            self.occurrences(&master, writes, copy.answer, here).await?;
         }
         Ok(id)
     }
 
-    /// Patches the copy with the newer version, guarded by its change key.
-    /// A copy no sync has read yet has none, and is left alone.
-    pub async fn replace(&self, target: &Target, copy: &NewCopy<'_>) -> Result<Replaced> {
+    /// Patches the copy with the newer version, guarded by its change key,
+    /// and each changed occurrence stored with it in `occurrences` by its
+    /// own. A copy no sync has read yet has none, and is left alone, as is
+    /// one with a changed occurrence stored without its change key.
+    pub async fn replace(&self, target: &Target, occurrences: &[Stored], copy: &NewCopy<'_>) -> Result<Replaced> {
         let here = tz::here();
         let etag = target.event.etag.as_deref().ok_or_else(|| Error::Other("Jolta hasn't read this copy back from Microsoft 365 yet. Try again in a minute.".into()))?;
-        let if_match = if etag.starts_with("W/") { etag.to_string() } else { format!("W/\"{etag}\"") };
+        let repeats = target.event.data.recurrence.is_some();
+        let writes = match repeats {
+            true => occurrence_writes(copy.master().unwrap_or(&target.event.data), copy, occurrences, here),
+            false => Some(Vec::new()),
+        };
+        let Some(writes) = writes else { return Ok(Replaced::Changed) };
         let path = format!("/me/events/{}", encode(&target.event.remote_id));
-        let written = copy.master().or_else(|| copy.events.first().filter(|_| target.event.data.recurrence.is_none()));
+        let written = copy.master().or_else(|| copy.events.first().filter(|_| !repeats));
         if let Some(e) = written {
             let body = event_body(e, copy.answer, here)?;
-            let (status, reply) = self.request("PATCH", &path, Some(&body), &[("If-Match", &if_match)]).await?;
+            let (status, reply) = self.request("PATCH", &path, Some(&body), &[("If-Match", &if_match(etag))]).await?;
             match status {
                 200..300 => {}
                 412 => return Ok(Replaced::Changed),
                 _ => return Err(self.failure(status, &reply)),
             }
         }
-        if target.event.data.recurrence.is_some() {
-            let master = copy.master().unwrap_or(&target.event.data);
-            self.occurrences(&target.event, master, copy, here).await?;
-        }
-        Ok(Replaced::Written(None))
+        self.occurrences(&target.event, writes, copy.answer, here).await
     }
 
     /// Shows the answer the user sent by mail as the copy's free, tentative
@@ -86,40 +90,67 @@ impl GraphCalendar {
         Ok(id)
     }
 
-    /// Deletes the occurrences of the series `master` that `sent` leaves
-    /// out and gives its changed occurrences their time and place. An
-    /// occurrence the series doesn't make is passed over.
-    async fn occurrences(&self, master: &Stored, sent: &EventData, copy: &NewCopy<'_>, here: Tz) -> Result<()> {
-        let excluded = sent.recurrence.iter().flat_map(|r| r.exdates.iter());
-        let cancelled = copy.overrides().filter(|o| o.status == EventStatus::Cancelled).filter_map(|o| o.recurrence_id.as_ref());
-        for rid in excluded.chain(cancelled) {
-            match self.instance(master, rid).await {
-                Ok(id) => {
-                    let (status, reply) = self.request("DELETE", &format!("/me/events/{}", encode(&id)), None, &[]).await?;
-                    if !(200..300).contains(&status) && status != 404 {
-                        return Err(self.failure(status, &reply));
-                    }
-                }
-                Err(Error::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        for o in copy.overrides().filter(|o| o.status != EventStatus::Cancelled) {
-            let rid = o.recurrence_id.as_ref().expect("an override");
+    /// Makes the occurrence `writes` on the series `master`. An occurrence
+    /// the series doesn't make is passed over.
+    async fn occurrences(&self, master: &Stored, writes: Vec<OccurrenceWrite<'_>>, answer: Option<Answer>, here: Tz) -> Result<Replaced> {
+        for OccurrenceWrite { rid, change, guard } in writes {
             let id = match self.instance(master, rid).await {
                 Ok(id) => id,
                 Err(Error::NotFound(_)) => continue,
                 Err(e) => return Err(e),
             };
-            let mut body = event_body(o, copy.answer, here)?;
-            body.as_object_mut().expect("an object").remove("recurrence");
-            let (status, reply) = self.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[]).await?;
-            if !(200..300).contains(&status) {
-                return Err(self.failure(status, &reply));
+            let headers: &[(&str, &str)] = match &guard {
+                Some(g) => &[("If-Match", g.as_str())],
+                None => &[],
+            };
+            let path = format!("/me/events/{}", encode(&id));
+            let (status, reply) = match change {
+                Some(o) => {
+                    let mut body = event_body(o, answer, here)?;
+                    body.as_object_mut().expect("an object").remove("recurrence");
+                    self.request("PATCH", &path, Some(&body), headers).await?
+                }
+                None => self.request("DELETE", &path, None, headers).await?,
+            };
+            match status {
+                200..300 => {}
+                404 if change.is_none() => {}
+                412 => return Ok(Replaced::Changed),
+                _ => return Err(self.failure(status, &reply)),
             }
         }
-        Ok(())
+        Ok(Replaced::Written(None))
     }
+}
+
+/// One write to an occurrence of the copy's series.
+#[derive(Debug, PartialEq)]
+struct OccurrenceWrite<'a> {
+    rid: &'a Moment,
+    /// Its changed version to patch in, None to delete it.
+    change: Option<&'a EventData>,
+    /// The `If-Match` of the changed occurrence stored for it.
+    guard: Option<String>,
+}
+
+/// The occurrence writes that put `copy` over the series `sent`: first a
+/// delete for each occurrence the series leaves out or the copy cancels,
+/// then a patch for each changed one, each guarded by the change key of
+/// the changed occurrence `stored` holds for it. None when one is stored
+/// without its change key, so nothing may be written.
+fn occurrence_writes<'a>(sent: &'a EventData, copy: &'a NewCopy<'a>, stored: &[Stored], here: Tz) -> Option<Vec<OccurrenceWrite<'a>>> {
+    let excluded = sent.recurrence.iter().flat_map(|r| r.exdates.iter());
+    let (cancelled, changed): (Vec<_>, Vec<_>) = copy.overrides().partition(|o| o.status == EventStatus::Cancelled);
+    let gone = excluded.chain(cancelled.into_iter().filter_map(|o| o.recurrence_id.as_ref())).map(|rid| (rid, None));
+    gone.chain(changed.into_iter().filter_map(|o| o.recurrence_id.as_ref().map(|rid| (rid, Some(o)))))
+        .map(|(rid, change)| Some(OccurrenceWrite { rid, change, guard: occurrence_etag(stored, rid, here).ok()?.map(if_match) }))
+        .collect()
+}
+
+/// The `If-Match` value for a stored change key: Graph's ETag is
+/// `W/"<changeKey>"`.
+fn if_match(etag: &str) -> String {
+    if etag.starts_with("W/") { etag.to_string() } else { format!("W/\"{etag}\"") }
 }
 
 /// The event as Graph creates it: no guests, so Exchange emails nobody.
@@ -340,6 +371,28 @@ mod tests {
 
     use super::super::unpack_uid;
     use super::*;
+
+    /// Each delete or patch of an occurrence Jolta holds changed carries
+    /// that occurrence's own change key, and one held without a change key
+    /// stops the update before anything is written.
+    #[test]
+    fn every_occurrence_write_over_a_changed_occurrence_is_guarded() {
+        let at = |day: &str| match timed(day) {
+            Span::Timed { start, .. } => Moment::Time(start),
+            Span::AllDay { .. } => unreachable!(),
+        };
+        let series = EventData { recurrence: Some(Recurrence { exdates: vec![at("2026-11-24")], ..rules("FREQ=WEEKLY") }), ..EventData::new("u", timed("2026-11-10")) };
+        let moved = EventData { recurrence_id: Some(at("2026-11-17")), ..EventData::new("u", timed("2026-11-18")) };
+        let events = [series.clone(), moved.clone()];
+        let copy = NewCopy { uid: "u", text: "", events: &events, me: "me@example.com", answer: None };
+        let held = |rid: &str, etag: Option<&str>| Stored { id: EventId(2), remote_id: "X1".into(), etag: etag.map(str::to_string), raw: None, data: EventData { recurrence_id: Some(at(rid)), ..moved.clone() } };
+        let plan = |stored: &[Stored]| occurrence_writes(&series, &copy, stored, Brussels).map(|w| w.into_iter().map(|w| (w.change.is_some(), w.guard)).collect::<Vec<_>>());
+
+        assert_eq!(plan(&[]), Some(vec![(false, None), (true, None)]), "occurrences held unchanged have no change key of their own");
+        let guarded = [held("2026-11-17", Some("ck7")), held("2026-11-24", Some("W/\"ck9\""))];
+        assert_eq!(plan(&guarded), Some(vec![(false, Some("W/\"ck9\"".into())), (true, Some("W/\"ck7\"".into()))]));
+        assert_eq!(plan(&[held("2026-11-17", None)]), None, "a changed occurrence held without its change key");
+    }
 
     fn timed(day: &str) -> Span {
         let wall = NaiveDateTime::parse_from_str(&format!("{day}T09:30:00"), "%Y-%m-%dT%H:%M:%S").unwrap();

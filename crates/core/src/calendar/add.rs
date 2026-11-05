@@ -265,15 +265,17 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
     let (account, uid, here) = (o.account, o.sent.event.uid.clone(), tz::here());
     let (calendar, mut target, _, _) =
         added_target(jolta, account, &uid, o.sent.event.recurrence_id).await?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?;
-    let before = jolta.store.read_async({
-        let uid = uid.clone();
-        move |c| Ok(store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default())
-    })
-    .await?;
+    let (before, occurrences) = jolta
+        .store
+        .read_async({
+            let (uid, event) = (uid.clone(), target.event.id);
+            move |c| Ok((store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default(), rsvp::changed_occurrences(c, event)?))
+        })
+        .await?;
     target.me = o.receiver.clone();
     let source = sync::calendar_source(jolta, &calendar).await?;
     let id = calendar.id;
-    match source.replace(&calendar, &target, &o.copy()).await? {
+    match source.replace(&calendar, &target, &occurrences, &o.copy()).await? {
         Replaced::Changed => {
             sync::sync_calendar(jolta, id).await?;
             return Err(Error::Other("The meeting changed in your calendar since Jolta last read it; check it again.".into()));
@@ -664,7 +666,7 @@ mod tests {
         let (_, mut target, event, scope) = added_target(&j, AccountId(1), "sync", None).await.unwrap().expect("the copy");
         target.me = ME.into();
         let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
-        assert!(matches!(Source::CalDav(dav).replace(&calendar, &target, &copy).await.unwrap(), Replaced::Written(_)));
+        assert!(matches!(Source::CalDav(dav).replace(&calendar, &target, &[], &copy).await.unwrap(), Replaced::Written(_)));
         assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "Update");
 
         let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;

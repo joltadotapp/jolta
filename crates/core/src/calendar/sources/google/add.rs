@@ -11,10 +11,10 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{NewCopy, Replaced, encode};
+use super::super::{NewCopy, Replaced, encode, occurrence_etag};
 use super::{BASE, Google, failure, parse};
 use crate::calendar::ical_edit::Prop;
-use crate::calendar::rsvp::{Answer, Target};
+use crate::calendar::rsvp::{Answer, Stored, Target};
 use crate::calendar::{Attendee, Calendar, EventData, EventStatus, Local, Moment, Response, Role, ShowAs, Span, Zone, tz};
 use crate::{Error, Result};
 
@@ -43,9 +43,11 @@ impl Google {
     /// its UID. A guest can't patch a private copy's time or title (Google's
     /// 403, 2026-11-04), so each import carries the ETag of the event it
     /// writes over, which `events.import` honours with a 412 for another one
-    /// (2026-11-05).
-    pub async fn replace(&self, calendar: &Calendar, target: &Target, copy: &NewCopy<'_>) -> Result<Replaced> {
-        for (e, etag) in imports(target, copy, tz::here())? {
+    /// (2026-11-05). A changed occurrence stored without its ETag stops
+    /// the update before anything is written.
+    pub async fn replace(&self, calendar: &Calendar, target: &Target, occurrences: &[Stored], copy: &NewCopy<'_>) -> Result<Replaced> {
+        let Some(imports) = imports(target, occurrences, copy, tz::here())? else { return Ok(Replaced::Changed) };
+        for (e, etag) in imports {
             let (status, reply) = self.send_import(calendar, e, copy, etag).await?;
             match status {
                 200..300 => {}
@@ -74,10 +76,11 @@ impl Google {
 
 /// The imports that write `copy` over `target`, each with the ETag Google
 /// must still hold for the event it replaces: the series or single event
-/// Jolta read, and the changed occurrence the target names when Jolta holds
-/// it. Google checks a changed occurrence against its own ETag, so one the
-/// copy holds unchanged has none to give.
-fn imports<'a>(target: &'a Target, copy: &'a NewCopy<'a>, here: Tz) -> Result<Vec<(&'a EventData, Option<&'a str>)>> {
+/// Jolta read, and each changed occurrence stored with it in `occurrences`.
+/// Google checks a changed occurrence against its own ETag, so one the
+/// copy holds unchanged has none to give. None when a changed occurrence is
+/// stored without its ETag.
+fn imports<'a>(target: &'a Target, occurrences: &'a [Stored], copy: &'a NewCopy<'a>, here: Tz) -> Result<Option<Vec<(&'a EventData, Option<&'a str>)>>> {
     let etag = target.event.etag.as_deref().ok_or_else(|| Error::Other("Jolta hasn't read this copy back from Google yet. Try again in a minute.".into()))?;
     let repeats = target.event.data.recurrence.is_some();
     let mut out = Vec::new();
@@ -86,11 +89,11 @@ fn imports<'a>(target: &'a Target, copy: &'a NewCopy<'a>, here: Tz) -> Result<Ve
     }
     if repeats {
         for o in copy.overrides() {
-            let stored = target.occurrence.as_ref().filter(|t| o.recurrence_id.is_some_and(|rid| rid.names(&t.recurrence_id, here))).and_then(|t| t.stored.as_ref());
-            out.push((o, stored.and_then(|s| s.etag.as_deref())));
+            let Ok(etag) = occurrence_etag(occurrences, o.recurrence_id.as_ref().expect("an override"), here) else { return Ok(None) };
+            out.push((o, etag));
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// The event as `events.import` takes it: the invitation's UID, times in
@@ -250,19 +253,29 @@ mod tests {
             .replace("20261110T09", "20261117T10");
         let occurrence = ical::read(&moved, &[]).unwrap();
         let copy = |events| NewCopy { uid: "standup@example.com", text: SERIES, events, me: "me@icloud.example", answer: None };
-        let conditions = |target: &Target, events| imports(target, &copy(events), Brussels).map(|list| list.into_iter().map(|(e, etag)| (e.recurrence_id.is_some(), etag.map(str::to_string))).collect::<Vec<_>>());
+        let conditions = |target: &Target, held: &[Stored], events| {
+            imports(target, held, &copy(events), Brussels).map(|list| list.map(|list| list.into_iter().map(|(e, etag)| (e.recurrence_id.is_some(), etag.map(str::to_string))).collect::<Vec<_>>()))
+        };
 
         let whole = Target { event: stored(&series[0], Some("\"1\"")), occurrence: None, me: "me@gmail.example".into() };
-        assert_eq!(conditions(&whole, &series).unwrap(), [(false, Some("\"1\"".into()))], "the series Jolta read");
+        assert_eq!(conditions(&whole, &[], &series).unwrap(), Some(vec![(false, Some("\"1\"".into()))]), "the series Jolta read");
         let rid = occurrence[0].recurrence_id.unwrap();
-        let changed = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: Some(stored(&occurrence[0], Some("\"7\""))) }), ..whole.clone() };
-        assert_eq!(conditions(&changed, &occurrence).unwrap(), [(true, Some("\"7\"".into()))], "Google checks a changed occurrence against its own ETag");
+        let held = [stored(&occurrence[0], Some("\"7\""))];
+        let changed = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: Some(held[0].clone()) }), ..whole.clone() };
+        assert_eq!(conditions(&changed, &held, &occurrence).unwrap(), Some(vec![(true, Some("\"7\"".into()))]), "Google checks a changed occurrence against its own ETag");
         let unchanged = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: None }), ..whole.clone() };
-        assert_eq!(conditions(&unchanged, &occurrence).unwrap(), [(true, None)], "an occurrence without an event of its own has no ETag");
+        assert_eq!(conditions(&unchanged, &[], &occurrence).unwrap(), Some(vec![(true, None)]), "an occurrence without an event of its own has no ETag");
         let alone = Target { event: stored(&occurrence[0], Some("\"3\"")), occurrence: None, me: "me@gmail.example".into() };
-        assert_eq!(conditions(&alone, &occurrence).unwrap(), [(true, Some("\"3\"".into()))], "an occurrence the copy holds without its series");
-        let unread = Target { event: stored(&series[0], None), ..whole };
-        assert!(conditions(&unread, &series).unwrap_err().to_string().contains("hasn't read this copy"), "no write without an ETag to hold it to");
+        assert_eq!(conditions(&alone, &[], &occurrence).unwrap(), Some(vec![(true, Some("\"3\"".into()))]), "an occurrence the copy holds without its series");
+        let unread = Target { event: stored(&series[0], None), ..whole.clone() };
+        assert!(conditions(&unread, &[], &series).unwrap_err().to_string().contains("hasn't read this copy"), "no write without an ETag to hold it to");
+
+        // A newer series with its changed occurrence: each import over an
+        // event Jolta holds carries that event's own ETag.
+        let both = [series[0].clone(), occurrence[0].clone()];
+        assert_eq!(conditions(&whole, &held, &both).unwrap(), Some(vec![(false, Some("\"1\"".into())), (true, Some("\"7\"".into()))]), "the whole series names no occurrence, and still guards it");
+        let unread = [stored(&occurrence[0], None)];
+        assert_eq!(conditions(&whole, &unread, &both).unwrap(), None, "a changed occurrence stored without its ETag stops the update before any import");
     }
 
     #[test]

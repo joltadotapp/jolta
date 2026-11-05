@@ -189,6 +189,13 @@ fn store_answer(conn: &Connection, calendar: super::CalendarId, target: &Target,
     }
 }
 
+/// The changed occurrences stored with the series of `event`, as the
+/// server last gave them.
+pub(crate) fn changed_occurrences(conn: &Connection, event: EventId) -> Result<Vec<Stored>> {
+    let (_, rows, _) = series_of(conn, event, None)?;
+    Ok(rows.into_iter().filter(|r| !r.is_master).map(|r| r.stored).collect())
+}
+
 /// One stored row of a series.
 struct Row {
     stored: Stored,

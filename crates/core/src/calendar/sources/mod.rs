@@ -10,8 +10,10 @@ pub mod webcal;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use super::rsvp::{Rsvp, Target};
-use super::{Calendar, CalendarSource, EventData};
+use chrono_tz::Tz;
+
+use super::rsvp::{Rsvp, Stored, Target};
+use super::{Calendar, CalendarSource, EventData, Moment};
 use crate::store::RemoteCalendar;
 use crate::{Account, AccountKind, Error, Result};
 
@@ -127,11 +129,13 @@ impl Source {
 
     /// Writes a newer version of the invitation over the copy `target`
     /// holds, telling nobody, only while the copy is the version Jolta read.
-    pub async fn replace(&self, calendar: &Calendar, target: &Target, copy: &NewCopy<'_>) -> Result<Replaced> {
+    /// `occurrences` are the changed occurrences stored with it, each of
+    /// which Google and Microsoft 365 keep as an event of its own.
+    pub async fn replace(&self, calendar: &Calendar, target: &Target, occurrences: &[Stored], copy: &NewCopy<'_>) -> Result<Replaced> {
         match self {
             Source::CalDav(s) => s.replace(calendar, target, copy).await,
-            Source::Google(s) => s.replace(calendar, target, copy).await,
-            Source::Graph(s) => s.replace(target, copy).await,
+            Source::Google(s) => s.replace(calendar, target, occurrences, copy).await,
+            Source::Graph(s) => s.replace(target, occurrences, copy).await,
             Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
         }
     }
@@ -171,6 +175,22 @@ impl NewCopy<'_> {
         self.events.iter().filter(|e| e.recurrence_id.is_some())
     }
 }
+
+/// The ETag a write over the occurrence `rid` of a copy's series carries:
+/// that of the changed occurrence stored for it, None for one the copy
+/// holds unchanged, which has no event of its own to check. Unread when
+/// the changed occurrence is stored without an ETag, so no write may go
+/// over it.
+pub(crate) fn occurrence_etag<'a>(occurrences: &'a [Stored], rid: &Moment, here: Tz) -> std::result::Result<Option<&'a str>, Unread> {
+    match occurrences.iter().find(|s| s.data.recurrence_id.is_some_and(|r| r.names(rid, here))) {
+        None => Ok(None),
+        Some(s) => s.etag.as_deref().map(Some).ok_or(Unread),
+    }
+}
+
+/// A changed occurrence Jolta holds without the ETag a write over it needs.
+#[derive(Debug)]
+pub(crate) struct Unread;
 
 /// What writing a newer version over an added copy did.
 #[derive(Clone, Debug, PartialEq)]
