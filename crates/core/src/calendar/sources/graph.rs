@@ -774,6 +774,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         meeting,
         categories: g.categories.clone(),
         color: None,
+        master_id: g.series_master_id.clone(),
     })
 }
 
@@ -1097,6 +1098,7 @@ mod tests {
         assert_eq!(x.uid, "040000008200E00074C5B7101A82E008SERIES", "the master's iCalUId, not the instance's");
         let brussels = |s: &str| Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(ROMANCE) };
         assert_eq!(x.recurrence_id, Some(Moment::Time(brussels("2026-12-04 09:00"))));
+        assert_eq!((events["M1"].master_id.as_deref(), x.master_id.as_deref()), (None, Some("M1")), "an exception names the series Graph files it under");
         assert_eq!(x.span, Span::Timed { start: brussels("2026-12-04 14:00"), end: brussels("2026-12-04 15:00") });
         assert_eq!(x.my_response(), Some(Response::Tentative), "the event's own answer wins over the attendee list");
         let roles: Vec<(Role, Response)> = x.attendees.iter().map(|a| (a.role, a.response)).collect();

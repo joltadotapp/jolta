@@ -73,20 +73,31 @@ pub fn added_event(conn: &Connection, account: AccountId, uid: &str, recurrence_
         .optional()?;
     let Some(own_uid) = own_uid else { return Ok(None) };
     let mut stmt = conn.prepare_cached(
-        "SELECT e.id, c.source, e.data FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.calendar_id = ?1 AND e.uid = ?2 AND (e.recurrence_id = '') = ?3 AND (?3 = 0 OR e.remote_id = ?4) AND c.shown",
+        "SELECT e.id, c.source, e.data, e.remote_id FROM event e JOIN calendar c ON c.id = e.calendar_id
+         WHERE e.calendar_id = ?1 AND e.uid = ?2 AND (e.recurrence_id = '') = ?3 AND c.shown",
     )?;
-    let rows = stmt.query_map(params![copy.calendar_id, own_uid, recurrence_id.is_none(), copy.remote_id], |r| {
-        Ok((r.get::<_, EventId>(0)?, r.get::<_, CalendarSource>(1)?, r.get::<_, String>(2)?))
+    let rows = stmt.query_map(params![copy.calendar_id, own_uid, recurrence_id.is_none()], |r| {
+        Ok((r.get::<_, EventId>(0)?, r.get::<_, CalendarSource>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
     })?;
     for row in rows {
-        let (event_id, source, data) = row?;
+        let (event_id, source, data, remote_id) = row?;
         let event: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {event_id}: {e}")))?;
+        if !of_copy(&copy.remote_id, &remote_id, &event) {
+            continue;
+        }
         if recurrence_id.is_none_or(|rid| event.recurrence_id.is_some_and(|stored| rid.names(&stored, here))) {
             return Ok(Some(StoredEvent { event_id, calendar_id: copy.calendar_id, source, event }));
         }
     }
     Ok(None)
+}
+
+/// Whether the stored event `remote_id` holding `data` is part of the copy
+/// whose object Jolta created is `object`: that object itself, or a changed
+/// occurrence Google or Microsoft 365 files under it. A CalDAV resource
+/// holds its changed occurrences, so they have its remote id.
+pub fn of_copy(object: &str, remote_id: &str, data: &EventData) -> bool {
+    remote_id == object || (data.recurrence_id.is_some() && data.master_id.as_deref() == Some(object))
 }
 
 /// The copy of an invitation to `account` that is the user's: the one in

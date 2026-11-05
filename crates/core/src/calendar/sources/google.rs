@@ -620,6 +620,7 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
         meeting,
         categories: Vec::new(),
         color: g.color_id.as_deref().and_then(event_color).map(str::to_string),
+        master_id: g.recurring_event_id.clone(),
     })
 }
 
@@ -910,6 +911,7 @@ mod tests {
         assert_eq!(moved.uid, master.uid, "an override joins its master's series");
         assert_eq!(moved.recurrence_id, Some(Moment::Time(at("2026-11-16 09:00", Europe::Brussels))));
         assert_eq!(moved.recurrence, None);
+        assert_eq!((master.master_id.as_deref(), moved.master_id.as_deref()), (None, Some("abc123")), "an override names the series Google files it under");
 
         let window = Window { start: Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap(), end: Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap() };
         let starts: Vec<String> = recur::expand(&master, &[moved], window, Europe::Brussels)

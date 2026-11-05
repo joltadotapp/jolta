@@ -232,6 +232,7 @@ fn event(
         meeting,
         categories,
         color,
+        master_id: None,
     };
     let stamp = comp.property(&Prop::Dtstamp).and_then(|e| match e.values.first() {
         Some(Value::PartialDateTime(dt)) => utc(dt),

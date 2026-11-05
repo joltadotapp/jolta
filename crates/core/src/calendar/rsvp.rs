@@ -149,7 +149,8 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
 /// The calendar of `event`, and what a change in `scope` goes to, with the
 /// objects as the server last gave them. For a copy the user added,
 /// `object` is the remote id of the object Jolta created, which is then the
-/// series or single event, whatever else in the calendar has its UID.
+/// series or single event, with only its own changed occurrences, whatever
+/// else in the calendar has its UID.
 pub(crate) async fn target_of(jolta: &Jolta, event: EventId, scope: &Scope, object: Option<String>) -> Result<(Calendar, Target)> {
     let here = tz::here();
     let (calendar, rows, me) = jolta.store.read_async(move |c| series_of(c, event, object.as_deref())).await?;
@@ -189,10 +190,10 @@ fn store_answer(conn: &Connection, calendar: super::CalendarId, target: &Target,
     }
 }
 
-/// The changed occurrences stored with the series of `event`, as the
-/// server last gave them.
-pub(crate) fn changed_occurrences(conn: &Connection, event: EventId) -> Result<Vec<Stored>> {
-    let (_, rows, _) = series_of(conn, event, None)?;
+/// The changed occurrences stored with the series of `event`, only those
+/// of the copy whose object is `object`, as the server last gave them.
+pub(crate) fn changed_occurrences(conn: &Connection, event: EventId, object: &str) -> Result<Vec<Stored>> {
+    let (_, rows, _) = series_of(conn, event, Some(object))?;
     Ok(rows.into_iter().filter(|r| !r.is_master).map(|r| r.stored).collect())
 }
 
@@ -202,9 +203,9 @@ struct Row {
     is_master: bool,
 }
 
-/// The calendar of `event`, every stored event of its series, with only
-/// `object` as its series or single event when given, and the user's
-/// address on the calendar's account.
+/// The calendar of `event`, every stored event of its series, only those
+/// of the copy whose object is `object` when given (`store::of_copy`), and
+/// the user's address on the calendar's account.
 fn series_of(conn: &Connection, event: EventId, object: Option<&str>) -> Result<(Calendar, Vec<Row>, String)> {
     let (calendar_id, uid): (super::CalendarId, String) = conn
         .query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -215,18 +216,19 @@ fn series_of(conn: &Connection, event: EventId, object: Option<&str>) -> Result<
         Some(account) => store::account(conn, account)?.address,
         None => String::new(),
     };
-    let mut stmt = conn.prepare(
-        "SELECT id, remote_id, etag, recurrence_id = '', data FROM event
-         WHERE calendar_id = ?1 AND uid = ?2 AND (?3 IS NULL OR recurrence_id <> '' OR remote_id = ?3) ORDER BY id",
-    )?;
+    let mut stmt = conn.prepare("SELECT id, remote_id, etag, recurrence_id = '', data FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY id")?;
     let rows = stmt
-        .query_map(params![calendar_id, uid, object], |r| {
+        .query_map(params![calendar_id, uid], |r| {
             Ok((r.get::<_, EventId>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, bool>(3)?, r.get::<_, String>(4)?))
         })?
         .map(|row| {
             let (id, remote_id, etag, is_master, data) = row?;
             let data: EventData = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}")))?;
             Ok(Row { stored: Stored { id, remote_id, etag, raw: None, data }, is_master })
+        })
+        .filter(|row| match (row, object) {
+            (Ok(row), Some(object)) => store::of_copy(object, &row.stored.remote_id, &row.stored.data),
+            _ => true,
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((calendar, rows, me))

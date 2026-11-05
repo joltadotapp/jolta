@@ -268,8 +268,8 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
     let (before, occurrences) = jolta
         .store
         .read_async({
-            let (uid, event) = (uid.clone(), target.event.id);
-            move |c| Ok((store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default(), rsvp::changed_occurrences(c, event)?))
+            let (uid, event, object) = (uid.clone(), target.event.id, target.event.remote_id.clone());
+            move |c| Ok((store::added_copy(c, account, &uid)?.map(|a| a.written).unwrap_or_default(), rsvp::changed_occurrences(c, event, &object)?))
         })
         .await?;
     target.me = o.receiver.clone();
@@ -679,6 +679,88 @@ mod tests {
         let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", None, None)]).await;
         Source::CalDav(dav).remove(&calendar, &target).await.unwrap();
         assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "Remove from calendar");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// The object and the changed occurrence an answer or an update for
+    /// the 17th goes to in the copy added of `uid`, and the changed
+    /// occurrences an update guards.
+    async fn on_the_17th(j: &crate::Jolta, uid: &str) -> (String, Option<String>, Vec<String>) {
+        let (_, target, _, _) = added_target(j, AccountId(1), uid, Some(at(17))).await.unwrap().expect("the copy");
+        let (event, object) = (target.event.id, target.event.remote_id.clone());
+        let guarded = j.store.read(|c| rsvp::changed_occurrences(c, event, &object)).unwrap();
+        (object, target.occurrence.and_then(|o| o.stored).map(|s| s.remote_id), guarded.into_iter().map(|s| s.remote_id).collect())
+    }
+
+    /// A changed occurrence is part of the added copy only while it belongs
+    /// to the object Jolta created: in its CalDAV resource, or filed under it
+    /// by Google or Microsoft 365. Another event in that calendar with the
+    /// UID, stored first, lends the copy none of its occurrences.
+    #[tokio::test]
+    async fn only_the_objects_own_occurrences_are_part_of_the_added_copy() {
+        let (j, personal, _team, _side) = folder("add-own-occurrences");
+        let series = "DTSTART;TZID=Europe/Brussels:20261110T093000\r\nDTEND;TZID=Europe/Brussels:20261110T094500\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n";
+        let store_as = |remote: &str, events: &[EventData]| {
+            j.store.write(|tx| store::apply_item(tx, personal, remote, None, events, None, &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap()
+        };
+        // CalDAV, Google and Microsoft 365: the other event's series and its
+        // changed 17th, the copy's series, then the copy's own changed 17th.
+        let shapes = [
+            ("dav", ["other.ics", "other.ics", "theirs.ics", "theirs.ics"], [None, None]),
+            ("google", ["other", "other_20261117T083000Z", "theirs", "theirs_20261117T083000Z"], [Some("other"), Some("theirs")]),
+            ("graph", ["M-other", "X-other", "M-theirs", "X-theirs"], [Some("M-other"), Some("M-theirs")]),
+        ];
+        for (uid, [other, other_moved, theirs, theirs_moved], [other_master, theirs_master]) in shapes {
+            let request = version(uid, uid, "REQUEST", 0, "20261104T080000Z", series);
+            let master = events_of(&request).remove(0);
+            let moved = |master_id: Option<&str>| EventData { recurrence: None, recurrence_id: Some(at(17)), master_id: master_id.map(String::from), ..master.clone() };
+            let both = |master_id| if other == other_moved { vec![master.clone(), moved(master_id)] } else { vec![moved(master_id)] };
+            if other == other_moved {
+                store_as(other, &both(other_master));
+                store_as(theirs, &[master.clone()]);
+            } else {
+                store_as(other, &[master.clone()]);
+                store_as(other_moved, &both(other_master));
+                store_as(theirs, &[master.clone()]);
+            }
+            added(&j, personal, uid, theirs, &request);
+            assert_eq!(on_the_17th(&j, uid).await, (theirs.to_string(), None, vec![]), "{uid}: the copy's 17th is unchanged");
+
+            store_as(theirs_moved, &both(theirs_master));
+            assert_eq!(on_the_17th(&j, uid).await, (theirs.to_string(), Some(theirs_moved.to_string()), vec![theirs_moved.to_string()]), "{uid}: its own changed 17th");
+        }
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// An occurrence the user added alone is the object Jolta created, also
+    /// while another event in that calendar holds that occurrence alone and
+    /// was stored first.
+    #[tokio::test]
+    async fn an_occurrence_added_alone_is_written_only_as_itself() {
+        use crate::calendar::sources::Source;
+        use crate::calendar::sources::caldav::tests::caldav_server;
+        let (j, personal, _team, _side) = folder("add-alone");
+        let lines = "RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\nDTSTART;TZID=Europe/Brussels:20261117T093000\r\nDTEND;TZID=Europe/Brussels:20261117T094500\r\nSUMMARY:Standup\r\n";
+        let one = version("o", "one", "REQUEST", 0, "20261104T080000Z", lines);
+        import(&j, one.as_bytes());
+        let text = invitation::calendar_text(one.as_bytes(), "one").unwrap();
+        let blob = j.blobs.put(text.as_bytes()).unwrap();
+        for remote in ["other.ics", "theirs.ics"] {
+            j.store.write(|tx| store::apply_item(tx, personal, remote, Some("\"1\""), &events_of(&one), Some(&blob), &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
+        }
+        added(&j, personal, "one", "theirs.ics", &one);
+
+        let (_, mut target, event, scope) = added_target(&j, AccountId(1), "one", Some(at(17))).await.unwrap().expect("the copy");
+        assert_eq!(target.event.remote_id, "theirs.ics");
+        target.me = ME.into();
+        let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
+        let rsvp = Rsvp { event, answer: Answer::Accept, note: None, notify: false, scope };
+        Source::CalDav(dav).follow(&calendar, &target, &rsvp).await.unwrap();
+        assert_eq!(server.await.unwrap(), ["PUT /cal/theirs.ics If-Match \"1\""], "an answer that follows");
+
+        let (_, target, added) = super::super::remove::target(&j, AccountId(1), "one", Some(at(17))).await.unwrap();
+        assert!(added);
+        assert_eq!(target.event.remote_id, "theirs.ics", "Remove from calendar");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

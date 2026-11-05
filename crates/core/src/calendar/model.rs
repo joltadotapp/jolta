@@ -198,6 +198,11 @@ pub struct EventData {
     pub meeting: Option<Meeting>,
     pub categories: Vec<String>,
     pub color: Option<String>,
+    /// For an occurrence a provider keeps as an object of its own, the
+    /// remote id of its series: Google's `recurringEventId`, Graph's
+    /// `seriesMasterId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_id: Option<String>,
 }
 
 impl EventData {
@@ -224,6 +229,7 @@ impl EventData {
             meeting: None,
             categories: Vec::new(),
             color: None,
+            master_id: None,
         }
     }
 

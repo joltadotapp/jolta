@@ -916,6 +916,7 @@ mod tests {
             meeting: None,
             categories: Vec::new(),
             color: None,
+            master_id: None,
         }
     }
 
