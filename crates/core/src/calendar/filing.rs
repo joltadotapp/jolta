@@ -4,13 +4,14 @@
 //! Outlook files responses. Each reply is settled once, by its Message-ID:
 //! filed, or left in the inbox for good.
 //!
-//! What a reply says beyond its answer, from about 440 real REPLY mails:
-//! Exchange (Microsoft 365, Outlook) sends an empty body and puts a note in
-//! COMMENT and in the body. Google writes one sentence ("Ann has accepted
-//! this invitation.") above the event's details, and with a note ends it
-//! "with a note:" and puts the note in the attendee's X-RESPONSE-COMMENT. Apple's Calendar writes one sentence ("Pat
-//! has accepted your invitation to the event: …"), and Jolta's own reply
-//! the same sentence as Google's.
+//! What a reply says beyond its answer, from 58 real replies by other
+//! people: Exchange (Microsoft 365, Outlook) sends an empty text and HTML
+//! body and puts a note in COMMENT and in the body. Google writes one
+//! sentence ("Ann has accepted this invitation.") above the event's details
+//! and its footer, and with a note ends it "with a note:" and puts the note
+//! in the attendee's X-RESPONSE-COMMENT. Apple's Calendar writes one
+//! sentence ("Pat has accepted your invitation to the event: …"), and
+//! Jolta's own reply the same sentence as Google's.
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
@@ -149,8 +150,8 @@ fn owns(calendar: &Calendar, account: &Account) -> bool {
 /// around every answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Producer {
-    /// Microsoft 365 and Outlook: every one of 34 real replies said
-    /// `Microsoft Exchange Server 2010`.
+    /// Microsoft 365 and Outlook: all 37 real replies said `Microsoft
+    /// Exchange Server 2010`.
     Exchange,
     Google,
     Apple,
