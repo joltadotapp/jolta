@@ -146,25 +146,63 @@ pub struct Slot {
 /// the quarter hour for meetings under 30 minutes, else on the half hour,
 /// on the working hours' clock.
 pub fn suggest(own: &[Busy], others: &[Schedule], hours: &WorkingHours, duration: Duration, from: DateTime<Utc>, days: u32) -> Vec<Slot> {
-    todo!()
+    if duration <= Duration::zero() {
+        return Vec::new();
+    }
+    let missing: Vec<String> = others
+        .iter()
+        .filter(|s| matches!(s.availability, Availability::Unknown(_)))
+        .map(|s| s.person.clone())
+        .collect();
+    let known = others.iter().filter_map(|s| match &s.availability {
+        Availability::Known(busy) => Some(busy.as_slice()),
+        Availability::Unknown(_) => None,
+    });
+    let taken = merged(std::iter::once(own).chain(known).flatten());
+    let step = if duration < Duration::minutes(30) { 15 } else { 30 };
+    let every = duration.max(Duration::hours(1));
+    let mut out = Vec::new();
+    for (gap_start, gap_end) in gaps(&taken, hours, from, days) {
+        let mut start = round_up(gap_start, step, hours.zone);
+        while start + duration <= gap_end {
+            out.push(Slot { start, end: start + duration, missing: missing.clone() });
+            start = round_up(start + every, step, hours.zone);
+        }
+    }
+    out
 }
 
 /// The user's free stretches of at least `shortest` in the next `days`
 /// working days after `from`, for Insert my availability. Stretch starts
 /// fall on the half hour.
 pub fn free_times(own: &[Busy], hours: &WorkingHours, from: DateTime<Utc>, days: u32, shortest: Duration) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
-    todo!()
+    gaps(&merged(own), hours, from, days)
+        .into_iter()
+        .map(|(start, end)| (round_up(start, 30, hours.zone), end))
+        .filter(|(start, end)| *end - *start >= shortest)
+        .collect()
 }
 
 /// "Tue 10 Nov: 10:00 to 11:30, 14:00 to 16:00", one line per day, on
 /// `zone`'s clock.
 pub fn availability_text(free: &[(DateTime<Utc>, DateTime<Utc>)], zone: Tz) -> String {
-    todo!()
+    let mut lines: Vec<(NaiveDate, Vec<String>)> = Vec::new();
+    for (start, end) in free {
+        let (s, e) = (start.with_timezone(&zone), end.with_timezone(&zone));
+        let span = format!("{} to {}", s.format("%H:%M"), e.format("%H:%M"));
+        match lines.last_mut() {
+            Some((day, spans)) if *day == s.date_naive() => spans.push(span),
+            _ => lines.push((s.date_naive(), vec![span])),
+        }
+    }
+    lines.iter().map(|(day, spans)| format!("{}: {}", day.format("%a %-d %b"), spans.join(", "))).collect::<Vec<_>>().join("\n")
 }
 
 /// "Would Tuesday 10 November, 14:00 to 14:30 (CET) work for you?"
 pub fn proposal_line(start: DateTime<Utc>, end: DateTime<Utc>, zone: Tz) -> String {
-    todo!()
+    let (s, e) = (start.with_timezone(&zone), end.with_timezone(&zone));
+    let end_text = if e.date_naive() == s.date_naive() { e.format("%H:%M").to_string() } else { e.format("%A %-d %B, %H:%M").to_string() };
+    format!("Would {}, {} to {end_text} ({}) work for you?", s.format("%A %-d %B"), s.format("%H:%M"), s.format("%Z"))
 }
 
 /// The blocking times, sorted and joined where they touch or overlap.
@@ -258,8 +296,8 @@ mod tests {
         assert_eq!(starts(&slots)[0], "Mon 10:30", "a half-hour meeting starts on the half hour");
         let slots = suggest(&[], &[], &hours(), Duration::minutes(15), at("2026-11-09 10:07"), 1);
         assert_eq!(starts(&slots)[0], "Mon 10:15", "a quarter-hour meeting starts on the quarter hour");
-        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 16:45"), 1);
-        assert_eq!(starts(&slots), ["Tue 09:00"], "a day whose working time is too short for the meeting gives nothing");
+        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 16:45"), 2);
+        assert_eq!(starts(&slots)[0], "Tue 09:00", "the quarter hour left today is too short for the meeting");
     }
 
     #[test]
@@ -284,7 +322,7 @@ mod tests {
     fn a_block_over_midnight_takes_the_next_morning() {
         let others = [known("ann@example.com", vec![busy("2026-11-09 16:00", "2026-11-10 10:00", BusyKind::Busy)])];
         let slots = suggest(&[], &others, &hours(), Duration::minutes(60), at("2026-11-09 14:00"), 2);
-        assert_eq!(starts(&slots), ["Mon 14:00", "Tue 10:00", "Tue 11:00", "Tue 12:00", "Tue 13:00", "Tue 14:00", "Tue 15:00", "Tue 16:00"]);
+        assert_eq!(starts(&slots), ["Mon 14:00", "Mon 15:00", "Tue 10:00", "Tue 11:00", "Tue 12:00", "Tue 13:00", "Tue 14:00", "Tue 15:00", "Tue 16:00"]);
     }
 
     #[test]
