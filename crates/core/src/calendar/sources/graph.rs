@@ -1257,6 +1257,76 @@ mod tests {
         );
     }
 
+    /// A weekly all-day series from Brussels as Microsoft 365 recorded it on
+    /// 2026-11-05: its own zone is UTC, its original starts are midnight on
+    /// the clock of `recurrenceTimeZone`.
+    fn all_day_series() -> Value {
+        json!({
+            "id": "M2", "changeKey": "ck2", "type": "seriesMaster", "iCalUId": "040000008200E00074C5B7101A82E008ALLDAY",
+            "subject": "Day off", "isAllDay": true,
+            "start": {"dateTime": "2026-11-12T00:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-13T00:00:00.0000000", "timeZone": "UTC"},
+            "originalStartTimeZone": "UTC", "originalEndTimeZone": "UTC",
+            "recurrence": {
+                "pattern": {"type": "weekly", "interval": 1, "daysOfWeek": ["thursday"], "firstDayOfWeek": "monday"},
+                "range": {"type": "numbered", "startDate": "2026-11-12", "numberOfOccurrences": 3, "recurrenceTimeZone": "Romance Standard Time"}
+            },
+            "cancelledOccurrences": []
+        })
+    }
+
+    #[test]
+    fn an_all_day_exception_replaces_the_day_it_was_on_in_the_series_zone() {
+        let renamed = json!({
+            "id": "X2", "changeKey": "ckx2", "type": "exception", "seriesMasterId": "M2", "iCalUId": "per-instance-uid",
+            "subject": "Day off, renamed", "isAllDay": true, "originalStart": "2026-11-18T23:00:00Z",
+            "start": {"dateTime": "2026-11-19T00:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-20T00:00:00.0000000", "timeZone": "UTC"},
+            "originalStartTimeZone": "UTC", "originalEndTimeZone": "UTC"
+        });
+        let masters: Masters = [("M2".to_string(), Some(graph(all_day_series())))].into();
+        let (changes, _) = batch(vec![graph(renamed)], masters, &Known::new(), true, &[], Europe::Brussels, &BTreeSet::new());
+        let events: Vec<&EventData> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Upsert { events, .. } => Some(&events[0]),
+                Change::Remove { .. } => None,
+            })
+            .collect();
+        let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        assert_eq!(events[1].recurrence_id, Some(Moment::Date(day("2026-11-19"))), "Thursday in Brussels, not the UTC date of its midnight");
+        assert_eq!(starts(events[0], &[events[1].clone()], (2026, 11), 1), ["2026-11-12", "2026-11-19", "2026-11-26"], "19 November once");
+    }
+
+    /// Microsoft 365 listing the instances of the all-day series around a day.
+    struct Instances;
+
+    impl Api for Instances {
+        async fn request(&self, _: &str, url: &str, _: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            assert!(url.starts_with("/me/events/M2/instances?"), "{url}");
+            Ok((200, json!({ "value": [
+                {"id": "O-12", "originalStart": "2026-11-11T23:00:00Z", "changeKey": "ck2"},
+                {"id": "O-19", "originalStart": "2026-11-18T23:00:00Z", "changeKey": "ck2"}
+            ]})))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_one_day_of_an_all_day_series_finds_that_day() {
+        let raw = serde_json::to_vec(&all_day_series()).unwrap();
+        let master = Stored { id: crate::calendar::EventId(1), remote_id: "M2".into(), etag: None, raw: Some(raw), data: mapped(all_day_series()) };
+        let day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        assert_eq!(instance(&Instances, &master, &Moment::Date(day)).await.unwrap().id, "O-19");
+    }
+
     #[test]
     fn deletions_and_a_master_graph_cannot_give() {
         let known: Known = [("S1", "a"), ("X9", "b"), ("O7", "c"), ("M9", "d")].into_iter().map(|(k, v)| (k.to_string(), Some(v.to_string()))).collect();
