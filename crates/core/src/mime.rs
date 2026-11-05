@@ -12,7 +12,7 @@ fn join_addresses(list: Option<AddressList>) -> String {
     let Some(list) = list else { return String::new() };
     list.mailboxes()
         .map(|m| match (m.name(), m.address()) {
-            (Some(n), Some(a)) if !n.is_empty() => format!("{n} <{a}>"),
+            (Some(n), Some(a)) if !n.is_empty() => crate::compose::format_addresses(&[(n.to_string(), a.to_string())]),
             (_, Some(a)) => a.to_string(),
             (Some(n), None) => n.to_string(),
             (None, None) => String::new(),

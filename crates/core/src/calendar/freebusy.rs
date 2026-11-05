@@ -174,7 +174,7 @@ pub fn proposal_recipients(conn: &rusqlite::Connection, thread: ThreadId) -> Res
         Some(newest) => vec![people.remove(newest)],
         None => std::mem::take(&mut people),
     };
-    let line = |list: &[Person]| list.iter().map(|p| if p.name.is_empty() { p.address.clone() } else { format!("{} <{}>", p.name, p.address) }).collect::<Vec<_>>().join(", ");
+    let line = |list: &[Person]| compose::format_addresses(&list.iter().map(|p| (p.name.clone(), p.address.clone())).collect::<Vec<_>>());
     Ok((line(&to), line(&people)))
 }
 
@@ -234,11 +234,13 @@ mod tests {
         let (j, _) = jolta("find-time-recipients");
         let first = import(&j, format!("From: Ann Berg <ann@example.com>\r\nTo: {ME}, Bo <bo@example.com>\r\nSubject: Plan\r\nMessage-ID: <a@example.com>\r\n\r\nHi\r\n").as_bytes());
         import(&j, format!("From: Dee <dee@example.com>\r\nTo: {ME}\r\nSubject: Re: Plan\r\nIn-Reply-To: <a@example.com>\r\nMessage-ID: <b@example.com>\r\n\r\nMe too\r\n").as_bytes());
-        import(&j, format!("From: Me <{ME}>\r\nTo: ann@example.com\r\nCc: Cy <cy@example.com>\r\nSubject: Re: Plan\r\nIn-Reply-To: <b@example.com>\r\nMessage-ID: <c@example.com>\r\n\r\nYes\r\n").as_bytes());
+        import(&j, format!("From: Me <{ME}>\r\nTo: ann@example.com\r\nCc: \"Cy <Ops> Ray\" <cy@example.com>\r\nSubject: Re: Plan\r\nIn-Reply-To: <b@example.com>\r\nMessage-ID: <c@example.com>\r\n\r\nYes\r\n").as_bytes());
         let thread: ThreadId = j.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [first], |r| r.get(0))?)).unwrap();
         let (to, cc) = j.store.read(|c| proposal_recipients(c, thread)).unwrap();
         assert_eq!(to, "Dee <dee@example.com>", "the user wrote last, so the newest sender who isn't the user");
-        assert_eq!(cc, "Ann Berg <ann@example.com>, Bo <bo@example.com>, Cy <cy@example.com>", "Bo was only on the first message");
+        assert_eq!(cc, "Ann Berg <ann@example.com>, Bo <bo@example.com>, \"Cy <Ops> Ray\" <cy@example.com>", "Bo was only on the first message");
+        let sent: Vec<String> = crate::compose::parse_addresses(&cc).into_iter().map(|(_, a)| a).collect();
+        assert_eq!(sent, ["ann@example.com", "bo@example.com", "cy@example.com"], "the addresses looked up are the ones the reply goes to");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

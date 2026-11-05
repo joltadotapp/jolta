@@ -65,9 +65,16 @@ pub fn parse_addresses(list: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn format_addresses(list: &[(String, String)]) -> String {
+/// An address list for a To or Cc line, quoting a name that has characters
+/// a header would otherwise read as part of the address or the list.
+pub(crate) fn format_addresses(list: &[(String, String)]) -> String {
+    let plain = |n: &str| !n.contains(['<', '>', ',', ';', ':', '"', '\\', '@', '(', ')', '[', ']']);
     list.iter()
-        .map(|(n, a)| if n.is_empty() { a.clone() } else { format!("{n} <{a}>") })
+        .map(|(n, a)| match n.as_str() {
+            "" => a.clone(),
+            n if plain(n) => format!("{n} <{a}>"),
+            n => format!("\"{}\" <{a}>", n.replace('\\', "\\\\").replace('"', "\\\"")),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -320,6 +327,18 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_name_with_special_characters_survives_formatting_and_parsing() {
+        let list = vec![
+            ("Jane <Support> Doe".to_string(), "jane@example.com".to_string()),
+            ("Berg, Ann \"AB\"".to_string(), "ann@example.com".to_string()),
+            ("Bo".to_string(), "bo@example.com".to_string()),
+        ];
+        let line = super::format_addresses(&list);
+        assert_eq!(super::parse_addresses(&line), list, "{line}");
+        assert!(line.ends_with(", Bo <bo@example.com>"), "a plain name stays unquoted: {line}");
+    }
+
     use super::*;
 
     #[test]
