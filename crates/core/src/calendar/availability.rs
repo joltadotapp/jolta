@@ -58,6 +58,7 @@ impl Unknown {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Availability {
     Known(Vec<Busy>),
     Unknown(Unknown),

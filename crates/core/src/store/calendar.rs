@@ -126,6 +126,24 @@ pub fn set_calendar_shown(conn: &Connection, id: CalendarId, shown: bool) -> Res
     Ok(())
 }
 
+/// The working hours the user set in Settings › Calendar, if any.
+pub fn working_hours(conn: &Connection) -> Result<Option<crate::calendar::availability::WorkingHours>> {
+    let text: Option<String> = conn.query_row("SELECT value FROM setting WHERE key = 'working_hours'", [], |r| r.get(0)).optional()?;
+    Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
+}
+
+/// Sets the working hours, or with None goes back to the provider's or the default.
+pub fn set_working_hours(conn: &Connection, hours: Option<&crate::calendar::availability::WorkingHours>) -> Result<()> {
+    match hours {
+        Some(h) => conn.execute(
+            "INSERT INTO setting (key, value) VALUES ('working_hours', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [serde_json::to_string(h).map_err(|e| Error::Other(format!("working hours: {e}")))?],
+        )?,
+        None => conn.execute("DELETE FROM setting WHERE key = 'working_hours'", [])?,
+    };
+    Ok(())
+}
+
 pub fn set_calendar_busy(conn: &Connection, id: CalendarId, busy: bool) -> Result<()> {
     conn.execute("UPDATE calendar SET counts_as_busy = ?2 WHERE id = ?1", params![id, busy])?;
     Ok(())

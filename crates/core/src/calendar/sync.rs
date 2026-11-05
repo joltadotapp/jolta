@@ -17,7 +17,7 @@ pub fn needs_consent(account: &Account) -> bool {
 }
 
 /// The source an account's calendars come from.
-async fn account_source(jolta: &Jolta, account: &Account) -> Result<Source> {
+pub(super) async fn account_source(jolta: &Jolta, account: &Account) -> Result<Source> {
     match account.kind {
         AccountKind::Imap => {
             let id = account.id;
