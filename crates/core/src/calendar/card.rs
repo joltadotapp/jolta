@@ -1623,10 +1623,35 @@ pub(crate) mod tests {
         hold(calendar, "ann@example.com", &|e| e.attendees.retain(|a| !a.is_me));
         assert!(!removing("ann@example.com"), "the copy doesn't list the user");
 
-        j.store.write(|tx| Ok(tx.execute("DELETE FROM event", []).map(|_| ())?)).unwrap();
-        let shared = calendar_of(&j, CalendarSource::Google, crate::calendar::Access::Write);
-        hold(shared, "ann@example.com", &|_| {});
-        assert!(!removing("ann@example.com"), "a calendar shared with the user");
+        // Bo shares a calendar with the user, which Google marks with Bo as
+        // the copy's self, and with the owner role when the sharing is
+        // "Make changes and manage sharing".
+        let bo = crate::calendar::Attendee { person: Person { address: "bo@example.com".into(), name: String::new() }, role: Role::Required, response: Response::Accepted, comment: String::new(), is_me: true };
+        use crate::calendar::Access::{Owner, Write};
+        for (source, access, remote_id, own) in [
+            (CalendarSource::Google, Owner, ME, true),
+            (CalendarSource::Google, Owner, "bo@example.com", false),
+            (CalendarSource::Google, Write, "bo@example.com", false),
+            (CalendarSource::Graph, Write, "AAMkBo", false),
+            (CalendarSource::CalDav, Write, "/cal/bo/", false),
+        ] {
+            j.store.write(|tx| Ok(tx.execute("DELETE FROM event", []).map(|_| ())?)).unwrap();
+            let calendar = j
+                .store
+                .write(|tx| {
+                    let remote = store::RemoteCalendar { remote_id: remote_id.into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None };
+                    Ok(store::sync_calendar_list(tx, AccountId(1), source, &[remote])?[0].id)
+                })
+                .unwrap();
+            match own {
+                true => hold(calendar, "ann@example.com", &|_| {}),
+                false => hold(calendar, "ann@example.com", &|e| {
+                    e.attendees.iter_mut().for_each(|a| a.is_me = false);
+                    e.attendees.push(bo.clone());
+                }),
+            }
+            assert_eq!(removing("ann@example.com"), own, "{source:?} calendar {remote_id} with {access:?}");
+        }
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
