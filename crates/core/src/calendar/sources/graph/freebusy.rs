@@ -9,9 +9,9 @@ use crate::calendar::availability::{Availability, Busy, BusyKind, Schedule, Unkn
 use crate::calendar::tz;
 use crate::Result;
 
-/// Schedules per request. The getSchedule reference names no limit;
-/// Exchange's availability service takes 100 mailboxes.
-const PER_REQUEST: usize = 100;
+/// Schedules per request: "up to 20 entities at once", Microsoft Graph's
+/// free/busy guide (outlook-get-free-busy-schedule).
+const PER_REQUEST: usize = 20;
 
 impl GraphCalendar {
     /// Each person's busy times from `from` to `to`, in the order asked.
@@ -161,6 +161,13 @@ mod tests {
         assert!(matches!(got[0].availability, Availability::Unknown(_)), "an item of unknown status leaves the person unknown");
         assert!(matches!(got[1].availability, Availability::Unknown(_)), "4 in availabilityView is Exchange's no data");
         assert_eq!(got[2].availability, Availability::Known(Vec::new()));
+    }
+
+    #[test]
+    fn schedules_go_twenty_a_request() {
+        // "getSchedule can support looking up free/busy information for up to
+        // 20 entities at once", Microsoft Graph's free/busy guide.
+        assert_eq!(PER_REQUEST, 20);
     }
 
     #[test]
