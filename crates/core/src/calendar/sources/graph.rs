@@ -1265,6 +1265,78 @@ mod tests {
         );
     }
 
+    /// `Recorded`'s calendar listed by its instances, as a calendar view
+    /// lists a series, whose master Microsoft 365 now refuses to give by id.
+    struct Refused;
+
+    impl Api for Refused {
+        async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)> {
+            if method == "POST" && url == "/$batch" {
+                let responses: Vec<Value> = body.unwrap()["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| json!({"id": r["id"], "status": 403, "body": {"error": {"code": "ErrorAccessDenied"}}}))
+                    .collect();
+                return Ok((200, json!({ "responses": responses })));
+            }
+            let (status, mut page) = Recorded.request(method, url, body, headers).await?;
+            page["value"].as_array_mut().unwrap().retain(|e| e["type"] != "seriesMaster");
+            Ok((status, page))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_round_keeps_an_exception_it_returns_when_its_series_is_refused() {
+        use crate::calendar::series::Horizon;
+        use crate::calendar::sync;
+        use crate::store::{self, Store};
+
+        let dir = std::env::temp_dir().join(format!("jolta-graph-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(&dir.join("jolta.sqlite")).unwrap();
+        let remote = RemoteCalendar { remote_id: "C1".into(), name: "Calendar".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None };
+        let cal = s
+            .write(|tx| {
+                tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (1, 'graph', 'me@example.com', 'me', 'a1', 0, 1)")?;
+                store::sync_calendar_list(tx, crate::AccountId(1), crate::calendar::CalendarSource::Graph, &[remote])
+            })
+            .unwrap()[0]
+            .id;
+        let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 4, 0, 0, 0).unwrap(), Europe::Brussels);
+        let sync_with = |batch: SyncBatch| {
+            let changes: Vec<(Change, Option<String>)> = batch.changes.into_iter().map(|c| (c, None)).collect();
+            s.write(|tx| sync::apply(tx, cal, &changes, &horizon)).unwrap();
+        };
+        let november = || -> Vec<String> {
+            let from = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+            s.read(|c| store::occurrences(c, from, from.checked_add_months(Months::new(1)).unwrap(), Europe::Brussels))
+                .unwrap()
+                .into_iter()
+                .map(|o| match o.bounds {
+                    crate::calendar::Bounds::Utc { start, .. } => start.with_timezone(&Europe::Brussels).format("%m-%d %H:%M").to_string(),
+                    crate::calendar::Bounds::Days { start, .. } => start.to_string(),
+                })
+                .collect()
+        };
+
+        sync_with(read(&Recorded, "C1", None, &Known::new(), "me@example.com").await.unwrap());
+        assert_eq!(november(), ["11-10 10:00", "11-17 15:00", "11-24 10:00"]);
+
+        let known = s.read(|c| store::known_items(c, cal)).unwrap();
+        sync_with(read(&Refused, "C1", None, &known, "me@example.com").await.unwrap());
+        assert_eq!(november(), ["11-17 15:00"], "the series Graph won't give goes; the moved occurrence the round returned stays");
+    }
+
     /// A weekly all-day series from Brussels as Microsoft 365 recorded it on
     /// 2026-11-05: its own zone is UTC, its original starts are midnight on
     /// the clock of `recurrenceTimeZone`.
