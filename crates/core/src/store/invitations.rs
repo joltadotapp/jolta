@@ -1234,6 +1234,92 @@ mod tests {
         assert_eq!(seen.len(), 6, "Not answered, Accepted, Maybe, Declined, Cancelled and the mark alone all turn up: {seen:?}");
     }
 
+    /// A copy in a calendar shared with the account is its owner's, whom
+    /// Google marks as the copy's self, even with the owner role Google
+    /// gives "Make changes and manage sharing". For a single event and for
+    /// the moved occurrence of a series the card shows, the card and the
+    /// list show the answer in the account's own calendar, else the one
+    /// given from Jolta, and never the owner's.
+    #[test]
+    fn a_shared_calendars_copy_never_shows_the_users_answer() {
+        use crate::calendar::Access::{Owner, Write};
+        use crate::calendar::{Attendee, Person, Role};
+        let brussels = chrono_tz::Europe::Brussels;
+        let me = ["me@example.com".to_string()];
+        let dee = Attendee { person: Person { address: "dee@example.com".into(), name: String::new() }, role: Role::Required, response: Response::Declined, comment: String::new(), is_me: true };
+        let wall = chrono::NaiveDateTime::parse_from_str("2026-11-05 09:30", "%Y-%m-%d %H:%M").unwrap();
+        let thursday = Moment::Time(crate::calendar::Local { wall, zone: crate::calendar::Zone::Tz(brussels) });
+        let horizon = Horizon::around(now(), brussels);
+        for (what, raw, occurrence) in [("a single event", &mail!("google-request.eml")[..], None), ("a moved occurrence", &mail!("series.eml")[..], Some(thursday))] {
+            let sent: Vec<EventData> = crate::calendar::invitation::find(raw, &me).into_iter().map(|i| i.event).collect();
+            let uid = sent[0].uid.clone();
+            // A calendar's copy lists the guests on every occurrence, which
+            // the mail leaves out of the moved one.
+            let guests = sent.iter().find(|e| e.recurrence_id.is_none()).unwrap().attendees.clone();
+            let mut copy = sent.clone();
+            copy.iter_mut().filter(|e| e.attendees.is_empty()).for_each(|e| e.attendees = guests.clone());
+            let mut mine = copy.clone();
+            mine.iter_mut().flat_map(|e| &mut e.attendees).filter(|a| a.is_me).for_each(|a| a.response = Response::Accepted);
+            let mut theirs = copy.clone();
+            for e in &mut theirs {
+                e.attendees.iter_mut().for_each(|a| a.is_me = false);
+                e.attendees.push(dee.clone());
+            }
+            let version = match &occurrence {
+                Some(rid) => vec![series::occurrence(&sent, rid, brussels).unwrap()],
+                None => sent.clone(),
+            };
+            for (source, access, remote_id) in [
+                (CalendarSource::Google, Owner, "dee@example.com"),
+                (CalendarSource::Google, Write, "dee@example.com"),
+                (CalendarSource::Graph, Write, "AAMkDee"),
+                (CalendarSource::CalDav, Write, "/cal/dee/"),
+            ] {
+                let (jolta, own) = jolta(&format!("shared-answer-{what}-{source:?}-{access:?}").replace(' ', "-"));
+                let message = import(&jolta, raw);
+                // A CalDAV list replaces the account's CalDAV calendars, the own one too.
+                let shared = jolta
+                    .store
+                    .write(|tx| {
+                        let remote = |remote_id: &str, access| crate::store::RemoteCalendar { remote_id: remote_id.into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None };
+                        let list = match source {
+                            CalendarSource::CalDav => vec![remote("/cal/work/", Owner), remote(remote_id, access)],
+                            _ => vec![remote(remote_id, access)],
+                        };
+                        let synced = crate::store::sync_calendar_list(tx, AccountId(1), source, &list)?;
+                        Ok(synced.iter().find(|c| c.remote_id == remote_id).unwrap().id)
+                    })
+                    .unwrap();
+                for (in_own, remembered, expected) in [
+                    (false, false, InvitationState::Unanswered),
+                    (false, true, InvitationState::Answered(Response::Tentative)),
+                    (true, false, InvitationState::Answered(Response::Accepted)),
+                    (true, true, InvitationState::Answered(Response::Accepted)),
+                ] {
+                    jolta
+                        .store
+                        .write(|tx| {
+                            tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer;")?;
+                            crate::store::apply_item(tx, shared, "theirs", Some("1"), &theirs, None, &horizon)?;
+                            if in_own {
+                                crate::store::apply_item(tx, own, "mine", Some("1"), &mine, None, &horizon)?;
+                            }
+                            if remembered {
+                                let given = GivenAnswer { answer: Response::Tentative, note: String::new(), notify: true, proposal: None };
+                                remember_answer(tx, AccountId(1), &uid, occurrence.as_ref(), &given, &version, None)?;
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    let case = format!("{what} on {source:?} calendar {remote_id} with {access:?}, in the own calendar {in_own}, answered from Jolta {remembered}");
+                    assert_eq!(card_says(&jolta, message, raw, now()), expected, "the card: {case}");
+                    assert_eq!(shown(&jolta, message, now()), Some(expected), "the list: {case}");
+                }
+                std::fs::remove_dir_all(&jolta.data_dir).unwrap();
+            }
+        }
+    }
+
     /// The organizer is the one the account the mail came to knows: another
     /// account's copy naming a stranger as organizer lets none of the
     /// stranger's mail count.

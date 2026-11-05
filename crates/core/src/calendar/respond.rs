@@ -846,6 +846,11 @@ pub(crate) mod tests {
             let done = run(&j, request(message, Answer::Accept, None, true, false)).unwrap_or_else(|e| panic!("{case}: {e}"));
             assert_eq!(done, Outcome { text: "Accepted. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None }, "{case}");
             assert_eq!(outbox(&j)[0].0, ME, "{case}: from the receiving account");
+            assert_eq!(card_answer(&j, message, mail!("google-request.eml")), Some(Response::Accepted), "{case}: the answer given from Jolta, never the owner's");
+            set_outbox(&j, "UPDATE outbox SET state = 'sent'");
+            run(&j, request(message, Answer::Accept, None, true, false)).unwrap_or_else(|e| panic!("{case}: {e}"));
+            let sent: Vec<String> = replies(&j).into_iter().map(|(state, ..)| state).collect();
+            assert_eq!(sent, ["sent"], "{case}: the same answer again sends nothing");
 
             assert!(!can_answer(ME, &calendar, &copy), "{case}: the detail offers no answer");
             let detail = Request { subject: Subject::Event { id: event, at: None }, ..request(message, Answer::Decline, None, true, false) };
