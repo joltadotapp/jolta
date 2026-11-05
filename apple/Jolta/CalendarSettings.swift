@@ -236,7 +236,8 @@ struct WorkingHoursRow: View {
     /// Minutes after midnight as a time today, for the pickers.
     private func time(_ key: WritableKeyPath<WorkingHoursInfo, UInt32>) -> Binding<Date> {
         Binding(get: {
-            Calendar.current.startOfDay(for: .now).addingTimeInterval(TimeInterval((hours?[keyPath: key] ?? 0) * 60))
+            let m = Int(hours?[keyPath: key] ?? 0)
+            return Calendar.current.date(bySettingHour: m / 60, minute: m % 60, second: 0, of: .now) ?? .now
         }, set: { date in
             guard var h = hours else { return }
             let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
