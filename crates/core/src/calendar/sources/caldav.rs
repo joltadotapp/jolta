@@ -622,10 +622,13 @@ fn calendars(at: &Url, ms: &MultiStatus, default: Option<&Url>, principal: &Url)
 
 /// A calendar whose DAV:owner is the account's principal is the user's own,
 /// whatever privileges it lists: Fastmail gives its default calendar no
-/// `all`. One owned by another principal is shared, at most writable.
-/// Without an owner, RFC 3744 privileges decide: `all` is the owner's, any
-/// write privilege allows editing, `read` only reading, and
-/// `read-free-busy` alone only free/busy.
+/// `all`. One owned by another principal, or whose resourcetype has
+/// Calendar Server's `shared` (shared to the user; the owner's own has
+/// `shared-owner`), is shared, at most writable. Otherwise RFC 3744
+/// privileges decide: `all` is the owner's, any write privilege allows
+/// editing, `read` only reading, and `read-free-busy` alone only free/busy.
+/// iCloud sends no DAV:owner, so that last step assumes a server marks
+/// every calendar shared to the user.
 fn access(r: &dav::Response, principal: &Url) -> Access {
     let privileges: Vec<&str> = r
         .prop(DAV, "current-user-privilege-set")
@@ -634,9 +637,10 @@ fn access(r: &dav::Response, principal: &Url) -> Access {
     let has = |name: &str| privileges.contains(&name);
     let key = |href: &str| href_key(href).trim_end_matches('/').to_string();
     let owner = r.prop_href(DAV, "owner").map(key);
+    let shared = r.prop(DAV, "resourcetype").is_some_and(|t| t.child(CALENDARSERVER, "shared").is_some());
     if owner.as_ref().is_some_and(|o| *o == key(principal.as_str())) {
         Access::Owner
-    } else if has("all") && owner.is_none() {
+    } else if has("all") && owner.is_none() && !shared {
         Access::Owner
     } else if has("all") || has("write") || has("write-content") || has("bind") {
         Access::Write
@@ -941,6 +945,32 @@ pub(crate) mod tests {
             ],
             "the task list, inbox and home itself are left out"
         );
+    }
+
+    /// Without a DAV:owner, a calendar that Calendar Server marks as shared
+    /// to the user stays shared even with `all`; one the user shares out
+    /// (`shared-owner`) is still theirs.
+    #[test]
+    fn a_calendar_shared_to_the_user_is_never_theirs() {
+        let at = Url::parse("https://caldav.example.com/1/calendars/").unwrap();
+        let principal = Url::parse("https://caldav.example.com/1/principal/").unwrap();
+        let calendar = |href: &str, marker: &str| {
+            format!(
+                r#"<response><href>{href}</href><propstat><prop>
+  <resourcetype><collection/><calendar xmlns="urn:ietf:params:xml:ns:caldav"/>{marker}</resourcetype>
+  <current-user-privilege-set><privilege><all/></privilege></current-user-privilege-set>
+ </prop><status>HTTP/1.1 200 OK</status></propstat></response>"#
+            )
+        };
+        let reply = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><multistatus xmlns="DAV:">{}{}{}</multistatus>"#,
+            calendar("/1/calendars/home/", ""),
+            calendar("/1/calendars/trips/", r#"<shared-owner xmlns="http://calendarserver.org/ns/"/>"#),
+            calendar("/1/calendars/team/", r#"<shared xmlns="http://calendarserver.org/ns/"/>"#),
+        );
+        let list = calendars(&at, &dav::multistatus(&reply).unwrap(), None, &principal).unwrap();
+        let access: Vec<Access> = list.iter().map(|c| c.access).collect();
+        assert_eq!(access, [Access::Owner, Access::Owner, Access::Write]);
     }
 
     #[test]
