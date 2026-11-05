@@ -302,17 +302,27 @@ pub enum Removal {
 /// Deletes the events of one remote object. Series they belonged to keep
 /// their other events, rebuilt without them. False when there were none.
 pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, removal: Removal, horizon: &Horizon) -> Result<bool> {
-    let uids = item_uids(conn, calendar, remote_id)?;
-    let deleted =
+    let mut uids = item_uids(conn, calendar, remote_id)?;
+    let mut deleted =
         conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
+    // The series may be gone already, left out of an earlier listing, while
+    // its changed occurrences stayed: find them by the id they are filed under.
+    if removal == Removal::Deleted {
+        uids.extend(filed_under_uids(conn, calendar, remote_id)?);
+        deleted += conn
+            .prepare_cached("DELETE FROM event WHERE calendar_id = ?1 AND json_extract(data, '$.master_id') = ?2")?
+            .execute(params![calendar, remote_id])?;
+    }
     for uid in &uids {
-        if removal == Removal::Deleted {
-            conn.prepare_cached("DELETE FROM event WHERE calendar_id = ?1 AND uid = ?2 AND json_extract(data, '$.master_id') = ?3")?
-                .execute(params![calendar, uid, remote_id])?;
-        }
         rebuild_series(conn, calendar, uid, horizon)?;
     }
     Ok(deleted > 0)
+}
+
+fn filed_under_uids(conn: &Connection, calendar: CalendarId, master: &str) -> Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare_cached("SELECT DISTINCT uid FROM event WHERE calendar_id = ?1 AND json_extract(data, '$.master_id') = ?2")?;
+    let rows = stmt.query_map(params![calendar, master], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 fn item_uids(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result<BTreeSet<String>> {
@@ -757,6 +767,24 @@ mod tests {
 
         assert!(remove(&s, cal, "M1"));
         assert_eq!(november(&s), pairs(&[("11-17 16:00", "Standup, moved")]), "the moved occurrence leaves with its series");
+    }
+
+    /// A series first left out (its occurrences kept), then confirmed
+    /// deleted: the occurrences filed under it go then, with no master row
+    /// left to find them through.
+    #[test]
+    fn a_series_confirmed_deleted_after_it_went_unlisted_takes_its_occurrences() {
+        let s = store("filed-later");
+        let cal = work_calendar(&s);
+        apply(&s, cal, "M1", Some("m1"), &[weekly("u1", "2026-11-03 09:00", 3)]);
+        apply(&s, cal, "X1", Some("x1"), &[EventData { master_id: Some("M1".into()), ..moved("u1", "2026-11-10 09:00", "2026-11-10 14:00") }]);
+        let horizon = horizon();
+        assert!(s.write(|tx| remove_item(tx, cal, "M1", Removal::Unlisted, &horizon)).unwrap());
+        assert_eq!(november(&s), pairs(&[("11-10 14:00", "Standup, moved")]), "unlisted: the moved occurrence stays");
+        assert!(s.write(|tx| remove_item(tx, cal, "M1", Removal::Deleted, &horizon)).unwrap());
+        assert!(november(&s).is_empty(), "deleted later: it goes too");
+        let left: i64 = s.read(|c| Ok(c.query_row("SELECT (SELECT count(*) FROM event) + (SELECT count(*) FROM occurrence)", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]
