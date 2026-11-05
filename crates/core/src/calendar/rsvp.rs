@@ -190,8 +190,8 @@ fn store_answer(conn: &Connection, calendar: super::CalendarId, target: &Target,
     }
 }
 
-/// The changed occurrences stored with the series of `event`, only those
-/// of the copy whose object is `object`, as the server last gave them.
+/// The changed occurrences stored of the copy whose object Jolta created
+/// is `object`, the series of `event`, as the server last gave them.
 pub(crate) fn changed_occurrences(conn: &Connection, event: EventId, object: &str) -> Result<Vec<Stored>> {
     let (_, rows, _) = series_of(conn, event, Some(object))?;
     Ok(rows.into_iter().filter(|r| !r.is_master).map(|r| r.stored).collect())

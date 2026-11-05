@@ -265,7 +265,7 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
     let (account, uid, here) = (o.account, o.sent.event.uid.clone(), tz::here());
     let (calendar, mut target, _, _) =
         added_target(jolta, account, &uid, o.sent.event.recurrence_id).await?.ok_or_else(|| Error::NotFound("Your calendar no longer has this meeting.".into()))?;
-    let (before, occurrences) = jolta
+    let (before, held) = jolta
         .store
         .read_async({
             let (uid, event, object) = (uid.clone(), target.event.id, target.event.remote_id.clone());
@@ -275,7 +275,7 @@ pub async fn update(jolta: &Jolta, message: MessageId) -> Result<Added> {
     target.me = o.receiver.clone();
     let source = sync::calendar_source(jolta, &calendar).await?;
     let id = calendar.id;
-    match source.replace(&calendar, &target, &occurrences, &o.copy()).await? {
+    match source.replace(&calendar, &target, &held, &o.copy()).await? {
         Replaced::Changed => {
             sync::sync_calendar(jolta, id).await?;
             return Err(Error::Other("The meeting changed in your calendar since Jolta last read it; check it again.".into()));
@@ -684,12 +684,12 @@ mod tests {
 
     /// The object and the changed occurrence an answer or an update for
     /// the 17th goes to in the copy added of `uid`, and the changed
-    /// occurrences an update guards.
+    /// occurrences an update holds Google to.
     async fn on_the_17th(j: &crate::Jolta, uid: &str) -> (String, Option<String>, Vec<String>) {
         let (_, target, _, _) = added_target(j, AccountId(1), uid, Some(at(17))).await.unwrap().expect("the copy");
         let (event, object) = (target.event.id, target.event.remote_id.clone());
-        let guarded = j.store.read(|c| rsvp::changed_occurrences(c, event, &object)).unwrap();
-        (object, target.occurrence.and_then(|o| o.stored).map(|s| s.remote_id), guarded.into_iter().map(|s| s.remote_id).collect())
+        let held = j.store.read(|c| rsvp::changed_occurrences(c, event, &object)).unwrap();
+        (object, target.occurrence.and_then(|o| o.stored).map(|s| s.remote_id), held.into_iter().map(|s| s.remote_id).collect())
     }
 
     /// A changed occurrence is part of the added copy only while it belongs

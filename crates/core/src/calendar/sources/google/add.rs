@@ -11,8 +11,8 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{NewCopy, Replaced, encode, occurrence_etag};
-use super::{BASE, Google, failure, parse};
+use super::super::{NewCopy, Replaced, encode};
+use super::{BASE, Google, GoogleEvent, failure, moment, parse};
 use crate::calendar::ical_edit::Prop;
 use crate::calendar::rsvp::{Answer, Stored, Target};
 use crate::calendar::{Attendee, Calendar, EventData, EventStatus, Local, Moment, Response, Role, ShowAs, Span, Zone, tz};
@@ -41,22 +41,11 @@ impl Google {
 
     /// Imports the newer version over the copy, which Google matches by
     /// its UID. A guest can't patch a private copy's time or title (Google's
-    /// 403, 2026-11-04), so each import carries the ETag of the event it
-    /// writes over, which `events.import` honours with a 412 for another one
-    /// (2026-11-05). A changed occurrence stored without its ETag stops
-    /// the update before anything is written.
-    pub async fn replace(&self, calendar: &Calendar, target: &Target, occurrences: &[Stored], copy: &NewCopy<'_>) -> Result<Replaced> {
-        let Some(imports) = imports(target, occurrences, copy, tz::here())? else { return Ok(Replaced::Changed) };
-        for (e, etag) in imports {
-            let (status, reply) = self.send_import(calendar, e, copy, etag).await?;
-            match status {
-                200..300 => {}
-                412 => return Ok(Replaced::Changed),
-                404 | 410 => return Err(Error::Other("The meeting is no longer in your calendar.".into())),
-                _ => return Err(failure(status, &reply)),
-            }
-        }
-        Ok(Replaced::Written(None))
+    /// 403, 2026-11-04), so the copy is imported again, guarded by its
+    /// ETags. `held` are the changed occurrences Jolta holds of it.
+    pub async fn replace(&self, calendar: &Calendar, target: &Target, held: &[Stored], copy: &NewCopy<'_>) -> Result<Replaced> {
+        let fallback = Zone::Tz(calendar.zone.as_deref().and_then(tz::zone).unwrap_or(chrono_tz::UTC));
+        update(&Importer { google: self, calendar, copy }, target, held, copy, fallback, tz::here()).await
     }
 
     async fn import(&self, calendar: &Calendar, e: &EventData, copy: &NewCopy<'_>) -> Result<Value> {
@@ -74,26 +63,109 @@ impl Google {
     }
 }
 
-/// The imports that write `copy` over `target`, each with the ETag Google
-/// must still hold for the event it replaces: the series or single event
-/// Jolta read, and each changed occurrence stored with it in `occurrences`.
-/// Google checks a changed occurrence against its own ETag, so one the
-/// copy holds unchanged has none to give. None when a changed occurrence is
-/// stored without its ETag.
-fn imports<'a>(target: &'a Target, occurrences: &'a [Stored], copy: &'a NewCopy<'a>, here: Tz) -> Result<Option<Vec<(&'a EventData, Option<&'a str>)>>> {
-    let etag = target.event.etag.as_deref().ok_or_else(|| Error::Other("Jolta hasn't read this copy back from Google yet. Try again in a minute.".into()))?;
-    let repeats = target.event.data.recurrence.is_some();
-    let mut out = Vec::new();
-    if let Some(e) = copy.master().or_else(|| copy.events.first().filter(|_| !repeats)) {
-        out.push((e, Some(etag)));
+/// What an update asks of Google: `Importer` asks it, a test answers it.
+trait Import {
+    /// Every event in the calendar with the copy's UID, cancelled ones too.
+    async fn listed(&self) -> Result<Vec<GoogleEvent>>;
+    async fn import(&self, e: &EventData, etag: &str) -> Result<(u16, Vec<u8>)>;
+}
+
+/// The imports into `calendar` of `copy`.
+struct Importer<'a> {
+    google: &'a Google,
+    calendar: &'a Calendar,
+    copy: &'a NewCopy<'a>,
+}
+
+impl Import for Importer<'_> {
+    async fn listed(&self) -> Result<Vec<GoogleEvent>> {
+        let url = format!("{BASE}/calendars/{}/events?iCalUID={}&showDeleted=true", encode(&self.calendar.remote_id), encode(self.copy.uid));
+        let page: Value = parse(&self.google.get_ok(&url).await?)?;
+        Ok(page["items"].as_array().into_iter().flatten().filter_map(|item| serde_json::from_value(item.clone()).ok()).collect())
     }
-    if repeats {
-        for o in copy.overrides() {
-            let Ok(etag) = occurrence_etag(occurrences, o.recurrence_id.as_ref().expect("an override"), here) else { return Ok(None) };
-            out.push((o, etag));
+
+    async fn import(&self, e: &EventData, etag: &str) -> Result<(u16, Vec<u8>)> {
+        self.google.send_import(self.calendar, e, self.copy, Some(etag)).await
+    }
+}
+
+/// What an import over an event of the copy names as the ETag Google must
+/// still hold.
+#[derive(Clone, Debug, PartialEq)]
+enum Guard {
+    /// The event's own: the series or single event, or a changed occurrence.
+    Own(String),
+    /// The series' as it stands, which Google gives each occurrence that has
+    /// no event of its own.
+    Series,
+}
+
+/// Writes `copy` over `target` while Google holds what Jolta read of it.
+/// Google gives the series and each changed occurrence of a private copy an
+/// ETag of its own, and an occurrence without an event of its own the
+/// series' ETag; an import of the series changes only the series' ETag
+/// (2026-11-05). So one listing first finds a change Jolta hasn't read to
+/// any event the update writes, also an occurrence changed that Jolta holds
+/// unchanged, and nothing is written. Each import still carries its ETag,
+/// which `events.import` honours with a 412.
+async fn update(google: &impl Import, target: &Target, held: &[Stored], copy: &NewCopy<'_>, fallback: Zone, here: Tz) -> Result<Replaced> {
+    let read = target.event.etag.clone().ok_or_else(|| Error::Other("Jolta hasn't read this copy back from Google yet. Try again in a minute.".into()))?;
+    let listed = google.listed().await?;
+    let Some(imports) = imports(target, held, &listed, copy, fallback, here) else { return Ok(Replaced::Changed) };
+    let mut series = read;
+    for (e, guard) in imports {
+        let etag = match guard {
+            Guard::Own(etag) => etag,
+            Guard::Series => series.clone(),
+        };
+        let (status, reply) = google.import(e, &etag).await?;
+        match status {
+            200..300 if e.recurrence_id.is_none() => {
+                let written: Value = parse(&reply)?;
+                series = written["etag"].as_str().ok_or_else(|| Error::Other("Google returned no ETag for the imported event.".into()))?.to_string();
+            }
+            200..300 => {}
+            412 => return Ok(Replaced::Changed),
+            404 | 410 => return Err(Error::Other("The meeting is no longer in your calendar.".into())),
+            _ => return Err(failure(status, &reply)),
         }
     }
-    Ok(Some(out))
+    Ok(Replaced::Written(None))
+}
+
+/// The imports that write `copy` over `target`, each with its guard: the
+/// series or single event, then a series' changed occurrences. None when
+/// the events Google `listed` of the copy differ from what Jolta holds for
+/// one of them: another ETag, or a changed occurrence only one side has.
+fn imports<'a>(target: &Target, held: &[Stored], listed: &[GoogleEvent], copy: &'a NewCopy<'a>, fallback: Zone, here: Tz) -> Option<Vec<(&'a EventData, Guard)>> {
+    let object = target.event.remote_id.as_str();
+    let on_google = |rid: Option<&Moment>| {
+        let found = listed.iter().find(|g| match rid {
+            None => g.id == object,
+            Some(rid) => {
+                g.id != object
+                    && g.recurring_event_id.as_deref() == Some(object)
+                    && g.original_start_time.as_ref().and_then(|w| moment(w, fallback)).is_some_and(|m| m.names(rid, here))
+            }
+        });
+        found.map(|g| g.etag.clone())
+    };
+    let read = target.event.etag.clone()?;
+    if on_google(None) != Some(Some(read.clone())) {
+        return None;
+    }
+    let repeats = target.event.data.recurrence.is_some();
+    let mut out: Vec<(&EventData, Guard)> = copy.master().or_else(|| copy.events.first().filter(|_| !repeats)).map(|e| (e, Guard::Own(read))).into_iter().collect();
+    for o in copy.overrides().filter(|_| repeats) {
+        let rid = o.recurrence_id.as_ref().expect("an override");
+        let ours = held.iter().find(|s| s.data.recurrence_id.is_some_and(|r| r.names(rid, here))).map(|s| s.etag.clone());
+        match (ours, on_google(Some(rid))) {
+            (None, None) => out.push((o, Guard::Series)),
+            (Some(Some(ours)), Some(Some(theirs))) if ours == theirs => out.push((o, Guard::Own(ours))),
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// The event as `events.import` takes it: the invitation's UID, times in
@@ -240,42 +312,75 @@ mod tests {
         assert!(v.get("recurrence").is_none());
     }
 
-    /// Update writes only over what Jolta read: each import names the ETag
-    /// Google must still hold, the series' or the changed occurrence's own.
-    #[test]
-    fn every_import_of_an_update_is_conditional_where_jolta_holds_an_etag() {
+    /// Google as a test answers it: it lists `listed`, `replies` answer the
+    /// imports in turn with a new ETag, and each import is noted as whether
+    /// it is an occurrence and its If-Match.
+    struct Fake {
+        listed: Vec<Value>,
+        replies: std::sync::Mutex<std::collections::VecDeque<u16>>,
+        seen: std::sync::Mutex<Vec<(bool, String)>>,
+    }
+
+    impl Import for Fake {
+        async fn listed(&self) -> Result<Vec<GoogleEvent>> {
+            Ok(self.listed.iter().map(|v| serde_json::from_value(v.clone()).unwrap()).collect())
+        }
+
+        async fn import(&self, e: &EventData, etag: &str) -> Result<(u16, Vec<u8>)> {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push((e.recurrence_id.is_some(), etag.to_string()));
+            Ok((self.replies.lock().unwrap().pop_front().expect("a reply"), format!(r#"{{"etag": "\"{}\""}}"#, seen.len() + 1).into_bytes()))
+        }
+    }
+
+    /// The imports an update of `target` to `events` sends while Jolta holds
+    /// `held` and Google lists `listed`, then answers `replies`.
+    async fn sent(target: &Target, held: &[Stored], listed: Vec<Value>, events: &[EventData], replies: &[u16]) -> (Replaced, Vec<(bool, String)>) {
+        let copy = NewCopy { uid: "standup@example.com", text: SERIES, events, me: "me@icloud.example", answer: None };
+        let fake = Fake { listed, replies: std::sync::Mutex::new(replies.iter().copied().collect()), seen: std::sync::Mutex::new(Vec::new()) };
+        let done = update(&fake, target, held, &copy, Zone::Tz(Brussels), Brussels).await.unwrap();
+        (done, fake.seen.into_inner().unwrap())
+    }
+
+    /// Google gives the series and each changed occurrence of a private
+    /// copy an ETag of its own, and an occurrence without one the series'.
+    /// Update writes only while Google lists what Jolta holds for every
+    /// event it writes, so a change made on Google to an occurrence Jolta
+    /// holds unchanged stops it before anything is written.
+    #[tokio::test]
+    async fn an_update_writes_only_over_what_jolta_holds_of_every_event_it_writes() {
         use crate::calendar::EventId;
-        use crate::calendar::rsvp::{Occurrence, Stored};
-        let stored = |data: &EventData, etag: Option<&str>| Stored { id: EventId(1), remote_id: "r".into(), etag: etag.map(str::to_string), raw: None, data: data.clone() };
-        let series = ical::read(SERIES, &[]).unwrap();
-        let moved = SERIES
-            .replace("RRULE:FREQ=WEEKLY;BYDAY=TU\r\nEXDATE;TZID=Europe/Brussels:20261124T093000\r\n", "RECURRENCE-ID;TZID=Europe/Brussels:20261117T093000\r\n")
-            .replace("20261110T09", "20261117T10");
-        let occurrence = ical::read(&moved, &[]).unwrap();
-        let copy = |events| NewCopy { uid: "standup@example.com", text: SERIES, events, me: "me@icloud.example", answer: None };
-        let conditions = |target: &Target, held: &[Stored], events| {
-            imports(target, held, &copy(events), Brussels).map(|list| list.map(|list| list.into_iter().map(|(e, etag)| (e.recurrence_id.is_some(), etag.map(str::to_string))).collect::<Vec<_>>()))
+        let stored = |data: &EventData, remote: &str, etag: &str| Stored { id: EventId(1), remote_id: remote.into(), etag: Some(etag.into()), raw: None, data: data.clone() };
+        let at = |day: u32| SERIES.replace("RRULE:FREQ=WEEKLY;BYDAY=TU\r\nEXDATE;TZID=Europe/Brussels:20261124T093000\r\n", &format!("RECURRENCE-ID;TZID=Europe/Brussels:202611{day}T093000\r\n")).replace("20261110T09", &format!("202611{day}T10"));
+        let series = ical::read(SERIES, &[]).unwrap().remove(0);
+        let (moved, later) = (ical::read(&at(17), &[]).unwrap().remove(0), ical::read(&at(24), &[]).unwrap().remove(0));
+        let whole = Target { event: stored(&series, "s1", "\"1\""), occurrence: None, me: "me@gmail.example".into() };
+        let held = [stored(&moved, "s1_20261117T083000Z", "\"7\"")];
+        let google = |id: &str, etag: &str, day: Option<u32>| match day {
+            None => json!({ "id": id, "etag": etag }),
+            Some(day) => json!({ "id": id, "etag": etag, "recurringEventId": id.split('_').next(), "originalStartTime": { "dateTime": format!("2026-11-{day}T09:30:00+01:00") } }),
         };
+        let as_held = || vec![google("s1", "\"1\"", None), google("s1_20261117T083000Z", "\"7\"", Some(17)), google("other_20261124T083000Z", "\"9\"", Some(24))];
+        let newer = [series.clone(), moved.clone(), later.clone()];
+        let written = |seen: &[(bool, &str)]| seen.iter().map(|(o, e)| (*o, e.to_string())).collect::<Vec<_>>();
 
-        let whole = Target { event: stored(&series[0], Some("\"1\"")), occurrence: None, me: "me@gmail.example".into() };
-        assert_eq!(conditions(&whole, &[], &series).unwrap(), Some(vec![(false, Some("\"1\"".into()))]), "the series Jolta read");
-        let rid = occurrence[0].recurrence_id.unwrap();
-        let held = [stored(&occurrence[0], Some("\"7\""))];
-        let changed = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: Some(held[0].clone()) }), ..whole.clone() };
-        assert_eq!(conditions(&changed, &held, &occurrence).unwrap(), Some(vec![(true, Some("\"7\"".into()))]), "Google checks a changed occurrence against its own ETag");
-        let unchanged = Target { occurrence: Some(Occurrence { recurrence_id: rid, stored: None }), ..whole.clone() };
-        assert_eq!(conditions(&unchanged, &[], &occurrence).unwrap(), Some(vec![(true, None)]), "an occurrence without an event of its own has no ETag");
-        let alone = Target { event: stored(&occurrence[0], Some("\"3\"")), occurrence: None, me: "me@gmail.example".into() };
-        assert_eq!(conditions(&alone, &[], &occurrence).unwrap(), Some(vec![(true, Some("\"3\"".into()))]), "an occurrence the copy holds without its series");
-        let unread = Target { event: stored(&series[0], None), ..whole.clone() };
-        assert!(conditions(&unread, &[], &series).unwrap_err().to_string().contains("hasn't read this copy"), "no write without an ETag to hold it to");
+        let (done, seen) = sent(&whole, &held, as_held(), &newer, &[200, 200, 200]).await;
+        assert_eq!(done, Replaced::Written(None), "another event's changed 24th is not the copy's");
+        assert_eq!(seen, written(&[(false, "\"1\""), (true, "\"7\""), (true, "\"2\"")]), "the series, its changed 17th by its own ETag, the 24th by the series' as its import left it");
 
-        // A newer series with its changed occurrence: each import over an
-        // event Jolta holds carries that event's own ETag.
-        let both = [series[0].clone(), occurrence[0].clone()];
-        assert_eq!(conditions(&whole, &held, &both).unwrap(), Some(vec![(false, Some("\"1\"".into())), (true, Some("\"7\"".into()))]), "the whole series names no occurrence, and still guards it");
-        let unread = [stored(&occurrence[0], None)];
-        assert_eq!(conditions(&whole, &unread, &both).unwrap(), None, "a changed occurrence stored without its ETag stops the update before any import");
+        let changed_by_hand = [as_held(), vec![google("s1_20261124T083000Z", "\"8\"", Some(24))]].concat();
+        assert_eq!(sent(&whole, &held, changed_by_hand, &newer, &[]).await, (Replaced::Changed, vec![]), "the 24th, which Jolta holds unchanged, was changed on Google");
+        let listed = vec![google("s1", "\"1\"", None), google("s1_20261117T083000Z", "\"8\"", Some(17))];
+        assert_eq!(sent(&whole, &held, listed, &newer, &[]).await, (Replaced::Changed, vec![]), "the changed 17th changed again");
+        let listed = vec![google("s1", "\"5\"", None), google("s1_20261117T083000Z", "\"7\"", Some(17))];
+        assert_eq!(sent(&whole, &held, listed, &newer, &[]).await, (Replaced::Changed, vec![]), "the series changed");
+        assert_eq!(sent(&whole, &[], as_held(), &newer, &[]).await, (Replaced::Changed, vec![]), "a changed 17th Jolta doesn't hold");
+
+        let (done, seen) = sent(&whole, &held, as_held(), std::slice::from_ref(&later), &[412]).await;
+        assert_eq!((done, seen), (Replaced::Changed, written(&[(true, "\"1\"")])), "an occurrence alone, held unchanged, carries the series' ETag");
+        let alone = Target { event: stored(&moved, "o1", "\"3\""), ..whole };
+        let (done, seen) = sent(&alone, &[], vec![google("o1", "\"3\"", None)], std::slice::from_ref(&moved), &[200]).await;
+        assert_eq!((done, seen), (Replaced::Written(None), written(&[(true, "\"3\"")])), "an occurrence the copy holds without its series");
     }
 
     #[test]

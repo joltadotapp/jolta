@@ -458,41 +458,79 @@ impl GraphCalendar {
         }
     }
 
-    /// The id of the occurrence of `master` that `rid` names, from the
-    /// series' instances around it. An all-day occurrence's original start
-    /// is midnight in the series' own zone.
+    /// The id of the occurrence of `master` that `rid` names.
     async fn instance(&self, master: &Stored, rid: &Moment) -> Result<String> {
-        let here = tz::here();
-        let raw: Value = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or(Value::Null);
-        let zone = zone_of(raw["originalStartTimeZone"].as_str(), self.here);
-        let at = match rid {
-            Moment::Time(local) => local.instant(here),
-            Moment::Date(day) => tz::instant(day.and_time(NaiveTime::MIN), zone),
-        };
-        let stamp = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let url = format!(
-            "/me/events/{}/instances?startDateTime={}&endDateTime={}&$select=id,originalStart",
-            encode(&master.remote_id),
-            stamp(at - chrono::Duration::hours(36)),
-            stamp(at + chrono::Duration::hours(36)),
-        );
-        let page = self.get_ok(&url).await?;
-        page["value"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|i| {
-                let Some(start) = i["originalStart"].as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()) else { return false };
-                let start = start.to_utc();
-                let original = match rid {
-                    Moment::Date(_) => Moment::Date(start.with_timezone(&zone).date_naive()),
-                    Moment::Time(_) => Moment::Time(Local { wall: start.naive_utc(), zone: Zone::Tz(chrono_tz::UTC) }),
-                };
-                original.names(rid, here)
-            })
-            .and_then(|i| i["id"].as_str().map(str::to_string))
-            .ok_or_else(|| Error::NotFound("Microsoft 365 has no occurrence of this series at that time".into()))
+        Ok(instance(self, master, rid).await?.id)
     }
+}
+
+/// What the writes to a copy ask of Microsoft 365: `GraphCalendar` sends
+/// them, a test answers them itself.
+pub(super) trait Api {
+    async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)>;
+    fn failure(&self, status: u16, json: &Value) -> Error;
+    /// The zone for a series whose own zone Graph names in a way Jolta can't map.
+    fn zone(&self) -> Tz;
+}
+
+impl Api for GraphCalendar {
+    async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)> {
+        GraphCalendar::request(self, method, url, body, headers).await
+    }
+
+    fn failure(&self, status: u16, json: &Value) -> Error {
+        GraphCalendar::failure(self, status, json)
+    }
+
+    fn zone(&self) -> Tz {
+        self.here
+    }
+}
+
+/// One occurrence of a series as Graph lists it.
+pub(super) struct Instance {
+    pub id: String,
+    /// The series' change key as Graph lists it with the occurrence.
+    pub change_key: Option<String>,
+}
+
+/// The occurrence of `master` that `rid` names, from the series' instances
+/// around it. An all-day occurrence's original start is midnight in the
+/// series' own zone.
+pub(super) async fn instance(api: &impl Api, master: &Stored, rid: &Moment) -> Result<Instance> {
+    let here = tz::here();
+    let raw: Value = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or(Value::Null);
+    let zone = zone_of(raw["originalStartTimeZone"].as_str(), api.zone());
+    let at = match rid {
+        Moment::Time(local) => local.instant(here),
+        Moment::Date(day) => tz::instant(day.and_time(NaiveTime::MIN), zone),
+    };
+    let stamp = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let url = format!(
+        "/me/events/{}/instances?startDateTime={}&endDateTime={}&$select=id,originalStart,changeKey",
+        encode(&master.remote_id),
+        stamp(at - chrono::Duration::hours(36)),
+        stamp(at + chrono::Duration::hours(36)),
+    );
+    let (status, page) = api.request("GET", &url, None, &[]).await?;
+    if !(200..300).contains(&status) {
+        return Err(api.failure(status, &page));
+    }
+    page["value"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| {
+            let Some(start) = i["originalStart"].as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()) else { return false };
+            let start = start.to_utc();
+            let original = match rid {
+                Moment::Date(_) => Moment::Date(start.with_timezone(&zone).date_naive()),
+                Moment::Time(_) => Moment::Time(Local { wall: start.naive_utc(), zone: Zone::Tz(chrono_tz::UTC) }),
+            };
+            original.names(rid, here)
+        })
+        .and_then(|i| Some(Instance { id: i["id"].as_str()?.to_string(), change_key: i["changeKey"].as_str().map(str::to_string) }))
+        .ok_or_else(|| Error::NotFound("Microsoft 365 has no occurrence of this series at that time".into()))
 }
 
 /// Whether Graph's answer to a GET of an event says the organizer's
