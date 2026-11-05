@@ -116,6 +116,10 @@ final class AppModel {
     var pendingDecline: Int64?
     /// Set by P: the card whose Propose new time panel the reader opens.
     var proposeFor: Int64?
+    /// The time Find a time picked for the Propose new time panel.
+    var proposedSlot: TimeSlot?
+    /// Find a time, while its panel is up.
+    var findTime: FindTimeRequest?
     /// The note field, the scope menu, the calendar menu or the propose
     /// panel under the open card, when one is up.
     var rsvpPanel: RsvpPanel?
@@ -714,6 +718,28 @@ final class AppModel {
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
+    }
+
+    /// A reply to everyone on the conversation proposing a time Find a time
+    /// picked. It stays a draft until the user sends it.
+    func replyProposing(thread: Int64, start: Int64, end: Int64) {
+        let offset = Int32(TimeZone.current.secondsFromGMT())
+        Task {
+            do {
+                composeReminder = nil
+                composeSchedule = nil
+                compose = try await core.replyProposing(threadId: thread, start: start, end: end, utcOffset: offset)
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+        }
+    }
+
+    /// Adds text after what was written in the message being written, above
+    /// the signature and the quote.
+    func insertIntoCompose(_ text: String) {
+        guard let draft = compose, let body = try? core.addToWritten(body: draft.body, accountId: draft.accountId, text: text) else { return }
+        compose?.body = body
     }
 
     /// Puts a snippet, filled in for the first recipient, at the cursor of

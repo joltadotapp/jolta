@@ -167,6 +167,12 @@ fn parts(info: &FindTimeInfo) -> (Vec<Busy>, Vec<Schedule>) {
     (own, others)
 }
 
+fn free(info: &FindTimeInfo, minutes: i64) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
+    let (own, _) = parts(info);
+    let hours = hours_of(&info.hours)?;
+    Ok(availability::free_times(&own, &hours, Utc::now(), info.days.len() as u32, Duration::minutes(minutes)))
+}
+
 impl Core {
     async fn find_time(&self, account: AccountId, people: Vec<Person>, days: u32) -> Result<FindTimeOutcome> {
         let jolta = self.jolta.clone();
@@ -220,13 +226,18 @@ impl Core {
             .collect())
     }
 
+    /// The user's free stretches of at least `minutes`, for Insert my availability.
+    pub fn free_times(&self, info: FindTimeInfo, minutes: i64) -> Result<Vec<FindTimeSlot>> {
+        Ok(free(&info, minutes)?.into_iter().map(|(s, e)| FindTimeSlot { start: s.timestamp(), end: e.timestamp(), missing: Vec::new() }).collect())
+    }
+
     /// The user's free stretches of at least `minutes` as lines for a mail,
-    /// on this Mac's clock: "Tue 10 Nov: 10:00 to 11:30, 14:00 to 16:00".
+    /// on this Mac's clock, after a line naming the zone: "Tue 10 Nov: 10:00
+    /// to 11:30, 14:00 to 16:00".
     pub fn availability_text(&self, info: FindTimeInfo, minutes: i64) -> Result<String> {
-        let (own, _) = parts(&info);
-        let hours = hours_of(&info.hours)?;
-        let free = availability::free_times(&own, &hours, Utc::now(), info.days.len() as u32, Duration::minutes(minutes));
-        Ok(availability::availability_text(&free, tz::here()))
+        let here = tz::here();
+        let lines = availability::availability_text(&free(&info, minutes)?, here);
+        Ok(format!("I'm free at these times ({}):\n{lines}", Utc::now().with_timezone(&here).format("%Z")))
     }
 
     /// The body with `text` added after what the writer typed, above the

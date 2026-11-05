@@ -42,11 +42,16 @@ struct ContentView: View {
         .font(.system(size: 13))
         .ignoresSafeArea()
         .overlay {
-            if model.palette != nil || model.showsHelp {
+            if model.palette != nil || model.showsHelp || model.findTime != nil {
                 // Light while picking a theme, so the preview behind the palette shows.
                 Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
                     .ignoresSafeArea()
-                    .onTapGesture { model.palette = nil; model.showsHelp = false }
+                    .onTapGesture { model.palette = nil; model.showsHelp = false; model.findTime = nil }
+            }
+        }
+        .overlay {
+            if let request = model.findTime {
+                FindTimePanel(model: model, request: request).id(request)
             }
         }
         .overlay {

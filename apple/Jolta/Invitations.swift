@@ -129,6 +129,8 @@ extension AppModel {
             return
         }
         proposeFor = invitation.messageId
+        let length = invitation.newTime.map { ($0.end - $0.start) / 60 } ?? 30
+        findTime(for: .propose(message: invitation.messageId, organizer: invitation.organizer), minutes: length)
     }
 
     /// Proposes a new time with a Maybe or a Decline for the card's
@@ -347,6 +349,7 @@ struct RsvpProposePanel: View {
     init(model: AppModel, invitation: InvitationInfo, slot: TimeSlot) {
         self.model = model
         self.invitation = invitation
+        let slot = model.proposedSlot ?? slot
         let start = Date(timeIntervalSince1970: TimeInterval(slot.start))
         let end = Date(timeIntervalSince1970: TimeInterval(slot.end))
         _start = State(initialValue: start)
@@ -386,9 +389,20 @@ struct RsvpProposePanel: View {
             .labelsHidden()
             .datePickerStyle(.field)
             .font(.system(size: 12.5))
-            Text(summary)
+            HStack {
+                Text(summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(valid ? Theme.text3 : Theme.accent))
+                Spacer(minLength: 0)
+                Button("Find a time…") {
+                    model.findTime(for: .propose(message: invitation.messageId, organizer: invitation.organizer),
+                                   minutes: Int64(end.timeIntervalSince(start) / 60))
+                }
+                .buttonStyle(.link)
                 .font(.system(size: 11))
-                .foregroundStyle(Color(valid ? Theme.text3 : Theme.accent))
+                .help("See when \(organizer) and the guests are busy")
+                .accessibilityIdentifier("propose-find-time")
+            }
             TextField("Note to \(organizer) (optional)", text: $note)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
@@ -416,7 +430,16 @@ struct RsvpProposePanel: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
         .onExitCommand { model.rsvpPanel = nil }
-        .onAppear { focus = .start }
+        .onAppear { if model.findTime == nil { focus = .start } }
+        .onDisappear { model.proposedSlot = nil }
+        .onChange(of: model.findTime) { _, new in if new == nil { focus = .start } }
+        .onChange(of: model.proposedSlot) { _, new in
+            guard let new else { return }
+            let (s, e) = (Date(timeIntervalSince1970: TimeInterval(new.start)), Date(timeIntervalSince1970: TimeInterval(new.end)))
+            length = e.timeIntervalSince(s)
+            start = s
+            end = e
+        }
         .onChange(of: start) { _, new in end = new.addingTimeInterval(length) }
         .onChange(of: end) { _, new in
             if new > start { length = new.timeIntervalSince(start) }

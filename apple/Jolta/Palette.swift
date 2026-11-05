@@ -125,6 +125,13 @@ struct PaletteView: View {
                 model.confirmEmpty = model.source
             })
         }
+        if model.compose != nil {
+            out.append(PaletteItem(id: "insert-availability", title: "Insert my availability", detail: "Free times in the next working days",
+                                   icon: "calendar.badge.clock") { [model] in model.insertMyAvailability() })
+        } else if model.selectedThreadID != nil {
+            out.append(PaletteItem(id: "find-time", title: "Find a time", detail: "With the people on this conversation",
+                                   icon: "calendar.badge.clock") { [model] in model.findTimeForConversation() })
+        }
         out.append(PaletteItem(id: "join-next", title: "Join next meeting", detail: model.calendar.nextMeeting?.title ?? "",
                                icon: "video", keys: CalendarCommand.joinNext.keys) { [model] in model.joinNextMeeting() })
         if model.mode == .mail {
