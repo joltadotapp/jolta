@@ -232,13 +232,13 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
         })
         .await?;
     let source = sync::calendar_source(jolta, &calendar).await?;
-    let (remote_id, change) = source.create(&calendar, &o.copy()).await?;
+    let (remote_id, change, complete) = source.create(&calendar, &o.copy()).await?;
     let id = calendar.id;
     let blob = match &change {
         Some(Change::Upsert { raw: Some(raw), .. }) => Some(jolta.blobs.put(raw)?),
         _ => None,
     };
-    let (account, written) = (o.account, written_after(&[], &o.sent, tz::here()));
+    let (account, written) = (o.account, written_on_add(complete, &o.sent, tz::here()));
     jolta
         .store
         .write_async(move |tx| {
@@ -252,7 +252,17 @@ pub async fn add(jolta: &Jolta, message: MessageId, calendar: Option<CalendarId>
     if calendar.source != CalendarSource::CalDav {
         sync::sync_calendar(jolta, id).await?;
     }
-    Ok(Added { text: format!("Added to {}.", calendar.name), calendar: id })
+    let text = match complete {
+        true => format!("Added to {}.", calendar.name),
+        false => format!("Added to {}, but the meeting changed there while Jolta added it. Use Update in your calendar.", calendar.name),
+    };
+    Ok(Added { text, calendar: id })
+}
+
+/// The versions a new copy holds: none when part of the version couldn't
+/// be written, so the card keeps offering Update in your calendar.
+fn written_on_add(complete: bool, sent: &Invitation, here: Tz) -> Vec<WrittenVersion> {
+    if complete { written_after(&[], sent, here) } else { Vec::new() }
 }
 
 /// Writes the newer version on `message` over the copy the user added,
@@ -786,6 +796,22 @@ mod tests {
         assert!(!newer(&written, Some(&at(17)), v(1, 0), Brussels), "an occurrence sent with the series' version is in the copy");
         assert!(newer(&written, Some(&at(17)), v(2, 0), Brussels), "a newer occurrence");
         assert!(newer(&[], None, v(0, 0), Brussels), "nothing written yet");
+    }
+
+    /// Graph refused a changed occurrence while the copy was created: the
+    /// copy records no version, so the card keeps offering Update.
+    #[test]
+    fn a_copy_added_only_in_part_keeps_offering_update() {
+        let sent = Invitation {
+            method: Method::Request,
+            event: EventData { sequence: 2, ..EventData::new("u", Span::AllDay { start: NaiveDate::MIN, end: NaiveDate::MIN }) },
+            dated: true,
+            stamp: Some(Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()),
+        };
+        let complete = written_on_add(true, &sent, Brussels);
+        assert!(!newer(&complete, None, Version::of(&sent), Brussels), "a whole copy holds the version it was added from");
+        let partial = written_on_add(false, &sent, Brussels);
+        assert!(newer(&partial, None, Version::of(&sent), Brussels), "a partial copy still offers that version as an update");
     }
 
     #[test]

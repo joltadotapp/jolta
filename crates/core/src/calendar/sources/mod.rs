@@ -113,14 +113,16 @@ impl Source {
     /// Puts a copy of an invitation in the calendar, telling nobody, and
     /// returns the remote id of the object created. CalDAV also gives the
     /// resource as written, to store as a sync would.
-    pub async fn create(&self, calendar: &Calendar, copy: &NewCopy<'_>) -> Result<(String, Option<Change>)> {
+    /// The bool is false when the copy lacks part of the version: Graph
+    /// refused a changed occurrence because the series changed meanwhile.
+    pub async fn create(&self, calendar: &Calendar, copy: &NewCopy<'_>) -> Result<(String, Option<Change>, bool)> {
         match self {
             Source::CalDav(s) => s.create(calendar, copy).await.map(|c| match &c {
-                Change::Upsert { remote_id, .. } => (remote_id.clone(), Some(c)),
-                Change::Remove { remote_id } => (remote_id.clone(), None),
+                Change::Upsert { remote_id, .. } => (remote_id.clone(), Some(c), true),
+                Change::Remove { remote_id } => (remote_id.clone(), None, true),
             }),
-            Source::Google(s) => s.create(calendar, copy).await.map(|id| (id, None)),
-            Source::Graph(s) => s.create(calendar, copy).await.map(|id| (id, None)),
+            Source::Google(s) => s.create(calendar, copy).await.map(|id| (id, None, true)),
+            Source::Graph(s) => s.create(calendar, copy).await.map(|(id, complete)| (id, None, complete)),
             Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
         }
     }

@@ -29,7 +29,9 @@ impl GraphCalendar {
     /// the UID, so a create retried after a lost answer makes no second
     /// one, then takes out the occurrences the series leaves out and moves
     /// its changed ones.
-    pub async fn create(&self, calendar: &Calendar, copy: &NewCopy<'_>) -> Result<String> {
+    /// The bool is false when Graph refused a changed occurrence because the
+    /// series changed meanwhile: the copy then lacks some of the version.
+    pub async fn create(&self, calendar: &Calendar, copy: &NewCopy<'_>) -> Result<(String, bool)> {
         let here = tz::here();
         let first = copy.master().or(copy.events.first()).ok_or_else(|| Error::Other("The invitation has no event to add.".into()))?;
         let mut body = event_body(first, copy.answer, here)?;
@@ -42,9 +44,10 @@ impl GraphCalendar {
         let id = created["id"].as_str().ok_or_else(|| Error::Other("Microsoft 365 returned no id for the new event.".into()))?.to_string();
         if copy.master().is_some() && first.recurrence.is_some() {
             let master = Stored { id: EventId(0), remote_id: id.clone(), etag: None, raw: serde_json::to_vec(&created).ok(), data: first.clone() };
-            occurrences(self, &master, occurrence_writes(first, copy), None, copy.answer, here).await?;
+            let written = occurrences(self, &master, occurrence_writes(first, copy), None, copy.answer, here).await?;
+            return Ok((id, written != Replaced::Changed));
         }
-        Ok(id)
+        Ok((id, true))
     }
 
     /// Patches the copy with the newer version, then its occurrences, only

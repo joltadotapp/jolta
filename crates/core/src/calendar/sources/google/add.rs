@@ -79,14 +79,33 @@ struct Importer<'a> {
 
 impl Import for Importer<'_> {
     async fn listed(&self) -> Result<Vec<GoogleEvent>> {
-        let url = format!("{BASE}/calendars/{}/events?iCalUID={}&showDeleted=true", encode(&self.calendar.remote_id), encode(self.copy.uid));
-        let page: Value = parse(&self.google.get_ok(&url).await?)?;
-        Ok(page["items"].as_array().into_iter().flatten().filter_map(|item| serde_json::from_value(item.clone()).ok()).collect())
+        let first = format!("{BASE}/calendars/{}/events?iCalUID={}&showDeleted=true", encode(&self.calendar.remote_id), encode(self.copy.uid));
+        every_page(&first, |url| async move { parse(&self.google.get_ok(&url).await?) }).await
     }
 
     async fn import(&self, e: &EventData, etag: &str) -> Result<(u16, Vec<u8>)> {
         self.google.send_import(self.calendar, e, self.copy, Some(etag)).await
     }
+}
+
+/// The items of a listing and of every page after it: a changed occurrence
+/// on a later page must stop an update as surely as one on the first.
+async fn every_page<F, Fut>(first: &str, mut fetch: F) -> Result<Vec<GoogleEvent>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let mut listed = Vec::new();
+    let mut url = first.to_string();
+    for _ in 0..100 {
+        let page = fetch(url).await?;
+        listed.extend(page["items"].as_array().into_iter().flatten().filter_map(|item| serde_json::from_value(item.clone()).ok()));
+        match page["nextPageToken"].as_str() {
+            Some(token) => url = format!("{first}&pageToken={}", encode(token)),
+            None => return Ok(listed),
+        }
+    }
+    Err(Error::Other("Google listed more of this meeting than Jolta can check, so Jolta left it alone.".into()))
 }
 
 /// What an import over an event of the copy names as the ETag Google must
@@ -276,6 +295,24 @@ mod tests {
         EXDATE;TZID=Europe/Brussels:20261124T093000\r\nSUMMARY:Standup\r\nLOCATION:Room 4\r\nORGANIZER;CN=Ann:mailto:ann@example.com\r\n\
         ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@icloud.example\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:bob@example.com\r\n\
         END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[tokio::test]
+    async fn the_listing_reads_every_page() {
+        let pages = [
+            serde_json::json!({ "items": [{ "id": "s", "iCalUID": "u", "summary": "" }], "nextPageToken": "two" }),
+            serde_json::json!({ "items": [{ "id": "s_20261117", "iCalUID": "u", "summary": "", "etag": "\"9\"" }] }),
+        ];
+        let mut asked = Vec::new();
+        let listed = every_page("https://x/events?iCalUID=u", |url| {
+            asked.push(url.clone());
+            let page = pages[asked.len() - 1].clone();
+            async move { Ok(page) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(listed.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["s", "s_20261117"], "the occurrence on page two counts");
+        assert_eq!(asked[1], "https://x/events?iCalUID=u&pageToken=two");
+    }
 
     #[test]
     fn the_import_keeps_the_uid_the_zone_the_rules_and_the_answer() {
