@@ -15,12 +15,13 @@ final class CalendarSwitches {
 
     init(model: AppModel) { self.model = model }
 
-    func set(_ account: CalendarAccount, on: Bool) {
+    @discardableResult
+    func set(_ account: CalendarAccount, on: Bool) -> Task<Void, Never> {
         let id = account.account.id
         messages[id] = nil
         let core = model.core
         working[id] = account.needsConsent && on ? "Continue in your browser…" : on ? "Finding calendars…" : "Turning off…"
-        Task {
+        return Task {
             do {
                 if on, account.needsConsent {
                     let session = try await core.beginCalendarConsent(accountId: id)
@@ -143,6 +144,9 @@ struct CalendarSettings: View {
             SettingsSection("Invitations") {
                 FileResponsesRow(core: model.core)
             }
+            SettingsSection("Working hours", footer: "Find a time and Insert my availability suggest times inside these hours. Until you set them, Jolta uses your Outlook working hours on Microsoft 365, else Monday to Friday, 9:00 to 17:00.") {
+                WorkingHoursRow(core: model.core)
+            }
             SettingsSection("Subscribe") {
                 SubscribeField(model: model)
                 SettingsRow(title: "Open webcal:// links in Jolta",
@@ -158,6 +162,92 @@ struct CalendarSettings: View {
             if switches == nil { switches = CalendarSwitches(model: model) }
             cal.reloadCalendars()
         }
+    }
+}
+
+/// The days and hours Find a time suggests times in, on this Mac's clock.
+struct WorkingHoursRow: View {
+    let core: Core
+    @State private var hours: WorkingHoursInfo?
+    @State private var custom = false
+    @State private var failure: String?
+
+    private static let letters = ["M", "T", "W", "T", "F", "S", "S"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let hours {
+                HStack(spacing: 4) {
+                    ForEach(0..<7, id: \.self) { i in
+                        let on = hours.days.indices.contains(i) && hours.days[i]
+                        Button(Self.letters[i]) { toggle(day: i) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 26, height: 24)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                            .foregroundStyle(Color(on ? Theme.text : Theme.text3))
+                            .accessibilityLabel(Calendar.current.weekdaySymbols[(i + 1) % 7])
+                            .accessibilityValue(on ? "on" : "off")
+                    }
+                    Spacer(minLength: 16)
+                    DatePicker("From", selection: time(\.start), displayedComponents: .hourAndMinute)
+                    Text("to").foregroundStyle(Color(Theme.text3))
+                    DatePicker("To", selection: time(\.end), displayedComponents: .hourAndMinute)
+                }
+                .labelsHidden()
+                .datePickerStyle(.field)
+                HStack {
+                    Text(failure ?? (custom ? "Set here, in \(hours.zone)." : "Not set; these are the defaults, in \(hours.zone)."))
+                        .font(.system(size: 12))
+                        .foregroundStyle(failure == nil ? Color(Theme.text3) : .red)
+                    Spacer()
+                    if custom { Button("Use Defaults") { reset() } }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        let set = try? core.workingHours()
+        custom = set != nil
+        hours = set ?? core.standardWorkingHours()
+    }
+
+    private func save(_ new: WorkingHoursInfo) {
+        do {
+            try core.setWorkingHours(hours: new)
+            hours = new
+            custom = true
+            failure = nil
+        } catch {
+            failure = "\(error)"
+        }
+    }
+
+    private func toggle(day: Int) {
+        guard var h = hours, h.days.indices.contains(day) else { return }
+        h.days[day].toggle()
+        save(h)
+    }
+
+    /// Minutes after midnight as a time today, for the pickers.
+    private func time(_ key: WritableKeyPath<WorkingHoursInfo, UInt32>) -> Binding<Date> {
+        Binding(get: {
+            Calendar.current.startOfDay(for: .now).addingTimeInterval(TimeInterval((hours?[keyPath: key] ?? 0) * 60))
+        }, set: { date in
+            guard var h = hours else { return }
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+            h[keyPath: key] = UInt32((parts.hour ?? 0) * 60 + (parts.minute ?? 0))
+            save(h)
+        })
+    }
+
+    private func reset() {
+        try? core.setWorkingHours(hours: nil)
+        load()
     }
 }
 
