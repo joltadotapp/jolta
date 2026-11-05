@@ -19,7 +19,7 @@ use mail_parser::{MessageParser, MessagePart, PartKind};
 use rusqlite::Connection;
 
 use super::invitation::{self, Invitation, Method};
-use super::{Access, Calendar, CalendarSource, EventData, ical, respond, tz, update};
+use super::{EventData, ical, respond, tz, update};
 use crate::blobs::Blobs;
 use crate::model::{Account, AccountId};
 use crate::store::{self, OpId, UnsettledReply};
@@ -124,11 +124,8 @@ fn guest_answers_own_meeting(conn: &Connection, blobs: &Blobs, account: &Account
     }
     let uid = &sent.event.uid;
     let copy = store::stored_event(conn, uid, None, Some(account.id), here)?;
-    let own = match &copy {
-        Some(copy) => owns(&store::calendar(conn, copy.calendar_id)?, account),
-        None => false,
-    };
-    let me = respond::addresses(&account.address, copy.as_ref().filter(|_| own).map(|c| &c.event));
+    let calendar = copy.as_ref().map(|c| store::calendar(conn, c.calendar_id)).transpose()?;
+    let me = respond::addresses(&account.address, calendar.as_ref().zip(copy.as_ref().map(|c| &c.event)));
     let organizer = update::organizer(conn, account.id, &me, uid)?;
     if !organizer.as_ref().is_some_and(|o| me.iter().any(|m| m.trim().eq_ignore_ascii_case(o.trim()))) {
         return Ok(false);
@@ -142,15 +139,6 @@ fn guest_answers_own_meeting(conn: &Connection, blobs: &Blobs, account: &Account
 /// seen sending organizers' invitations but no guest's reply: the one real
 /// reply from Apple's Calendar came from the guest's own address.
 const GOOGLE_FOR_GUESTS: &str = "calendar-notification@google.com";
-
-/// Whether the calendar is the account's own, so the attendee its copy
-/// marks as the user is an alias. A shared or delegated calendar marks its
-/// owner. Google gives a calendar shared with "Make changes and manage
-/// sharing" the owner role too, so there only the account's primary
-/// calendar, whose id is the account's address, counts.
-fn owns(calendar: &Calendar, account: &Account) -> bool {
-    calendar.access == Access::Owner && (calendar.source != CalendarSource::Google || calendar.remote_id.eq_ignore_ascii_case(&account.address))
-}
 
 /// Who wrote a reply's calendar part, by its PRODID, for the words it puts
 /// around every answer.

@@ -350,7 +350,8 @@ async fn from_message(jolta: &Jolta, message: MessageId, occurrence_only: bool, 
                     .flatten(),
                 found => found,
             };
-            let me = addresses(&from, copy.as_ref().map(|s| &s.event));
+            let calendar = copy.as_ref().map(|s| store::calendar(c, s.calendar_id)).transpose()?;
+            let me = addresses(&from, calendar.as_ref().zip(copy.as_ref().map(|s| &s.event)));
             let copy = copy.map(|s| Copy { event: s.event_id, calendar: s.calendar_id, source: s.source });
             let occurrence = a.occurrence.filter(|o| o.alone || occurrence_only).map(|o| (o.recurrence_id, o.day));
             let events: Vec<EventData> = invitations.iter().filter(|i| i.event.uid == a.uid).map(|i| i.event.clone()).collect();
@@ -383,7 +384,7 @@ fn from_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -
     let calendar = store::calendar(conn, calendar)?;
     let account = calendar.account_id.ok_or_else(|| Error::Other("This calendar belongs to no account, so Jolta has nowhere to answer from.".into()))?;
     let from = store::account(conn, account)?.address;
-    let me = addresses(&from, Some(&data));
+    let me = addresses(&from, Some((&calendar, &data)));
     let repeats = data.recurrence.is_some() || data.recurrence_id.is_some();
     let occurrence = match at.filter(|_| repeats) {
         Some(at) => {
@@ -418,9 +419,12 @@ fn answered(events: Vec<EventData>, rid: Option<&Moment>, here: Tz) -> Vec<Event
 }
 
 /// The account's address, then the aliases its calendar's copy of the
-/// event marks as the user's: each sync marks only its own account's.
-pub(crate) fn addresses(account: &str, copy: Option<&EventData>) -> Vec<String> {
-    let aliases = copy.into_iter().flat_map(|e| &e.attendees).filter(|a| a.is_me).map(|a| &a.person.address);
+/// event marks as the user's: each sync marks only its own account's. A
+/// copy in a calendar the account doesn't own (`Calendar::is_own`) adds
+/// none, since Google marks that calendar's owner there.
+pub(crate) fn addresses(account: &str, copy: Option<(&Calendar, &EventData)>) -> Vec<String> {
+    let own = copy.filter(|(calendar, _)| calendar.is_own(account)).map(|(_, e)| e);
+    let aliases = own.into_iter().flat_map(|e| &e.attendees).filter(|a| a.is_me).map(|a| &a.person.address);
     let mut me = vec![account.to_string()];
     for alias in aliases {
         if !me.iter().any(|m| m.eq_ignore_ascii_case(alias)) {
@@ -452,7 +456,7 @@ mod tests {
     use mail_parser::MessageParser;
 
     use super::*;
-    use crate::calendar::Response;
+    use crate::calendar::{Access, Response};
     use crate::calendar::invitation::tests::{import, jolta, mail};
 
     #[test]
@@ -753,11 +757,53 @@ mod tests {
         let raw = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:alias\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\n\
                    ORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me2@example.net\r\nATTENDEE:mailto:alias@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let copy = crate::calendar::ical::read_invitation(raw, &["alias@example.com".to_string()]).unwrap().remove(0).event;
-        let me = addresses("me@example.com", Some(&copy));
+        let me = addresses("me@example.com", Some((&calendar_of(CalendarSource::CalDav, Access::Owner, "/cal/work/"), &copy)));
         assert_eq!(me, ["me@example.com", "alias@example.com"], "the other account isn't one of this account's addresses");
         let reply = rsvp::imip_reply(&ImipReply { invitation: raw, from: "me@example.com", me: &me, answer: Answer::Accept, note: None, occurrence: None }, tz::here()).unwrap();
         let ics = reply_ics(&reply.raw);
         assert!(ics.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:alias@example.com") && !ics.contains("me2@"), "{ics}");
+    }
+
+    /// A calendar of account 1.
+    fn calendar_of(source: CalendarSource, access: Access, remote_id: &str) -> Calendar {
+        Calendar {
+            id: CalendarId(1),
+            account_id: Some(AccountId(1)),
+            source,
+            remote_id: remote_id.into(),
+            name: "Calendar".into(),
+            color: None,
+            zone: None,
+            access,
+            shown: true,
+            counts_as_busy: true,
+            notify: true,
+            default_reminder: None,
+            is_default: true,
+            cursor: None,
+            refresh: None,
+            synced: None,
+        }
+    }
+
+    /// Google marks a shared calendar's owner as its copies' self, and gives
+    /// a calendar shared with "Make changes and manage sharing" the owner
+    /// role, so only the primary calendar's copy names an alias.
+    #[test]
+    fn a_shared_calendars_copy_names_no_alias() {
+        let raw = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:bo\r\nDTSTART:20261112T150000Z\r\nDTEND:20261112T160000Z\r\n\
+                   ORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:bo@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let copy = crate::calendar::ical::read_invitation(raw, &["bo@example.com".to_string()]).unwrap().remove(0).event;
+        for (source, access, remote_id, aliases) in [
+            (CalendarSource::Google, Access::Owner, "me@example.com", &["me@example.com", "bo@example.com"][..]),
+            (CalendarSource::Google, Access::Owner, "bo@example.com", &["me@example.com"][..]),
+            (CalendarSource::Google, Access::Write, "bo@example.com", &["me@example.com"][..]),
+            (CalendarSource::Graph, Access::Write, "AAMkBo", &["me@example.com"][..]),
+            (CalendarSource::CalDav, Access::Write, "/cal/bo/", &["me@example.com"][..]),
+        ] {
+            let me = addresses("me@example.com", Some((&calendar_of(source, access, remote_id), &copy)));
+            assert_eq!(me, aliases, "{source:?} calendar {remote_id} with {access:?}");
+        }
     }
 
     /// One of the user's accounts invites another. The organizer's copy is
