@@ -370,6 +370,9 @@ impl Engine {
         let poll = (account.kind == AccountKind::Graph).then_some(GRAPH_POLL);
         let mut backoff = Backoff::default();
         let mut last_full = Instant::now();
+        if let Err(e) = self.jolta.store.write(|tx| store::release_claims(tx, account.id)) {
+            tracing::warn!("releasing claimed ops: {e}");
+        }
         loop {
             let id = account.id;
             match self.jolta.store.read(|c| store::account(c, id)) {
@@ -447,7 +450,7 @@ impl Engine {
         let account_id = account.id;
         self.wake_snoozed(account_id).await?;
         self.fire_reminders(account_id).await?;
-        for op in self.jolta.store.read_async(move |c| store::pending_ops(c, account_id)).await? {
+        while let Some(op) = self.jolta.store.write_async(move |tx| store::claim_op(tx, account_id)).await? {
             let applied = match link {
                 Link::Imap(session, caps) => imap::apply_op(&self.jolta, session, *caps, &op).await,
                 Link::Graph(g) => g.apply_op(&self.jolta, &op).await,

@@ -169,11 +169,37 @@ pub fn op(conn: &Connection, id: OpId) -> Result<Option<(Op, String)>> {
         .optional()?)
 }
 
+/// The account's ops the server hasn't confirmed: waiting to be sent, or
+/// claimed by the worker and on their way.
 pub fn pending_ops(conn: &Connection, account: AccountId) -> Result<Vec<Op>> {
-    let mut stmt =
-        conn.prepare(&format!("SELECT {OP_COLS} FROM op WHERE account_id = ?1 AND state = 'pending' ORDER BY id"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {OP_COLS} FROM op WHERE account_id = ?1 AND state IN ('pending', 'sending') ORDER BY id"
+    ))?;
     let rows = stmt.query_map([account], op_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Claims the account's oldest waiting op for sending: from here on Undo
+/// can no longer take it back unsent and queues its inverse instead.
+pub fn claim_op(conn: &Connection, account: AccountId) -> Result<Option<Op>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "UPDATE op SET state = 'sending'
+                 WHERE id = (SELECT id FROM op WHERE account_id = ?1 AND state = 'pending' ORDER BY id LIMIT 1)
+                 RETURNING {OP_COLS}"
+            ),
+            [account],
+            op_row,
+        )
+        .optional()?)
+}
+
+/// Puts the account's claimed ops back in the queue, for a worker that
+/// starts after one stopped mid-send.
+pub fn release_claims(conn: &Connection, account: AccountId) -> Result<()> {
+    conn.execute("UPDATE op SET state = 'pending' WHERE account_id = ?1 AND state = 'sending'", [account])?;
+    Ok(())
 }
 
 /// Messages with an op the server hasn't confirmed yet. Until it does, the
@@ -195,7 +221,7 @@ pub fn pending_move_uids(conn: &Connection, account: AccountId, mailbox: Mailbox
 
 pub fn has_pending_ops(conn: &Connection, account: AccountId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM op WHERE account_id = ?1 AND state = 'pending')",
+        "SELECT EXISTS (SELECT 1 FROM op WHERE account_id = ?1 AND state IN ('pending', 'sending'))",
         [account],
         |r| r.get(0),
     )?)
@@ -213,7 +239,7 @@ pub fn cancel_op(conn: &Connection, id: OpId) -> Result<()> {
 
 pub fn fail_attempt(conn: &Connection, id: OpId, error: &str, give_up: bool) -> Result<()> {
     conn.execute(
-        "UPDATE op SET attempts = attempts + 1, error = ?2, state = CASE WHEN ?3 THEN 'failed' ELSE state END
+        "UPDATE op SET attempts = attempts + 1, error = ?2, state = CASE WHEN ?3 THEN 'failed' ELSE 'pending' END
          WHERE id = ?1",
         params![id.0, error, give_up],
     )?;

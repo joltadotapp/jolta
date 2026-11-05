@@ -592,7 +592,7 @@ async fn list_action(jolta: &Jolta, action: impl FnOnce(&jolta_core::engine::Eng
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let pending: bool = jolta
             .store
-            .read(|c| Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM op WHERE id > ?1 AND state = 'pending')", [last], |r| r.get(0))?))?;
+            .read(|c| Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM op WHERE id > ?1 AND state IN ('pending', 'sending'))", [last], |r| r.get(0))?))?;
         if !pending {
             break;
         }

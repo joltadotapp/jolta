@@ -166,7 +166,8 @@ fn queue(conn: &Connection, account: AccountId, kind: &OpKind, messages: &[Messa
     Ok(Some((account, store::insert_op(conn, account, kind, &changed)?)))
 }
 
-/// Undoes an op: an unsent one is dropped and the local change reverted; a
+/// Undoes an op: an unsent one is dropped and the local change reverted;
+/// one the worker has claimed, which may reach the server any moment, or a
 /// sent one gets an inverse op. Returns the op to send, if any.
 pub fn undo(conn: &Connection, id: OpId) -> Result<Option<(AccountId, OpId)>> {
     let Some((op, state)) = store::op(conn, id)? else { return Ok(None) };
@@ -177,7 +178,7 @@ pub fn undo(conn: &Connection, id: OpId) -> Result<Option<(AccountId, OpId)>> {
             forget_snooze(conn, &op)?;
             Ok(None)
         }
-        "done" => {
+        "sending" | "done" => {
             let Some(inverse) = op.inverse() else { return Ok(None) };
             let messages: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
             forget_snooze(conn, &op)?;
@@ -285,6 +286,39 @@ mod tests {
             })
             .unwrap();
         (dir, store)
+    }
+
+    /// The worker claims an op before sending it, so Undo can no longer
+    /// drop it unsent and queues the opposite move instead; an unclaimed op
+    /// is still dropped.
+    #[test]
+    fn undo_of_an_op_on_its_way_queues_its_opposite() {
+        let (_dir, store) = store();
+        let inbox = |c: &Connection| -> Result<bool> { Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM message_mailbox WHERE message_id = 3 AND mailbox_id = 1)", [], |r| r.get(0))?) };
+        store
+            .write(|c| {
+                let (_, unsent) = queue(c, AccountId(1), &OpKind::Move { from: MailboxId(1), to: MailboxId(3) }, &[MessageId(3)])?.unwrap();
+                assert_eq!(undo(c, unsent)?, None);
+                assert!(store::op(c, unsent)?.is_none(), "an unclaimed op is dropped");
+
+                let (_, archive) = queue(c, AccountId(1), &OpKind::Move { from: MailboxId(1), to: MailboxId(3) }, &[MessageId(3)])?.unwrap();
+                let claimed = store::claim_op(c, AccountId(1))?.expect("claimed");
+                assert_eq!(claimed.id, archive);
+                assert!(store::claim_op(c, AccountId(1))?.is_none(), "claimed once");
+                let (_, back) = undo(c, archive)?.expect("the opposite move");
+                assert_eq!(store::op(c, archive)?.map(|(_, state)| state).as_deref(), Some("sending"), "the claimed op stays");
+                assert_eq!(store::op(c, back)?.unwrap().0.kind, OpKind::Move { from: MailboxId(3), to: MailboxId(1) });
+                assert!(inbox(c)?);
+                store::finish_op(c, archive)?;
+                assert!(store::pending_messages(c, AccountId(1))?.contains(&MessageId(3)), "sync leaves it in the inbox until the opposite move lands");
+                assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back));
+                store::fail_attempt(c, back, "offline", false)?;
+                assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "a failed attempt goes back in the queue");
+                store::release_claims(c, AccountId(1))?;
+                assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "a claim left by a stopped worker");
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

@@ -94,6 +94,13 @@ impl Mailbox {
 
     /// Adds this user as an account and starts the app.
     pub fn sign_in(&self, app: &App) -> Account {
+        let account = self.add(app);
+        app.core.start().unwrap();
+        account
+    }
+
+    /// Adds the account without starting the engine.
+    pub fn add(&self, app: &App) -> Account {
         let setup = ImapSetup {
             address: self.user.clone(),
             password: PASSWORD.into(),
@@ -104,9 +111,7 @@ impl Mailbox {
             smtp_port: Some(31025),
             ..Default::default()
         };
-        let account = block_on(jolta_core::imap::add_account(&app.jolta, setup)).expect("the account signs in");
-        app.core.start().unwrap();
-        account
+        block_on(jolta_core::imap::add_account(&app.jolta, setup)).expect("the account signs in")
     }
 }
 

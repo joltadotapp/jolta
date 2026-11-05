@@ -4,7 +4,7 @@
 
 use jolta_ffi::{ListContext, ThreadAction};
 
-use crate::fixture::{App, Mail, now};
+use crate::fixture::{App, Mail, block_on, now};
 use crate::server::{Mailbox, available, caught, wait};
 
 fn inbox_has(app: &App, subject: &str) -> bool {
@@ -70,6 +70,44 @@ fn actions_reach_the_server() {
     let trash = app.core.mailboxes(account).unwrap().into_iter().find(|m| m.role.as_deref() == Some("trash")).unwrap().id;
     app.core.empty_mailboxes(vec![trash]).unwrap();
     wait(20, "Trash was emptied on the server", || server.subjects("Trash").is_empty());
+    assert!(!app.events.seen("action failed"));
+}
+
+/// Undo while the worker is moving the message: the move lands on the
+/// server, then the opposite move brings the message back, there and in
+/// Jolta, and the sync after the move never takes it out of the inbox.
+#[test]
+fn undo_while_the_archive_is_on_its_way() {
+    if !available() {
+        return;
+    }
+    use jolta_core::actions::{self, Action, Context};
+    use jolta_core::{ThreadId, store};
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "File me", "Body."));
+    let app = App::unstarted();
+    let account = server.add(&app);
+    block_on(jolta_core::imap::sync_account(&app.jolta, &account, jolta_core::imap::SyncOptions { bodies: false }, |_| {})).expect("the first sync");
+    let thread = app.list("in:inbox")[0].thread_id;
+    app.jolta.store.write(|tx| actions::perform(tx, ThreadId(thread), Action::Archive, Context::Inbox)).unwrap().expect("archived");
+    let claimed = app.jolta.store.write(|tx| store::claim_op(tx, account.id)).unwrap().expect("the worker claims the archive");
+    app.jolta.store.write(|tx| actions::undo(tx, claimed.id)).unwrap();
+    assert_eq!(app.subjects("in:inbox"), ["File me"]);
+    block_on(async {
+        let mut session = jolta_core::imap::connect_account(&account).await?;
+        let caps = jolta_core::imap::caps(&mut session).await?;
+        jolta_core::imap::apply_op(&app.jolta, &mut session, caps, &claimed).await
+    })
+    .expect("the claimed move reaches the server");
+    app.jolta.store.write(|tx| store::finish_op(tx, claimed.id)).unwrap();
+    assert_eq!(server.subjects("Archive"), ["File me"], "the archive landed after the undo");
+
+    app.core.start().unwrap();
+    wait(20, "the undo reached the server", || server.subjects("Archive").is_empty() && server.subjects("INBOX") == ["File me"]);
+    app.core.sync_now();
+    wait(20, "nothing is left to send", || app.count("SELECT count(*) FROM op WHERE state IN ('pending', 'sending')") == 0);
+    wait(20, "the next sync keeps it in the inbox", || app.subjects("in:inbox") == ["File me"]);
+    assert!(app.subjects("in:archive").is_empty());
     assert!(!app.events.seen("action failed"));
 }
 
