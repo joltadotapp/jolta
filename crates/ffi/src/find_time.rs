@@ -232,12 +232,10 @@ impl Core {
     }
 
     /// The user's free stretches of at least `minutes` as lines for a mail,
-    /// on this Mac's clock, after a line naming the zone: "Tue 10 Nov: 10:00
-    /// to 11:30, 14:00 to 16:00".
+    /// on this Mac's clock: "Tue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00".
     pub fn availability_text(&self, info: FindTimeInfo, minutes: i64) -> Result<String> {
-        let here = tz::here();
-        let lines = availability::availability_text(&free(&info, minutes)?, here);
-        Ok(format!("I'm free at these times ({}):\n{lines}", Utc::now().with_timezone(&here).format("%Z")))
+        let lines = availability::availability_text(&free(&info, minutes)?, tz::here());
+        Ok(format!("I'm free at these times:\n{lines}"))
     }
 
     /// The body with `text` added after what the writer typed, above the

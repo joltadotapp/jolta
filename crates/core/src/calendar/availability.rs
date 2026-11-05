@@ -185,19 +185,19 @@ pub fn free_times(own: &[Busy], hours: &WorkingHours, from: DateTime<Utc>, days:
         .collect()
 }
 
-/// "Tue 10 Nov: 10:00 to 11:30, 14:00 to 16:00", one line per day, on
-/// `zone`'s clock.
+/// "Tue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00", one line per day,
+/// on `zone`'s clock and named with that day's abbreviation.
 pub fn availability_text(free: &[(DateTime<Utc>, DateTime<Utc>)], zone: Tz) -> String {
-    let mut lines: Vec<(NaiveDate, Vec<String>)> = Vec::new();
+    let mut lines: Vec<(NaiveDate, String, Vec<String>)> = Vec::new();
     for (start, end) in free {
         let (s, e) = (start.with_timezone(&zone), end.with_timezone(&zone));
         let span = format!("{} to {}", s.format("%H:%M"), e.format("%H:%M"));
         match lines.last_mut() {
-            Some((day, spans)) if *day == s.date_naive() => spans.push(span),
-            _ => lines.push((s.date_naive(), vec![span])),
+            Some((day, _, spans)) if *day == s.date_naive() => spans.push(span),
+            _ => lines.push((s.date_naive(), s.format("%Z").to_string(), vec![span])),
         }
     }
-    lines.iter().map(|(day, spans)| format!("{}: {}", day.format("%a %-d %b"), spans.join(", "))).collect::<Vec<_>>().join("\n")
+    lines.iter().map(|(day, abbr, spans)| format!("{} ({abbr}): {}", day.format("%a %-d %b"), spans.join(", "))).collect::<Vec<_>>().join("\n")
 }
 
 /// "Would Tuesday 10 November, 14:00 to 14:30 (CET) work for you?"
@@ -368,8 +368,15 @@ mod tests {
         let free = free_times(&own, &hours(), at("2026-11-10 07:00"), 3, Duration::minutes(30));
         assert_eq!(
             availability_text(&free, Brussels),
-            "Tue 10 Nov: 10:00 to 11:30, 14:00 to 16:00, 16:30 to 17:00\nThu 12 Nov: 09:00 to 17:00"
+            "Tue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00, 16:30 to 17:00\nThu 12 Nov (CET): 09:00 to 17:00"
         );
+    }
+
+    #[test]
+    fn availability_names_each_days_own_zone() {
+        // Brussels leaves summer time on Sunday 25 October 2026.
+        let free = free_times(&[], &hours(), at("2026-10-23 07:00"), 2, Duration::minutes(30));
+        assert_eq!(availability_text(&free, Brussels), "Fri 23 Oct (CEST): 09:00 to 17:00\nMon 26 Oct (CET): 09:00 to 17:00");
     }
 
     #[test]
