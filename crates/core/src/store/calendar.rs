@@ -287,13 +287,17 @@ pub fn set_event_data(conn: &Connection, id: EventId, e: &EventData) -> Result<(
     Ok(())
 }
 
-/// Deletes the events of one remote object. Series they belonged to keep
-/// their other events, rebuilt without them. False when there were none.
+/// Deletes the events of one remote object, and the changed occurrences
+/// filed under it as their series (`master_id`): Graph's delta reports a
+/// deleted series by its master's id alone. Series they belonged to keep their
+/// other events, rebuilt without them. False when there were none.
 pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, horizon: &Horizon) -> Result<bool> {
     let uids = item_uids(conn, calendar, remote_id)?;
     let deleted =
         conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
     for uid in &uids {
+        conn.prepare_cached("DELETE FROM event WHERE calendar_id = ?1 AND uid = ?2 AND json_extract(data, '$.master_id') = ?3")?
+            .execute(params![calendar, uid, remote_id])?;
         rebuild_series(conn, calendar, uid, horizon)?;
     }
     Ok(deleted > 0)
@@ -727,8 +731,8 @@ mod tests {
         assert_eq!(left, 0, "deleting the series leaves no rows");
     }
 
-    /// Graph and Google report a deleted series by its master's id alone, so
-    /// the changed occurrences filed under it go with it. An event that only
+    /// Graph reports a deleted series by its master's id alone, so the
+    /// changed occurrences filed under it go with it. An event that only
     /// shares the UID, such as a copy added from an invitation, stays.
     #[test]
     fn removing_a_series_removes_the_occurrences_filed_under_it() {
