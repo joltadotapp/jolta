@@ -2,6 +2,7 @@
 //! repeating events, invitations and meeting links.
 
 pub mod add;
+pub mod availability;
 pub mod card;
 pub mod detail;
 pub mod filing;
