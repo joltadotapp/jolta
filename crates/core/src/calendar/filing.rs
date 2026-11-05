@@ -7,8 +7,8 @@
 //! What a reply says beyond its answer, from about 440 real REPLY mails:
 //! Exchange (Microsoft 365, Outlook) sends an empty body and puts a note in
 //! COMMENT and in the body. Google writes one sentence ("Ann has accepted
-//! this invitation.") above the event's details, and a note goes in the
-//! attendee's X-RESPONSE-COMMENT. Apple's Calendar writes one sentence ("Pat
+//! this invitation.") above the event's details, and with a note ends it
+//! "with a note:" and puts the note in the attendee's X-RESPONSE-COMMENT. Apple's Calendar writes one sentence ("Pat
 //! has accepted your invitation to the event: …"), and Jolta's own reply
 //! the same sentence as Google's.
 
@@ -256,6 +256,7 @@ mod tests {
         assert!(only(shaped(GOOGLE, "Bo heeft deze uitnodiging afgeslagen.\r\n\r\nDesign crit", BO).as_bytes()), "Google in Dutch");
         assert!(!only(shaped(GOOGLE, "Running late, see you at 10:15\r\nBo has accepted this invitation.", BO).as_bytes()), "words above Google's sentence");
         assert!(!only(shaped(GOOGLE, "has accepted this invitation.", BO).as_bytes()), "the sentence without anyone in it");
+        assert!(!only(shaped(GOOGLE, "Bo has accepted this invitation with a note:\r\n\"Late\"", BO).as_bytes()), "Google's note in the body alone");
         let apple = "-//Apple Inc.//Mac OS X 10.8.3//EN";
         assert!(!only(shaped(apple, "Bo has accepted your invitation to the event: Design crit.\r\nCan we move it?", BO).as_bytes()), "a line under Apple's sentence");
         let two = format!("{BO}\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:cy@example.com");
