@@ -777,7 +777,7 @@ pub(crate) mod tests {
     /// its ETag, or not at all.
     #[tokio::test]
     async fn an_answer_writes_only_with_an_etag() {
-        let accept = Rsvp { event: crate::calendar::EventId(1), answer: rsvp::Answer::Accept, note: None, notify: true, scope: rsvp::Scope::Series };
+        let accept = Rsvp { event: crate::calendar::EventId(1), answer: rsvp::Answer::Accept, note: None, notify: true, scope: rsvp::Scope::Series, proposal: None };
         let (dav, calendar, server) = caldav_server(vec![("200 OK", None, Some(meeting(0))), ("204 No Content", None, None)]).await;
         let err = dav.answer(&calendar, &stored(None), &accept).await.unwrap_err();
         assert!(err.to_string().contains("no version tag (ETag)"), "{err}");

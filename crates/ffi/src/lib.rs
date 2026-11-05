@@ -114,6 +114,9 @@ pub struct ThreadView {
     /// Every invitation in the conversation the user can answer, oldest
     /// first. Y, M and N answer the last one whose message is expanded.
     pub invitations: Vec<calendar::InvitationInfo>,
+    /// Every guest's proposal the user can decline as the organizer, oldest
+    /// first.
+    pub proposals: Vec<calendar::ProposalInfo>,
 }
 
 #[derive(uniffi::Enum)]
@@ -792,6 +795,7 @@ impl Core {
             image_sender: detail.image_sender.unwrap_or_default(),
             images_trusted: detail.images_trusted,
             invitations: detail.invitations.into_iter().map(Into::into).collect(),
+            proposals: detail.proposals.into_iter().map(Into::into).collect(),
             mailing_list: self.jolta.store.read(|c| {
                 Ok(c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM message WHERE thread_id = ?1 AND list_unsubscribe IS NOT NULL)",

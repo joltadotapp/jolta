@@ -61,6 +61,28 @@ pub struct EventCard {
     /// Add to calendar, and Update in your calendar for the copy added.
     pub adding: Option<super::add::Adding>,
     pub updating: Option<super::add::Updating>,
+    /// Set on a guest's proposal for a new time; `when` is the time proposed.
+    pub proposal: Option<Proposed>,
+}
+
+/// A guest's proposal for a new time, which the organizer can decline.
+/// Accepting it changes the meeting, which happens in the calendar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Proposed {
+    /// The meeting's time now: "Thu 12 Nov · 16:00 to 16:45". None when the
+    /// account has neither a calendar copy nor a request that says.
+    pub now: Option<String>,
+    /// "Bo Nilsson".
+    pub proposer: String,
+    /// Decline proposal, for the meeting's organizer, until it is declined.
+    pub declining: Option<MessageId>,
+    /// Jolta sent the organizer's no.
+    pub declined: bool,
+    /// The proposal checked, which Decline proposal answers: its UID and
+    /// RECURRENCE-ID, and the proposing guest's address.
+    pub uid: String,
+    pub recurrence_id: Option<Moment>,
+    pub address: String,
 }
 
 /// What Remove from calendar needs.
@@ -83,6 +105,18 @@ pub struct Answering {
     pub occurrence: Option<ShownOccurrence>,
     /// "Ann", whom the answer tells.
     pub organizer: String,
+    /// Propose new time, for a meeting with a start and an end time; None
+    /// for one that lasts all day.
+    pub new_time: Option<NewTime>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewTime {
+    /// The panel starts from the time shown, the occurrence's for a series.
+    Open { start: DateTime<Utc>, end: DateTime<Utc> },
+    /// The organizer takes no proposals: Outlook's setting, in the mail or
+    /// on the account's Microsoft 365 copy.
+    Refused,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,10 +309,15 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let update = current && matches!(method, Method::Request | Method::Add);
     let changes = if update { changes(&history.before, described, cx) } else { Changes::default() };
 
+    let countered_now = if method == Method::Counter { Some(countered(conn, said, &history.before, cx)?) } else { None };
+
     let mut notes = Vec::new();
     match method {
         Method::Cancel => notes.push(Note { text: "Cancelled by the organizer".into(), warn: true }),
-        Method::Counter => notes.push(Note { text: with_comment(format!("{} proposed this new time", first_attendee(said)), said), warn: false }),
+        Method::Counter => {
+            let who = update::proposer(said, cx.sender).map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false));
+            notes.push(Note { text: with_comment(format!("{who} proposed this new time"), said), warn: false });
+        }
         Method::DeclineCounter => notes.push(Note { text: "The organizer kept the original time".into(), warn: false }),
         Method::Refresh => notes.push(Note { text: format!("{} asked for the latest version", first_attendee(said)), warn: false }),
         Method::Add => notes.push(Note { text: "Adds dates to a repeating event".into(), warn: false }),
@@ -293,6 +332,13 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     if history.not_from_organizer {
         notes.push(Note { text: "This isn't from the meeting's organizer".into(), warn: true });
     }
+    if history.not_from_guest {
+        let text = match update::organizer(conn, cx.account, cx.me, &sent.uid)? {
+            Some(_) => "This isn't from one of the meeting's guests",
+            None => "Jolta has no copy of this meeting to check this proposal against",
+        };
+        notes.push(Note { text: text.into(), warn: true });
+    }
     if method != Method::Cancel && stranger(conn, said, cx)? {
         notes.push(Note { text: "You haven't written to this sender before".into(), warn: true });
     }
@@ -300,8 +346,8 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     let receiver = store::account(conn, cx.account)?.address;
     let alone = sent.recurrence_id.is_some();
     // Another sender's message about the meeting answers nothing in it.
-    let trusted = !history.not_from_organizer;
-    let answering = (current && trusted && answerable(method, sent, &receiver)).then(|| Answering {
+    let trusted = !history.not_from_organizer && !history.not_from_guest;
+    let mut answering = (current && trusted && answerable(method, sent, &receiver)).then(|| Answering {
         message: cx.message,
         uid: sent.uid.clone(),
         occurrence: occurrence.filter(|_| repeats || alone).map(|(e, span)| ShownOccurrence {
@@ -313,6 +359,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
             alone,
         }),
         organizer: sent.organizer.as_ref().map_or_else(String::new, |o| name(o, &[], true)),
+        new_time: None,
     });
     let (adding, updating) = match &answering {
         Some(_) => super::add::offers(conn, invitation, cx)?,
@@ -324,6 +371,9 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         Some(a) => (store::remembered_answer(conn, cx.account, &a.uid, a.occurrence.as_ref().map(|o| &o.recurrence_id))?, copy(Some(cx.account))?),
         None => (None, stored.clone()),
     };
+    if let (Some(a), Some(Bounds::Utc { start, end })) = (answering.as_mut(), bounds) {
+        a.new_time = Some(if takes_proposals(conn, invitation, answered.as_ref(), cx)? { NewTime::Open { start, end } } else { NewTime::Refused });
+    }
 
     let held = method == Method::Cancel && current && held(conn, sent, cx)?;
     let removing = if held && trusted { removable(conn, sent, cx)? } else { None };
@@ -331,7 +381,12 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         notes.push(Note { text: "Not in your calendar".into(), warn: false });
     }
 
-    let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish | Method::Counter);
+    let proposal = match &countered_now {
+        Some(now) if current && trusted => Some(proposed(conn, sent, now, &receiver, cx)?),
+        _ => None,
+    };
+    // A declined proposal's time no longer needs its conflicts.
+    let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish) || (method == Method::Counter && !proposal.as_ref().is_some_and(|p| p.declined));
     let availability = match bounds {
         Some(bounds) if current && wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
         _ => None,
@@ -346,7 +401,7 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
 
     Ok(EventCard {
         label: label(method, !history.before.is_empty()),
-        title: title(method, shown, &history.before),
+        title: title(method, shown, countered_now.as_deref().unwrap_or(&history.before)),
         cancelled: method == Method::Cancel || shown.status == EventStatus::Cancelled,
         when,
         elsewhere,
@@ -364,7 +419,48 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         removing,
         adding,
         updating,
+        proposal,
     })
+}
+
+/// The meeting a proposal is for as the organizer has it now: the
+/// account's calendar copy, else the request before it; for one occurrence,
+/// that occurrence.
+fn countered(conn: &Connection, counter: &EventData, before: &[EventData], cx: &Context) -> Result<Vec<EventData>> {
+    let copy = store::stored_series(conn, &counter.uid, Some(cx.account))?;
+    let series = if copy.is_empty() { before } else { &copy };
+    Ok(match &counter.recurrence_id {
+        Some(rid) => series::occurrence(series, rid, cx.here).into_iter().collect(),
+        None => series.to_vec(),
+    })
+}
+
+/// What the organizer sees of a guest's proposal: the meeting's time now,
+/// and Decline proposal when the account the proposal came to organizes it.
+fn proposed(conn: &Connection, counter: &EventData, now: &[EventData], receiver: &str, cx: &Context) -> Result<Proposed> {
+    let organizes = update::organizer(conn, cx.account, cx.me, &counter.uid)?.is_some_and(|o| o.trim().eq_ignore_ascii_case(receiver));
+    let declined = store::calendar_answer_to(conn, cx.message)?.is_some();
+    let guest = update::proposer(counter, cx.sender);
+    Ok(Proposed {
+        now: Lines::of(now, cx).map(|l| l.when()),
+        proposer: guest.map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false)),
+        declining: (organizes && !declined).then_some(cx.message),
+        declined,
+        uid: counter.uid.clone(),
+        recurrence_id: counter.recurrence_id,
+        address: guest.map(|a| a.person.address.clone()).unwrap_or_default(),
+    })
+}
+
+/// Whether the organizer takes proposals for a new time: the invitation
+/// says nothing against it, nor does the account's Microsoft 365 copy.
+fn takes_proposals(conn: &Connection, sent: &Invitation, copy: Option<&store::StoredEvent>, cx: &Context) -> Result<bool> {
+    if !sent.proposals {
+        return Ok(false);
+    }
+    let Some(copy) = copy.filter(|c| c.source == super::CalendarSource::Graph) else { return Ok(true) };
+    let blob: Option<String> = conn.query_row("SELECT blob FROM event WHERE id = ?1", [copy.event_id], |r| r.get(0))?;
+    Ok(blob.and_then(|hash| cx.blobs.get(&hash).ok()).is_none_or(|raw| super::sources::graph::takes_proposals(&raw)))
 }
 
 /// Whether the account's calendar, or the copy the user added for it,
@@ -412,13 +508,14 @@ fn occurs(master: &EventData, rid: &Moment, here: Tz) -> bool {
 }
 
 /// The event's title. Exchange writes its cancellation's as "Canceled:
-/// Design review", in the organizer's language; the request before it
-/// gives the title itself.
+/// Design review" and its proposal's as "New Time Proposed: Design review",
+/// in the sender's language; the request before it, or for a proposal the
+/// meeting as the organizer has it, gives the title itself.
 fn title(method: Method, shown: &EventData, before: &[EventData]) -> String {
     let own = shown.title.trim();
     let earlier = before.iter().find(|e| e.recurrence_id == shown.recurrence_id).or(before.first()).map(|e| e.title.trim()).filter(|t| !t.is_empty());
     match earlier {
-        Some(t) if method == Method::Cancel && own.len() > t.len() && own.ends_with(t) => t.to_string(),
+        Some(t) if matches!(method, Method::Cancel | Method::Counter) && own.len() > t.len() && own.ends_with(t) => t.to_string(),
         _ if own.is_empty() => "(no title)".into(),
         _ => own.to_string(),
     }
@@ -920,6 +1017,33 @@ pub(crate) mod tests {
         assert_eq!(strip.busy.len(), 1, "lunch is outside the strip");
         assert!(strip.busy[0].conflict && strip.busy[0].title == "Standup");
         assert_eq!((strip.this.left, strip.this.width), (40.0, 15.0));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn propose_new_time_starts_from_the_time_shown_unless_the_organizer_refuses() {
+        let (j, calendar) = jolta("card-new-time");
+        let at = |h, m| Utc.with_ymd_and_hms(2026, 11, 12, h, m, 0).unwrap();
+        let new_time = |raw: &[u8]| event_card(&j, raw).answering.expect("answerable").new_time;
+        assert_eq!(new_time(mail!("google-request.eml")), Some(NewTime::Open { start: at(15, 0), end: at(15, 45) }));
+
+        let copy = invitation::find(mail!("google-request.eml"), &[ME.into()]).remove(0).event;
+        let blob = j.blobs.put(br#"{"id":"AAMk","allowNewTimeProposals":false}"#).unwrap();
+        j.store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET source = 'graph' WHERE id = ?1", [calendar])?;
+                store::apply_item(tx, calendar, "AAMk", None, &[copy.clone()], Some(&blob), &Horizon::around(now(), Brussels))
+            })
+            .unwrap();
+        assert_eq!(new_time(mail!("google-request.eml")), Some(NewTime::Refused), "the Microsoft 365 copy says the organizer takes none");
+
+        let from_ann = |lines: &str| format!("From: ann@example.com\r\n{}", request(&format!("ORGANIZER;CN=Ann:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\n{lines}")));
+        let all_day = from_ann("")
+            .replace("DTSTART:20261112T150000Z", "DTSTART;VALUE=DATE:20261112")
+            .replace("DTEND:20261112T160000Z", "DTEND;VALUE=DATE:20261113");
+        assert_eq!(new_time(all_day.as_bytes()), None, "a day-long meeting gets no new time");
+        let refused = from_ann("X-MICROSOFT-DISALLOW-COUNTER:TRUE\r\n");
+        assert_eq!(new_time(refused.as_bytes()), Some(NewTime::Refused), "Outlook's own setting in the mail");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

@@ -842,7 +842,7 @@ mod tests {
                 "attendees": attendees
             })
         };
-        let accept = Rsvp { event: crate::calendar::EventId(1), answer: Answer::Accept, note: None, notify: true, scope: Scope::Series };
+        let accept = Rsvp { event: crate::calendar::EventId(1), answer: Answer::Accept, note: None, notify: true, scope: Scope::Series, proposal: None };
         let statuses = |list: &[Value]| list.iter().map(|a| a["responseStatus"].as_str().unwrap_or_default().to_string()).collect::<Vec<_>>();
         let marked = |e: &EventData| e.attendees.iter().map(|a| a.is_me).collect::<Vec<_>>();
 

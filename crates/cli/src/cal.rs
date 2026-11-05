@@ -12,7 +12,7 @@ use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
 use jolta_core::calendar::card::{self, Card, Edit};
-use jolta_core::calendar::{add, invitation, remove, respond};
+use jolta_core::calendar::{add, invitation, proposal, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
@@ -119,6 +119,28 @@ pub enum CalCommand {
         #[arg(long)]
         occurrence: bool,
     },
+    /// Propose a new time for the invitation on a message, as the card's
+    /// panel does: for a series, for the occurrence the card shows. Waits
+    /// until a COUNTER mail has left.
+    #[command(group = clap::ArgGroup::new("with").required(true))]
+    Propose {
+        message: i64,
+        #[arg(long, group = "with")]
+        maybe: bool,
+        #[arg(long, group = "with")]
+        decline: bool,
+        /// The new start on this Mac's clock: "2026-11-13 15:00".
+        #[arg(long)]
+        start: String,
+        /// The new end; the meeting keeps its length without one.
+        #[arg(long)]
+        end: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Decline the guest's proposal on a message, as its card's Decline
+    /// proposal does. Waits until the mail has left.
+    DeclineProposal { message: i64 },
     /// Print the invitation cards of a message as the reader shows them,
     /// with what an update struck through as ~~old~~.
     Card { message: i64 },
@@ -408,44 +430,75 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             } else {
                 Answer::Decline
             };
-            let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let sink: jolta_core::engine::Sink = std::sync::Arc::new(move |e| {
-                let _ = events.send(e);
-            });
-            let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+            let engine = Outgoing::start(jolta)?;
             let request = respond::Request {
                 subject: respond::Subject::Message(jolta_core::MessageId(message)),
                 answer,
                 note,
                 notify: !no_reply,
                 occurrence_only: occurrence,
+                proposal: None,
             };
             let t = Instant::now();
             let done = respond::answer(jolta, &request).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
-            let Some(account) = done.mailed_from else { return Ok(()) };
-            engine.wake(account);
-            let wait = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-                while let Some(e) = rx.recv().await {
-                    match e {
-                        jolta_core::engine::Event::Sent { subject, .. } => return Ok(subject),
-                        jolta_core::engine::Event::SendFailed(m) => bail!("the reply mail failed: {m}"),
-                        _ => {}
-                    }
-                }
-                bail!("the engine stopped")
-            });
-            let subject = wait.await.context("the reply mail didn't leave within two minutes")??;
-            println!("sent {subject:?} after {:.1} s", t.elapsed().as_secs_f64());
-            // Lets the engine file the Sent copy.
-            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-            Ok(())
+            match done.mailed_from {
+                Some(account) => engine.send(account, t).await,
+                None => Ok(()),
+            }
         }
         CalCommand::Card { message } => {
             for card in message_cards(jolta, jolta_core::MessageId(message)).await? {
                 print_card(&card);
             }
             Ok(())
+        }
+        CalCommand::Propose { message, maybe: _, decline, start, end, note } => {
+            let answer = if decline { Answer::Decline } else { Answer::Maybe };
+            let at = |s: &str| -> Result<DateTime<Utc>> {
+                let wall = chrono::NaiveDateTime::parse_from_str(s.trim(), "%Y-%m-%d %H:%M").with_context(|| format!("{s} is not a time like 2026-11-13 15:00"))?;
+                Ok(tz::instant(wall, tz::here()))
+            };
+            let start = at(&start)?;
+            let end = match end {
+                Some(e) => at(&e)?,
+                None => {
+                    let shown = message_cards(jolta, jolta_core::MessageId(message)).await?.into_iter().find_map(|c| match c {
+                        Card::Event(e) => e.answering.and_then(|a| a.new_time),
+                        Card::Reply(_) => None,
+                    });
+                    match shown {
+                        Some(card::NewTime::Open { start: s, end: e }) => start + (e - s),
+                        _ => bail!("the card offers no new time; give --end"),
+                    }
+                }
+            };
+            let engine = Outgoing::start(jolta)?;
+            let request = respond::Request {
+                subject: respond::Subject::Message(jolta_core::MessageId(message)),
+                answer,
+                note,
+                notify: true,
+                occurrence_only: true,
+                proposal: Some(rsvp::Proposal { start, end }),
+            };
+            let t = Instant::now();
+            let done = respond::answer(jolta, &request).await?;
+            println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            match done.mailed_from {
+                Some(account) => engine.send(account, t).await,
+                None => Ok(()),
+            }
+        }
+        CalCommand::DeclineProposal { message } => {
+            let engine = Outgoing::start(jolta)?;
+            let t = Instant::now();
+            let done = proposal::decline(jolta, jolta_core::MessageId(message)).await?;
+            println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            match done.mailed_from {
+                Some(account) => engine.send(account, t).await,
+                None => Ok(()),
+            }
         }
         CalCommand::Remove { message } => {
             let t = Instant::now();
@@ -492,7 +545,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 Scope::Occurrence(rid) => format!("the occurrence of {}", moment_text(rid)),
             };
             let t = Instant::now();
-            rsvp::answer(jolta, &Rsvp { event, answer, note, notify: !no_reply, scope }).await?;
+            rsvp::answer(jolta, &Rsvp { event, answer, note, notify: !no_reply, scope, proposal: None }).await?;
             println!(
                 "{} {what} of {title:?} in {:.2} s; {}.",
                 match answer {
@@ -633,6 +686,42 @@ fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
 
+/// The engine, started to send what a calendar command queues.
+struct Outgoing {
+    engine: std::sync::Arc<jolta_core::engine::Engine>,
+    events: tokio::sync::mpsc::UnboundedReceiver<jolta_core::engine::Event>,
+}
+
+impl Outgoing {
+    fn start(jolta: &Jolta) -> Result<Outgoing> {
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
+        let sink: jolta_core::engine::Sink = std::sync::Arc::new(move |e| {
+            let _ = tx.send(e);
+        });
+        Ok(Outgoing { engine: jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?, events })
+    }
+
+    /// Sends the account's outbox and waits until a mail has left.
+    async fn send(mut self, account: jolta_core::AccountId, t: Instant) -> Result<()> {
+        self.engine.wake(account);
+        let wait = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            while let Some(e) = self.events.recv().await {
+                match e {
+                    jolta_core::engine::Event::Sent { subject, .. } => return Ok(subject),
+                    jolta_core::engine::Event::SendFailed(m) => bail!("the mail failed: {m}"),
+                    _ => {}
+                }
+            }
+            bail!("the engine stopped")
+        });
+        let subject = wait.await.context("the mail didn't leave within two minutes")??;
+        println!("sent {subject:?} after {:.1} s", t.elapsed().as_secs_f64());
+        // Lets the engine file the Sent copy.
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        Ok(())
+    }
+}
+
 /// The cards of a message, built as the reader builds them.
 async fn message_cards(jolta: &Jolta, message: jolta_core::MessageId) -> Result<Vec<Card>> {
     let (account, sender): (jolta_core::AccountId, String) =
@@ -662,6 +751,10 @@ fn print_card(card: &Card) {
                 (None, None) => {}
             };
             line("when", &e.changes.when, &e.when);
+            if let Some(p) = &e.proposal {
+                println!("  proposed by {}, currently {}", p.proposer, p.now.as_deref().unwrap_or("unknown"));
+                println!("  {}", if p.declined { "declined" } else if p.declining.is_some() { "Decline proposal offered" } else { "no Decline proposal" });
+            }
             line("repeat", &e.changes.repeat, &e.repeat);
             line("place", &e.changes.location, &e.location);
             line("link", &e.changes.join, &e.join.as_ref().map(|j| j.provider.to_string()));
@@ -670,6 +763,14 @@ fn print_card(card: &Card) {
             }
             let answer = e.answer.map_or("none", card::answer_word);
             println!("  answer: {answer}{}", if e.answering.is_some() { ", Accept, Maybe and Decline offered" } else { "" });
+            match e.answering.as_ref().and_then(|a| a.new_time) {
+                Some(card::NewTime::Open { .. }) => println!("  Propose new time offered"),
+                Some(card::NewTime::Refused) => println!("  the organizer takes no new time proposals"),
+                None => {}
+            }
+            if let Some(a) = &e.availability {
+                println!("  {}", a.text);
+            }
             if let Some(r) = &e.removing {
                 println!("  Remove from calendar offered{}", r.occurrence.as_ref().map(|(_, d)| format!(" for {d}")).unwrap_or_default());
             }

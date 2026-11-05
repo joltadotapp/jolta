@@ -110,7 +110,7 @@ pub(crate) fn resource(copy: &NewCopy, here: Tz) -> Result<String> {
 /// quiet.
 fn answered(text: &str, copy: &NewCopy, rid: Option<&Moment>, here: Tz) -> Result<String> {
     if let Some(answer) = copy.answer {
-        let rsvp = Rsvp { event: EventId(0), answer, note: None, notify: false, scope: rid.map_or(Scope::Series, |r| Scope::Occurrence(*r)) };
+        let rsvp = Rsvp { event: EventId(0), answer, note: None, notify: false, scope: rid.map_or(Scope::Series, |r| Scope::Occurrence(*r)), proposal: None };
         if let Ok(done) = rsvp::answer_in_ical(text, copy.uid, rid, &[copy.me], &rsvp, here) {
             return Ok(done);
         }

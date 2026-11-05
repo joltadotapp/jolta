@@ -20,10 +20,11 @@ enum RsvpPanel: Equatable {
     case scope(CGRect)
     /// The Add to calendar menu.
     case calendars(CGRect)
+    case propose(CGRect)
 
     var anchor: CGRect {
         switch self {
-        case .note(let r), .scope(let r), .calendars(let r): r
+        case .note(let r), .scope(let r), .calendars(let r), .propose(let r): r
         }
     }
 }
@@ -115,6 +116,66 @@ extension AppModel {
         }
     }
 
+    /// The guest's proposal N declines when no invitation is on screen: the
+    /// last one whose message is expanded.
+    var shownProposal: ProposalInfo? {
+        openThread?.proposals.last { expandedMessages[$0.messageId] ?? $0.expanded }
+    }
+
+    /// P: opens Propose new time on the card on screen.
+    func openPropose() {
+        guard let invitation = shownInvitation, invitation.newTime != nil else {
+            notify("No invitation on screen takes a new time")
+            return
+        }
+        proposeFor = invitation.messageId
+    }
+
+    /// Proposes a new time with a Maybe or a Decline for the card's
+    /// invitation, the occurrence it shows for a series.
+    func proposeNewTime(_ answer: InvitationAnswer, start: Date, end: Date, note: String, message: Int64) {
+        guard pendingAnswer == nil, let threadID = openThread?.threadId else { return }
+        rsvpPanel = nil
+        rsvpMessage = message
+        pendingAnswer = answer
+        Task {
+            do {
+                let text = try await core.proposeNewTime(
+                    messageId: message, answer: answer, start: Int64(start.timeIntervalSince1970), end: Int64(end.timeIntervalSince1970), note: note)
+                if let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
+                   selectedThreadID == threadID {
+                    openThread = view
+                }
+                answerChoices = AnswerChoices()
+                pendingAnswer = nil
+                notify(text)
+            } catch {
+                pendingAnswer = nil
+                notify("\(error)")
+            }
+        }
+    }
+
+    /// Decline proposal on a guest's proposal. The card comes back from the
+    /// store reading Declined.
+    func declineProposal(message: Int64) {
+        guard pendingDecline == nil, let threadID = openThread?.threadId else { return }
+        pendingDecline = message
+        Task {
+            do {
+                let text = try await core.declineProposal(messageId: message)
+                if let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
+                   selectedThreadID == threadID {
+                    openThread = view
+                }
+                notify(text)
+            } catch {
+                notify("\(error)")
+            }
+            pendingDecline = nil
+        }
+    }
+
     /// Takes the meeting a cancellation's card names out of the calendar.
     /// The card comes back from the store without the link.
     func removeCancelled(message: Int64) {
@@ -163,8 +224,9 @@ extension ReaderPage {
         return CGRect(x: v[0], y: v[1], width: v[2], height: v[3])
     }
 
-    /// Marks Remove from calendar on a card while it goes out.
-    func markRemoving(message: Int64, on: Bool) {
+    /// Marks a card's Remove from calendar or Decline proposal while it
+    /// goes out.
+    func markSending(message: Int64, on: Bool) {
         let script = """
         const card = document.querySelector(`[data-rsvp="${id}"]`);
         if (card) card.classList.toggle("jolta-sending", on);
@@ -264,6 +326,126 @@ struct RsvpNotePanel: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
         .onAppear { focused = true }
+    }
+}
+
+/// Propose new time: the new start and end, the end keeping the meeting's
+/// length until it is changed, a note, and the answer that goes with it.
+/// Tab moves through the fields, ↑ and ↓ change the part of a date under
+/// the cursor, Return proposes with Maybe, ⌥Return with Decline, Esc closes.
+struct RsvpProposePanel: View {
+    @Bindable var model: AppModel
+    let invitation: InvitationInfo
+    @State private var start: Date
+    @State private var end: Date
+    @State private var length: TimeInterval
+    @State private var note = ""
+    @FocusState private var focus: Field?
+
+    private enum Field { case start, end, note }
+
+    init(model: AppModel, invitation: InvitationInfo, slot: TimeSlot) {
+        self.model = model
+        self.invitation = invitation
+        let start = Date(timeIntervalSince1970: TimeInterval(slot.start))
+        let end = Date(timeIntervalSince1970: TimeInterval(slot.end))
+        _start = State(initialValue: start)
+        _end = State(initialValue: end)
+        _length = State(initialValue: end.timeIntervalSince(start))
+    }
+
+    private var organizer: String { invitation.organizer.isEmpty ? "the organizer" : invitation.organizer }
+    private var valid: Bool { end > start }
+    private var sameDay: Bool { Calendar.current.isDate(start, inSameDayAs: end) }
+
+    /// "Thu 5 Nov · 45 minutes", with the end's day when it differs.
+    private var summary: String {
+        guard valid else { return "The new time ends before it starts" }
+        let f = DateComponentsFormatter()
+        f.allowedUnits = [.day, .hour, .minute]
+        f.unitsStyle = .full
+        let span = f.string(from: end.timeIntervalSince(start)) ?? ""
+        let day = { (d: Date) in d.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)) }
+        return sameDay ? "\(day(start)) · \(span)" : "\(day(start)) to \(day(end)) · \(span)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("New time for \(organizer)")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color(Theme.text3))
+            HStack(spacing: 6) {
+                DatePicker("Starts", selection: $start, displayedComponents: [.date, .hourAndMinute])
+                    .focused($focus, equals: .start)
+                    .accessibilityIdentifier("propose-start")
+                Text("to").font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
+                DatePicker("Ends", selection: $end, displayedComponents: sameDay ? [.hourAndMinute] : [.date, .hourAndMinute])
+                    .focused($focus, equals: .end)
+                    .accessibilityIdentifier("propose-end")
+            }
+            .labelsHidden()
+            .datePickerStyle(.field)
+            .font(.system(size: 12.5))
+            Text(summary)
+                .font(.system(size: 11))
+                .foregroundStyle(Color(valid ? Theme.text3 : Theme.accent))
+            TextField("Note to \(organizer) (optional)", text: $note)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                .focused($focus, equals: .note)
+                .onSubmit { send(.maybe) }
+                .accessibilityIdentifier("propose-note")
+            HStack(spacing: 6) {
+                Text("Propose with")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(Theme.text3))
+                Spacer(minLength: 0)
+                answer(.decline, hint: "⌥↩")
+                    .keyboardShortcut(.return, modifiers: .option)
+                answer(.maybe, hint: "↩")
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(12)
+        .frame(width: 330)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .onExitCommand { model.rsvpPanel = nil }
+        .onAppear { focus = .start }
+        .onChange(of: start) { _, new in end = new.addingTimeInterval(length) }
+        .onChange(of: end) { _, new in
+            if new > start { length = new.timeIntervalSince(start) }
+        }
+    }
+
+    private func answer(_ a: InvitationAnswer, hint: String) -> some View {
+        let main = a == .maybe
+        return Button { send(a) } label: {
+            HStack(spacing: 5) {
+                Text(a.title)
+                Text(hint).foregroundStyle(Color(Theme.text3))
+            }
+            .font(.system(size: 12, weight: main ? .semibold : .medium))
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(RoundedRectangle(cornerRadius: 6).fill(main ? Color(Theme.fill) : .clear))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color(Theme.text))
+        .disabled(!valid)
+        .accessibilityIdentifier("propose-\(a.name)")
+    }
+
+    private func send(_ a: InvitationAnswer) {
+        guard valid else { return }
+        model.proposeNewTime(a, start: start, end: end, note: note.trimmingCharacters(in: .whitespacesAndNewlines), message: invitation.messageId)
     }
 }
 

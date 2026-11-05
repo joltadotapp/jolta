@@ -35,7 +35,7 @@ const BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = r#"outlook.timezone="UTC", IdType="ImmutableId", odata.maxpagesize=200"#;
 const FIELDS: &str = "id,changeKey,type,seriesMasterId,iCalUId,subject,body,location,start,end,isAllDay,originalStart,\
 originalStartTimeZone,originalEndTimeZone,recurrence,showAs,sensitivity,responseStatus,attendees,organizer,isOrganizer,\
-isReminderOn,reminderMinutesBeforeStart,onlineMeeting,categories,isCancelled";
+isReminderOn,reminderMinutesBeforeStart,onlineMeeting,categories,isCancelled,allowNewTimeProposals";
 /// Requests per JSON batch, Graph's limit.
 const BATCH: usize = 20;
 
@@ -405,7 +405,7 @@ impl GraphCalendar {
 
     /// `accept`, `tentativelyAccept` or `decline` with `sendResponse`, and
     /// the note as `comment` when a reply goes out. Exchange sends the
-    /// organizer the reply.
+    /// organizer the reply, with a new time as `proposedNewTime`.
     pub async fn answer(&self, target: &Target, rsvp: &Rsvp) -> Result<String> {
         let id = match &target.occurrence {
             None => target.event.remote_id.clone(),
@@ -417,11 +417,7 @@ impl GraphCalendar {
             Answer::Maybe => "tentativelyAccept",
             Answer::Decline => "decline",
         };
-        // Graph refuses a comment, even an empty one, without sendResponse.
-        let body = match &rsvp.note {
-            Some(note) if rsvp.notify => json!({ "comment": note, "sendResponse": true }),
-            _ => json!({ "sendResponse": rsvp.notify }),
-        };
+        let body = answer_body(rsvp);
         let (status, reply) = self.request("POST", &format!("/me/events/{}/{action}", encode(&id)), Some(&body), &[]).await?;
         if !(200..300).contains(&status) {
             return Err(self.failure(status, &reply));
@@ -928,6 +924,27 @@ fn weekday(day: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether the organizer takes proposals for a new time, from an event's
+/// JSON as Graph gave it: `allowNewTimeProposals`, true when it is missing,
+/// as in copies stored before Jolta asked for it.
+pub fn takes_proposals(raw: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(raw).ok().and_then(|v| v["allowNewTimeProposals"].as_bool()).unwrap_or(true)
+}
+
+/// The body of an answer: Graph refuses a comment, even an empty one, and
+/// a proposed time without `sendResponse`.
+fn answer_body(rsvp: &Rsvp) -> Value {
+    let mut body = json!({ "sendResponse": rsvp.notify });
+    if let Some(note) = rsvp.note.as_ref().filter(|_| rsvp.notify) {
+        body["comment"] = json!(note);
+    }
+    if let Some(p) = rsvp.proposal.filter(|_| rsvp.notify && rsvp.answer != Answer::Accept) {
+        let slot = |t: DateTime<Utc>| json!({ "dateTime": t.format("%Y-%m-%dT%H:%M:%S").to_string(), "timeZone": "UTC" });
+        body["proposedNewTime"] = json!({ "start": slot(p.start), "end": slot(p.end) });
+    }
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -1217,5 +1234,25 @@ mod tests {
         assert_eq!((shared.access, shared.color), (Access::Write, None));
         assert_eq!(read.access, Access::Read);
         assert_eq!(window(NaiveDate::from_ymd_opt(2026, 11, 4).unwrap()), ("2024-11-01T00:00:00Z".into(), "2029-11-01T00:00:00Z".into()));
+    }
+
+    #[test]
+    fn an_answer_with_a_new_time_proposes_it() {
+        use crate::calendar::rsvp::{Proposal, Scope};
+        let at = |h: u32| Utc.with_ymd_and_hms(2026, 11, 6, h, 0, 0).unwrap();
+        let rsvp = |answer, note: Option<&str>, notify, proposal| Rsvp { event: crate::calendar::EventId(1), answer, note: note.map(str::to_string), notify, scope: Scope::Series, proposal };
+        let proposal = Some(Proposal { start: at(13), end: at(14) });
+        assert_eq!(
+            answer_body(&rsvp(Answer::Maybe, Some("Friday?"), true, proposal)),
+            json!({
+                "sendResponse": true,
+                "comment": "Friday?",
+                "proposedNewTime": {"start": {"dateTime": "2026-11-06T13:00:00", "timeZone": "UTC"}, "end": {"dateTime": "2026-11-06T14:00:00", "timeZone": "UTC"}}
+            })
+        );
+        assert_eq!(answer_body(&rsvp(Answer::Decline, Some("x"), false, proposal)), json!({ "sendResponse": false }), "Graph refuses a comment or a time without a reply");
+        assert_eq!(answer_body(&rsvp(Answer::Accept, None, true, None)), json!({ "sendResponse": true }));
+        assert!(takes_proposals(br#"{"id":"a"}"#), "a copy stored before Jolta asked");
+        assert!(!takes_proposals(br#"{"allowNewTimeProposals":false}"#));
     }
 }

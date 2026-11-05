@@ -96,7 +96,13 @@ struct PaletteView: View {
         let hasThread = model.cursorRow != nil
         var out: [PaletteItem] = Command.allCases
             .filter { ![.next, .previous, .open, .help].contains($0) && (!$0.needsThread || hasThread) }
-            .filter { $0.answer == nil || model.shownInvitation != nil }
+            .filter { c in
+                switch c {
+                case .propose: model.shownInvitation?.newTime != nil
+                case .decline: model.shownInvitation != nil || model.shownProposal != nil
+                default: c.answer == nil || model.shownInvitation != nil
+                }
+            }
             .map { c in PaletteItem(id: c.rawValue, title: c.title, icon: c.icon, keys: c.keys) { [model] in model.run(c) } }
         for s in model.sections {
             out.append(PaletteItem(id: "section-\(s.id)", title: "Show \(s.name)", detail: s.query, icon: "rectangle.split.3x1") { [model] in

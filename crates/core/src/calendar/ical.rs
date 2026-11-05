@@ -39,6 +39,9 @@ pub struct Sent {
     /// DTSTAMP: when the organizer sent this version. It orders two
     /// versions with the same SEQUENCE.
     pub stamp: Option<DateTime<chrono::Utc>>,
+    /// False when the organizer takes no proposals for a new time:
+    /// Outlook's `X-MICROSOFT-DISALLOW-COUNTER:TRUE`.
+    pub proposals: bool,
 }
 
 /// Every VEVENT in an invitation in mail.
@@ -170,7 +173,8 @@ fn event(
     };
 
     let organizer = comp.property(&Prop::Organizer).and_then(person);
-    let reply_comment = (method == Some("REPLY")).then(|| prop_text(comp, &Prop::Comment)).flatten();
+    // A reply or a proposal carries its one guest's note as COMMENT.
+    let reply_comment = matches!(method, Some("REPLY" | "COUNTER")).then(|| prop_text(comp, &Prop::Comment)).flatten();
     let mut attendees: Vec<Attendee> =
         comp.properties(&Prop::Attendee).filter_map(|e| attendee(e, me)).collect();
     if let ([only], Some(comment)) = (attendees.as_mut_slice(), reply_comment)
@@ -238,7 +242,8 @@ fn event(
         Some(Value::PartialDateTime(dt)) => utc(dt),
         _ => None,
     });
-    Some(Sent { event, dated: start.is_some(), stamp })
+    let proposals = !x_props(comp, "X-MICROSOFT-DISALLOW-COUNTER").filter_map(upper).any(|v| v == "TRUE");
+    Some(Sent { event, dated: start.is_some(), stamp, proposals })
 }
 
 fn span(comp: &ICalendarComponent, start: Moment, zones: &mut Zones<'_>) -> Span {

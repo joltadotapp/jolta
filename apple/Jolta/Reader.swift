@@ -345,12 +345,19 @@ struct ReaderView: View {
         case "quiet":
             model.rsvpPanel = nil
             model.answerChoices.quiet.toggle()
-        case "note", "scope":
+        case "decline-proposal":
+            model.declineProposal(message: message)
+        case "note", "scope", "propose":
             if case .note = model.rsvpPanel, action == "note" { model.rsvpPanel = nil; return }
             if case .scope = model.rsvpPanel, action == "scope" { model.rsvpPanel = nil; return }
+            if case .propose = model.rsvpPanel, action == "propose" { model.rsvpPanel = nil; return }
             Task {
                 guard let frame = await reader.frame(of: ".jolta-rsvp-\(action)", message: message) else { return }
-                model.rsvpPanel = action == "note" ? .note(frame) : .scope(frame)
+                model.rsvpPanel = switch action {
+                case "note": .note(frame)
+                case "scope": .scope(frame)
+                default: .propose(frame)
+                }
             }
         default: break
         }
@@ -364,6 +371,8 @@ struct ReaderView: View {
                 case .note: RsvpNotePanel(model: model, invitation: invitation)
                 case .scope: RsvpScopePanel(model: model, day: invitation.occurrenceDay ?? "this one")
                 case .calendars: AddCalendarPanel(model: model, message: model.rsvpMessage ?? invitation.messageId)
+                case .propose:
+                    if let slot = invitation.newTime { RsvpProposePanel(model: model, invitation: invitation, slot: slot) }
                 }
             }
             .offset(x: max(8, panel.left), y: anchor.maxY + 6)
@@ -468,7 +477,15 @@ struct ReaderView: View {
         .onChange(of: model.answerChoices) { reflect() }
         .onChange(of: model.pendingAnswer) { reflect() }
         .onChange(of: model.pendingRemoval) { old, new in
-            if let message = new ?? old { reader.markRemoving(message: message, on: new != nil) }
+            if let message = new ?? old { reader.markSending(message: message, on: new != nil) }
+        }
+        .onChange(of: model.pendingDecline) { old, new in
+            if let message = new ?? old { reader.markSending(message: message, on: new != nil) }
+        }
+        .onChange(of: model.proposeFor) { _, new in
+            guard let new else { return }
+            model.proposeFor = nil
+            rsvp(new, "propose")
         }
         .onAppear {
             reader.onAttachment = onAttachment
@@ -560,12 +577,13 @@ enum ReaderStyle {
     .jolta-invite-title { color: var(--tx); font-size: 15px; line-height: 21px; font-weight: 600; letter-spacing: -.01em; }
     .jolta-invite-cancelled .jolta-invite-title { color: var(--tx2); text-decoration: line-through; text-decoration-color: var(--tx3); }
     .jolta-invite-when { margin-top: 2px; color: var(--tx); font-size: 13px; font-variant-numeric: tabular-nums; }
-    .jolta-invite-elsewhere { color: var(--tx3); font-variant-numeric: tabular-nums; }
+    .jolta-invite-elsewhere, .jolta-invite-was { color: var(--tx3); font-variant-numeric: tabular-nums; }
     .jolta-invite-facts { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 10px; }
     .jolta-invite-facts span { display: inline-flex; align-items: center; gap: 6px; }
     .jolta-invite-people { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
     .jolta-invite-facts + .jolta-invite-people { margin-top: 2px; }
-    .jolta-invite-when + .jolta-invite-people, .jolta-invite-elsewhere + .jolta-invite-people { margin-top: 10px; }
+    .jolta-invite-when + .jolta-invite-people, .jolta-invite-elsewhere + .jolta-invite-people,
+      .jolta-invite-was + .jolta-invite-people { margin-top: 10px; }
     .jolta-invite-people b { color: var(--tx); font-weight: 500; }
     .jolta-invite-note, .jolta-invite-free { margin-top: 10px; }
     .jolta-invite-note + .jolta-invite-note, .jolta-invite-note + .jolta-invite-free { margin-top: 2px; }
@@ -599,6 +617,17 @@ enum ReaderStyle {
       font-weight: 500; text-decoration: none; cursor: default; transition: background-color .16s ease; }
     .jolta-add:hover, .jolta-update:hover { background: var(--fill); }
     .jolta-sending .jolta-add, .jolta-sending .jolta-update { animation: jolta-sending .7s ease-in-out infinite alternate; }
+    .jolta-decline-proposal { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box;
+      padding: 0 5px 0 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
+      text-decoration: none; cursor: default; transition: background-color .16s ease; }
+    .jolta-decline-proposal:hover { background: var(--fill); }
+    .jolta-decline-proposal kbd, .jolta-rsvp-propose kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px;
+      border-radius: 4px; text-align: center; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3);
+      font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
+    .jolta-rsvp-propose kbd { min-width: 14px; height: 14px; padding: 0 3px; font-size: 9.5px; line-height: 14px; }
+    .jolta-sending .jolta-decline-proposal { animation: jolta-sending .7s ease-in-out infinite alternate; }
+    .jolta-invite-hint { color: var(--tx3); font-size: 12px; }
+    .jolta-rsvp-fixed { color: var(--tx3); }
     .jolta-rsvp { display: inline-flex; gap: 6px; }
     .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
       border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;

@@ -9,6 +9,7 @@ pub mod ical_edit;
 pub mod invitation;
 pub mod meeting;
 mod model;
+pub mod proposal;
 pub mod recur;
 pub mod remind;
 pub mod remove;

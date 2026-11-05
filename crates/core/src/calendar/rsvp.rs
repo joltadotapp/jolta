@@ -13,7 +13,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as BuilderAddress;
@@ -73,6 +73,10 @@ pub struct Rsvp {
     /// isn't told.
     pub notify: bool,
     pub scope: Scope,
+    /// A new time proposed with a Maybe or a Decline, which Graph sends as
+    /// `proposedNewTime`. The other providers have no field for it; Jolta
+    /// mails those a COUNTER.
+    pub proposal: Option<Proposal>,
 }
 
 /// A stored event, as a source needs it to answer.
@@ -543,7 +547,8 @@ fn occurrence_of(master: &Component, rid: &Moment, here: Tz) -> Result<(Componen
     Ok((over, value))
 }
 
-/// Who an iMIP reply comes from, and what it answers.
+/// Who an iMIP mail to an invitation's organizer comes from, and what it
+/// answers.
 pub struct ImipReply<'a> {
     /// The invitation as the organizer sent it, or the calendar's copy.
     pub invitation: &'a str,
@@ -560,82 +565,162 @@ pub struct ImipReply<'a> {
     pub occurrence: Option<Moment>,
 }
 
+/// A new time for a meeting, or for one occurrence of a series, that an
+/// attendee proposes with a Maybe or a Decline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Proposal {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+/// The event of an invitation an iMIP mail answers: the series or single
+/// event, or one occurrence of it, with its organizer.
+struct About {
+    event: Component,
+    master: Component,
+    organizer: Prop,
+    organizer_address: String,
+    /// Every VTIMEZONE of the invitation.
+    zones: Vec<Component>,
+}
+
+impl About {
+    /// The VEVENT of `invitation` that `occurrence` names: its changed
+    /// occurrence, else one made from the series, else the event itself.
+    fn of(invitation: &str, occurrence: Option<&Moment>, here: Tz) -> Result<About> {
+        let invite = Object::parse(invitation);
+        let calendar = invite.calendar().ok_or_else(|| Error::Other("the invitation holds no calendar".into()))?;
+        if let Some(method) = calendar.prop("METHOD").map(|m| m.value().trim().to_ascii_uppercase())
+            && !matches!(method.as_str(), "REQUEST" | "ADD" | "PUBLISH")
+        {
+            return Err(Error::Other(format!("this calendar mail is a {method}, not an invitation")));
+        }
+        let events: Vec<&Component> = calendar.components().filter(|c| c.name() == "VEVENT").collect();
+        let master = events
+            .iter()
+            .find(|e| e.prop("RECURRENCE-ID").is_none())
+            .or(events.first())
+            .copied()
+            .ok_or_else(|| Error::Other("the invitation holds no event".into()))?;
+        let event = match occurrence {
+            None => master.clone(),
+            Some(rid) => match events.iter().find(|e| e.prop("RECURRENCE-ID").and_then(prop_moment).is_some_and(|m| m.names(rid, here))) {
+                Some(changed) => (*changed).clone(),
+                None if master.prop("RRULE").is_some() || master.prop("RDATE").is_some() => occurrence_of(master, rid, here)?.0,
+                None => return Err(Error::Other("This invitation doesn't repeat, so it has no single occurrence to answer.".into())),
+            },
+        };
+        let organizer = event.prop("ORGANIZER").or(master.prop("ORGANIZER")).cloned().ok_or_else(|| Error::Other("the invitation names no organizer".into()))?;
+        let organizer_address = organizer
+            .address()
+            .or(organizer.param("EMAIL"))
+            .map(str::to_string)
+            .ok_or_else(|| Error::Other("the invitation's organizer has no address".into()))?;
+        let zones = calendar.components().filter(|c| c.name() == "VTIMEZONE").cloned().collect();
+        Ok(About { event, master: master.clone(), organizer, organizer_address, zones })
+    }
+
+    /// The user's own ATTENDEE line with `answer`'s PARTSTAT: the one the
+    /// event, else its series, has for an address in `me`, or one made for
+    /// `from`.
+    fn my_line(&self, me: &[String], from: &str, answer: Answer) -> Prop {
+        let mine = |e: &Component| e.props().find(|p| p.is("ATTENDEE") && is_me(p, me)).cloned();
+        let mut attendee = mine(&self.event).or_else(|| mine(&self.master)).unwrap_or_else(|| Prop::new("ATTENDEE", &format!("mailto:{from}")));
+        attendee.set_param("PARTSTAT", answer.partstat());
+        for stale in ["RSVP", "SCHEDULE-STATUS", "X-RESPONSE-COMMENT"] {
+            attendee.remove_param(stale);
+        }
+        attendee
+    }
+
+    fn title(&self) -> String {
+        self.event.prop("SUMMARY").map(Prop::text).unwrap_or_default()
+    }
+}
+
+/// A VEVENT with the properties of `from` named in `names`, in that order.
+fn echo(from: &Component, names: &[&str]) -> Component {
+    let mut out = Component::new("VEVENT");
+    for name in names {
+        if let Some(p) = from.prop(name) {
+            out.add(p.clone());
+        }
+    }
+    if out.prop("SEQUENCE").is_none() {
+        out.add(Prop::new("SEQUENCE", "0"));
+    }
+    out.add(Prop::new("DTSTAMP", &format!("{}Z", Utc::now().format("%Y%m%dT%H%M%S"))));
+    out
+}
+
+/// One iTIP object: `event` under `method`, with the VTIMEZONEs its own
+/// properties name.
+fn itip(method: &str, event: Component, zones: &[Component]) -> String {
+    let named: Vec<&str> = ["DTSTART", "DTEND", "RECURRENCE-ID"].iter().filter_map(|n| event.prop(n)).filter_map(|p| p.param("TZID")).collect();
+    let mut cal = Component::new("VCALENDAR");
+    cal.add(Prop::text_value("PRODID", concat!("-//Jolta//Jolta ", env!("CARGO_PKG_VERSION"), "//EN")));
+    cal.add(Prop::new("VERSION", "2.0"));
+    cal.add(Prop::new("CALSCALE", "GREGORIAN"));
+    cal.add(Prop::new("METHOD", method));
+    for vtimezone in zones {
+        if vtimezone.prop("TZID").is_some_and(|t| named.contains(&t.value())) {
+            cal.push(vtimezone.clone());
+        }
+    }
+    cal.push(event);
+    Object::new(cal).to_string()
+}
+
+/// An iMIP mail from `from` to the one person `to` names, as "Name" and
+/// address: the text, and the iTIP object as its calendar part.
+struct Mail<'a> {
+    from: &'a str,
+    to: (Option<String>, String),
+    subject: String,
+    text: String,
+    method: &'a str,
+    ics: String,
+    /// Made from what the mail says, so the same mail built twice has the
+    /// same id; None for one of its own.
+    same_as: Option<String>,
+}
+
+fn imip_mail(m: Mail) -> Result<Built> {
+    let seed = m.same_as.unwrap_or_else(|| format!("{}{}", SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos()), m.ics));
+    let domain = m.from.rsplit('@').next().unwrap_or("jolta.invalid");
+    let message_id = format!("{}@{domain}", &hex::encode(Sha256::digest(seed))[..24]);
+    let calendar_part = ContentType::new("text/calendar").attribute("method", m.method).attribute("charset", "utf-8");
+    let (name, address) = m.to;
+    let raw = MessageBuilder::new()
+        .from(BuilderAddress::new_address(None::<String>, m.from.to_string()))
+        .to(BuilderAddress::new_address(name, address.clone()))
+        .subject(m.subject)
+        .message_id(message_id.clone())
+        .body(MimePart::new("multipart/alternative", vec![MimePart::new("text/plain", m.text), MimePart::new(calendar_part, m.ics)]))
+        .write_to_vec()?;
+    Ok(Built { raw, message_id, from: m.from.to_string(), recipients: vec![address] })
+}
+
+fn cn(p: &Prop) -> Option<String> {
+    p.param("CN").map(str::to_string).filter(|n| !n.is_empty())
+}
+
 /// The iMIP reply (RFC 6047) to an invitation: a METHOD:REPLY object (RFC
 /// 5546 section 3.2.3) holding only the user's own ATTENDEE line with its
 /// PARTSTAT, and the invitation's UID, SEQUENCE and RECURRENCE-ID, so the
 /// organizer's calendar finds the meeting. A note goes in COMMENT. It goes
 /// to the organizer only, through the account's outbox like any other mail.
 pub fn imip_reply(r: &ImipReply, here: Tz) -> Result<Built> {
-    let invite = Object::parse(r.invitation);
-    let calendar = invite.calendar().ok_or_else(|| Error::Other("the invitation holds no calendar".into()))?;
-    if let Some(method) = calendar.prop("METHOD").map(|m| m.value().trim().to_ascii_uppercase())
-        && !matches!(method.as_str(), "REQUEST" | "ADD" | "PUBLISH")
-    {
-        return Err(Error::Other(format!("this calendar mail is a {method}, not an invitation")));
-    }
-    let events: Vec<&Component> = calendar.components().filter(|c| c.name() == "VEVENT").collect();
-    let master = events
-        .iter()
-        .find(|e| e.prop("RECURRENCE-ID").is_none())
-        .or(events.first())
-        .copied()
-        .ok_or_else(|| Error::Other("the invitation holds no event".into()))?;
-    let made;
-    let event: &Component = match &r.occurrence {
-        None => master,
-        Some(rid) => match events.iter().find(|e| e.prop("RECURRENCE-ID").and_then(prop_moment).is_some_and(|m| m.names(rid, here))) {
-            Some(changed) => changed,
-            None if master.prop("RRULE").is_some() || master.prop("RDATE").is_some() => {
-                made = occurrence_of(master, rid, here)?.0;
-                &made
-            }
-            None => return Err(Error::Other("This invitation doesn't repeat, so it has no single occurrence to answer.".into())),
-        },
-    };
-    let organizer = event.prop("ORGANIZER").or(master.prop("ORGANIZER")).ok_or_else(|| Error::Other("the invitation names no organizer".into()))?;
-    let organizer_address = organizer.address().or(organizer.param("EMAIL")).map(str::to_string)
-        .ok_or_else(|| Error::Other("the invitation's organizer has no address".into()))?;
-    let me = r.from;
-
-    let mut reply = Component::new("VEVENT");
-    for name in ["UID", "RECURRENCE-ID", "SEQUENCE", "DTSTART", "DTEND", "DURATION", "SUMMARY"] {
-        if let Some(p) = event.prop(name) {
-            reply.add(p.clone());
-        }
-    }
-    if reply.prop("SEQUENCE").is_none() {
-        reply.add(Prop::new("SEQUENCE", "0"));
-    }
-    reply.add(Prop::new("DTSTAMP", &format!("{}Z", Utc::now().format("%Y%m%dT%H%M%S"))));
-    reply.add(organizer.clone());
-    let mine = |e: &Component| e.props().find(|p| p.is("ATTENDEE") && is_me(p, r.me)).cloned();
-    let mut attendee = mine(event).or_else(|| mine(master)).unwrap_or_else(|| Prop::new("ATTENDEE", &format!("mailto:{me}")));
-    attendee.set_param("PARTSTAT", r.answer.partstat());
-    for stale in ["RSVP", "SCHEDULE-STATUS", "X-RESPONSE-COMMENT"] {
-        attendee.remove_param(stale);
-    }
-    let who = attendee.address().unwrap_or(me).to_string();
+    let about = About::of(r.invitation, r.occurrence.as_ref(), here)?;
+    let mut reply = echo(&about.event, &["UID", "RECURRENCE-ID", "SEQUENCE", "DTSTART", "DTEND", "DURATION", "SUMMARY"]);
+    reply.add(about.organizer.clone());
+    let attendee = about.my_line(r.me, r.from, r.answer);
+    let who = attendee.address().unwrap_or(r.from).to_string();
     reply.add(attendee);
     let note = r.note.filter(|n| !n.trim().is_empty());
     if let Some(n) = note {
         reply.add(Prop::text_value("COMMENT", n));
     }
-
-    let zones: Vec<&str> = ["DTSTART", "DTEND", "RECURRENCE-ID"].iter().filter_map(|n| event.prop(n)).filter_map(|p| p.param("TZID")).collect();
-    let mut cal = Component::new("VCALENDAR");
-    cal.add(Prop::text_value("PRODID", concat!("-//Jolta//Jolta ", env!("CARGO_PKG_VERSION"), "//EN")));
-    cal.add(Prop::new("VERSION", "2.0"));
-    cal.add(Prop::new("CALSCALE", "GREGORIAN"));
-    cal.add(Prop::new("METHOD", "REPLY"));
-    for vtimezone in calendar.components().filter(|c| c.name() == "VTIMEZONE") {
-        if vtimezone.prop("TZID").is_some_and(|t| zones.contains(&t.value())) {
-            cal.push(vtimezone.clone());
-        }
-    }
-    cal.push(reply);
-    let ics = Object::new(cal).to_string();
-
-    let title = event.prop("SUMMARY").map(Prop::text).unwrap_or_default();
     let (prefix, verb) = match r.answer {
         Answer::Accept => ("Accepted", "accepted"),
         Answer::Maybe => ("Tentative", "tentatively accepted"),
@@ -645,19 +730,133 @@ pub fn imip_reply(r: &ImipReply, here: Tz) -> Result<Built> {
     if let Some(n) = note {
         text.push_str(&format!("\n\n{n}"));
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let domain = me.rsplit('@').next().unwrap_or("jolta.invalid");
-    let message_id = format!("{}@{domain}", &hex::encode(Sha256::digest(format!("{now}{ics}")))[..24]);
-    let organizer_name = organizer.param("CN").map(str::to_string).filter(|n| !n.is_empty());
-    let calendar_part = ContentType::new("text/calendar").attribute("method", "REPLY").attribute("charset", "utf-8");
-    let raw = MessageBuilder::new()
-        .from(BuilderAddress::new_address(None::<String>, me.to_string()))
-        .to(BuilderAddress::new_address(organizer_name, organizer_address.clone()))
-        .subject(if title.is_empty() { prefix.to_string() } else { format!("{prefix}: {title}") })
-        .message_id(message_id.clone())
-        .body(MimePart::new("multipart/alternative", vec![MimePart::new("text/plain", text), MimePart::new(calendar_part, ics)]))
-        .write_to_vec()?;
-    Ok(Built { raw, message_id, from: me.to_string(), recipients: vec![organizer_address] })
+    let title = about.title();
+    imip_mail(Mail {
+        from: r.from,
+        to: (cn(&about.organizer), about.organizer_address.clone()),
+        subject: if title.is_empty() { prefix.to_string() } else { format!("{prefix}: {title}") },
+        text,
+        method: "REPLY",
+        ics: itip("REPLY", reply, &about.zones),
+        same_as: None,
+    })
+}
+
+/// The iMIP proposal of a new time (RFC 5546 section 3.2.7): a
+/// METHOD:COUNTER object with the invitation's UID, SEQUENCE, RECURRENCE-ID
+/// and title, the proposed start and end in UTC, and the user's own ATTENDEE
+/// line with the answer that goes with it, Maybe or Decline. A note goes in
+/// COMMENT. It goes to the organizer only. The same proposal built twice is
+/// the same mail, with the same Message-ID, so the outbox can tell it is
+/// already on its way.
+pub fn imip_counter(r: &ImipReply, proposal: &Proposal, here: Tz) -> Result<Built> {
+    if r.answer == Answer::Accept {
+        return Err(Error::Other("A new time goes with Maybe or Decline, not with Accept.".into()));
+    }
+    if proposal.end <= proposal.start {
+        return Err(Error::Other("The proposed meeting ends before it starts.".into()));
+    }
+    let about = About::of(r.invitation, r.occurrence.as_ref(), here)?;
+    if about.event.prop("DTSTART").is_some_and(|p| p.param("VALUE").is_some_and(|v| v.eq_ignore_ascii_case("DATE")) || p.value().trim().len() == 8) {
+        return Err(Error::Other("This meeting lasts all day; Jolta proposes new times for meetings with a start and an end time.".into()));
+    }
+    let utc = |t: DateTime<Utc>| format!("{}Z", t.format("%Y%m%dT%H%M%S"));
+    let mut counter = echo(&about.event, &["UID", "RECURRENCE-ID", "SEQUENCE", "SUMMARY", "LOCATION"]);
+    counter.add(Prop::new("DTSTART", &utc(proposal.start)));
+    counter.add(Prop::new("DTEND", &utc(proposal.end)));
+    counter.add(about.organizer.clone());
+    let attendee = about.my_line(r.me, r.from, r.answer);
+    let who = cn(&attendee).unwrap_or_else(|| attendee.address().unwrap_or(r.from).to_string());
+    counter.add(attendee);
+    let note = r.note.filter(|n| !n.trim().is_empty());
+    if let Some(n) = note {
+        counter.add(Prop::text_value("COMMENT", n));
+    }
+
+    let mut text = format!("{who} proposes a new time: {}.", spoken(proposal, here));
+    if let Some(n) = note {
+        text.push_str(&format!("\n\n{n}"));
+    }
+    let title = about.title();
+    let value = |name: &str| about.event.prop(name).map(|p| p.value().trim().to_string()).unwrap_or_default();
+    let same_as = [r.from, &value("UID"), &value("RECURRENCE-ID"), &value("SEQUENCE"), &utc(proposal.start), &utc(proposal.end), r.answer.partstat(), note.unwrap_or("")].join("\n");
+    imip_mail(Mail {
+        from: r.from,
+        to: (cn(&about.organizer), about.organizer_address.clone()),
+        subject: if title.is_empty() { "New time proposed".into() } else { format!("New time proposed: {title}") },
+        text,
+        method: "COUNTER",
+        ics: itip("COUNTER", counter, &about.zones),
+        same_as: Some(format!("COUNTER\n{same_as}")),
+    })
+}
+
+/// "Fri 13 Nov 2026, 10:00 to 11:00 (Europe/Brussels)" on the Mac's clock.
+fn spoken(p: &Proposal, here: Tz) -> String {
+    let (start, end) = (p.start.with_timezone(&here), p.end.with_timezone(&here));
+    let end = if end.date_naive() == start.date_naive() { end.format("%H:%M").to_string() } else { end.format("%a %-d %b %Y %H:%M").to_string() };
+    format!("{}, {} to {end} ({here})", start.format("%a %-d %b %Y"), start.format("%H:%M"))
+}
+
+/// The organizer's no to a proposal (RFC 5546 section 3.2.8): a
+/// METHOD:DECLINECOUNTER object echoing the UID, SEQUENCE and
+/// RECURRENCE-ID of the COUNTER's event `uid` at `rid`, with its
+/// ORGANIZER, else `from` as Exchange's COUNTER names none, and the
+/// proposer's ATTENDEE line, from the organizer's account `from` to the
+/// proposer only. The meeting keeps its time; the
+/// proposer's calendar keeps its copy. `title` is the meeting's, which
+/// Exchange's COUNTER gives as "New Time Proposed: Planning".
+pub fn imip_decline_counter(counter: &str, uid: &str, rid: Option<&Moment>, from: &str, proposer: &str, title: &str, here: Tz) -> Result<Built> {
+    let obj = Object::parse(counter);
+    let calendar = obj.calendar().ok_or_else(|| Error::Other("the proposal holds no calendar".into()))?;
+    if !calendar.prop("METHOD").is_some_and(|m| m.value().trim().eq_ignore_ascii_case("COUNTER")) {
+        return Err(Error::Other("this calendar mail isn't a proposal for a new time".into()));
+    }
+    // The calendar parser decodes escaped UIDs and resolves a custom
+    // VTIMEZONE such as Outlook's "Customized Time Zone"; it reads the
+    // VEVENTs in order, so its events line up with the components.
+    let vevents: Vec<&Component> = calendar.components().filter(|c| c.name() == "VEVENT").collect();
+    let parsed = super::ical::read(counter, &[]).ok().filter(|events| events.len() == vevents.len());
+    let same_occurrence = |m: Option<Moment>| match (m, rid) {
+        (None, None) => true,
+        (Some(m), Some(rid)) => m.names(rid, here),
+        _ => false,
+    };
+    let event = vevents
+        .iter()
+        .enumerate()
+        .find(|(i, e)| match &parsed {
+            Some(events) => events[*i].uid == uid && same_occurrence(events[*i].recurrence_id),
+            None => e.prop("UID").is_some_and(|u| u.text().trim() == uid) && same_occurrence(e.prop("RECURRENCE-ID").and_then(prop_moment)),
+        })
+        .map(|(_, e)| *e)
+        .ok_or_else(|| Error::Other("the proposal holds no event".into()))?;
+    let organizer = event.prop("ORGANIZER").cloned().unwrap_or_else(|| Prop::new("ORGANIZER", &format!("mailto:{from}")));
+    let mut attendee = event
+        .props()
+        .find(|p| p.is("ATTENDEE") && is_me(p, &[proposer]))
+        .cloned()
+        .ok_or_else(|| Error::Other(format!("the proposal doesn't name {proposer} as a guest")))?;
+    for stale in ["PARTSTAT", "RSVP", "SCHEDULE-STATUS", "X-RESPONSE-COMMENT"] {
+        attendee.remove_param(stale);
+    }
+    let proposed = |name: &str| event.prop(name).map(|p| p.value().trim().to_string()).unwrap_or_default();
+    let mut decline = echo(event, &["UID", "RECURRENCE-ID", "SEQUENCE"]);
+    decline.add(organizer);
+    let name = cn(&attendee);
+    decline.add(attendee);
+    let zones: Vec<Component> = calendar.components().filter(|c| c.name() == "VTIMEZONE").cloned().collect();
+    let title = title.trim();
+    let same_as = ["DECLINECOUNTER", from, &proposed("UID"), &proposed("RECURRENCE-ID"), &proposed("SEQUENCE"), proposer, &proposed("DTSTART"), &proposed("DTEND")].join("\n");
+    imip_mail(Mail {
+        from,
+        to: (name, proposer.to_string()),
+        subject: if title.is_empty() { "New time declined".into() } else { format!("New time declined: {title}") },
+        text: format!("{from} declined the new time you proposed. The meeting keeps its time."),
+        method: "DECLINECOUNTER",
+        ics: itip("DECLINECOUNTER", decline, &zones),
+        same_as: Some(same_as),
+    })
 }
 
 #[cfg(test)]
@@ -670,7 +869,7 @@ mod tests {
     const OUTLOOK_UID: &str = "040000008200E00074C5B7101A82E00800000000A1B2C3D4E5F6D901000000000000000010000000F00DFACEB00C4B6A9E2F5B3D8C7A6E51";
 
     fn rsvp(answer: Answer, note: Option<&str>, notify: bool) -> Rsvp {
-        Rsvp { event: EventId(1), answer, note: note.map(str::to_string), notify, scope: Scope::Series }
+        Rsvp { event: EventId(1), answer, note: note.map(str::to_string), notify, scope: Scope::Series, proposal: None }
     }
 
     /// Content lines that differ between two texts, unfolded, as (removed, added).
@@ -1010,5 +1209,147 @@ mod tests {
         let built = reply_to(fixture!("google.ics"), "list-member@example.org", Answer::Accept, None, None).unwrap();
         let (_, ics) = reply_parts(&built);
         assert!(ics.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:list-member@example.org"), "invited through a list: {ics}");
+    }
+
+    /// The calendar part of an iMIP mail under `method`, and the message.
+    fn itip_parts<'a>(built: &'a Built, method: &str) -> (mail_parser::Message<'a>, String) {
+        let msg = mail_parser::MessageParser::default().parse(&built.raw).expect("a message");
+        let part = msg.parts().find(|p| p.content_type().is_some_and(|c| c.subtype() == Some("calendar"))).expect("a text/calendar part");
+        assert_eq!(part.content_type().unwrap().attribute("method"), Some(method));
+        let ics = String::from_utf8_lossy(&part.decoded()).into_owned();
+        (msg, ics)
+    }
+
+    fn propose(invitation: &str, answer: Answer, note: Option<&str>, occurrence: Option<Moment>, proposal: &Proposal) -> Result<Built> {
+        let me = [ME.to_string()];
+        imip_counter(&ImipReply { invitation, from: ME, me: &me, answer, note, occurrence }, proposal, Europe::Brussels)
+    }
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap().and_utc()
+    }
+
+    #[test]
+    fn a_counter_proposes_the_new_time_to_the_organizer_only() {
+        let proposal = Proposal { start: utc("2026-11-06 13:00"), end: utc("2026-11-06 13:45") };
+        let built = propose(fixture!("google.ics"), Answer::Maybe, Some("Thursday is full; Friday?"), None, &proposal).unwrap();
+        assert_eq!((built.from.as_str(), built.recipients.as_slice()), (ME, ["lotte.maes@example.com".to_string()].as_slice()));
+        let (msg, ics) = itip_parts(&built, "COUNTER");
+        assert_eq!(msg.subject(), Some("New time proposed: Design review"));
+        assert!(msg.body_text(0).unwrap().contains("proposes a new time: Fri 6 Nov 2026, 14:00 to 14:45 (Europe/Brussels)."), "{:?}", msg.body_text(0));
+
+        let obj = Object::parse(&ics);
+        let cal = obj.calendar().unwrap();
+        assert_eq!(cal.prop("METHOD").unwrap().value(), "COUNTER");
+        let ev = cal.components().find(|c| c.name() == "VEVENT").unwrap();
+        assert_eq!(ev.prop("UID").unwrap().text(), "5f2k9q8v1n3m7c0b4x6z2a8d1e@google.com");
+        assert_eq!(ev.prop("SEQUENCE").unwrap().value(), "0", "the version it counters");
+        assert_eq!((ev.prop("DTSTART").unwrap().value(), ev.prop("DTEND").unwrap().value()), ("20261106T130000Z", "20261106T134500Z"));
+        assert_eq!(ev.prop("ORGANIZER").unwrap().address(), Some("lotte.maes@example.com"));
+        let attendees: Vec<&Prop> = ev.props().filter(|p| p.is("ATTENDEE")).collect();
+        assert_eq!(attendees.len(), 1, "only the user, who proposes: {ics}");
+        assert_eq!((attendees[0].address(), attendees[0].param("PARTSTAT"), attendees[0].param("RSVP")), (Some(ME), Some("TENTATIVE"), None));
+        assert_eq!(ev.prop("COMMENT").unwrap().text(), "Thursday is full; Friday?");
+        assert!(ev.prop("RRULE").is_none() && ev.prop("RECURRENCE-ID").is_none() && ev.prop("DESCRIPTION").is_none());
+
+        let read = super::super::ical::read_invitation(&ics, &[ME.to_string()]).unwrap();
+        assert_eq!(read[0].event.span.bounds(Europe::Brussels), Bounds::Utc { start: proposal.start, end: proposal.end }, "the card reads the proposed time");
+    }
+
+    #[test]
+    fn the_same_proposal_is_the_same_mail() {
+        let proposal = Proposal { start: utc("2026-11-06 13:00"), end: utc("2026-11-06 13:45") };
+        let id = |answer, note, p: &Proposal| propose(fixture!("google.ics"), answer, note, None, p).unwrap().message_id;
+        let first = id(Answer::Maybe, None, &proposal);
+        assert_eq!(first, id(Answer::Maybe, None, &proposal), "built twice, one Message-ID");
+        let later = Proposal { start: utc("2026-11-06 14:00"), end: utc("2026-11-06 14:45") };
+        for other in [id(Answer::Decline, None, &proposal), id(Answer::Maybe, Some("Or later"), &proposal), id(Answer::Maybe, None, &later)] {
+            assert_ne!(first, other, "a changed answer, note or time is a new proposal");
+        }
+    }
+
+    #[test]
+    fn a_counter_for_one_occurrence_names_it() {
+        let paris = Zone::Tz(Tz::Europe__Paris);
+        let unchanged = Moment::Time(at("2026-12-01 10:00", paris));
+        let proposal = Proposal { start: utc("2026-12-01 14:00"), end: utc("2026-12-01 14:30") };
+        let built = propose(fixture!("outlook-series.ics"), Answer::Decline, None, Some(unchanged), &proposal).unwrap();
+        let (_, ics) = itip_parts(&built, "COUNTER");
+        assert!(ics.contains("RECURRENCE-ID;TZID=Romance Standard Time:20261201T100000"), "{ics}");
+        assert!(ics.contains("BEGIN:VTIMEZONE"), "the recurrence id's zone comes along");
+        let event = &ics[ics.find("BEGIN:VEVENT").unwrap()..];
+        assert!(!event.contains("RRULE") && !event.contains("EXDATE"), "{ics}");
+        assert!(ics.contains("PARTSTAT=DECLINED"));
+        assert!(ics.contains("DTSTART:20261201T140000Z"));
+
+        let moved = Moment::Time(at("2026-11-17 10:00", paris));
+        let (_, ics) = itip_parts(&propose(fixture!("outlook-series.ics"), Answer::Maybe, None, Some(moved), &proposal).unwrap(), "COUNTER");
+        assert!(ics.contains("RECURRENCE-ID;TZID=Romance Standard Time:20261117T100000"), "the changed occurrence's own: {ics}");
+    }
+
+    #[test]
+    fn a_counter_needs_maybe_or_decline_and_a_timed_meeting() {
+        let proposal = Proposal { start: utc("2026-11-06 13:00"), end: utc("2026-11-06 13:45") };
+        let err = |r: Result<Built>| r.err().expect("refused").to_string();
+        assert!(err(propose(fixture!("google.ics"), Answer::Accept, None, None, &proposal)).contains("not with Accept"));
+        let backwards = Proposal { start: proposal.end, end: proposal.start };
+        assert!(err(propose(fixture!("google.ics"), Answer::Maybe, None, None, &backwards)).contains("ends before it starts"));
+        let all_day = fixture!("google.ics").replace("DTSTART:20261105T090000Z", "DTSTART;VALUE=DATE:20261105").replace("DTEND:20261105T094500Z", "DTEND;VALUE=DATE:20261106");
+        assert!(err(propose(&all_day, Answer::Maybe, None, None, &proposal)).contains("all day"));
+        let cancel = fixture!("google.ics").replace("METHOD:REQUEST", "METHOD:CANCEL");
+        assert!(err(propose(&cancel, Answer::Maybe, None, None, &proposal)).contains("CANCEL"));
+    }
+
+    /// Outlook writes a custom VTIMEZONE as "Customized Time Zone", and a
+    /// UID may carry an escaped comma; the no still finds the proposal.
+    #[test]
+    fn a_declinecounter_finds_a_proposal_in_a_custom_zone_with_an_escaped_uid() {
+        let counter = format!(
+            "BEGIN:VCALENDAR\r\nMETHOD:COUNTER\r\nBEGIN:VTIMEZONE\r\nTZID:Customized Time Zone\r\n\
+             BEGIN:STANDARD\r\nDTSTART:16010101T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\n\
+             BEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=3\r\nEND:DAYLIGHT\r\n\
+             END:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:plan\\,slot\r\nRECURRENCE-ID;TZID=Customized Time Zone:20261201T100000\r\n\
+             DTSTART;TZID=Customized Time Zone:20261201T150000\r\nDTEND;TZID=Customized Time Zone:20261201T153000\r\n\
+             DTSTAMP:20261105T090000Z\r\nSEQUENCE:0\r\nORGANIZER:mailto:sofie.janssens@example.com\r\n\
+             ATTENDEE;PARTSTAT=TENTATIVE:mailto:{ME}\r\nSUMMARY:Weekplanning\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let rid = Moment::Time(at("2026-12-01 10:00", Zone::Tz(Tz::Europe__Brussels)));
+        let built = imip_decline_counter(&counter, "plan,slot", Some(&rid), "sofie.janssens@example.com", ME, "Weekplanning", Tz::Europe__Brussels).unwrap();
+        assert_eq!(built.recipients, [ME.to_string()]);
+        let (_, ics) = itip_parts(&built, "DECLINECOUNTER");
+        assert!(ics.contains("UID:plan\\,slot") && ics.contains("RECURRENCE-ID;TZID=Customized Time Zone:20261201T100000"), "{ics}");
+    }
+
+    #[test]
+    fn a_declinecounter_goes_back_to_the_proposer() {
+        let paris = Zone::Tz(Tz::Europe__Paris);
+        let proposal = Proposal { start: utc("2026-12-01 14:00"), end: utc("2026-12-01 14:30") };
+        let counter = propose(fixture!("outlook-series.ics"), Answer::Maybe, None, Some(Moment::Time(at("2026-12-01 10:00", paris))), &proposal).unwrap();
+        let (_, counter) = itip_parts(&counter, "COUNTER");
+        let organizer = "sofie.janssens@example.com";
+        let rid = Moment::Time(at("2026-12-01 10:00", paris));
+        let decline = |counter: &str, proposer: &str| imip_decline_counter(counter, OUTLOOK_UID, Some(&rid), organizer, proposer, "Weekplanning", Tz::Europe__Brussels);
+
+        let built = decline(&counter, ME).unwrap();
+        assert_eq!((built.from.as_str(), built.recipients.as_slice()), (organizer, [ME.to_string()].as_slice()), "from the organizer to the proposer only");
+        assert_eq!(built.message_id, decline(&counter, ME).unwrap().message_id, "the same no twice is one mail");
+        let (msg, ics) = itip_parts(&built, "DECLINECOUNTER");
+        assert_eq!(msg.subject(), Some("New time declined: Weekplanning"));
+        let obj = Object::parse(&ics);
+        let ev = obj.calendar().unwrap().components().find(|c| c.name() == "VEVENT").unwrap();
+        assert_eq!(ev.prop("UID").unwrap().text(), OUTLOOK_UID);
+        assert!(ics.contains("RECURRENCE-ID;TZID=Romance Standard Time:20261201T100000") && ics.contains("BEGIN:VTIMEZONE"), "{ics}");
+        assert_eq!(ev.prop("ORGANIZER").unwrap().address(), Some(organizer));
+        let attendees: Vec<&Prop> = ev.props().filter(|p| p.is("ATTENDEE")).collect();
+        assert_eq!((attendees.len(), attendees[0].address(), attendees[0].param("PARTSTAT")), (1, Some(ME), None), "{ics}");
+        assert!(ev.prop("DTSTART").is_none(), "the meeting keeps its time, which the proposer already has");
+
+        let exchange: String = counter.lines().filter(|l| !l.starts_with("ORGANIZER")).map(|l| format!("{l}\r\n")).collect();
+        let (_, ics) = itip_parts(&decline(&exchange, ME).unwrap(), "DECLINECOUNTER");
+        assert!(ics.contains("ORGANIZER:mailto:sofie.janssens@example.com"), "Exchange's COUNTER names no organizer: {ics}");
+
+        let err = |r: Result<Built>| r.err().expect("refused").to_string();
+        assert!(err(decline(fixture!("google.ics"), ME)).contains("isn't a proposal"));
+        assert!(err(decline(&counter, "someone@example.org")).contains("doesn't name"));
     }
 }

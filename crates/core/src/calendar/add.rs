@@ -318,7 +318,7 @@ pub(crate) async fn follow(jolta: &Jolta, account: AccountId, uid: &str, rid: Op
     let Some((calendar, mut target, event, scope)) = added_target(jolta, account, uid, rid).await? else { return Ok(None) };
     target.me = jolta.store.read_async(move |c| store::account(c, account)).await?.address;
     let source = sync::calendar_source(jolta, &calendar).await?;
-    let rsvp = Rsvp { event, answer, note: None, notify: false, scope };
+    let rsvp = Rsvp { event, answer, note: None, notify: false, scope, proposal: None };
     let id = calendar.id;
     match source.follow(&calendar, &target, &rsvp).await? {
         Some(Change::Upsert { remote_id, etag, events, raw }) => {
@@ -583,7 +583,7 @@ mod tests {
         copy[0].attendees.clear();
         hold(&j, own, "copy", &copy);
         added(&j, own, "sync", "copy", &v1);
-        let given = store::GivenAnswer { answer: Response::Accepted, note: String::new(), notify: true };
+        let given = store::GivenAnswer { answer: Response::Accepted, note: String::new(), notify: true, proposal: None };
         j.store.write(|tx| store::remember_answer(tx, AccountId(1), "sync", None, &given, &events_of(&v1), None)).unwrap();
 
         let routed = j.store.read(|c| store::stored_event(c, "sync", None, Some(AccountId(1)), Brussels)).unwrap();
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "Update");
 
         let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
-        let rsvp = Rsvp { event, answer: Answer::Accept, note: None, notify: false, scope };
+        let rsvp = Rsvp { event, answer: Answer::Accept, note: None, notify: false, scope, proposal: None };
         Source::CalDav(dav).follow(&calendar, &target, &rsvp).await.unwrap();
         assert_eq!(server.await.unwrap(), ["PUT /cal/theirs If-Match \"1\""], "an answer that follows");
 
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(target.event.remote_id, "theirs.ics");
         target.me = ME.into();
         let (dav, calendar, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
-        let rsvp = Rsvp { event, answer: Answer::Accept, note: None, notify: false, scope };
+        let rsvp = Rsvp { event, answer: Answer::Accept, note: None, notify: false, scope, proposal: None };
         Source::CalDav(dav).follow(&calendar, &target, &rsvp).await.unwrap();
         assert_eq!(server.await.unwrap(), ["PUT /cal/theirs.ics If-Match \"1\""], "an answer that follows");
 
@@ -807,6 +807,7 @@ mod tests {
             event: EventData { sequence: 2, ..EventData::new("u", Span::AllDay { start: NaiveDate::MIN, end: NaiveDate::MIN }) },
             dated: true,
             stamp: Some(Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()),
+            proposals: true,
         };
         let complete = written_on_add(true, &sent, Brussels);
         assert!(!newer(&complete, None, Version::of(&sent), Brussels), "a whole copy holds the version it was added from");
@@ -821,6 +822,7 @@ mod tests {
             event: EventData { recurrence_id: rid, sequence, ..EventData::new("u", Span::AllDay { start: NaiveDate::MIN, end: NaiveDate::MIN }) },
             dated: true,
             stamp: Some(Utc.with_ymd_and_hms(2026, 11, 4, 9, 0, 0).unwrap()),
+            proposals: true,
         };
         let utc = Moment::Time(Local { wall: NaiveDate::from_ymd_opt(2026, 11, 17).unwrap().and_hms_opt(8, 30, 0).unwrap(), zone: Zone::Tz(chrono_tz::UTC) });
         let before = vec![written(None, 1, 0), written(Some(at(17)), 2, 0), written(Some(at(24)), 2, 0)];
