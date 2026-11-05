@@ -211,7 +211,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
     // A series the calendar holds cancelled cancels each of its occurrences.
     if rid.is_some()
         && sent.method != Method::Cancel
-        && let Some(master) = store::stored_event(seen.conn, uid, None, Some(seen.account), seen.here)?
+        && let Some(master) = store::stored_event_in(seen.conn, uid, None, Some(seen.account), seen.here, |c| c.is_own(&receiver))?
         && cancels(&master, this.sequence)
     {
         newest = Some((Version { sequence: master.event.sequence, stamp: None }, Method::Cancel));

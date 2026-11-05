@@ -1727,6 +1727,36 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// The only cancelled series is on a calendar shared with the user, a
+    /// colleague's Google calendar with the owner role: the user's
+    /// invitation to one occurrence stands, on the card and in the list.
+    #[test]
+    fn a_cancelled_series_on_a_shared_calendar_leaves_an_occurrences_invitation() {
+        let (j, _) = jolta("card-series-shared-cancel");
+        let one = version("o", "standup", "REQUEST", 1, "20261104T080000Z", "RECURRENCE-ID:20261117T083000Z\r\nDTSTART:20261118T133000Z\r\nDTEND:20261118T134500Z\r\nSUMMARY:Standup\r\n");
+        let id = import(&j, one.as_bytes());
+        let series = version("s", "standup", "REQUEST", 0, "20261104T070000Z", "DTSTART:20261110T083000Z\r\nDTEND:20261110T084500Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Standup\r\n");
+        let master = EventData { status: EventStatus::Cancelled, sequence: 2, ..invitation::find(series.as_bytes(), &[ME.into()]).remove(0).event };
+        j.store
+            .write(|tx| {
+                let remote = store::RemoteCalendar { remote_id: "dee@example.com".into(), name: "Dee".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: false, refresh: None };
+                let shared = store::sync_calendar_list(tx, AccountId(1), crate::calendar::CalendarSource::Google, &[remote])?[0].id;
+                store::apply_item(tx, shared, "standup", None, std::slice::from_ref(&master), None, &Horizon::around(now(), Brussels)).map(|_| ())
+            })
+            .unwrap();
+        let c = stored_card(&j, id, &one);
+        assert!(!c.outdated && c.answering.is_some(), "the card: {:?}", notes(&c));
+        let listed = j
+            .store
+            .read(|c| {
+                let thread = c.query_row("SELECT thread_id FROM message WHERE id = ?1", [id], |r| r.get(0))?;
+                Ok(store::thread_invitations(c, &[thread], now(), Brussels)?.get(&thread).copied())
+            })
+            .unwrap();
+        assert_eq!(listed, Some(store::InvitationState::Unanswered), "the list");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     #[test]
     fn an_occurrence_named_in_another_zone_is_the_same_occurrence() {
         let (j, _) = jolta("card-occurrence-zones");
