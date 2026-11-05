@@ -175,7 +175,11 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         }
     }
 
-    let copy = store::stored_event(seen.conn, uid, rid.as_ref(), Some(seen.account), seen.here)?;
+    // Only a copy in the account's own calendars says what became of the
+    // user's invitation: a shared calendar's copy is its owner's, as the
+    // list reads it.
+    let receiver = store::account(seen.conn, seen.account)?.address;
+    let copy = store::stored_event_in(seen.conn, uid, rid.as_ref(), Some(seen.account), seen.here, |c| c.is_own(&receiver))?;
     if let Some(copy) = &copy {
         let source = copy.source;
         let cancelled = copy.event.status == EventStatus::Cancelled;

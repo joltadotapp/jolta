@@ -1317,6 +1317,19 @@ mod tests {
                     assert_eq!(card_says(&jolta, message, raw, now()), expected, "the card: {case}");
                     assert_eq!(shown(&jolta, message, now()), Some(expected), "the list: {case}");
                 }
+                // The owner's copy cancelled, as when the organizer took only
+                // the owner off: the user's invitation still stands.
+                let cancelled: Vec<EventData> = theirs.iter().map(|e| EventData { status: crate::calendar::EventStatus::Cancelled, sequence: e.sequence + 1, ..e.clone() }).collect();
+                jolta
+                    .store
+                    .write(|tx| {
+                        tx.execute_batch("DELETE FROM event; DELETE FROM invitation_answer;")?;
+                        crate::store::apply_item(tx, shared, "theirs", Some("2"), &cancelled, None, &horizon).map(|_| ())
+                    })
+                    .unwrap();
+                let case = format!("{what} cancelled on {source:?} calendar {remote_id} with {access:?}");
+                assert_eq!(card_says(&jolta, message, raw, now()), InvitationState::Unanswered, "the card: {case}");
+                assert_eq!(shown(&jolta, message, now()), Some(InvitationState::Unanswered), "the list: {case}");
                 std::fs::remove_dir_all(&jolta.data_dir).unwrap();
             }
         }
