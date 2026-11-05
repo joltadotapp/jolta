@@ -377,9 +377,14 @@ async fn read(api: &impl Api, calendar: &str, cursor: Option<&str>, known: &Know
 
 /// A full delta round over a new window: the calendar's own delta, else
 /// the primary calendar's when this is it, else a poll from now on.
+///
+/// Delta's own fields leave out an exception's `originalStart`, its
+/// recurrence id. The Graph docs say delta takes no `$select`, but Microsoft
+/// 365 adds the fields it names, and the delta link keeps them for the
+/// rounds that follow.
 async fn first_round(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<(Round, BTreeSet<String>)> {
     let (from, to) = window(today);
-    let range = format!("startDateTime={from}&endDateTime={to}");
+    let range = format!("startDateTime={from}&endDateTime={to}&$select={FIELDS}");
     if let Some(round) = pages(api, &format!("/me/calendars/{}/calendarView/delta?{range}", encode(calendar))).await? {
         return Ok((round, BTreeSet::new()));
     }
