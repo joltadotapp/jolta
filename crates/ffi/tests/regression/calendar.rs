@@ -242,8 +242,12 @@ fn a_feed_from_subscription_to_removal() {
 
     app.core.set_calendar_shown(info.id, false).unwrap();
     assert!(week(&app, monday, here).is_empty(), "a hidden calendar shows nothing");
+    app.events.0.lock().unwrap().clear();
     app.core.set_calendar_shown(info.id, true).unwrap();
     assert_eq!(week(&app, monday, here).len(), 5);
+    // The round that showing starts first rebuilds the occurrences in this
+    // Mac's zone; one still running would overwrite the rebuild below.
+    eventually("showing the calendar syncs it", || app.events.seen("calendar synced"));
 
     let other = if here == chrono_tz::Asia::Tokyo { chrono_tz::America::New_York } else { chrono_tz::Asia::Tokyo };
     let rebuilt = block_on(scheduler::refresh_occurrences(&app.jolta, Utc::now(), other)).unwrap();
