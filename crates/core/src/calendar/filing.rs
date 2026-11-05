@@ -230,7 +230,7 @@ pub fn answer_only(raw: &[u8], reply: &Invitation) -> bool {
         }
         match (part.kind(), part.text()) {
             (PartKind::Text, Some(t)) => text.push(t.into_owned()),
-            (PartKind::Html, Some(h)) => html.push(html_text(&h)),
+            (PartKind::Html, Some(h)) if !shows_image(&h) => html.push(html_text(&h)),
             // An image or other part shown in the body.
             _ => return false,
         }
@@ -238,8 +238,21 @@ pub fn answer_only(raw: &[u8], reply: &Invitation) -> bool {
     if text.is_empty() && html.is_empty() {
         return producer.wrote("", &reply.event);
     }
-    let alone = text.is_empty();
-    text.iter().all(|t| producer.wrote(t, &reply.event)) && html.iter().all(|h| if alone { producer.wrote(h, &reply.event) } else { text.iter().any(|t| shows_only(h, t)) })
+    text.iter().all(|t| producer.wrote(t, &reply.event))
+        && html.iter().all(|h| match producer {
+            Producer::Google if !text.is_empty() => text.iter().any(|t| shows_only(h, t, GOOGLE_HTML_LABELS)),
+            Producer::Exchange => producer.wrote(h, &reply.event),
+            _ if text.is_empty() => producer.wrote(h, &reply.event),
+            _ => text.iter().any(|t| shows_only(h, t, &[])),
+        })
+}
+
+/// Whether an HTML body shows an image, whose words the text conversion
+/// can't read: one the reader shows, or an SVG, a picture, a data URI or
+/// an inline part, which no real reply's HTML has.
+fn shows_image(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    crate::render::shows_beyond_text(html) || ["<svg", "<picture", "data:", "cid:"].iter().any(|m| lower.contains(m))
 }
 
 /// An HTML body reduced to its text, with a break at every tag so that
@@ -249,15 +262,15 @@ fn html_text(html: &str) -> String {
 }
 
 /// Whether the HTML body says no more than the text body: none of its
-/// words, links aside, comes more often than in the text, except the few
-/// labels an HTML layout adds. Google's HTML puts the title above the
-/// sentence, so the order can differ.
-fn shows_only(html: &str, text: &str) -> bool {
+/// words, links aside, comes more often than in the text, except `labels`.
+/// Google's HTML puts the title above the sentence, so the order can
+/// differ.
+fn shows_only(html: &str, text: &str, labels: &[&str]) -> bool {
     let mut left: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for w in words(text) {
         *left.entry(w).or_default() += 1;
     }
-    words(html).filter(|w| !HTML_ONLY.contains(&w.as_str())).all(|w| match left.get_mut(&w) {
+    words(html).filter(|w| !labels.contains(&w.as_str())).all(|w| match left.get_mut(&w) {
         Some(n) if *n > 0 => {
             *n -= 1;
             true
@@ -266,7 +279,8 @@ fn shows_only(html: &str, text: &str) -> bool {
     })
 }
 
-const HTML_ONLY: &[&str] = &["when", "wanneer", "view", "map", "kaart"];
+/// The labels Google's HTML adds to the details its text body holds.
+const GOOGLE_HTML_LABELS: &[&str] = &["when", "wanneer", "view", "map", "kaart"];
 
 /// Lowercase words without links.
 fn words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -420,6 +434,40 @@ mod tests {
             "multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: image/png\r\nContent-Disposition: inline\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n",
         );
         assert!(!only(image.as_bytes()), "an image in the body");
+    }
+
+    #[test]
+    fn an_image_in_the_html_stays() {
+        let images = [
+            ("an image as a data URI", "<p><img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"\"></p>"),
+            ("a remote image", "<p><img src=\"https://example.com/can-we-move-it.png\"></p>"),
+            ("an inline image", "<p><img src=\"cid:note@example.com\"></p>"),
+            ("a CSS background", "<div style=\"background-image: url(data:image/png;base64,iVBORw0KGgo=); height: 40px\">&nbsp;</div>"),
+            ("a CSS background behind entities", "<div style=\"background: url(&#100;ata:image/png;base64,iVBORw0KGgo=)\">&nbsp;</div>"),
+            ("a stylesheet's background", "<style>p { background: url('cid:note@example.com') }</style><p>&nbsp;</p>"),
+            ("text from a stylesheet", "<style>p::before { content: 'Can we move it?' }</style><p>&nbsp;</p>"),
+            ("an SVG", "<svg width=\"200\" height=\"40\"><image href=\"https://example.com/note.png\"/></svg>"),
+            ("a picture", "<picture><source srcset=\"https://example.com/note.png\"></picture>"),
+        ];
+        for (what, html) in images {
+            assert!(!only(bodies(EXCHANGE, &[("text/plain", ""), ("text/html", html)], BO).as_bytes()), "{what} in Exchange's HTML");
+            let html = format!("<html><body><h2>Design crit</h2><p>Bo Nilsson has accepted this invitation.</p>{html}</body></html>");
+            assert!(!only(bodies(GOOGLE, &[("text/plain", &google("")), ("text/html", &html)], BO).as_bytes()), "{what} in Google's HTML");
+        }
+        let icons = "<html><head><style>.icon { background-image: url('https://fonts.gstatic.com/s/i/googlematerialiconsfilled/event/v6/24px.png') }</style></head>\
+                     <body><h2>Design crit</h2><p>Bo Nilsson has accepted this invitation.</p></body></html>";
+        assert!(only(bodies(GOOGLE, &[("text/plain", &google("")), ("text/html", icons)], BO).as_bytes()), "Google's own icons, which the reader drops");
+    }
+
+    #[test]
+    fn only_google_s_html_adds_labels() {
+        for html in ["<p>When?</p>", "<p>View</p><p>map</p>"] {
+            assert!(!only(bodies(EXCHANGE, &[("text/plain", ""), ("text/html", html)], BO).as_bytes()), "{html} under Exchange's empty text");
+        }
+        let apple = "-//Apple Inc.//Mac OS X 10.8.3//EN";
+        let sentence = "Bo has accepted your invitation to the event: Design crit.";
+        let html = format!("<p>{sentence}</p><p>When?</p>");
+        assert!(!only(bodies(apple, &[("text/plain", sentence), ("text/html", &html)], BO).as_bytes()), "a label in Apple's HTML");
     }
 
     /// Jolta's own iMIP reply, which the iCloud account sends, with and

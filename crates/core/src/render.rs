@@ -491,6 +491,17 @@ fn sanitizer() -> ammonia::Builder<'static> {
     b
 }
 
+/// Whether the reader shows more of this HTML body than its text: an
+/// `<img>` of any source, or a style that keeps a `url()`, which after
+/// `filter_declarations` is a `cid:` or `data:` image, or that writes text
+/// with `content`. Remote styles the reader drops don't count.
+pub(crate) fn shows_beyond_text(html: &str) -> bool {
+    let (html, styles) = extract_styles(html);
+    let shown = sanitizer().clean(&html).to_string() + &styles.iter().map(|s| filter_css(s, "#m")).collect::<String>();
+    let shown = shown.to_ascii_lowercase().replace(char::is_whitespace, "");
+    ["<img", "url(", "content:"].iter().any(|m| shown.contains(m))
+}
+
 /// One message of a thread, as the reader shows it.
 pub struct MessageView<'a> {
     pub id: i64,
