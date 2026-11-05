@@ -49,11 +49,20 @@ fn schedules(reply: &Value, people: &[String]) -> Vec<Schedule> {
             let availability = match found {
                 None => Availability::Unknown(Unknown::Failed("Microsoft gave no answer".into())),
                 Some(s) if s["error"].is_object() => Availability::Unknown(unknown(&s["error"])),
+                Some(s) if no_data(s) => Availability::Unknown(Unknown::Failed("Microsoft 365 has no free/busy for them".into())),
                 Some(s) => Availability::Known(s["scheduleItems"].as_array().into_iter().flatten().filter_map(busy).collect()),
             };
             Schedule { person: person.clone(), availability }
         })
         .collect()
+}
+
+/// An item of status `unknown`, or a merged view of only 4, Exchange's
+/// "no data" (MergedFreeBusy), says nothing about when the person is free.
+fn no_data(schedule: &Value) -> bool {
+    let view = schedule["availabilityView"].as_str().unwrap_or_default();
+    let items = schedule["scheduleItems"].as_array().map(Vec::as_slice).unwrap_or_default();
+    (!view.is_empty() && view.bytes().all(|b| b == b'4')) || items.iter().any(|i| i["status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("unknown")))
 }
 
 fn unknown(error: &Value) -> Unknown {
@@ -136,6 +145,22 @@ mod tests {
         assert_eq!(got[3].availability, Availability::Unknown(Unknown::NotShared));
         assert_eq!(got[4].availability, Availability::Unknown(Unknown::Failed("Something else.".into())));
         assert!(matches!(got[5].availability, Availability::Unknown(_)), "a schedule Graph left out is never free");
+    }
+
+    #[test]
+    fn an_unknown_item_or_a_view_of_no_data_is_never_free() {
+        let item = |status: &str| json!({"status": status, "start": {"dateTime": "2026-11-09T09:00:00.0000000", "timeZone": "UTC"},
+                                          "end": {"dateTime": "2026-11-09T10:00:00.0000000", "timeZone": "UTC"}});
+        let reply = json!({"value": [
+            {"scheduleId": "half@example.com", "availabilityView": "0420", "scheduleItems": [item("busy"), item("unknown")]},
+            {"scheduleId": "blank@example.com", "availabilityView": "4444", "scheduleItems": []},
+            {"scheduleId": "free@example.com", "availabilityView": "0000", "scheduleItems": []}
+        ]});
+        let asked: Vec<String> = ["half@example.com", "blank@example.com", "free@example.com"].map(String::from).into();
+        let got = schedules(&reply, &asked);
+        assert!(matches!(got[0].availability, Availability::Unknown(_)), "an item of unknown status leaves the person unknown");
+        assert!(matches!(got[1].availability, Availability::Unknown(_)), "4 in availabilityView is Exchange's no data");
+        assert_eq!(got[2].availability, Availability::Known(Vec::new()));
     }
 
     #[test]
