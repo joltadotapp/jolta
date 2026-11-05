@@ -563,6 +563,8 @@ final class AppModel {
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
         case .sendFailed(let message):
             show(Toast(text: "Not sent yet: \(message)", undo: nil))
+        case .responsesFiled(let text, let tokens):
+            show(Toast(text: text, undo: .action(tokens)))
         case .modelChanged(let id, let state):
             if let i = localModels.firstIndex(where: { $0.id == id }) { localModels[i].state = state }
             if case .ready = state, ai.provider == .local, ai.localModel == id { reloadAI() }

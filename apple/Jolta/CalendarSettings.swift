@@ -140,6 +140,9 @@ struct CalendarSettings: View {
                     ForEach(group.calendars) { entry in CalendarSettingsRow(model: model, info: entry.info, removal: $removal) }
                 }
             }
+            SettingsSection("Invitations") {
+                FileResponsesRow(core: model.core)
+            }
             SettingsSection("Subscribe") {
                 SubscribeField(model: model)
                 SettingsRow(title: "Open webcal:// links in Jolta",
@@ -154,6 +157,33 @@ struct CalendarSettings: View {
         .onAppear {
             if switches == nil { switches = CalendarSwitches(model: model) }
             cal.reloadCalendars()
+        }
+    }
+}
+
+/// File responses automatically, off until the user turns it on.
+struct FileResponsesRow: View {
+    let core: Core
+    @State private var on = false
+    @State private var failure: String?
+
+    var body: some View {
+        SettingsRow(title: "File responses automatically",
+                    detail: failure ?? "Replies to your meetings that only say yes, no or maybe go to the archive. Replies with a note stay in the inbox.",
+                    detailColor: failure == nil ? Color(Theme.text3) : .red) {
+            Toggle("File responses automatically", isOn: Binding(get: { on }, set: set))
+                .settingsSwitch()
+        }
+        .onAppear { on = (try? core.fileResponses()) ?? false }
+    }
+
+    private func set(_ value: Bool) {
+        do {
+            try core.setFileResponses(on: value)
+            on = value
+            failure = nil
+        } catch {
+            failure = "\(error)"
         }
     }
 }

@@ -40,7 +40,7 @@ struct SettingsView: View {
             ]),
             ("Accounts", accounts),
             ("Calendar", [Item(page: .calendar, title: "Calendar", icon: "calendar",
-                               keywords: "calendars google microsoft caldav icloud subscription webcal feed holidays color busy reminders notifications")]),
+                               keywords: "calendars google microsoft caldav icloud subscription webcal feed holidays color busy reminders notifications invitations responses replies file archive")]),
             ("Inbox", [
                 Item(page: .sections, title: "Sections", icon: "rectangle.split.3x1", keywords: "split inbox tabs query newsletters notifications"),
                 Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people"),
