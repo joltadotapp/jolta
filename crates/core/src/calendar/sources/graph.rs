@@ -504,8 +504,8 @@ pub(super) struct Instance {
 /// series' own zone.
 pub(super) async fn instance(api: &impl Api, master: &Stored, rid: &Moment) -> Result<Instance> {
     let here = tz::here();
-    let raw: Value = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or(Value::Null);
-    let zone = zone_of(raw["originalStartTimeZone"].as_str(), api.zone());
+    let series: GraphEvent = master.raw.as_deref().and_then(|r| serde_json::from_slice(r).ok()).unwrap_or_default();
+    let zone = series_zone(&series, api.zone());
     let at = match rid {
         Moment::Time(local) => local.instant(here),
         Moment::Date(day) => tz::instant(day.and_time(NaiveTime::MIN), zone),
@@ -714,7 +714,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         }
     };
     let series = master.unwrap_or(g);
-    let series_zone = zone_of(series.original_start_time_zone.as_deref(), here);
+    let series_zone = series_zone(series, here);
     let recurrence_id = g.original_start.filter(|_| g.kind != "seriesMaster").map(|at| {
         let at = at.to_utc();
         if series.is_all_day {
@@ -823,6 +823,14 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
 
 fn zone_of(name: Option<&str>, here: Tz) -> Tz {
     name.and_then(tz::zone).unwrap_or(here)
+}
+
+/// The zone of a series' original starts; an all-day series' are midnight
+/// there. Graph writes an all-day series' own zone as UTC, so the rule's
+/// `recurrenceTimeZone` comes first.
+fn series_zone(series: &GraphEvent, here: Tz) -> Tz {
+    let rule = series.recurrence.as_ref().and_then(|r| r.range.recurrence_time_zone.as_deref());
+    zone_of(rule.or(series.original_start_time_zone.as_deref()), here)
 }
 
 /// A `dateTimeTimeZone` as an instant. Jolta asks for UTC; a reply in
