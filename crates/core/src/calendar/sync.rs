@@ -103,10 +103,10 @@ pub async fn sync_calendar(jolta: &Jolta, id: CalendarId) -> Result<SyncReport> 
             Change::Remove { remote_id } => (remote_id, None),
         });
     }
-    let horizon = Horizon::now();
     let report = jolta
         .store
         .write_async(move |tx| {
+            let horizon = Horizon::now();
             let mut report = SyncReport::default();
             for (remote_id, change) in &changes {
                 match change {
