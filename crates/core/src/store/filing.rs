@@ -15,12 +15,19 @@ pub fn file_responses_since(conn: &Connection) -> Result<Option<i64>> {
 }
 
 /// Turns File responses automatically on from `now`, or off. Turning it on
-/// while it is on keeps the time it was first turned on.
+/// while it is on keeps the time it was first turned on. Mail already
+/// there that the time alone would let through, dated `now` or later, is
+/// settled at once, so turning it on never files it.
 pub fn set_file_responses(conn: &Connection, on: bool, now: i64) -> Result<()> {
-    match on {
-        true => conn.execute("INSERT OR IGNORE INTO setting (key, value) VALUES ('file_responses', ?1)", [now.to_string()])?,
-        false => conn.execute("DELETE FROM setting WHERE key = 'file_responses'", [])?,
-    };
+    if !on {
+        conn.execute("DELETE FROM setting WHERE key = 'file_responses'", [])?;
+    } else if conn.execute("INSERT OR IGNORE INTO setting (key, value) VALUES ('file_responses', ?1)", [now.to_string()])? == 1 {
+        conn.execute(
+            "INSERT OR IGNORE INTO settled_reply (account_id, message_id)
+             SELECT account_id, message_id FROM message WHERE date >= ?1 AND coalesce(message_id, '') != ''",
+            [now],
+        )?;
+    }
     Ok(())
 }
 

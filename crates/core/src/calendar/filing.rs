@@ -544,9 +544,11 @@ mod tests {
         meeting(&j, calendar, ME, &[ME], "");
         j.store.write(|tx| store::set_file_responses(tx, false, 0)).unwrap();
         assert!(!filed(&j, &exchange("off", "bo@example.com", "bo@example.com", None, "")), "off");
-        let on = Utc.with_ymd_and_hms(2026, 11, 4, 10, 35, 0).unwrap().timestamp();
+        let same_second = exchange("same", "bo@example.com", "bo@example.com", None, "");
+        import(&j, same_second.as_bytes());
+        let on = Utc.with_ymd_and_hms(2026, 11, 4, 10, 30, 0).unwrap().timestamp();
         j.store.write(|tx| store::set_file_responses(tx, true, on)).unwrap();
-        assert_eq!(file(&j), None, "turning it on files no mail already there");
+        assert_eq!(file(&j), None, "turning it on files no mail already there, also from the same second");
         let later = exchange("later", "bo@example.com", "bo@example.com", None, "").replace("10:30:00", "10:40:00");
         assert!(filed(&j, &later));
         j.store.write(|tx| store::set_file_responses(tx, true, now().timestamp())).unwrap();
