@@ -12,6 +12,7 @@
 //! window and compares change keys.
 
 mod add;
+mod freebusy;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;

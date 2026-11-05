@@ -10,6 +10,9 @@ pub mod webcal;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
+use super::availability::{Availability, Schedule, Unknown, WorkingHours};
 use super::rsvp::{Rsvp, Stored, Target};
 use super::{Calendar, CalendarSource, EventData};
 use crate::store::{RemoteCalendar, Removal};
@@ -94,6 +97,29 @@ impl Source {
         match self {
             Source::CalDav(s) => s.me().await,
             Source::Google(_) | Source::Graph(_) | Source::Webcal(_) => Vec::new(),
+        }
+    }
+
+    /// Each person's busy times from `from` to `to`, in the order asked.
+    /// CalDAV's scheduling outbox (RFC 6638) isn't asked yet, so there
+    /// everyone is unknown.
+    pub async fn free_busy(&self, people: &[String], from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<Schedule>> {
+        match self {
+            Source::Google(s) => s.free_busy(people, from, to).await,
+            Source::Graph(s) => s.free_busy(people, from, to).await,
+            Source::CalDav(_) | Source::Webcal(_) => Ok(people
+                .iter()
+                .map(|p| Schedule { person: p.clone(), availability: Availability::Unknown(Unknown::NotSupported) })
+                .collect()),
+        }
+    }
+
+    /// The user's working hours as the provider keeps them: only Microsoft
+    /// 365 says.
+    pub async fn working_hours(&self) -> Result<Option<WorkingHours>> {
+        match self {
+            Source::Graph(s) => s.working_hours().await,
+            Source::Google(_) | Source::CalDav(_) | Source::Webcal(_) => Ok(None),
         }
     }
 

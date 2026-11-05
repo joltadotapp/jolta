@@ -6,6 +6,7 @@
 //! answering an invitation.
 
 mod add;
+mod freebusy;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
