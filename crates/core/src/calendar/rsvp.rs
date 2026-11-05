@@ -799,17 +799,24 @@ pub fn imip_decline_counter(counter: &str, uid: &str, rid: Option<&Moment>, from
     if !calendar.prop("METHOD").is_some_and(|m| m.value().trim().eq_ignore_ascii_case("COUNTER")) {
         return Err(Error::Other("this calendar mail isn't a proposal for a new time".into()));
     }
-    let event = calendar
-        .components()
-        .filter(|c| c.name() == "VEVENT")
-        .find(|e| {
-            let named = e.prop("UID").is_some_and(|u| u.value().trim() == uid);
-            let occurrence = match e.prop("RECURRENCE-ID") {
-                Some(p) => prop_moment(p).is_some_and(|m| rid.is_some_and(|rid| m.names(rid, here))),
-                None => rid.is_none(),
-            };
-            named && occurrence
+    // The calendar parser decodes escaped UIDs and resolves a custom
+    // VTIMEZONE such as Outlook's "Customized Time Zone"; it reads the
+    // VEVENTs in order, so its events line up with the components.
+    let vevents: Vec<&Component> = calendar.components().filter(|c| c.name() == "VEVENT").collect();
+    let parsed = super::ical::read(counter, &[]).ok().filter(|events| events.len() == vevents.len());
+    let same_occurrence = |m: Option<Moment>| match (m, rid) {
+        (None, None) => true,
+        (Some(m), Some(rid)) => m.names(rid, here),
+        _ => false,
+    };
+    let event = vevents
+        .iter()
+        .enumerate()
+        .find(|(i, e)| match &parsed {
+            Some(events) => events[*i].uid == uid && same_occurrence(events[*i].recurrence_id),
+            None => e.prop("UID").is_some_and(|u| u.text().trim() == uid) && same_occurrence(e.prop("RECURRENCE-ID").and_then(prop_moment)),
         })
+        .map(|(_, e)| *e)
         .ok_or_else(|| Error::Other("the proposal holds no event".into()))?;
     let organizer = event.prop("ORGANIZER").cloned().unwrap_or_else(|| Prop::new("ORGANIZER", &format!("mailto:{from}")));
     let mut attendee = event
@@ -1278,6 +1285,26 @@ mod tests {
         assert!(err(propose(&all_day, Answer::Maybe, None, None, &proposal)).contains("all day"));
         let cancel = fixture!("google.ics").replace("METHOD:REQUEST", "METHOD:CANCEL");
         assert!(err(propose(&cancel, Answer::Maybe, None, None, &proposal)).contains("CANCEL"));
+    }
+
+    /// Outlook writes a custom VTIMEZONE as "Customized Time Zone", and a
+    /// UID may carry an escaped comma; the no still finds the proposal.
+    #[test]
+    fn a_declinecounter_finds_a_proposal_in_a_custom_zone_with_an_escaped_uid() {
+        let counter = format!(
+            "BEGIN:VCALENDAR\r\nMETHOD:COUNTER\r\nBEGIN:VTIMEZONE\r\nTZID:Customized Time Zone\r\n\
+             BEGIN:STANDARD\r\nDTSTART:16010101T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\n\
+             BEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=3\r\nEND:DAYLIGHT\r\n\
+             END:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:plan\\,slot\r\nRECURRENCE-ID;TZID=Customized Time Zone:20261201T100000\r\n\
+             DTSTART;TZID=Customized Time Zone:20261201T150000\r\nDTEND;TZID=Customized Time Zone:20261201T153000\r\n\
+             DTSTAMP:20261105T090000Z\r\nSEQUENCE:0\r\nORGANIZER:mailto:sofie.janssens@example.com\r\n\
+             ATTENDEE;PARTSTAT=TENTATIVE:mailto:{ME}\r\nSUMMARY:Weekplanning\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let rid = Moment::Time(at("2026-12-01 10:00", Zone::Tz(Tz::Europe__Brussels)));
+        let built = imip_decline_counter(&counter, "plan,slot", Some(&rid), "sofie.janssens@example.com", ME, "Weekplanning", Tz::Europe__Brussels).unwrap();
+        assert_eq!(built.recipients, [ME.to_string()]);
+        let (_, ics) = itip_parts(&built, "DECLINECOUNTER");
+        assert!(ics.contains("UID:plan\\,slot") && ics.contains("RECURRENCE-ID;TZID=Customized Time Zone:20261201T100000"), "{ics}");
     }
 
     #[test]
