@@ -376,6 +376,9 @@ struct ReaderView: View {
                 }
             }
             .offset(x: max(8, panel.left), y: anchor.maxY + 6)
+            // Hidden, not closed, behind Find a time, so Escape brings it back as it was.
+            .opacity(model.findTime == nil ? 1 : 0)
+            .accessibilityHidden(model.findTime != nil)
             .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .topLeading)))
         }
     }
