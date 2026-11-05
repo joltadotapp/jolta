@@ -243,14 +243,6 @@ impl GraphCalendar {
         unreachable!("the last attempt returns")
     }
 
-    async fn get_ok(&self, url: &str) -> Result<Value> {
-        let (status, json) = self.request("GET", url, None, &[]).await?;
-        if !(200..300).contains(&status) {
-            return Err(self.failure(status, &json));
-        }
-        Ok(json)
-    }
-
     fn failure(&self, status: u16, json: &Value) -> Error {
         let code = json["error"]["code"].as_str().unwrap_or_default();
         if status == 403 && code == "ErrorAccessDenied" {
@@ -264,7 +256,7 @@ impl GraphCalendar {
         let mut out = Vec::new();
         let mut next = Some("/me/calendars?$select=id,name,hexColor,isDefaultCalendar,canEdit,owner&$top=100".to_string());
         while let Some(url) = next {
-            let page = self.get_ok(&url).await?;
+            let page = get_ok(self, &url).await?;
             for c in page["value"].as_array().into_iter().flatten() {
                 out.push(remote_calendar(c, &self.account.address));
             }
@@ -274,133 +266,7 @@ impl GraphCalendar {
     }
 
     pub async fn sync(&self, calendar: &Calendar, known: &Known) -> Result<SyncBatch> {
-        let now = Utc::now().date_naive();
-        let month = now.format("%Y-%m").to_string();
-        let cursor: Option<Cursor> = calendar.cursor.as_deref().and_then(|c| serde_json::from_str(c).ok());
-        let (round, earlier) = match cursor {
-            Some(Cursor::Poll) => (self.poll(&calendar.remote_id, now).await?, BTreeSet::new()),
-            Some(Cursor::Delta { link, month: m, masters }) if m == month => match self.pages(&link).await? {
-                Some(round) => (round, masters),
-                None => self.first_round(&calendar.remote_id, now).await?,
-            },
-            _ => self.first_round(&calendar.remote_id, now).await?,
-        };
-        let complete = round.complete;
-        let delta_link = round.delta_link.clone();
-        let instances = parse_items(round.items);
-        let wanted = masters_to_fetch(&instances, &earlier, complete);
-        let masters = self.masters(&calendar.remote_id, &wanted).await?;
-        let (changes, masters) = batch(instances, masters, known, complete, std::slice::from_ref(&self.account.address), self.here, &earlier);
-        let cursor = match delta_link {
-            Some(link) => Cursor::Delta { link, month, masters },
-            None => Cursor::Poll,
-        };
-        Ok(SyncBatch { changes, cursor: Some(serde_json::to_string(&cursor).expect("a cursor serializes")), refresh: None })
-    }
-
-    /// A full delta round over a new window: the calendar's own delta, else
-    /// the primary calendar's when this is it, else a poll from now on.
-    async fn first_round(&self, calendar: &str, today: NaiveDate) -> Result<(Round, BTreeSet<String>)> {
-        let (from, to) = window(today);
-        let range = format!("startDateTime={from}&endDateTime={to}");
-        if let Some(round) = self.pages(&format!("/me/calendars/{}/calendarView/delta?{range}", encode(calendar))).await? {
-            return Ok((round, BTreeSet::new()));
-        }
-        let primary = self.get_ok("/me/calendar?$select=id").await?;
-        if primary["id"].as_str() == Some(calendar)
-            && let Some(round) = self.pages(&format!("/me/calendarView/delta?{range}")).await?
-        {
-            return Ok((round, BTreeSet::new()));
-        }
-        tracing::info!("Graph has no delta for calendar {calendar}; polling its window");
-        Ok((self.poll(calendar, today).await?, BTreeSet::new()))
-    }
-
-    async fn poll(&self, calendar: &str, today: NaiveDate) -> Result<Round> {
-        let (from, to) = window(today);
-        let url = format!("/me/calendars/{}/calendarView?startDateTime={from}&endDateTime={to}&$select={FIELDS}", encode(calendar));
-        let mut round = self.pages(&url).await?.ok_or_else(|| Error::Other(format!("Microsoft Graph refused the calendar view of {calendar}")))?;
-        round.complete = true;
-        round.delta_link = None;
-        Ok(round)
-    }
-
-    /// Follows `@odata.nextLink` to the end. None when Graph refuses the
-    /// request as a delta it doesn't support or a delta link it no longer
-    /// knows; the caller starts over another way.
-    async fn pages(&self, first: &str) -> Result<Option<Round>> {
-        let mut round = Round { items: Vec::new(), complete: !first.contains("deltatoken"), delta_link: None };
-        let mut next = Some(first.to_string());
-        while let Some(url) = next {
-            let (status, page) = self.request("GET", &url, None, &[]).await?;
-            match status {
-                200..300 => {}
-                400 | 404 | 405 | 410 | 501 if round.items.is_empty() => {
-                    tracing::info!("Graph refused {url}: {status} {}", page["error"]["code"]);
-                    return Ok(None);
-                }
-                _ => return Err(self.failure(status, &page)),
-            }
-            round.items.extend(page["value"].as_array().cloned().unwrap_or_default());
-            round.delta_link = page["@odata.deltaLink"].as_str().map(str::to_string);
-            next = page["@odata.nextLink"].as_str().map(str::to_string);
-        }
-        Ok(Some(round))
-    }
-
-    /// The masters by id, through JSON batches, with the fields only a GET
-    /// by id returns. A master Graph can't give maps to None.
-    async fn masters(&self, calendar: &str, ids: &BTreeSet<String>) -> Result<Masters> {
-        let mut out = Masters::new();
-        let ids: Vec<&String> = ids.iter().collect();
-        for chunk in ids.chunks(BATCH) {
-            let mut pending: Vec<&String> = chunk.to_vec();
-            for attempt in 0..4u32 {
-                let requests: Vec<Value> = pending
-                    .iter()
-                    .enumerate()
-                    .map(|(i, id)| {
-                        json!({
-                            "id": i.to_string(),
-                            "method": "GET",
-                            "url": format!("/me/calendars/{}/events/{}?$select={FIELDS},cancelledOccurrences", encode(calendar), encode(id)),
-                            "headers": {"Prefer": PREFER},
-                        })
-                    })
-                    .collect();
-                let (status, reply) =
-                    self.request("POST", "/$batch", Some(&json!({ "requests": requests })), &[]).await?;
-                if !(200..300).contains(&status) {
-                    return Err(self.failure(status, &reply));
-                }
-                let mut throttled = Vec::new();
-                let mut wait = 0;
-                for r in reply["responses"].as_array().into_iter().flatten() {
-                    let Some(id) = r["id"].as_str().and_then(|i| i.parse::<usize>().ok()).and_then(|i| pending.get(i)) else { continue };
-                    match r["status"].as_u64().unwrap_or(0) {
-                        200..300 => {
-                            let raw = serde_json::to_vec(&r["body"]).expect("JSON serializes");
-                            let master = serde_json::from_value::<GraphEvent>(r["body"].clone()).ok().map(|m| (m, raw));
-                            out.insert((*id).clone(), master);
-                        }
-                        429 | 503 | 504 if attempt < 3 => {
-                            wait = wait.max(r["headers"]["Retry-After"].as_str().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2));
-                            throttled.push(*id);
-                        }
-                        404 | 403 => {
-                            out.insert((*id).clone(), None);
-                        }
-                        status => return Err(self.failure(status as u16, &r["body"])),
-                    }
-                }
-                if throttled.is_empty() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_secs(wait.min(120))).await;
-                pending = throttled;
-            }
-        }
-        Ok(out)
+        read(self, &calendar.remote_id, calendar.cursor.as_deref(), known, &self.account.address).await
     }
 
     /// `accept`, `tentativelyAccept` or `decline` with `sendResponse`, and
@@ -460,8 +326,8 @@ impl GraphCalendar {
     }
 }
 
-/// What the writes to a copy ask of Microsoft 365: `GraphCalendar` sends
-/// them, a test answers them itself.
+/// What a sync and the writes to a copy ask of Microsoft 365:
+/// `GraphCalendar` sends it, a test answers it itself.
 pub(super) trait Api {
     async fn request(&self, method: &str, url: &str, body: Option<&Value>, headers: &[(&str, &str)]) -> Result<(u16, Value)>;
     fn failure(&self, status: u16, json: &Value) -> Error;
@@ -481,6 +347,144 @@ impl Api for GraphCalendar {
     fn zone(&self) -> Tz {
         self.here
     }
+}
+
+/// One sync of the calendar `calendar` from `cursor`, for the account `me`.
+async fn read(api: &impl Api, calendar: &str, cursor: Option<&str>, known: &Known, me: &str) -> Result<SyncBatch> {
+    let now = Utc::now().date_naive();
+    let month = now.format("%Y-%m").to_string();
+    let cursor: Option<Cursor> = cursor.and_then(|c| serde_json::from_str(c).ok());
+    let (round, earlier) = match cursor {
+        Some(Cursor::Poll) => (poll(api, calendar, now).await?, BTreeSet::new()),
+        Some(Cursor::Delta { link, month: m, masters }) if m == month => match pages(api, &link).await? {
+            Some(round) => (round, masters),
+            None => first_round(api, calendar, now).await?,
+        },
+        _ => first_round(api, calendar, now).await?,
+    };
+    let complete = round.complete;
+    let delta_link = round.delta_link.clone();
+    let instances = parse_items(round.items);
+    let wanted = masters_to_fetch(&instances, &earlier, complete);
+    let masters = fetch_masters(api, calendar, &wanted).await?;
+    let (changes, masters) = batch(instances, masters, known, complete, &[me.to_string()], api.zone(), &earlier);
+    let cursor = match delta_link {
+        Some(link) => Cursor::Delta { link, month, masters },
+        None => Cursor::Poll,
+    };
+    Ok(SyncBatch { changes, cursor: Some(serde_json::to_string(&cursor).expect("a cursor serializes")), refresh: None })
+}
+
+/// A full delta round over a new window: the calendar's own delta, else
+/// the primary calendar's when this is it, else a poll from now on.
+async fn first_round(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<(Round, BTreeSet<String>)> {
+    let (from, to) = window(today);
+    let range = format!("startDateTime={from}&endDateTime={to}");
+    if let Some(round) = pages(api, &format!("/me/calendars/{}/calendarView/delta?{range}", encode(calendar))).await? {
+        return Ok((round, BTreeSet::new()));
+    }
+    let primary = get_ok(api, "/me/calendar?$select=id").await?;
+    if primary["id"].as_str() == Some(calendar)
+        && let Some(round) = pages(api, &format!("/me/calendarView/delta?{range}")).await?
+    {
+        return Ok((round, BTreeSet::new()));
+    }
+    tracing::info!("Graph has no delta for calendar {calendar}; polling its window");
+    Ok((poll(api, calendar, today).await?, BTreeSet::new()))
+}
+
+async fn poll(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<Round> {
+    let (from, to) = window(today);
+    let url = format!("/me/calendars/{}/calendarView?startDateTime={from}&endDateTime={to}&$select={FIELDS}", encode(calendar));
+    let mut round = pages(api, &url).await?.ok_or_else(|| Error::Other(format!("Microsoft Graph refused the calendar view of {calendar}")))?;
+    round.complete = true;
+    round.delta_link = None;
+    Ok(round)
+}
+
+/// Follows `@odata.nextLink` to the end. None when Graph refuses the
+/// request as a delta it doesn't support or a delta link it no longer
+/// knows; the caller starts over another way.
+async fn pages(api: &impl Api, first: &str) -> Result<Option<Round>> {
+    let mut round = Round { items: Vec::new(), complete: !first.contains("deltatoken"), delta_link: None };
+    let mut next = Some(first.to_string());
+    while let Some(url) = next {
+        let (status, page) = api.request("GET", &url, None, &[]).await?;
+        match status {
+            200..300 => {}
+            400 | 404 | 405 | 410 | 501 if round.items.is_empty() => {
+                tracing::info!("Graph refused {url}: {status} {}", page["error"]["code"]);
+                return Ok(None);
+            }
+            _ => return Err(api.failure(status, &page)),
+        }
+        round.items.extend(page["value"].as_array().cloned().unwrap_or_default());
+        round.delta_link = page["@odata.deltaLink"].as_str().map(str::to_string);
+        next = page["@odata.nextLink"].as_str().map(str::to_string);
+    }
+    Ok(Some(round))
+}
+
+async fn get_ok(api: &impl Api, url: &str) -> Result<Value> {
+    let (status, json) = api.request("GET", url, None, &[]).await?;
+    if !(200..300).contains(&status) {
+        return Err(api.failure(status, &json));
+    }
+    Ok(json)
+}
+
+/// The masters by id, through JSON batches, with the fields only a GET by
+/// id returns. A master Graph can't give maps to None.
+async fn fetch_masters(api: &impl Api, calendar: &str, ids: &BTreeSet<String>) -> Result<Masters> {
+    let mut out = Masters::new();
+    let ids: Vec<&String> = ids.iter().collect();
+    for chunk in ids.chunks(BATCH) {
+        let mut pending: Vec<&String> = chunk.to_vec();
+        for attempt in 0..4u32 {
+            let requests: Vec<Value> = pending
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    json!({
+                        "id": i.to_string(),
+                        "method": "GET",
+                        "url": format!("/me/calendars/{}/events/{}?$select={FIELDS},cancelledOccurrences", encode(calendar), encode(id)),
+                        "headers": {"Prefer": PREFER},
+                    })
+                })
+                .collect();
+            let (status, reply) = api.request("POST", "/$batch", Some(&json!({ "requests": requests })), &[]).await?;
+            if !(200..300).contains(&status) {
+                return Err(api.failure(status, &reply));
+            }
+            let mut throttled = Vec::new();
+            let mut wait = 0;
+            for r in reply["responses"].as_array().into_iter().flatten() {
+                let Some(id) = r["id"].as_str().and_then(|i| i.parse::<usize>().ok()).and_then(|i| pending.get(i)) else { continue };
+                match r["status"].as_u64().unwrap_or(0) {
+                    200..300 => {
+                        let raw = serde_json::to_vec(&r["body"]).expect("JSON serializes");
+                        let master = serde_json::from_value::<GraphEvent>(r["body"].clone()).ok().map(|m| (m, raw));
+                        out.insert((*id).clone(), master);
+                    }
+                    429 | 503 | 504 if attempt < 3 => {
+                        wait = wait.max(r["headers"]["Retry-After"].as_str().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2));
+                        throttled.push(*id);
+                    }
+                    404 | 403 => {
+                        out.insert((*id).clone(), None);
+                    }
+                    status => return Err(api.failure(status as u16, &r["body"])),
+                }
+            }
+            if throttled.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(wait.min(120))).await;
+            pending = throttled;
+        }
+    }
+    Ok(out)
 }
 
 /// One occurrence of a series as Graph lists it.
