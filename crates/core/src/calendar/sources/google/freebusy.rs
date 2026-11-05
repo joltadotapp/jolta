@@ -90,6 +90,8 @@ mod tests {
 
     #[test]
     fn busy_times_errors_and_people_left_out() {
+        // The shapes the Google Workspace test account returned on 2026-11-05: an
+        // address outside the Workspace that shares nothing is notFound.
         let reply: Reply = serde_json::from_value(json!({
             "kind": "calendar#freeBusy",
             "timeMin": "2026-11-09T00:00:00.000Z",

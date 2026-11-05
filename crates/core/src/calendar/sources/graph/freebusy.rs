@@ -94,9 +94,10 @@ mod tests {
 
     #[test]
     fn schedule_items_by_status_and_errors_per_schedule() {
+        // The shapes the Microsoft 365 test account returned on 2026-11-05.
         let reply = json!({"value": [
             {"scheduleId": "me@example.com", "availabilityView": "0022", "scheduleItems": [
-                {"isPrivate": false, "status": "busy", "subject": "Planning", "location": "",
+                {"isPrivate": false, "isMeeting": false, "isRecurring": false, "status": "busy", "subject": "Planning", "location": "",
                  "start": {"dateTime": "2026-11-09T09:00:00.0000000", "timeZone": "UTC"},
                  "end": {"dateTime": "2026-11-09T10:00:00.0000000", "timeZone": "UTC"}},
                 {"status": "free", "start": {"dateTime": "2026-11-09T10:00:00.0000000", "timeZone": "UTC"},
@@ -110,10 +111,12 @@ mod tests {
             ], "workingHours": {"daysOfWeek": ["monday"], "startTime": "08:00:00.0000000", "endTime": "17:00:00.0000000", "timeZone": {"name": "UTC"}}},
             {"scheduleId": "nobody@example.com", "availabilityView": "",
              "error": {"message": "The specified mailbox couldn't be found.", "responseCode": "ErrorMailRecipientNotFound"}},
+            {"scheduleId": "outside@example.org", "error": {"message": "Unable to resolve e-mail address outside@example.org to an Active Directory object.", "responseCode": "5009"}},
             {"scheduleId": "far@example.com", "error": {"message": "Free/busy isn't available.", "responseCode": "ErrorFreeBusyGenerationFailed"}},
             {"scheduleId": "odd@example.com", "error": {"message": "Something else.", "responseCode": "ErrorSomethingNew"}}
         ]});
-        let asked: Vec<String> = ["me@example.com", "nobody@example.com", "far@example.com", "odd@example.com", "silent@example.com"].map(String::from).into();
+        let asked: Vec<String> =
+            ["me@example.com", "nobody@example.com", "outside@example.org", "far@example.com", "odd@example.com", "silent@example.com"].map(String::from).into();
         let got = schedules(&reply, &asked);
         let utc = |d, h, m| Utc.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap();
         assert_eq!(
@@ -127,9 +130,10 @@ mod tests {
             "free time is dropped"
         );
         assert_eq!(got[1].availability, Availability::Unknown(Unknown::NotFound));
-        assert_eq!(got[2].availability, Availability::Unknown(Unknown::NotShared));
-        assert_eq!(got[3].availability, Availability::Unknown(Unknown::Failed("Something else.".into())));
-        assert!(matches!(got[4].availability, Availability::Unknown(_)), "a schedule Graph left out is never free");
+        assert_eq!(got[2].availability, Availability::Unknown(Unknown::NotFound), "an address outside the organization, as Microsoft 365 answered it");
+        assert_eq!(got[3].availability, Availability::Unknown(Unknown::NotShared));
+        assert_eq!(got[4].availability, Availability::Unknown(Unknown::Failed("Something else.".into())));
+        assert!(matches!(got[5].availability, Availability::Unknown(_)), "a schedule Graph left out is never free");
     }
 
     #[test]
