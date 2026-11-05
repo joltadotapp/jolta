@@ -38,7 +38,8 @@ pub struct Busy {
 pub enum Unknown {
     /// The person doesn't share free/busy with the user.
     NotShared,
-    /// The provider knows no such person or calendar.
+    /// The provider can't see the person's calendar: someone outside the
+    /// organization who shares nothing, or a mistyped address.
     NotFound,
     /// The account's provider has no way to ask (CalDAV, for now).
     NotSupported,
@@ -50,7 +51,7 @@ impl Unknown {
     pub fn reason(&self) -> String {
         match self {
             Unknown::NotShared => "Doesn't share free/busy with you".into(),
-            Unknown::NotFound => "Not found by your calendar provider".into(),
+            Unknown::NotFound => "Outside your organization, or doesn't share free/busy with you".into(),
             Unknown::NotSupported => "This account's calendar can't look up other people yet".into(),
             Unknown::Failed(why) => format!("Couldn't be looked up: {why}"),
         }

@@ -59,7 +59,9 @@ fn schedules(reply: &Value, people: &[String]) -> Vec<Schedule> {
 fn unknown(error: &Value) -> Unknown {
     let code = error["responseCode"].as_str().unwrap_or_default();
     match code {
-        "ErrorMailRecipientNotFound" | "ErrorInvalidSmtpAddress" => Unknown::NotFound,
+        // 5009: "Unable to resolve e-mail address … to an Active Directory
+        // object", for an address outside the organization (2026-11-05).
+        "5009" | "ErrorMailRecipientNotFound" | "ErrorInvalidSmtpAddress" => Unknown::NotFound,
         "ErrorNoFreeBusyAccess" | "ErrorFreeBusyGenerationFailed" | "ErrorProxyRequestNotAllowed" => Unknown::NotShared,
         _ => Unknown::Failed(error["message"].as_str().filter(|m| !m.is_empty()).unwrap_or(code).to_string()),
     }

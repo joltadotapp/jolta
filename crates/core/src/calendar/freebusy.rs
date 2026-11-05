@@ -51,15 +51,14 @@ struct Recorded {
     working_hours: Option<WorkingHours>,
 }
 
-/// Looks up `people` through `account` for the next `days` working days
-/// after `from`. With nobody to look up, as for Insert my availability, an
-/// account with calendar off still gives the user's own busy times.
+/// Looks up `people` through `account`, the account's own address aside,
+/// for the next `days` working days after `from`. With nobody to look up,
+/// as for Insert my availability, an account with calendar off still gives
+/// the user's own busy times.
 pub async fn look_up(jolta: &Jolta, account: AccountId, people: &[String], from: DateTime<Utc>, days: u32) -> Result<Lookup> {
-    let (a, every, chosen): (Account, Vec<String>, Option<WorkingHours>) = jolta
-        .store
-        .read_async(move |c| Ok((store::account(c, account)?, store::accounts(c)?.into_iter().map(|a| a.address).collect(), store::working_hours(c)?)))
-        .await?;
-    let people: Vec<String> = people.iter().filter(|p| !every.iter().any(|m| m.eq_ignore_ascii_case(p))).cloned().collect();
+    let (a, chosen): (Account, Option<WorkingHours>) =
+        jolta.store.read_async(move |c| Ok((store::account(c, account)?, store::working_hours(c)?))).await?;
+    let people: Vec<String> = people.iter().filter(|p| !p.eq_ignore_ascii_case(&a.address)).cloned().collect();
     if !a.calendar && !people.is_empty() {
         return Ok(Lookup::CalendarOff { account, address: a.address.clone(), needs_consent: sync::needs_consent(&a) });
     }

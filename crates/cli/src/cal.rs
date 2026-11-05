@@ -12,12 +12,22 @@ use jolta_core::oauth::{self, Provider};
 use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
 use jolta_core::calendar::card::{self, Card, Edit};
-use jolta_core::calendar::{add, invitation, proposal, remove, respond};
+use jolta_core::calendar::availability::{self, Availability, Busy};
+use jolta_core::calendar::{add, freebusy, invitation, proposal, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
 
 use crate::{pct, truncate};
+
+/// Find a time's lookup for the CLI; calendar off is an error here.
+async fn find_time_lookup(jolta: &Jolta, account: &str, addresses: &[String], days: u32) -> Result<freebusy::Found> {
+    let a = jolta.store.read(|c| store::find_account(c, account))?;
+    match freebusy::look_up(jolta, a.id, addresses, Utc::now(), days).await? {
+        freebusy::Lookup::Found(found) => Ok(found),
+        freebusy::Lookup::CalendarOff { address, .. } => bail!("calendar is off for {address}; run `jolta cal enable {address}` first"),
+    }
+}
 
 #[derive(Subcommand)]
 pub enum CalCommand {
@@ -165,6 +175,27 @@ pub enum CalCommand {
     /// Write the newer invitation on a message over the copy added to a
     /// calendar, as its card's Update in your calendar does.
     Update { message: i64 },
+    /// Each person's busy blocks over the next working days, looked up
+    /// through the account's provider, or why they aren't known. Reads only.
+    Freebusy {
+        account: String,
+        #[arg(required = true)]
+        addresses: Vec<String>,
+        /// Working days to look at.
+        #[arg(long, default_value_t = 5)]
+        days: u32,
+    },
+    /// Times everyone known is free for a meeting, as Find a time suggests
+    /// them. Reads only.
+    FindTime {
+        account: String,
+        #[arg(required = true)]
+        addresses: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        minutes: i64,
+        #[arg(long, default_value_t = 5)]
+        days: u32,
+    },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
         #[arg(value_enum)]
@@ -203,6 +234,47 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 println!("  {:>4}  [{}] {}", c.id, if c.shown { "x" } else { " " }, c.name);
             }
             println!("Hidden calendars aren't synced. Show one with `jolta cal show <id> on`.");
+            Ok(())
+        }
+        CalCommand::Freebusy { account, addresses, days } => {
+            let found = find_time_lookup(jolta, &account, &addresses, days).await?;
+            let here = tz::here();
+            let h = &found.hours;
+            let weekdays: Vec<String> = std::iter::successors(Some(chrono::Weekday::Mon), |d| Some(d.succ()))
+                .take(7)
+                .filter(|d| h.days.has(*d))
+                .map(|d| format!("{d}"))
+                .collect();
+            println!("Working hours: {} {} to {} ({})", weekdays.join(" "), h.start.format("%H:%M"), h.end.format("%H:%M"), h.zone);
+            let block = |b: &Busy| {
+                let (s, e) = (b.start.with_timezone(&here), b.end.with_timezone(&here));
+                let end = if e.date_naive() == s.date_naive() { e.format("%H:%M").to_string() } else { e.format("%a %-d %b %H:%M").to_string() };
+                format!("  {} to {end}  {:?}", s.format("%a %-d %b %H:%M"), b.kind)
+            };
+            println!("{} (you, {} blocks)", found.me, found.own.len());
+            found.own.iter().for_each(|b| println!("{}", block(b)));
+            for s in &found.others {
+                match &s.availability {
+                    Availability::Known(busy) => {
+                        println!("{} ({} blocks)", s.person, busy.len());
+                        busy.iter().for_each(|b| println!("{}", block(b)));
+                    }
+                    Availability::Unknown(why) => println!("{}: unknown, {} ({why:?})", s.person, why.reason()),
+                }
+            }
+            Ok(())
+        }
+        CalCommand::FindTime { account, addresses, minutes, days } => {
+            let found = find_time_lookup(jolta, &account, &addresses, days).await?;
+            let here = tz::here();
+            let slots = availability::suggest(&found.own, &found.others, &found.hours, Duration::minutes(minutes), Utc::now(), days);
+            if slots.is_empty() {
+                println!("No time in the next {days} working days suits everyone known.");
+            }
+            for s in &slots {
+                let missing = if s.missing.is_empty() { String::new() } else { format!("  (unknown: {})", s.missing.join(", ")) };
+                println!("{} to {}{missing}", s.start.with_timezone(&here).format("%a %-d %b %H:%M"), s.end.with_timezone(&here).format("%H:%M"));
+            }
             Ok(())
         }
         CalCommand::Disable { account } => {
