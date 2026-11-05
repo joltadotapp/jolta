@@ -14,15 +14,17 @@
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
-use mail_parser::{MessageParser, MessagePart};
+use mail_parser::{MessageParser, MessagePart, PartKind};
 use rusqlite::Connection;
 
 use super::invitation::{self, Invitation, Method};
-use super::{Access, Calendar, CalendarSource, ical, respond, tz, update};
+use super::{Access, Calendar, CalendarSource, EventData, ical, respond, tz, update};
 use crate::blobs::Blobs;
 use crate::model::{Account, AccountId};
 use crate::store::{self, OpId, UnsettledReply};
 use crate::{Jolta, Result, actions};
+
+mod google;
 
 /// Replies filed in one pass, for the toast that offers Undo.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +138,9 @@ fn owns(calendar: &Calendar, account: &Account) -> bool {
 /// around every answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Producer {
+    /// Microsoft 365 and Outlook: every one of 34 real replies said
+    /// `Microsoft Exchange Server 2010`.
+    Exchange,
     Google,
     Apple,
     Jolta,
@@ -145,7 +150,9 @@ enum Producer {
 impl Producer {
     fn of(prodid: &str) -> Producer {
         let id = prodid.to_ascii_lowercase();
-        if id.starts_with("-//google inc//google calendar") {
+        if id.starts_with("microsoft exchange server") {
+            Producer::Exchange
+        } else if id.starts_with("-//google inc//google calendar") {
             Producer::Google
         } else if id.starts_with("-//apple inc.//") {
             Producer::Apple
@@ -156,20 +163,27 @@ impl Producer {
         }
     }
 
-    /// Whether `text` holds only the words this producer writes around an
-    /// answer. Google's sentence comes above the event's own details, which
-    /// the organizer wrote.
-    fn wrote(self, text: &str) -> bool {
+    /// Whether `text`, one body as a reader sees it, holds only the words
+    /// this producer writes around an answer to `event`: nothing at all
+    /// from Exchange, one sentence from Apple and Jolta, and from Google its
+    /// sentence above the event's details. A quoted line is never theirs.
+    fn wrote(self, text: &str, event: &EventData) -> bool {
         let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !blank(l)).collect();
-        let said = |line: &str, sentences: &[&str]| sentences.iter().any(|s| line.len() > s.len() && line.ends_with(s));
+        if lines.iter().any(|l| l.starts_with('>')) {
+            return false;
+        }
         match (self, lines.as_slice()) {
-            (_, []) => true,
-            (Producer::Google, [first, ..]) => said(first, ENGLISH) || said(first, DUTCH),
+            (Producer::Exchange, []) => true,
+            (Producer::Google, [first, ..]) => (said(first, ENGLISH) || said(first, DUTCH)) && google::details(text, event),
             (Producer::Jolta, [only]) => said(only, ENGLISH),
             (Producer::Apple, [only]) => APPLE.iter().any(|s| only.split_once(s).is_some_and(|(who, event)| !who.is_empty() && !event.is_empty())),
             _ => false,
         }
     }
+}
+
+fn said(line: &str, sentences: &[&str]) -> bool {
+    sentences.iter().any(|s| line.len() > s.len() && line.ends_with(s))
 }
 
 /// Google's and Jolta's sentence.
@@ -180,9 +194,9 @@ const DUTCH: &[&str] = &[" heeft deze uitnodiging aangenomen.", " heeft deze uit
 const APPLE: &[&str] = &[" has accepted your invitation to the event: ", " has declined your invitation to the event: ", " has tentatively accepted your invitation to the event: "];
 
 /// Whether a reply says nothing beyond its answer: it answers as one guest
-/// without a note, and its body is empty or holds only the words its
-/// producer writes around every answer. Anything else, including a body
-/// Jolta can't read, counts as more.
+/// without a note, and every body a reader could see, text or HTML, is
+/// empty or holds only the words its producer writes around every answer.
+/// Anything else, including a body Jolta can't read, counts as more.
 pub fn answer_only(raw: &[u8], reply: &Invitation) -> bool {
     let [guest] = reply.event.attendees.as_slice() else { return false };
     if !blank(&guest.comment) {
@@ -196,13 +210,59 @@ pub fn answer_only(raw: &[u8], reply: &Invitation) -> bool {
     });
     let Some(calendar) = calendar else { return false };
     let producer = Producer::of(&ical::producer(&calendar).unwrap_or_default());
-    let text: Vec<String> = root
-        .text_body()
-        .enumerate()
-        .filter(|(_, part)| !is_calendar(part))
-        .filter_map(|(i, _)| root.body_text(i).map(|t| t.into_owned()))
-        .collect();
-    producer.wrote(&text.join("\n"))
+    let (mut text, mut html) = (Vec::new(), Vec::new());
+    let mut seen = std::collections::HashSet::new();
+    for part in root.text_body().chain(root.html_body()) {
+        if is_calendar(&part) || !seen.insert(part.id()) {
+            continue;
+        }
+        match (part.kind(), part.text()) {
+            (PartKind::Text, Some(t)) => text.push(t.into_owned()),
+            (PartKind::Html, Some(h)) => html.push(html_text(&h)),
+            // An image or other part shown in the body.
+            _ => return false,
+        }
+    }
+    if text.is_empty() && html.is_empty() {
+        return producer.wrote("", &reply.event);
+    }
+    let alone = text.is_empty();
+    text.iter().all(|t| producer.wrote(t, &reply.event)) && html.iter().all(|h| if alone { producer.wrote(h, &reply.event) } else { text.iter().any(|t| shows_only(h, t)) })
+}
+
+/// An HTML body reduced to its text, with a break at every tag so that
+/// words in neighbouring cells stay apart.
+fn html_text(html: &str) -> String {
+    mail_parser::html_to_text(&html.replace('<', " <"))
+}
+
+/// Whether the HTML body says no more than the text body: none of its
+/// words, links aside, comes more often than in the text, except the few
+/// labels an HTML layout adds. Google's HTML puts the title above the
+/// sentence, so the order can differ.
+fn shows_only(html: &str, text: &str) -> bool {
+    let mut left: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for w in words(text) {
+        *left.entry(w).or_default() += 1;
+    }
+    words(html).filter(|w| !HTML_ONLY.contains(&w.as_str())).all(|w| match left.get_mut(&w) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    })
+}
+
+const HTML_ONLY: &[&str] = &["when", "wanneer", "view", "map", "kaart"];
+
+/// Lowercase words without links.
+fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split_whitespace()
+        .filter(|w| !w.contains("://"))
+        .flat_map(|w| w.split(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
 }
 
 /// Whitespace and the zero-width characters some mailers leave in an
@@ -237,17 +297,43 @@ mod tests {
 
     /// A reply written by `prodid` with this text body and ATTENDEE line.
     fn shaped(prodid: &str, text: &str, attendee: &str) -> String {
+        bodies(prodid, &[("text/plain", text)], attendee)
+    }
+
+    /// A reply written by `prodid` with these alternatives, each a content
+    /// type and its body, and this ATTENDEE line.
+    fn bodies(prodid: &str, bodies: &[(&str, &str)], attendee: &str) -> String {
+        let bodies: String = bodies.iter().map(|(kind, body)| format!("--b\r\nContent-Type: {kind}; charset=utf-8\r\n\r\n{body}\r\n")).collect();
         format!(
             "From: Bo Nilsson <bo@example.com>\r\nTo: me@example.com\r\nSubject: Accepted: Design crit\r\nMessage-ID: <shaped@example.com>\r\n\
-             MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{text}\r\n\
+             MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n{bodies}\
              --b\r\nContent-Type: text/calendar; method=REPLY\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nPRODID:{prodid}\r\nBEGIN:VEVENT\r\nUID:{UID}\r\n\
-             DTSTAMP:20261104T103000Z\r\n{attendee}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n--b--\r\n"
+             DTSTAMP:20261104T103000Z\r\nSUMMARY:Design crit\r\nDESCRIPTION:Bring the latest <https://example.com/mock-ups>mock-ups.\r\n{attendee}\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n--b--\r\n"
         )
     }
 
     const BO: &str = "ATTENDEE;PARTSTAT=ACCEPTED;CN=Bo Nilsson:mailto:bo@example.com";
     const GOOGLE: &str = "-//Google Inc//Google Calendar 70.9054//EN";
     const EXCHANGE: &str = "Microsoft Exchange Server 2010";
+
+    /// Google's text body in the layout since 2022, the way real replies
+    /// wrap it, with `more` among its details.
+    fn google(more: &str) -> String {
+        format!(
+            "Bo Nilsson has accepted this invitation.\r\n\r\nDesign crit\r\nFriday 13 Nov 2026 \u{22c5} 10:00 \u{2013} 10:45\r\nCentral European Time - Brussels\r\n\r\n\
+             Bring the latest mock-ups.\r\n{more}\r\nOrganizer\r\nme@example.com\r\nme@example.com\r\n\r\nGuests\r\nme@example.com - organizer\r\nBo Nilsson\r\n\
+             View all guest info  \r\nhttps://calendar.google.com/calendar/event?action=VIEW&eid=ZGVz\r\n\r\n~~//~~\r\n\
+             Invitation from Google Calendar: https://calendar.google.com/calendar/\r\n\r\nYou are receiving this email because you are an attendee on the event.\r\n\r\n\
+             Forwarding this invitation could allow any recipient to send a response to  \r\nthe organizer, be added to the guest list, invite others regardless of  \r\n\
+             their own invitation status, or modify your RSVP.\r\n\r\nLearn more https://support.google.com/calendar/answer/37135#forwarding\r\n"
+        )
+    }
+
+    /// Google's text body in Dutch in the layout of 2013.
+    const GOOGLE_2013: &str = "Bo heeft deze uitnodiging afgeslagen.\r\n\r\nTitel: Design crit\r\nBring the latest mock-ups.\r\nWanneer: vr 13. nov 2026 10:00 \u{2013} 10:45 Brussel\r\n\
+         Agenda: me@example.com\r\nWie:\r\n     * me@example.com - organisator\r\n     * Bo\r\n\r\n\r\nUitnodiging van Google Agenda: https://www.google.com/calendar/\r\n\r\n\
+         Je ontvangt deze e-mail op het adres me@example.com omdat je je hebt  \r\naangemeld voor updates over antwoorden op uitnodigingen in de agenda van  \r\nme@example.com.\r\n";
 
     #[test]
     fn each_providers_answer_alone_and_with_a_note() {
@@ -263,9 +349,7 @@ mod tests {
     fn words_the_producer_didnt_write_stay() {
         assert!(only(shaped(EXCHANGE, "\u{200b} \u{a0}", BO).as_bytes()), "a zero-width space is no note");
         assert!(!only(shaped(EXCHANGE, "See you there", BO).as_bytes()), "words in Exchange's body with no COMMENT");
-        assert!(only(shaped("AndroidEmail", "", BO).as_bytes()), "an empty body says nothing, whoever wrote it");
         assert!(!only(shaped("AndroidEmail", "When: 13-Nov-2026 10:00", BO).as_bytes()), "words from a mailer Jolta doesn't know");
-        assert!(only(shaped(GOOGLE, "Bo heeft deze uitnodiging afgeslagen.\r\n\r\nDesign crit", BO).as_bytes()), "Google in Dutch");
         assert!(!only(shaped(GOOGLE, "Running late, see you at 10:15\r\nBo has accepted this invitation.", BO).as_bytes()), "words above Google's sentence");
         assert!(!only(shaped(GOOGLE, "has accepted this invitation.", BO).as_bytes()), "the sentence without anyone in it");
         assert!(!only(shaped(GOOGLE, "Bo has accepted this invitation with a note:\r\n\"Late\"", BO).as_bytes()), "Google's note in the body alone");
@@ -275,6 +359,55 @@ mod tests {
         assert!(!only(shaped(EXCHANGE, "", &two).as_bytes()), "a reply for two guests");
         let note = format!("{BO}\r\nCOMMENT:\\n\\nsee you\\n");
         assert!(!only(shaped(EXCHANGE, "", &note).as_bytes()), "a note in COMMENT alone");
+    }
+
+    #[test]
+    fn only_exchange_sends_an_empty_body() {
+        assert!(only(shaped(EXCHANGE, "", BO).as_bytes()));
+        for prodid in ["AndroidEmail", "", GOOGLE, "-//Apple Inc.//Mac OS X 10.8.3//EN", "-//Jolta//Jolta//EN"] {
+            assert!(!only(shaped(prodid, "", BO).as_bytes()), "an empty body from {prodid:?}");
+        }
+        let unnamed = shaped(EXCHANGE, "", BO).replace(&format!("PRODID:{EXCHANGE}\r\n"), "");
+        assert!(!only(unnamed.as_bytes()), "no PRODID");
+    }
+
+    #[test]
+    fn under_googles_sentence_only_googles_details() {
+        assert!(only(shaped(GOOGLE, &google(""), BO).as_bytes()), "the layout since 2022");
+        assert!(only(shaped(GOOGLE, GOOGLE_2013, BO).as_bytes()), "the layout of 2013, in Dutch");
+        let quoted = "> Bo has accepted this invitation.\r\n\r\nCan we move it?";
+        assert!(!only(shaped(GOOGLE, quoted, BO).as_bytes()), "a quoted sentence");
+        let quoted_details = google("").replacen("Design crit\r\n", "> Design crit\r\n", 1);
+        assert!(!only(shaped(GOOGLE, &quoted_details, BO).as_bytes()), "a quoted line among the details");
+        assert!(!only(shaped(GOOGLE, &google("Can we move it?\r\n"), BO).as_bytes()), "a line among the details");
+        assert!(!only(shaped(GOOGLE, &format!("{}\r\nCan we move it?\r\n", google("")), BO).as_bytes()), "a line under the footer");
+        let footer = google("").replace("Learn more", "Read more");
+        assert!(!only(shaped(GOOGLE, &footer, BO).as_bytes()), "a footer Jolta hasn't seen");
+        let cut = google("");
+        let cut = &cut[..cut.find("~~//~~").unwrap()];
+        assert!(!only(shaped(GOOGLE, cut, BO).as_bytes()), "no footer");
+        let place = GOOGLE_2013.replace("Agenda:", "Waar: Room 3\r\nAgenda:");
+        assert!(!only(shaped(GOOGLE, &place, BO).as_bytes()), "a place the event doesn't have");
+    }
+
+    #[test]
+    fn every_body_a_reader_sees() {
+        let blank = [("text/plain", ""), ("text/html", "<html><body><p>\u{a0}</p></body></html>")];
+        assert!(only(bodies(EXCHANGE, &blank, BO).as_bytes()), "Exchange's empty text and HTML");
+        let html = [("text/plain", ""), ("text/html", "<html><body><p>Can we move it?</p></body></html>")];
+        assert!(!only(bodies(EXCHANGE, &html, BO).as_bytes()), "words in the HTML alone");
+        assert!(!only(bodies(EXCHANGE, &html[1..], BO).as_bytes()), "words in the only body, HTML");
+        let text = google("");
+        let html = "<html><body><h2>Design crit</h2><p>Bo Nilsson has accepted this invitation.</p><p>When</p><p>Friday 13 Nov 2026 &#8901; 10:00 &ndash; 10:45</p>\
+                    <p>Bring the latest mock-ups.</p><a href=\"https://www.google.com/maps\">View map</a><p>Invitation from Google Calendar</p></body></html>";
+        assert!(only(bodies(GOOGLE, &[("text/plain", &text), ("text/html", html)], BO).as_bytes()), "Google's HTML of the same details");
+        let more = html.replace("<p>When</p>", "<p>Can we move it?</p><p>When</p>");
+        assert!(!only(bodies(GOOGLE, &[("text/plain", &text), ("text/html", &more)], BO).as_bytes()), "a line in Google's HTML alone");
+        let image = bodies(EXCHANGE, &[("text/plain", "")], BO).replace(
+            "multipart/alternative; boundary=b\r\n\r\n",
+            "multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: image/png\r\nContent-Disposition: inline\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n",
+        );
+        assert!(!only(image.as_bytes()), "an image in the body");
     }
 
     /// Jolta's own iMIP reply, which the iCloud account sends, with and
