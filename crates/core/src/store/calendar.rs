@@ -287,17 +287,29 @@ pub fn set_event_data(conn: &Connection, id: EventId, e: &EventData) -> Result<(
     Ok(())
 }
 
-/// Deletes the events of one remote object, and the changed occurrences
-/// filed under it as their series (`master_id`): Graph's delta reports a
-/// deleted series by its master's id alone. Series they belonged to keep their
-/// other events, rebuilt without them. False when there were none.
-pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, horizon: &Horizon) -> Result<bool> {
+/// Why a remote object leaves the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// The server said the object was deleted. A deleted series takes the
+    /// changed occurrences filed under it (`master_id`) along, since Graph's
+    /// delta reports a deleted series by its master's id alone.
+    Deleted,
+    /// A full listing left the object out, or the server wouldn't give it.
+    /// What is filed under it stays: the server may still list it.
+    Unlisted,
+}
+
+/// Deletes the events of one remote object. Series they belonged to keep
+/// their other events, rebuilt without them. False when there were none.
+pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, removal: Removal, horizon: &Horizon) -> Result<bool> {
     let uids = item_uids(conn, calendar, remote_id)?;
     let deleted =
         conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
     for uid in &uids {
-        conn.prepare_cached("DELETE FROM event WHERE calendar_id = ?1 AND uid = ?2 AND json_extract(data, '$.master_id') = ?3")?
-            .execute(params![calendar, uid, remote_id])?;
+        if removal == Removal::Deleted {
+            conn.prepare_cached("DELETE FROM event WHERE calendar_id = ?1 AND uid = ?2 AND json_extract(data, '$.master_id') = ?3")?
+                .execute(params![calendar, uid, remote_id])?;
+        }
         rebuild_series(conn, calendar, uid, horizon)?;
     }
     Ok(deleted > 0)
@@ -643,7 +655,7 @@ mod tests {
     }
 
     fn remove(s: &Store, cal: CalendarId, remote_id: &str) -> bool {
-        s.write(|tx| remove_item(tx, cal, remote_id, &horizon())).unwrap()
+        s.write(|tx| remove_item(tx, cal, remote_id, Removal::Deleted, &horizon())).unwrap()
     }
 
     /// (start, title) of every occurrence in November 2026, in order.

@@ -82,7 +82,7 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
         Gone::Deleted(_) if target.occurrence.is_none() => {
             let remote_id = target.event.remote_id.clone();
             let horizon = super::series::Horizon::around(Utc::now(), here);
-            jolta.store.write_async(move |tx| store::remove_item(tx, id, &remote_id, &horizon).map(|_| ())).await?;
+            jolta.store.write_async(move |tx| store::remove_item(tx, id, &remote_id, store::Removal::Deleted, &horizon).map(|_| ())).await?;
         }
         // The server knows what's left of the series.
         Gone::Deleted(_) | Gone::Already => {

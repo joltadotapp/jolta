@@ -7,7 +7,7 @@
 
 mod add;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
@@ -22,7 +22,7 @@ use crate::calendar::{
     Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
-use crate::store::RemoteCalendar;
+use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, Error, Result, oauth};
 
 const BASE: &str = "https://www.googleapis.com/calendar/v3";
@@ -475,7 +475,7 @@ async fn listing<F: Future<Output = Result<Page>>>(token: Option<String>, mut fe
 /// takes that occurrence out.
 fn batch(listing: Listing, known: &Known, uids: &HashMap<String, String>, me: &[String]) -> SyncBatch {
     let mut changes = Vec::new();
-    let mut removed: BTreeSet<String> = BTreeSet::new();
+    let mut removed: BTreeMap<String, Removal> = BTreeMap::new();
     let mut present: BTreeSet<String> = BTreeSet::new();
     for item in listing.items {
         let raw = serde_json::to_vec(&item).expect("JSON serializes");
@@ -490,8 +490,8 @@ fn batch(listing: Listing, known: &Known, uids: &HashMap<String, String>, me: &[
         if cancelled && g.recurring_event_id.is_none() {
             // Occurrences of a deleted series carry the master's id before an underscore.
             let prefix = format!("{}_", g.id);
-            removed.extend(known.keys().filter(|k| k.starts_with(&prefix)).cloned());
-            removed.insert(g.id);
+            removed.extend(known.keys().filter(|k| k.starts_with(&prefix)).map(|k| (k.clone(), Removal::Deleted)));
+            removed.insert(g.id, Removal::Deleted);
             continue;
         }
         let uid = g.ical_uid.clone().or_else(|| g.recurring_event_id.as_ref().and_then(|m| uids.get(m).cloned()));
@@ -503,13 +503,14 @@ fn batch(listing: Listing, known: &Known, uids: &HashMap<String, String>, me: &[
         changes.push(Change::Upsert { remote_id: g.id, etag: g.etag, events: vec![event], raw: Some(raw) });
     }
     if listing.full {
-        removed.extend(vanished(known, &present).into_iter().filter_map(|c| match c {
-            Change::Remove { remote_id } => Some(remote_id),
-            Change::Upsert { .. } => None,
-        }));
+        for change in vanished(known, &present) {
+            if let Change::Remove { remote_id, removal } = change {
+                removed.entry(remote_id).or_insert(removal);
+            }
+        }
     }
-    removed.retain(|id| !present.contains(id));
-    changes.extend(removed.into_iter().map(|remote_id| Change::Remove { remote_id }));
+    removed.retain(|id, _| !present.contains(id));
+    changes.extend(removed.into_iter().map(|(remote_id, removal)| Change::Remove { remote_id, removal }));
     SyncBatch { changes, cursor: listing.sync_token, refresh: None }
 }
 
@@ -960,7 +961,7 @@ mod tests {
         assert_eq!(events[0].recurrence_id, Some(Moment::Time(at("2026-11-23 09:00", Europe::Brussels))));
         assert_eq!(
             b.changes[1..],
-            [Change::Remove { remote_id: "dead".into() }, Change::Remove { remote_id: "dead_20261103T090000Z".into() }],
+            [Change::Remove { remote_id: "dead".into(), removal: Removal::Deleted }, Change::Remove { remote_id: "dead_20261103T090000Z".into(), removal: Removal::Deleted }],
             "a deleted master takes its stored occurrences along; an incremental sync leaves the rest"
         );
         assert_eq!(b.cursor.as_deref(), Some("next"));
@@ -998,7 +999,7 @@ mod tests {
             .iter()
             .map(|c| match c {
                 Change::Upsert { remote_id, .. } => (remote_id.as_str(), true),
-                Change::Remove { remote_id } => (remote_id.as_str(), false),
+                Change::Remove { remote_id, .. } => (remote_id.as_str(), false),
             })
             .collect();
         assert_eq!(ids, [("kept", true), ("new", true), ("gone", false)]);

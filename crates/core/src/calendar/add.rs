@@ -473,7 +473,7 @@ mod tests {
         added(&j, personal, "sync", "theirs", &v2);
         assert_eq!(card_of(&j, v2_id, &v2).updating, None, "written: a second Update has nothing to do");
 
-        j.store.write(|tx| store::remove_item(tx, personal, "theirs", &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
+        j.store.write(|tx| store::remove_item(tx, personal, "theirs", store::Removal::Deleted, &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
         assert!(card_of(&j, v2_id, &v2).adding.is_some(), "the copy was deleted in the calendar: Add again");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
@@ -557,7 +557,7 @@ mod tests {
         let cancel_id = import(&j, cancel.as_bytes());
         assert!(card_of(&j, cancel_id, &cancel).removing.is_some(), "the copy Jolta made holds it, whatever the other event says");
 
-        j.store.write(|tx| store::remove_item(tx, personal, "theirs", &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
+        j.store.write(|tx| store::remove_item(tx, personal, "theirs", store::Removal::Deleted, &Horizon::around(Utc::now(), Brussels)).map(|_| ())).unwrap();
         hold(&j, personal, "other", &events_of(&v1));
         assert_eq!(card_of(&j, cancel_id, &cancel).removing, None, "nothing the user added is left to remove");
         let v2 = version("v2", "sync", "REQUEST", 1, "20261104T091000Z", &V1.replace("T150000Z", "T130000Z"));

@@ -117,7 +117,8 @@ pub async fn sync_calendar(jolta: &Jolta, id: CalendarId) -> Result<SyncReport> 
 }
 
 /// Stores one round of changes, each upsert with the blob its raw JSON
-/// went to.
+/// went to. Removals go first: a deleted series takes the rows filed under
+/// it along, and an object the same round returned is written back after.
 pub(crate) fn apply(
     tx: &rusqlite::Connection,
     calendar: CalendarId,
@@ -125,13 +126,15 @@ pub(crate) fn apply(
     horizon: &Horizon,
 ) -> Result<SyncReport> {
     let mut report = SyncReport::default();
+    for (change, _) in changes {
+        if let Change::Remove { remote_id, removal } = change {
+            report.removed += usize::from(store::remove_item(tx, calendar, remote_id, *removal, horizon)?);
+        }
+    }
     for (change, blob) in changes {
-        match change {
-            Change::Upsert { remote_id, etag, events, .. } => {
-                report.upserted +=
-                    usize::from(store::apply_item(tx, calendar, remote_id, etag.as_deref(), events, blob.as_deref(), horizon)?);
-            }
-            Change::Remove { remote_id } => report.removed += usize::from(store::remove_item(tx, calendar, remote_id, horizon)?),
+        if let Change::Upsert { remote_id, etag, events, .. } = change {
+            report.upserted +=
+                usize::from(store::apply_item(tx, calendar, remote_id, etag.as_deref(), events, blob.as_deref(), horizon)?);
         }
     }
     Ok(report)

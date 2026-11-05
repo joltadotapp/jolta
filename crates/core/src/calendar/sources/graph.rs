@@ -28,7 +28,7 @@ use crate::calendar::{
     Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
-use crate::store::RemoteCalendar;
+use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, Error, Result, oauth};
 
 const BASE: &str = "https://graph.microsoft.com/v1.0";
@@ -632,7 +632,7 @@ fn batch(
     earlier: &BTreeSet<String>,
 ) -> (Vec<Change>, BTreeSet<String>) {
     let mut changes = Vec::new();
-    let mut removed: BTreeSet<String> = BTreeSet::new();
+    let mut removed: BTreeMap<String, Removal> = BTreeMap::new();
     let mut present: BTreeSet<String> = BTreeSet::new();
     let referenced: BTreeSet<&str> = instances.iter().filter(|(g, _)| g.removed.is_none()).filter_map(|(g, _)| g.series_master_id.as_deref()).collect();
     let mut holding: BTreeSet<String> = if complete { BTreeSet::new() } else { earlier.clone() };
@@ -649,7 +649,7 @@ fn batch(
             None => {
                 holding.remove(id);
                 if !referenced.contains(id.as_str()) {
-                    removed.insert(id.clone());
+                    removed.entry(id.clone()).or_insert(Removal::Unlisted);
                 }
             }
         }
@@ -657,7 +657,7 @@ fn batch(
 
     for (g, raw) in instances {
         if g.removed.is_some() {
-            removed.insert(g.id);
+            removed.insert(g.id, Removal::Deleted);
             continue;
         }
         let master = g.series_master_id.as_ref().map(|id| masters.get(id).and_then(Option::as_ref).map(|(m, _)| m));
@@ -669,7 +669,7 @@ fn batch(
             // exception or a stand-in, it goes.
             ("occurrence", Some(Some(_))) => {
                 if known.contains_key(&g.id) {
-                    removed.insert(g.id);
+                    removed.entry(g.id).or_insert(Removal::Unlisted);
                 }
                 continue;
             }
@@ -685,13 +685,14 @@ fn batch(
     }
 
     if complete {
-        removed.extend(vanished(known, &present).into_iter().filter_map(|c| match c {
-            Change::Remove { remote_id } => Some(remote_id),
-            Change::Upsert { .. } => None,
-        }));
+        for change in vanished(known, &present) {
+            if let Change::Remove { remote_id, removal } = change {
+                removed.entry(remote_id).or_insert(removal);
+            }
+        }
     }
-    removed.retain(|id| !present.contains(id));
-    changes.extend(removed.into_iter().map(|remote_id| Change::Remove { remote_id }));
+    removed.retain(|id, _| !present.contains(id));
+    changes.extend(removed.into_iter().map(|(remote_id, removal)| Change::Remove { remote_id, removal }));
     (changes, holding)
 }
 
@@ -1475,13 +1476,13 @@ mod tests {
             .iter()
             .map(|c| match c {
                 Change::Upsert { remote_id, events, .. } => format!("+{remote_id} {}", events[0].uid),
-                Change::Remove { remote_id } => format!("-{remote_id}"),
+                Change::Remove { remote_id, removal } => format!("-{remote_id} {removal:?}"),
             })
             .collect();
         assert_eq!(
             summary,
-            ["+M1 040000008200E00074C5B7101A82E008SERIES", "+O8 u8", "-M9", "-O7", "-X9", "-an-occurrence"],
-            "M9 is gone; O8's master can't be read, so the occurrence stands alone; O7 was stored and now expands from M1"
+            ["+M1 040000008200E00074C5B7101A82E008SERIES", "+O8 u8", "-M9 Unlisted", "-O7 Unlisted", "-X9 Deleted", "-an-occurrence Deleted"],
+            "M9 can't be read; O8's master can't be read, so the occurrence stands alone; O7 was stored and now expands from M1; delta deleted the others"
         );
         let Change::Upsert { events, .. } = &changes[1] else { unreachable!() };
         assert_eq!(events[0].recurrence_id, None, "a stand-in is a single event");
