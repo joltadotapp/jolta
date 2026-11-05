@@ -94,13 +94,19 @@ fn first_name(reply: &UnsettledReply) -> &str {
 fn verdict(conn: &Connection, blobs: &Blobs, account: &Account, reply: &UnsettledReply, now: DateTime<Utc>, here: Tz) -> Result<Verdict> {
     let Ok(raw) = blobs.get(&reply.blob) else { return Ok(Verdict::Keep) };
     let found = invitation::find(&raw, &[]);
-    if found.is_empty() || found.iter().any(|i| i.method != Method::Reply || !answer_only(&raw, i)) {
+    if found.is_empty() || found.iter().any(|i| i.method != Method::Reply) {
         return Ok(Verdict::Keep);
     }
     for sent in &found {
         if !guest_answers_own_meeting(conn, blobs, account, reply, sent, here)? {
             let waited = now.timestamp() - reply.date > KNOWN_WITHIN.num_seconds();
             return Ok(if waited { Verdict::Keep } else { Verdict::Wait });
+        }
+    }
+    // Only now is the account's copy known, whose guests Google's body lists.
+    for sent in &found {
+        if !answer_only(&raw, sent, &store::stored_series(conn, &sent.event.uid, Some(account.id))?) {
+            return Ok(Verdict::Keep);
         }
     }
     Ok(Verdict::File)
@@ -178,15 +184,17 @@ impl Producer {
     /// Whether `text`, one body as a reader sees it, holds only the words
     /// this producer writes around an answer to `event`: nothing at all
     /// from Exchange, one sentence from Apple and Jolta, and from Google its
-    /// sentence above the event's details. A quoted line is never theirs.
-    fn wrote(self, text: &str, event: &EventData) -> bool {
+    /// sentence above the event's details, whose guests may be those of
+    /// `copy`, the account's copy of the meeting. A quoted line is never
+    /// theirs.
+    fn wrote(self, text: &str, event: &EventData, copy: &[EventData]) -> bool {
         let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !blank(l)).collect();
         if lines.iter().any(|l| l.starts_with('>')) {
             return false;
         }
         match (self, lines.as_slice()) {
             (Producer::Exchange, []) => true,
-            (Producer::Google, [first, ..]) => (said(first, ENGLISH) || said(first, DUTCH)) && google::details(text, event),
+            (Producer::Google, [first, ..]) => (said(first, ENGLISH) || said(first, DUTCH)) && google::details(text, event, copy),
             (Producer::Jolta, [only]) => said(only, ENGLISH),
             (Producer::Apple, [only]) => APPLE.iter().any(|s| only.split_once(s).is_some_and(|(who, event)| !who.is_empty() && !event.is_empty())),
             _ => false,
@@ -207,9 +215,10 @@ const APPLE: &[&str] = &[" has accepted your invitation to the event: ", " has d
 
 /// Whether a reply says nothing beyond its answer: it answers as one guest
 /// without a note, and every body a reader could see, text or HTML, is
-/// empty or holds only the words its producer writes around every answer.
-/// Anything else, including a body Jolta can't read, counts as more.
-pub fn answer_only(raw: &[u8], reply: &Invitation) -> bool {
+/// empty or holds only the words its producer writes around every answer
+/// to the meeting, of which `copy` is the account's copy. Anything else,
+/// including a body Jolta can't read, counts as more.
+pub fn answer_only(raw: &[u8], reply: &Invitation, copy: &[EventData]) -> bool {
     let [guest] = reply.event.attendees.as_slice() else { return false };
     if !blank(&guest.comment) {
         return false;
@@ -236,13 +245,13 @@ pub fn answer_only(raw: &[u8], reply: &Invitation) -> bool {
         }
     }
     if text.is_empty() && html.is_empty() {
-        return producer.wrote("", &reply.event);
+        return producer.wrote("", &reply.event, copy);
     }
-    text.iter().all(|t| producer.wrote(t, &reply.event))
+    text.iter().all(|t| producer.wrote(t, &reply.event, copy))
         && html.iter().all(|h| match producer {
             Producer::Google if !text.is_empty() => text.iter().any(|t| shows_only(h, t, GOOGLE_HTML_LABELS)),
-            Producer::Exchange => producer.wrote(h, &reply.event),
-            _ if text.is_empty() => producer.wrote(h, &reply.event),
+            Producer::Exchange => producer.wrote(h, &reply.event, copy),
+            _ if text.is_empty() => producer.wrote(h, &reply.event, copy),
             _ => text.iter().any(|t| shows_only(h, t, &[])),
         })
 }
@@ -318,7 +327,7 @@ mod tests {
     fn only(raw: &[u8]) -> bool {
         let found = invitation::find(raw, &[]);
         assert_eq!(found.len(), 1, "one reply");
-        answer_only(raw, &found[0])
+        answer_only(raw, &found[0], &[])
     }
 
     /// A reply written by `prodid` with this text body and ATTENDEE line.
@@ -334,7 +343,7 @@ mod tests {
             "From: Bo Nilsson <bo@example.com>\r\nTo: me@example.com\r\nSubject: Accepted: Design crit\r\nMessage-ID: <shaped@example.com>\r\n\
              MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n{bodies}\
              --b\r\nContent-Type: text/calendar; method=REPLY\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nPRODID:{prodid}\r\nBEGIN:VEVENT\r\nUID:{UID}\r\n\
-             DTSTAMP:20261104T103000Z\r\nSUMMARY:Design crit\r\nDESCRIPTION:Bring the latest <https://example.com/mock-ups>mock-ups.\r\n{attendee}\r\n\
+             DTSTAMP:20261104T103000Z\r\nDTSTART:20261113T090000Z\r\nDTEND:20261113T094500Z\r\nORGANIZER;CN=Me:mailto:me@example.com\r\nSUMMARY:Design crit\r\nDESCRIPTION:Bring the latest <https://example.com/mock-ups>mock-ups.\r\n{attendee}\r\n\
              END:VEVENT\r\nEND:VCALENDAR\r\n--b--\r\n"
         )
     }
@@ -358,7 +367,7 @@ mod tests {
 
     /// Google's text body in Dutch in the layout of 2013.
     const GOOGLE_2013: &str = "Bo heeft deze uitnodiging afgeslagen.\r\n\r\nTitel: Design crit\r\nBring the latest mock-ups.\r\nWanneer: vr 13. nov 2026 10:00 \u{2013} 10:45 Brussel\r\n\
-         Agenda: me@example.com\r\nWie:\r\n     * me@example.com - organisator\r\n     * Bo\r\n\r\n\r\nUitnodiging van Google Agenda: https://www.google.com/calendar/\r\n\r\n\
+         Agenda: me@example.com\r\nWie:\r\n     * me@example.com - organisator\r\n     * Bo Nilsson\r\n\r\n\r\nUitnodiging van Google Agenda: https://www.google.com/calendar/\r\n\r\n\
          Je ontvangt deze e-mail op het adres me@example.com omdat je je hebt  \r\naangemeld voor updates over antwoorden op uitnodigingen in de agenda van  \r\nme@example.com.\r\n";
 
     #[test]
@@ -414,6 +423,41 @@ mod tests {
         assert!(!only(shaped(GOOGLE, cut, BO).as_bytes()), "no footer");
         let place = GOOGLE_2013.replace("Agenda:", "Waar: Room 3\r\nAgenda:");
         assert!(!only(shaped(GOOGLE, &place, BO).as_bytes()), "a place the event doesn't have");
+    }
+
+    #[test]
+    fn google_s_time_and_guests_are_the_event_s() {
+        let google_says = |text: &str| only(shaped(GOOGLE, text, BO).as_bytes());
+        let base = google("");
+        let time = "Friday 13 Nov 2026 \u{22c5} 10:00 \u{2013} 10:45\r\nCentral European Time - Brussels\r\n";
+        assert!(google_says(&base));
+        assert!(!google_says(&base.replace(time, &format!("{time}Can we move it?\r\n"))), "a line in the time block");
+        assert!(!google_says(&base.replace("10:00 \u{2013} 10:45", "Can we move it?")), "words for the time");
+        assert!(!google_says(&base.replace("10:00 \u{2013} 10:45", "11:00 \u{2013} 11:45")), "another time");
+        assert!(!google_says(&base.replace("Friday 13 Nov", "Saturday 14 Nov")), "another day");
+        assert!(!google_says(&base.replace("Central European Time - Brussels", "Can we move it?")), "words for the zone");
+        assert!(!google_says(&base.replace("Central European Time - Brussels", "Greenwich Mean Time - London")), "a zone Jolta hasn't seen");
+        assert!(google_says(&base.replace("10:00 \u{2013} 10:45", "10am \u{2013} 10:45am")), "a 12-hour clock");
+        let dutch = base.replace("Friday 13 Nov 2026", "vrijdag 13 nov 2026").replace("Central European Time - Brussels", "Midden-Europese tijd - Brussel");
+        assert!(google_says(&dutch), "in Dutch");
+
+        assert!(!google_says(&base.replace("Bo Nilsson\r\n", "Bo Nilsson\r\nCan we move it?\r\n")), "a line in the guest list");
+        assert!(!google_says(&base.replace("me@example.com - organizer", "Can we move it? - organizer")), "words with a guest's role");
+        assert!(!google_says(&base.replace("eid=ZGVz", "eid=ZGVz Can we move it?")), "words after Google's link");
+        let cy = base.replace("Bo Nilsson\r\n", "Bo Nilsson\r\nCy Berg\r\n");
+        assert!(!google_says(&cy), "a guest the meeting doesn't name");
+        let copy = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:{UID}\r\nDTSTART:20261113T090000Z\r\nDTEND:20261113T094500Z\r\nSUMMARY:Design crit\r\nORGANIZER:mailto:{ME}\r\n\
+             ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\nATTENDEE;CN=Cy Berg:mailto:cy@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let copy = crate::calendar::ical::read(&copy, &[]).unwrap();
+        let raw = shaped(GOOGLE, &cy, BO);
+        assert!(answer_only(raw.as_bytes(), &invitation::find(raw.as_bytes(), &[])[0], &copy), "a guest the account's copy names");
+
+        assert!(!google_says(&GOOGLE_2013.replace("10:00 \u{2013} 10:45", "11:00 \u{2013} 11:45")), "another time in the layout of 2013");
+        assert!(!google_says(&GOOGLE_2013.replace("10:45 Brussel", "10:45 Can we move it?")), "words for the city");
+        assert!(!google_says(&GOOGLE_2013.replace("* Bo Nilsson", "* Can we move it?")), "a line in the guest list of 2013");
+        assert!(!google_says(&GOOGLE_2013.replace("Agenda: me@example.com", "Agenda: Can we move it?")), "words for the calendar");
     }
 
     #[test]
@@ -650,6 +694,22 @@ mod tests {
         assert!(!filed(&j, &exchange("ann", "bo@example.com", "bo@example.com", Some("ann@example.com"), "")), "another organizer with the same UID");
         assert!(!filed(&j, &exchange("apple", "noreply@email.apple.com", "bo@example.com", Some(ME), "")), "iCloud's sender, seen only on organizers' invitations");
         assert!(filed(&j, &exchange("google", "calendar-notification@google.com", "bo@example.com", Some(ME), "")), "Google sending for Bo");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Google's guest list names everyone invited, whom the reply itself
+    /// doesn't carry: the account's copy of the meeting does.
+    #[test]
+    fn google_s_guest_list_against_the_account_s_copy() {
+        let (j, calendar) = setup("guest-list");
+        let reply = |id: &str| {
+            let text = google("").replace("Bo Nilsson\r\nView", "Bo Nilsson\r\nCy Berg\r\nView");
+            shaped(GOOGLE, &text, BO).replace("<shaped@", &format!("<{id}@")).replace("MIME-Version", "Date: Wed, 04 Nov 2026 10:30:00 +0000\r\nMIME-Version")
+        };
+        meeting(&j, calendar, ME, &[ME], "");
+        assert!(!filed(&j, &reply("without-cy")), "a guest the copy doesn't name");
+        meeting(&j, calendar, ME, &[ME], "ATTENDEE;CN=Cy Berg:mailto:cy@example.com\r\n");
+        assert!(filed(&j, &reply("with-cy")), "a guest the copy names");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
