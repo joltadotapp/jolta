@@ -107,9 +107,14 @@ fn verdict(conn: &Connection, blobs: &Blobs, account: &Account, reply: &Unsettle
 
 /// Whether a reply answers a meeting that the receiving account, by its
 /// address or an alias its own calendar's copy marks, organizes, and comes
-/// from one of that meeting's guests (`update::from_guest`). A changed
-/// occurrence shares its series' organizer and guests.
+/// from one of that meeting's guests (`update::from_guest`), from their own
+/// address or from Google's. A changed occurrence shares its series'
+/// organizer and guests.
 fn guest_answers_own_meeting(conn: &Connection, blobs: &Blobs, account: &Account, reply: &UnsettledReply, sent: &Invitation, here: Tz) -> Result<bool> {
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    if !same(&reply.from_addr, GOOGLE_FOR_GUESTS) && !sent.event.attendees.iter().any(|a| same(&a.person.address, &reply.from_addr)) {
+        return Ok(false);
+    }
     let uid = &sent.event.uid;
     let copy = store::stored_event(conn, uid, None, Some(account.id), here)?;
     let own = match &copy {
@@ -124,6 +129,12 @@ fn guest_answers_own_meeting(conn: &Connection, blobs: &Blobs, account: &Account
     let seen = update::Seen { conn, blobs, account: account.id, message: reply.id, sender: &reply.from_addr, me: &me, here };
     update::from_guest(&seen, organizer.as_deref(), &sent.event)
 }
+
+/// The one provider address a guest's reply may come from. iCloud's
+/// `noreply@email.apple.com`, which `update::from_guest` also accepts, was
+/// seen sending organizers' invitations but no guest's reply: the one real
+/// reply from Apple's Calendar came from the guest's own address.
+const GOOGLE_FOR_GUESTS: &str = "calendar-notification@google.com";
 
 /// Whether the calendar is the account's own, so the attendee its copy
 /// marks as the user is an alias. A shared or delegated calendar marks its
@@ -588,6 +599,7 @@ mod tests {
         assert!(!filed(&j, &exchange("forged", "eve@example.com", "bo@example.com", None, "")), "Eve answers in Bo's name");
         assert!(!filed(&j, &exchange("eve", "eve@example.com", "eve@example.com", None, "")), "Eve isn't invited");
         assert!(!filed(&j, &exchange("ann", "bo@example.com", "bo@example.com", Some("ann@example.com"), "")), "another organizer with the same UID");
+        assert!(!filed(&j, &exchange("apple", "noreply@email.apple.com", "bo@example.com", Some(ME), "")), "iCloud's sender, seen only on organizers' invitations");
         assert!(filed(&j, &exchange("google", "calendar-notification@google.com", "bo@example.com", Some(ME), "")), "Google sending for Bo");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
