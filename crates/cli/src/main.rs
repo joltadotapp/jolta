@@ -124,6 +124,9 @@ enum Command {
         /// For snooze: when to wake, in plain words ("tomorrow 9am", "in 2h"), in UTC.
         #[arg(long)]
         until: Option<String>,
+        /// For label and unlabel: the Gmail label's mailbox id.
+        #[arg(long)]
+        label: Option<i64>,
         /// Only record the change; Jolta.app sends it at its next sync. Needs
         /// no Keychain access, so it works for accounts the app signed in.
         #[arg(long)]
@@ -271,6 +274,8 @@ enum ActionArg {
     Flag,
     Unflag,
     Snooze,
+    Label,
+    Unlabel,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -393,7 +398,7 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
-        Command::Act { action, thread, from, undo, until, no_wait } => act(&jolta, action, thread, from, undo, until, no_wait).await,
+        Command::Act { action, thread, from, undo, until, label, no_wait } => act(&jolta, action, thread, from, undo, until, label, no_wait).await,
         Command::MarkAllRead { query } => {
             let q = jolta_core::search::parse(&format!("{query} is:unread"))?;
             list_action(&jolta, |engine| Ok(engine.mark_all_read(&q)?.len())).await
@@ -526,7 +531,8 @@ async fn send(
     Ok(())
 }
 
-async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>, no_wait: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, undo: bool, until: Option<String>, label: Option<i64>, no_wait: bool) -> Result<()> {
     use jolta_core::actions::Action;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
     let wake_at = match &until {
@@ -541,6 +547,8 @@ async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, u
         ActionArg::Flag => Action::Flag,
         ActionArg::Unflag => Action::Unflag,
         ActionArg::Snooze => Action::Snooze(wake_at.context("snooze needs --until")?),
+        ActionArg::Label => Action::AddLabel(jolta_core::MailboxId(label.context("label needs --label")?)),
+        ActionArg::Unlabel => Action::RemoveLabel(jolta_core::MailboxId(label.context("unlabel needs --label")?)),
     };
     let context = from.map_or(jolta_core::actions::Context::Inbox, |m| jolta_core::actions::Context::Mailbox(jolta_core::MailboxId(m)));
     if no_wait {

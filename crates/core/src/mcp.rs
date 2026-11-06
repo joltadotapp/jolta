@@ -146,7 +146,7 @@ fn tools() -> Value {
         },
         {
             "name": "label",
-            "description": "File a thread in a mailbox (for folder accounts this moves it out of the inbox).",
+            "description": "File a thread under a mailbox from list_mailboxes. On Gmail a label is added and the thread stays where it is; on other accounts the thread moves to that folder, out of the inbox.",
             "inputSchema": {"type": "object", "properties": {
                 "thread_id": thread,
                 "mailbox_id": {"type": "integer", "description": "From list_mailboxes."}
@@ -316,7 +316,14 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
             need(thread_account(thread)?, Grant::Organize)?;
             let action = match name {
                 "archive" => Action::Archive,
-                "label" => Action::MoveTo(MailboxId(arg_i64(args, "mailbox_id")?)),
+                "label" => {
+                    let mailbox = MailboxId(arg_i64(args, "mailbox_id")?);
+                    let gmail_label = store
+                        .read(|c| Ok(crate::actions::labels(c, ThreadId(thread)).ok()))
+                        .map_err(|e| e.to_string())?
+                        .is_some_and(|labels| labels.iter().any(|l| l.mailbox == mailbox));
+                    if gmail_label { Action::AddLabel(mailbox) } else { Action::MoveTo(mailbox) }
+                }
                 _ => {
                     let text = arg_str(args, "until");
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -326,7 +333,7 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
                 }
             };
             if ctx.engine.perform(&[ThreadId(thread)], action, Context::Inbox).map_err(|e| e.to_string())?.is_empty() {
-                Ok(format!("Nothing to change: thread {thread} is not in the inbox."))
+                Ok(format!("Nothing to change: thread {thread} is not in the inbox, or already has that label."))
             } else {
                 Ok(format!("Done: {name} thread {thread}."))
             }

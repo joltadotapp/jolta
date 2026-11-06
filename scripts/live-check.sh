@@ -98,6 +98,23 @@ for address in "$@"; do
 	wait_for "the reply arrived in the conversation" "$(in_box inbox)" 2 "$id"
 	step "reply sent and threaded"
 
+	if [ "$(q "SELECT kind FROM account WHERE id = $id")" = gmail ]; then
+		label=$(q "SELECT id FROM mailbox WHERE account_id = $id AND remote_id = 'Jolta live check'")
+		if [ -z "$label" ]; then
+			sqlite3 "$DIR/jolta.sqlite" "INSERT INTO mailbox (account_id, remote_id, name, delimiter, selectable) VALUES ($id, 'Jolta live check', 'Jolta live check', '/', 1)"
+			label=$(q "SELECT id FROM mailbox WHERE account_id = $id AND remote_id = 'Jolta live check'")
+		fi
+		labelled="SELECT count(*) FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
+		          WHERE mm.mailbox_id = $label AND m.subject LIKE '%$TOKEN%'"
+		k act label "$thread" --label "$label" >/dev/null
+		wait_for "the label reached Gmail" "$labelled" 2 "$id"
+		[ "$(q "$(in_box inbox)")" = 2 ] || fail "labelling took the conversation out of the inbox"
+		k act unlabel "$thread" --label "$label" >/dev/null
+		wait_for "taking the label off reached Gmail" "$labelled" 0 "$id"
+		[ "$(q "$(in_box inbox)")" = 2 ] || fail "taking the label off took the conversation out of the inbox"
+		step "label added and taken off on Gmail, the conversation stayed in the inbox"
+	fi
+
 	k act archive "$thread" --undo >/dev/null
 	wait_for "archive and undo left the conversation in the inbox" "$(in_box inbox)" 2 "$id"
 	step "archive, then undo, on the server"
