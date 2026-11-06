@@ -23,8 +23,9 @@ pub enum Provider {
     Microsoft,
 }
 
-/// Client ids come from `oauth-clients.env` in the data folder (written by
-/// the setup wizards), or the environment. Neither is in the repository.
+/// Client ids come from the environment, then `oauth-clients.env` in the data
+/// folder (written by the setup wizards), then the ones a release build
+/// carries. None of them is in the repository.
 #[derive(Clone, Debug)]
 pub struct Client {
     pub id: String,
@@ -127,6 +128,19 @@ impl Provider {
         }
     }
 
+    /// The client a release build carries: `scripts/release.sh` sets these
+    /// while it compiles the core, so a downloaded Jolta can sign in without
+    /// an `oauth-clients.env`.
+    fn built_in(self, name: &str) -> Option<&'static str> {
+        match (self, name) {
+            (Provider::Google, "CLIENT_ID") => option_env!("JOLTA_GOOGLE_CLIENT_ID"),
+            (Provider::Google, "CLIENT_SECRET") => option_env!("JOLTA_GOOGLE_CLIENT_SECRET"),
+            (Provider::Microsoft, "CLIENT_ID") => option_env!("JOLTA_MICROSOFT_CLIENT_ID"),
+            _ => None,
+        }
+        .filter(|v| !v.is_empty())
+    }
+
     pub fn for_kind(kind: AccountKind) -> Option<Provider> {
         match kind {
             AccountKind::Gmail => Some(Provider::Google),
@@ -147,7 +161,11 @@ impl Provider {
         }
         let get = |name: &str| {
             let key = format!("{}_{name}", self.env_prefix());
-            std::env::var(&key).ok().or_else(|| values.get(&key).cloned()).filter(|v| !v.is_empty())
+            std::env::var(&key)
+                .ok()
+                .or_else(|| values.get(&key).cloned())
+                .filter(|v| !v.is_empty())
+                .or_else(|| self.built_in(name).map(str::to_string))
         };
         let id = get("CLIENT_ID").ok_or_else(|| {
             Error::Auth(format!("No {} OAuth client yet: run the setup wizard in scripts/.", self.env_prefix().to_lowercase()))
@@ -541,6 +559,18 @@ pub fn xoauth2(user: &str, token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_build_signs_in_without_a_clients_file() {
+        if std::env::var_os("GOOGLE_CLIENT_ID").is_some() {
+            return;
+        }
+        let empty = std::env::temp_dir().join(format!("jolta-no-clients-{}", std::process::id()));
+        match option_env!("JOLTA_GOOGLE_CLIENT_ID") {
+            Some(id) => assert_eq!(Provider::Google.client(&empty).unwrap().id, id),
+            None => assert!(Provider::Google.client(&empty).is_err()),
+        }
+    }
 
     #[test]
     fn forms_and_decoding() {

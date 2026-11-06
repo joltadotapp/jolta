@@ -4,6 +4,8 @@
 <dict>
 	<key>SUFeedURL</key>
 	<string>$(JOLTA_FEED_URL)</string>
+	<key>JoltaTestBuild</key>
+	<string>$(JOLTA_TEST_BUILD)</string>
 	<key>SUPublicEDKey</key>
 	<string>lbTVjQLu66+oXvkVlhGE23i+CWInKwjtT59jityqw8I=</string>
 	<key>SUEnableAutomaticChecks</key>
