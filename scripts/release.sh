@@ -15,7 +15,9 @@
 # A public release's feed is https://jolta.app/updates/mac/appcast.xml. Its zips are kept in
 # ~/jolta-updates/public/mac and copied to the web server named in ~/jolta-devid/site-target
 # (an rsync destination such as user@host:jolta/web). The latest one is also
-# https://jolta.app/download/Jolta.zip. A public release goes into the test feed too.
+# https://jolta.app/download/Jolta.zip. A public release goes into the test feed too, and becomes a
+# GitHub release: the commit gets the tag v<version>, and the release lists the commits since the
+# previous public one. It needs a clean working tree on a commit that is on GitHub's main.
 #
 # Both appcasts are signed with the EdDSA key in ~/jolta-devid; its public half is SUPublicEDKey
 # in apple/Jolta-Info.plist. The OAuth clients the app carries come from
@@ -51,6 +53,10 @@ TEST_URL=$(tr -d '[:space:]' < "$FEED_FILE")
 if [ $PUBLIC = 1 ]; then
     SITE=$(tr -d '[:space:]' < "$DEVID/site-target" 2>/dev/null || true)
     [ -n "$SITE" ] || { echo "No web server in $DEVID/site-target."; exit 1; }
+    [ -z "$(git -C "$(dirname "$0")" status --porcelain)" ] || { echo "Commit first: a public release is built from a clean tree."; exit 1; }
+    git -C "$(dirname "$0")" fetch -q origin main
+    git -C "$(dirname "$0")" merge-base --is-ancestor HEAD origin/main || { echo "Push first: HEAD isn't on GitHub's main."; exit 1; }
+    ! git -C "$(dirname "$0")" rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null || { echo "The tag v$VERSION exists already."; exit 1; }
     FEED_URL=$PUBLIC_URL
     TEST_BUILD=
 else
@@ -145,7 +151,23 @@ if [ $PUBLIC = 1 ]; then
         || { echo "jolta.app doesn't serve $VERSION in its appcast."; exit 1; }
     curl -fsSI https://jolta.app/download/Jolta.zip > /dev/null \
         || { echo "jolta.app doesn't serve the download."; exit 1; }
-    echo "Jolta $VERSION (build $BUILD) is public: ${PUBLIC_URL}appcast.xml and https://jolta.app/download/Jolta.zip"
+
+    PREVIOUS=$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)
+    NOTES=$(mktemp)
+    {
+        echo "Download: https://jolta.app/download/Jolta.zip (notarized, macOS 26 or later, Apple silicon). Installed copies update themselves."
+        echo
+        if [ -n "$PREVIOUS" ]; then
+            echo "Changes since ${PREVIOUS#v}:"
+            echo
+            git log --no-merges --reverse --format='- %s' "$PREVIOUS..HEAD"
+        fi
+    } > "$NOTES"
+    git tag "v$VERSION" HEAD
+    git push -q origin "v$VERSION"
+    gh release create "v$VERSION" "$ZIP" --title "Jolta $VERSION" --notes-file "$NOTES" --verify-tag
+    rm -f "$NOTES"
+    echo "Jolta $VERSION (build $BUILD) is public: ${PUBLIC_URL}appcast.xml, https://jolta.app/download/Jolta.zip and GitHub"
 else
     echo "Jolta $VERSION (build $BUILD) published to the test feed: ${TEST_URL}appcast.xml"
 fi
