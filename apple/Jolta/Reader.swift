@@ -11,7 +11,6 @@ import WebKit
 /// the browser only after the user confirms its real destination.
 @MainActor
 final class ReaderPage {
-    let page: WebPage
     let images = ImageSource()
     /// Called when the user clicks an attachment chip in the message.
     var onAttachment: ((Int64, UInt32) -> Void)? {
@@ -33,29 +32,67 @@ final class ReaderPage {
         get { links.onToggle }
         set { links.onToggle = newValue }
     }
+    /// The context menu's items after Copy, for the page on screen.
+    var menuExtras: () -> [ReaderMenuItem] = { [] }
     private let links = LinkActions()
+    private let navigator: Navigator
+    /// The last page shown, loaded again if its web content process ends.
+    private var shown: String?
     private static var ruleList: WKContentRuleList?
 
-    init() {
-        var config = WebPage.Configuration()
+    /// Built on first use: SwiftUI makes a `ReaderPage` each time a view that
+    /// owns one in `@State` is initialised, and keeps only the first.
+    private(set) lazy var webView: ReaderWebView = {
+        let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
-        config.defaultNavigationPreferences.allowsContentJavaScript = false
-        config.urlSchemeHandlers[URLScheme("cid")!] = InlineImages(source: images)
-        config.urlSchemeHandlers[URLScheme("x-remote")!] = RemoteImages(source: images)
+        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        if #available(macOS 26.4, *) {
+            config.defaultWebpagePreferences.securityRestrictionMode = .maximizeCompatibility
+        }
+        config.setURLSchemeHandler(ImageScheme(serve: InlineImages(source: images).serve), forURLScheme: "cid")
+        config.setURLSchemeHandler(ImageScheme(serve: RemoteImages(source: images).serve), forURLScheme: "x-remote")
+        let content = config.userContentController
         if let rules = Self.ruleList {
-            config.userContentController.add(rules)
+            content.add(rules)
         }
         // In the app's own script world, which runs with the page's
-        // JavaScript off: every expand and collapse of a message, by its id.
-        let toggles = """
+        // JavaScript off: every expand and collapse of a message, by its id,
+        // and the link under the pointer as a context menu opens. WebKit
+        // dispatches `contextmenu` before it asks the app to show the menu,
+        // so the link arrives first.
+        let script = """
         document.addEventListener("toggle", (e) => {
           const body = e.target.matches?.("details.jolta-message") && e.target.querySelector(":scope > .jolta-body");
           if (body) webkit.messageHandlers.toggle.postMessage({ id: body.id.slice(1), open: e.target.open });
         }, true);
+        document.addEventListener("contextmenu", (e) => {
+          const a = e.target.closest?.("a[href]");
+          const href = a ? (typeof a.href === "string" ? a.href : a.href.baseVal) : "";
+          webkit.messageHandlers.menu.postMessage(href);
+        }, true);
         """
-        config.userContentController.addUserScript(WKUserScript(source: toggles, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient))
-        config.userContentController.add(ToggleMessages(links: links), contentWorld: .defaultClient, name: "toggle")
-        page = WebPage(configuration: config, navigationDecider: Decider(links: links))
+        content.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient))
+        content.add(ToggleMessages(links: links), contentWorld: .defaultClient, name: "toggle")
+        let menuLinks = MenuLinks()
+        content.add(menuLinks, contentWorld: .defaultClient, name: "menu")
+
+        let view = ReaderWebView(frame: .zero, configuration: config)
+        view.allowsBackForwardNavigationGestures = false
+        view.allowsMagnification = false
+        view.allowsLinkPreview = false
+        view.navigationDelegate = navigator
+        view.uiDelegate = navigator
+        view.menuItems = { [weak self] link in self?.menuItems(link: link) ?? [] }
+        menuLinks.webView = view
+        return view
+    }()
+
+    init() {
+        navigator = Navigator(links: links)
+        navigator.onTerminate = { [weak self] in
+            guard let self, let html = shown else { return }
+            show(html: html)
+        }
     }
 
     /// Compiles the block-all rule list once, before the first page is built.
@@ -75,31 +112,47 @@ final class ReaderPage {
         }
     }
 
-    /// Loads a rendered conversation; `then` runs once it has loaded.
+    /// Loads a rendered conversation; `then` runs once it has loaded, or
+    /// once the load failed or was replaced by the next one.
     func show(html: String, then done: (@MainActor () -> Void)? = nil) {
-        var html = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"jolta-images\">") : html
+        shown = html
+        var page = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"jolta-images\">") : html
         // Here rather than in the core's `appCss`: a page loads again, with
         // images, from HTML rendered before the theme last changed.
-        if let head = html.range(of: "</head>") {
-            html.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>", at: head.lowerBound)
+        if let head = page.range(of: "</head>") {
+            page.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>", at: head.lowerBound)
         }
-        let events = page.load(html: html, baseURL: URL(string: "about:blank")!)
+        let html = page
+        let navigation = webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
         let debug = UserDefaults.standard.bool(forKey: "JoltaReaderDebug")
         guard debug || done != nil else { return }
-        Task {
-            var log = "html \(html.count) chars\n"
-            do {
-                for try await event in events { log += "event \(event)\n" }
-            } catch {
-                log += "load error \(error)\n"
-            }
+        guard let navigation else { done?(); return }
+        var log = "html \(html.count) chars\n"
+        navigator.track(navigation, event: { log += "event \($0)\n" }) { [weak self] error in
+            if let error { log += "load error \(error)\n" }
             done?()
-            guard debug else { return }
-            let probe = try? await page.callJavaScript("return [document.body ? document.body.innerText.length : -1, getComputedStyle(document.body).color, innerWidth, innerHeight].join(' ')")
-            log += "probe \(String(describing: probe))\nurl \(String(describing: page.url))\n"
-            try? log.write(toFile: AppModel.dataDirectory + "/readerdebug.txt", atomically: true, encoding: .utf8)
-            try? html.write(toFile: AppModel.dataDirectory + "/readerdebug.html", atomically: true, encoding: .utf8)
+            guard debug, let self else { return }
+            let events = log
+            Task {
+                var log = events
+                let probe = await self.call("return [document.body ? document.body.innerText.length : -1, getComputedStyle(document.body).color, innerWidth, innerHeight].join(' ')")
+                log += "probe \(String(describing: probe))\nurl \(String(describing: self.webView.url))\n"
+                try? log.write(toFile: AppModel.dataDirectory + "/readerdebug.txt", atomically: true, encoding: .utf8)
+                try? html.write(toFile: AppModel.dataDirectory + "/readerdebug.html", atomically: true, encoding: .utf8)
+            }
         }
+    }
+
+    /// Runs the app's own script on the page. The page world, as WebKit for
+    /// SwiftUI's `callJavaScript` used: the app's scripts run there even with
+    /// the page's JavaScript off, and they read the page's own elements.
+    func call(_ script: String, arguments: [String: Any] = [:]) async -> Any? {
+        try? await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
+    }
+
+    /// `call` without waiting for the result.
+    func run(_ script: String, arguments: [String: Any] = [:]) {
+        Task { _ = await call(script, arguments: arguments) }
     }
 
     /// Expands or collapses messages by id, as the user left them before
@@ -112,7 +165,7 @@ final class ReaderPage {
         }
         """
         let states = Dictionary(uniqueKeysWithValues: states.map { (String($0.key), $0.value) })
-        Task { _ = try? await page.callJavaScript(script, arguments: ["states": states]) }
+        run(script, arguments: ["states": states])
     }
 
     /// Swaps the theme's colors into the page on screen. The app's own
@@ -124,53 +177,156 @@ final class ReaderPage {
         style.textContent = css;
         document.head.appendChild(style);
         """
-        Task { _ = try? await page.callJavaScript(script, arguments: ["css": ReaderStyle.themeCSS]) }
+        run(script, arguments: ["css": ReaderStyle.themeCSS])
+    }
+
+    /// Open Link… and Copy Link on a link the reader would open, then Copy
+    /// and the view's own items.
+    private func menuItems(link: URL?) -> [NSMenuItem] {
+        var items: [ReaderMenuItem] = []
+        if let link, Navigator.opens(link) {
+            items += [
+                .button("Open Link…") { Navigator.confirmOpen(link) },
+                .button("Copy Link") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link.absoluteString, forType: .string)
+                },
+                .divider,
+            ]
+        }
+        items.append(.button("Copy") { [weak self] in NSApp.sendAction(#selector(NSText.copy(_:)), to: self?.webView, from: nil) })
+        return (items + menuExtras()).map(\.menuItem)
+    }
+}
+
+/// One entry of the reader's context menu.
+enum ReaderMenuItem {
+    case button(String, @MainActor () -> Void)
+    case divider
+
+    @MainActor fileprivate var menuItem: NSMenuItem {
+        switch self {
+        case .divider:
+            return .separator()
+        case .button(let title, let action):
+            let target = MenuAction(action)
+            let item = NSMenuItem(title: title, action: #selector(MenuAction.run), keyEquivalent: "")
+            item.target = target
+            // The item holds its target weakly.
+            item.representedObject = target
+            return item
+        }
+    }
+}
+
+@MainActor
+private final class MenuAction: NSObject {
+    let action: @MainActor () -> Void
+
+    init(_ action: @escaping @MainActor () -> Void) {
+        self.action = action
+    }
+
+    @objc func run() { action() }
+}
+
+/// The reader's `WKWebView`, with Jolta's context menu in place of WebKit's.
+final class ReaderWebView: WKWebView {
+    /// The link the pointer was on when the context menu was asked for, from
+    /// the page's `contextmenu` event; nil off a link.
+    fileprivate var menuLink: URL?
+    fileprivate var menuItems: (URL?) -> [NSMenuItem] = { _ in [] }
+
+    override func rightMouseDown(with event: NSEvent) {
+        menuLink = nil
+        super.rightMouseDown(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        menuLink = nil
+        super.mouseDown(with: event)
+    }
+
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        menu.items = menuItems(menuLink)
+        menuLink = nil
+        super.willOpenMenu(menu, with: event)
+    }
+}
+
+/// SwiftUI's host for a `ReaderPage`'s one web view.
+struct ReaderPageView: NSViewRepresentable {
+    let page: ReaderPage
+    var menu: () -> [ReaderMenuItem] = { [] }
+
+    func makeNSView(context: Context) -> ReaderWebView { page.webView }
+
+    func updateNSView(_ view: ReaderWebView, context: Context) {
+        page.menuExtras = menu
     }
 }
 
 /// What the image handlers may serve for the page on screen.
-final class ImageSource: @unchecked Sendable {
+@MainActor
+final class ImageSource {
     var core: Core?
     /// Set when the user asks to load this conversation's remote images.
     var allowsRemote = false
 }
 
-private func imageReply(_ url: URL?, mime: String, data: Data) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
-    AsyncThrowingStream { continuation in
-        let response = URLResponse(url: url ?? URL(string: "about:blank")!, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil)
-        continuation.yield(.response(response))
-        continuation.yield(.data(data))
-        continuation.finish()
+/// Answers a custom scheme's loads with what `serve` returns. WebKit stops a
+/// load when the page goes away; a stopped task must not be answered, so
+/// each running one is tracked until it is answered or stopped.
+@MainActor
+private final class ImageScheme: NSObject, WKURLSchemeHandler {
+    typealias Reply = (mime: String, data: Data)
+    private let serve: @MainActor (URL) async -> Reply
+    private var running: [ObjectIdentifier: Task<Void, Never>] = [:]
+
+    init(serve: @escaping @MainActor (URL) async -> Reply) {
+        self.serve = serve
+    }
+
+    func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+        let id = ObjectIdentifier(task)
+        guard let url = task.request.url else {
+            task.didFailWithError(URLError(.badURL))
+            return
+        }
+        running[id] = Task {
+            let reply = await serve(url)
+            guard running.removeValue(forKey: id) != nil else { return }
+            task.didReceive(URLResponse(url: url, mimeType: reply.mime, expectedContentLength: reply.data.count, textEncodingName: nil))
+            task.didReceive(reply.data)
+            task.didFinish()
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {
+        running.removeValue(forKey: ObjectIdentifier(task))?.cancel()
     }
 }
 
 /// `cid:<message id>/<content id>`: an image part of the message itself.
-private struct InlineImages: URLSchemeHandler {
+@MainActor
+private struct InlineImages {
     let source: ImageSource
 
-    func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
-        let url = request.url
-        let path = url?.absoluteString.dropFirst("cid:".count) ?? ""
+    func serve(_ url: URL) async -> ImageScheme.Reply {
+        let path = url.absoluteString.dropFirst("cid:".count)
         guard let core = source.core, let slash = path.firstIndex(of: "/"), let message = Int64(path[..<slash]) else {
-            return imageReply(url, mime: "image/gif", data: Data())
+            return ("image/gif", Data())
         }
         let cid = String(path[path.index(after: slash)...]).removingPercentEncoding ?? String(path[path.index(after: slash)...])
-        return AsyncThrowingStream { continuation in
-            Task {
-                let part = try? await core.inlineImage(messageId: message, contentId: cid)
-                let response = URLResponse(url: url ?? URL(string: "about:blank")!, mimeType: part?.mimeType ?? "image/gif",
-                                           expectedContentLength: part?.bytes.count ?? 0, textEncodingName: nil)
-                continuation.yield(.response(response))
-                continuation.yield(.data(part.map { Data($0.bytes) } ?? Data()))
-                continuation.finish()
-            }
-        }
+        let part = try? await core.inlineImage(messageId: message, contentId: cid)
+        return (part?.mimeType ?? "image/gif", part.map { Data($0.bytes) } ?? Data())
     }
 }
 
 /// `x-remote:<http URL>`: nothing until the user loads images, then a
 /// cookieless, cacheless fetch that sends no referrer.
-private struct RemoteImages: URLSchemeHandler {
+@MainActor
+private struct RemoteImages {
     let source: ImageSource
     private static let session = URLSession(configuration: {
         let c = URLSessionConfiguration.ephemeral
@@ -181,23 +337,13 @@ private struct RemoteImages: URLSchemeHandler {
         return c
     }())
 
-    func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
-        let url = request.url
-        let target = url.flatMap { URL(string: String($0.absoluteString.dropFirst("x-remote:".count))) }
+    func serve(_ url: URL) async -> ImageScheme.Reply {
+        let target = URL(string: String(url.absoluteString.dropFirst("x-remote:".count)))
         guard source.allowsRemote, let target, ["http", "https"].contains(target.scheme?.lowercased() ?? "") else {
-            return imageReply(url, mime: "image/gif", data: Data())
+            return ("image/gif", Data())
         }
-        return AsyncThrowingStream { continuation in
-            Task {
-                let fetched = try? await Self.session.data(from: target)
-                let mime = (fetched?.1 as? HTTPURLResponse)?.mimeType ?? "image/gif"
-                let data = fetched?.0 ?? Data()
-                let response = URLResponse(url: url ?? target, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil)
-                continuation.yield(.response(response))
-                continuation.yield(.data(data))
-                continuation.finish()
-            }
-        }
+        let fetched = try? await Self.session.data(from: target)
+        return ((fetched?.1 as? HTTPURLResponse)?.mimeType ?? "image/gif", fetched?.0 ?? Data())
     }
 }
 
@@ -223,20 +369,92 @@ private final class ToggleMessages: NSObject, WKScriptMessageHandler {
     }
 }
 
-@MainActor
-private struct Decider: WebPage.NavigationDeciding {
-    let links: LinkActions
+/// The context menu script's messages: the link's URL, or "" off a link.
+private final class MenuLinks: NSObject, WKScriptMessageHandler {
+    weak var webView: ReaderWebView?
 
-    func decidePolicy(for action: WebPage.NavigationAction, preferences: inout WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        let link = (message.body as? String).flatMap { $0.isEmpty ? nil : URL(string: $0) }
+        MainActor.assumeIsolated { webView?.menuLink = link }
+    }
+}
+
+/// Decides every navigation and reports the loads `ReaderPage.show` starts.
+@MainActor
+private final class Navigator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    let links: LinkActions
+    var onTerminate: (() -> Void)?
+    private var loads: [(navigation: WKNavigation, event: @MainActor (String) -> Void, end: @MainActor (String?) -> Void)] = []
+
+    init(links: LinkActions) {
+        self.links = links
+    }
+
+    /// Calls `event` as the load moves on and `end` once, when it finished
+    /// (nil) or failed (the error).
+    func track(_ navigation: WKNavigation, event: @escaping @MainActor (String) -> Void, end: @escaping @MainActor (String?) -> Void) {
+        loads.append((navigation, event, end))
+    }
+
+    private func report(_ navigation: WKNavigation?, _ event: String) {
+        loads.first { $0.navigation === navigation }?.event(event)
+    }
+
+    private func end(_ navigation: WKNavigation?, _ event: String, error: String?) {
+        guard let i = loads.firstIndex(where: { $0.navigation === navigation }) else { return }
+        let load = loads.remove(at: i)
+        load.event(event)
+        load.end(error)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        report(navigation, "started")
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        report(navigation, "committed")
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        end(navigation, "finished", error: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+        end(navigation, "failed", error: "\(error)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+        end(navigation, "failed", error: "\(error)")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        for load in loads { load.end("web content process ended") }
+        loads.removeAll()
+        onTerminate?()
+    }
+
+    /// No page opens a window: a `target="_blank"` link was already decided
+    /// as a navigation.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        nil
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         if #available(macOS 26.4, *) {
             preferences.securityRestrictionMode = .maximizeCompatibility
         }
         preferences.allowsContentJavaScript = false
+        return (decide(action), preferences)
+    }
+
+    private func decide(_ action: WKNavigationAction) -> WKNavigationActionPolicy {
         let url = action.request.url
         if action.navigationType == .other, url?.absoluteString == "about:blank" {
             return .allow
         }
-        if action.navigationType == .linkActivated, let url, url.scheme == "x-attachment" {
+        guard action.navigationType == .linkActivated, let url else { return .cancel }
+        switch url.scheme {
+        case "x-attachment":
             let parts = url.absoluteString.dropFirst("x-attachment:".count).split(separator: "/")
             if parts.count == 2, let message = Int64(parts[0]) {
                 if parts[1] == "all" {
@@ -245,23 +463,24 @@ private struct Decider: WebPage.NavigationDeciding {
                     links.onAttachment?(message, index)
                 }
             }
-            return .cancel
-        }
-        if action.navigationType == .linkActivated, let url, url.scheme == "x-rsvp" {
+        case "x-rsvp":
             let parts = url.absoluteString.dropFirst("x-rsvp:".count).split(separator: "/")
             if parts.count == 2, let message = Int64(parts[0]) {
                 links.onRsvp?(message, String(parts[1]))
             }
-            return .cancel
-        }
-        if action.navigationType == .linkActivated, let url, url.scheme == "x-join" {
+        case "x-join":
             Self.join(url)
-            return .cancel
-        }
-        if action.navigationType == .linkActivated, let url, ["http", "https", "mailto"].contains(url.scheme ?? "") {
-            Self.confirmOpen(url)
+        default:
+            // After WebKit has its answer: the alert's modal loop would
+            // otherwise hold the decision open.
+            if Self.opens(url) { Task { Self.confirmOpen(url) } }
         }
         return .cancel
+    }
+
+    /// The links the reader opens in another app, after asking.
+    static func opens(_ url: URL) -> Bool {
+        ["http", "https", "mailto"].contains(url.scheme ?? "")
     }
 
     /// `x-join:open?url=…&app=…` from an invitation card: the meeting's app
@@ -383,6 +602,21 @@ struct ReaderView: View {
         }
     }
 
+    /// The context menu's image items, after Copy.
+    private func imageMenu() -> [ReaderMenuItem] {
+        if imagesBlocked {
+            var items: [ReaderMenuItem] = [.button("Load Images", loadImages)]
+            if !thread.imageSender.isEmpty {
+                items.append(.button("Always Load Images from \(thread.imageSender)") { trustSender(true) })
+            }
+            return items
+        }
+        if trusted, !thread.imageSender.isEmpty {
+            return [.button("Stop Loading Images from \(thread.imageSender)") { trustSender(false) }]
+        }
+        return []
+    }
+
     private func loadImages() {
         imagesLoaded = true
         render()
@@ -451,30 +685,8 @@ struct ReaderView: View {
             .padding(.horizontal, 56)
             .padding(.top, 30)
             .padding(.bottom, 16)
-            WebView(reader.page)
-                .webViewBackForwardNavigationGestures(.disabled)
-                .webViewMagnificationGestures(.disabled)
-                .webViewLinkPreviews(.disabled)
+            ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
-                .webViewContextMenu { element in
-                    if let link = element.linkURL {
-                        Button("Open Link…") { Decider.confirmOpen(link) }
-                        Button("Copy Link") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(link.absoluteString, forType: .string)
-                        }
-                        Divider()
-                    }
-                    Button("Copy") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
-                    if imagesBlocked {
-                        Button("Load Images", action: loadImages)
-                        if !thread.imageSender.isEmpty {
-                            Button("Always Load Images from \(thread.imageSender)") { trustSender(true) }
-                        }
-                    } else if trusted, !thread.imageSender.isEmpty {
-                        Button("Stop Loading Images from \(thread.imageSender)") { trustSender(false) }
-                    }
-                }
         }
         .animation(.snappy(duration: 0.16), value: model.rsvpPanel)
         .onChange(of: model.answerChoices) { reflect() }

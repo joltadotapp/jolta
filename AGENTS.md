@@ -1,6 +1,6 @@
 # Jolta
 
-A native, keyboard-first, local-first email client, called Kite (its codename) until 2026-11-03. A Rust core holds all mail logic; a SwiftUI + AppKit app for macOS 26+ is the first UI.
+A native, keyboard-first, local-first email client, called Kite (its codename) until 2026-11-03. A Rust core holds all mail logic; a SwiftUI + AppKit app for macOS 15.4+ is the first UI.
 
 If `AGENTS.local.md` exists, read it first: it describes this checkout's machines and accounts, and the planning docs kept outside the repository. `docs/architecture.md` describes the shape of the code, the data model and the bridge.
 

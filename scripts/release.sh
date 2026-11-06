@@ -166,7 +166,7 @@ if [ $PUBLIC = 1 ]; then
     PREVIOUS=$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)
     NOTES=$(mktemp)
     {
-        echo "Download: https://jolta.app/download/Jolta.zip (notarized, macOS 26 or later, Apple silicon). Installed copies update themselves."
+        echo "Download: https://jolta.app/download/Jolta.zip (notarized, macOS 15.4 or later, Apple silicon). Installed copies update themselves."
         echo
         if [ -n "$PREVIOUS" ]; then
             echo "Changes since ${PREVIOUS#v}:"

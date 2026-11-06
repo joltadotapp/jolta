@@ -25,7 +25,17 @@ else
     CARGO_FLAGS=""
 fi
 
-export MACOSX_DEPLOYMENT_TARGET=26.0
+export MACOSX_DEPLOYMENT_TARGET=15.4
+
+# Cargo doesn't rebuild when the deployment target changes, so objects built
+# for an older or newer minimum would stay. A target folder built for another
+# minimum is removed once.
+for t in $TARGETS; do
+    STAMP="$ROOT/target/$t/deployment-target"
+    [ "$(cat "$STAMP" 2>/dev/null)" = "$MACOSX_DEPLOYMENT_TARGET" ] || rm -rf "$ROOT/target/$t"
+    mkdir -p "$ROOT/target/$t"
+    echo "$MACOSX_DEPLOYMENT_TARGET" > "$STAMP"
+done
 
 # One cargo call per crate builds every target at once.
 TARGET_FLAGS=""
