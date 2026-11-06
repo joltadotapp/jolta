@@ -25,4 +25,6 @@ Build the `jolta` CLI with `scripts/build-cli.sh`, never plain `cargo build`: th
 
 Release builds are Apple silicon only; `JOLTA_INTEL=1` in front of `scripts/build-core.sh --release` or `scripts/release.sh` builds the universal app. Debug builds don't run Sparkle.
 
+The website, jolta.app, is a Cloudflare Worker in `site/`; `site/README.md` says how to run and deploy it. It also serves the public update feed, so its `/updates/` and `/download/` paths stay.
+
 Rust toolchain and dependency versions are pinned in `rust-toolchain.toml` and the workspace `Cargo.toml`. UniFFI is pinned to `=0.31.2`; don't bump it without checking `uniffi-bindgen-cs` support.

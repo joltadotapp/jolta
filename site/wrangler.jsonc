@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jolta-site",
+  "account_id": "8d890b20f5107f80d458a69f19b21660",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "r2_buckets": [{ "binding": "RELEASES", "bucket_name": "jolta-releases" }],
+  "routes": [
+    { "pattern": "jolta.app/*", "zone_name": "jolta.app" },
+    { "pattern": "www.jolta.app/*", "zone_name": "jolta.app" }
+  ],
+  "workers_dev": true,
+  "preview_urls": true
+}

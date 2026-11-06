@@ -13,9 +13,10 @@
 # A test build also carries JoltaTestBuild, so the Mac remembers that feed (Updater.swift).
 #
 # A public release's feed is https://jolta.app/updates/mac/appcast.xml. Its zips are kept in
-# ~/jolta-updates/public/mac and copied to the web server named in ~/jolta-devid/site-target
-# (an rsync destination such as user@host:jolta/web). The latest one is also
-# https://jolta.app/download/Jolta.zip. A public release goes into the test feed too, and becomes a
+# ~/jolta-updates/public/mac and uploaded to the R2 bucket jolta-releases, which the jolta.app
+# Worker in site/ serves under the same paths. The latest one is also
+# https://jolta.app/download/Jolta.zip. Uploading needs a wrangler login to the Cloudflare account
+# in site/wrangler.jsonc. A public release goes into the test feed too, and becomes a
 # GitHub release: the commit gets the tag v<version>, and the release lists the commits since the
 # previous public one. It needs a clean working tree on a commit that is on GitHub's main.
 #
@@ -51,8 +52,10 @@ CLIENTS=${JOLTA_CLIENTS_FILE:-$DEVID/oauth-clients.env}
 TEST_URL=$(tr -d '[:space:]' < "$FEED_FILE")
 
 if [ $PUBLIC = 1 ]; then
-    SITE=$(tr -d '[:space:]' < "$DEVID/site-target" 2>/dev/null || true)
-    [ -n "$SITE" ] || { echo "No web server in $DEVID/site-target."; exit 1; }
+    WRANGLER="$(cd "$(dirname "$0")/.." && pwd)/site/node_modules/.bin/wrangler"
+    [ -x "$WRANGLER" ] || npm --prefix "$(dirname "$0")/../site" ci --no-fund --no-audit
+    "$WRANGLER" whoami --config "$(dirname "$0")/../site/wrangler.jsonc" 2>&1 | grep "You are logged in" > /dev/null \
+        || { echo "Log in to Cloudflare first: cd site && npx wrangler login"; exit 1; }
     [ -z "$(git -C "$(dirname "$0")" status --porcelain)" ] || { echo "Commit first: a public release is built from a clean tree."; exit 1; }
     git -C "$(dirname "$0")" fetch -q origin main
     git -C "$(dirname "$0")" merge-base --is-ancestor HEAD origin/main || { echo "Push first: HEAD isn't on GitHub's main."; exit 1; }
@@ -143,10 +146,18 @@ ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
 if [ $PUBLIC = 1 ]; then
     mkdir -p "$PUBLIC_UPDATES"
+    STAMP=$(mktemp)
     cp "$ZIP" "$PUBLIC_UPDATES/"
     "$SPARKLE_BIN/generate_appcast" --ed-key-file "$ED_KEY" --download-url-prefix "$PUBLIC_URL" "$PUBLIC_UPDATES"
-    rsync -a "$PUBLIC_UPDATES/" "$SITE/updates/mac/"
-    rsync -a "$ZIP" "$SITE/download/Jolta.zip"
+    put() { "$WRANGLER" r2 object put "jolta-releases/$1" --file "$2" --remote --config site/wrangler.jsonc > /dev/null; }
+    # The new zip and any delta generate_appcast made go up before the appcast that points at them.
+    put "updates/mac/Jolta-$VERSION.zip" "$ZIP"
+    find "$PUBLIC_UPDATES" -type f -newer "$STAMP" ! -path "*/old_updates/*" ! -name appcast.xml ! -name "Jolta-$VERSION.zip" | while read -r FILE; do
+        put "updates/mac/${FILE#"$PUBLIC_UPDATES"/}" "$FILE"
+    done
+    put updates/mac/appcast.xml "$PUBLIC_UPDATES/appcast.xml"
+    put download/Jolta.zip "$ZIP"
+    rm -f "$STAMP"
     curl -fsS "${PUBLIC_URL}appcast.xml" | grep "sparkle:shortVersionString>$VERSION<" > /dev/null \
         || { echo "jolta.app doesn't serve $VERSION in its appcast."; exit 1; }
     curl -fsSI https://jolta.app/download/Jolta.zip > /dev/null \
