@@ -220,7 +220,7 @@ extension ReaderPage {
         const r = el.getBoundingClientRect();
         return [r.left, r.top, r.width, r.height];
         """
-        guard let v = try? await page.callJavaScript(script, arguments: ["id": String(message), "selector": selector]) as? [Double], v.count == 4 else {
+        guard let v = await call(script, arguments: ["id": String(message), "selector": selector]) as? [Double], v.count == 4 else {
             return nil
         }
         return CGRect(x: v[0], y: v[1], width: v[2], height: v[3])
@@ -233,7 +233,7 @@ extension ReaderPage {
         const card = document.querySelector(`[data-rsvp="${id}"]`);
         if (card) card.classList.toggle("jolta-sending", on);
         """
-        Task { _ = try? await page.callJavaScript(script, arguments: ["id": String(message), "on": on]) }
+        run(script, arguments: ["id": String(message), "on": on])
     }
 
     /// Shows the choices and the answer going out on the card, with the
@@ -266,7 +266,7 @@ extension ReaderPage {
             "id": String(message), "chosen": chosen?.name ?? "", "sending": sending, "quiet": choices.quiet,
             "note": choices.note.trimmingCharacters(in: .whitespacesAndNewlines), "only": choices.occurrenceOnly, "day": day ?? "",
         ]
-        Task { _ = try? await page.callJavaScript(script, arguments: args) }
+        run(script, arguments: args)
     }
 }
 

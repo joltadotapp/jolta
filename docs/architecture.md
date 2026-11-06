@@ -188,8 +188,9 @@ The Swift side keeps a page cache per visible list and asks for rows by index as
 1. `mail-parser` reads the raw message and picks the HTML part, or converts plain text to HTML.
 2. `ammonia` strips scripts, event handlers, forms, iframes, objects, embeds, `javascript:` links and meta refresh.
 3. Our CSS filter cleans `<style>` blocks and style attributes: no `@import`, no remote `url()`, no attribute-selector tricks.
-4. Remote URLs are rewritten to `x-remote:` and inline parts to `cid:`. Remote images stay blocked until the user allows them for that sender or message; then the core fetches them without cookies or referrer and hands the bytes to the web view.
-5. The web view loads the result with JavaScript off, subresource loading off, a CSP meta tag, a block-all content rule list, and a navigation decider that opens clicked links in the browser only after showing the real destination.
+4. Remote URLs are rewritten to `x-remote:` and inline parts to `cid:`. Remote images stay blocked until the user allows them for that sender or message; then the app's `x-remote:` scheme handler fetches them over http or https with an ephemeral `URLSession`, without cookies, cache or referrer, and hands the bytes to the web view.
+5. `ReaderPage` (`apple/Jolta/Reader.swift`) loads the result into one reused `WKWebView`, hosted in SwiftUI by an `NSViewRepresentable`, with JavaScript off on every navigation, a non-persistent data store, `securityRestrictionMode = .maximizeCompatibility` on macOS 26.4 and later, a CSP meta tag, a block-all content rule list, and a navigation delegate that cancels everything after the first load and opens clicked links in the browser only after showing the real destination. No page opens a window.
+6. The app's own scripts still run with the page's JavaScript off. `callAsyncJavaScript` in the page world sets the theme, the expanded messages and the invitation cards. A user script in the app's own script world (`.defaultClient`) reports each expand and collapse, and the link under the pointer on each `contextmenu` event. WebKit dispatches that event before it asks the app to show its context menu, so `ReaderWebView.willOpenMenu` already knows the link and swaps WebKit's items for Jolta's: Open Link… and Copy Link on a link, then Copy and the image items.
 
 ## Themes
 

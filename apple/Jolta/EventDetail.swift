@@ -1,6 +1,5 @@
 @preconcurrency import JoltaFFI
 import SwiftUI
-import WebKit
 
 /// One occurrence's detail beside the event: times (with the event's own
 /// zone when it differs), repeat, meeting with Join, phones and passcode,
@@ -123,10 +122,7 @@ struct EventDetailCard: View {
                 EventAnswerRow(model: model, detail: detail, event: event)
             }
             if !detail.descriptionHtml.isEmpty {
-                WebView(reader.page)
-                    .webViewBackForwardNavigationGestures(.disabled)
-                    .webViewMagnificationGestures(.disabled)
-                    .webViewLinkPreviews(.disabled)
+                ReaderPageView(page: reader)
                     .frame(height: 120)
                     .padding(.top, 6)
                     .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
