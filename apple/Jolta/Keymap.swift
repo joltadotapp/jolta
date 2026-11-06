@@ -165,7 +165,8 @@ extension AppModel {
         case .star:
             if row?.flagged == true { act(.unflag, label: "Unstarred") } else { act(.flag, label: "Starred") }
         case .snooze: palette = .snooze
-        case .move, .label: palette = .move
+        case .move: palette = .move
+        case .label: openLabels()
         case .undo: undo()
         case .compose: startCompose()
         case .reply: reply(.reply, threadID: row?.threadId)

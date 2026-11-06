@@ -124,7 +124,7 @@ trait Engine {
 ```
 
 - **Plain IMAP.** Sync INBOX first, newest messages first, so the list fills within seconds; other folders follow. Use CONDSTORE (`CHANGEDSINCE`) when offered, QRESYNC when offered, and otherwise a UID range fetch plus a flag sweep over recent UIDs. One extra connection holds IDLE on INBOX. A changed `UIDVALIDITY` drops and refetches that mailbox.
-- **Gmail.** Same IMAP engine with Gmail mode on: sync `[Gmail]/All Mail` only and read labels from `X-GM-LABELS`, so a message in three labels is stored once. Thread ids come from `X-GM-THRID`. Gmail search operators can be passed to the server through `X-GM-RAW` when local search lacks the mail.
+- **Gmail.** Same IMAP engine with Gmail mode on: sync `[Gmail]/All Mail` only and read labels from `X-GM-LABELS`, so a message in three labels is stored once. Thread ids come from `X-GM-THRID`. Label… adds a label as a move from All Mail that keeps the All Mail link and takes one off as a move back into All Mail, so Gmail gets `+X-GM-LABELS` or `-X-GM-LABELS` by All Mail UID, undo is the opposite move, and the conversation stays in the inbox. Other accounts have no labels (`AccountKind::has_labels`): the L key says so and the palette leaves Label… out. Gmail search operators can be passed to the server through `X-GM-RAW` when local search lacks the mail.
 - **Microsoft Graph.** One delta query per mail folder with immutable ids, polled every 30 to 60 seconds and right after any local action. Sending uses `sendMail`; drafts use the drafts API. Throttling (HTTP 429) honours `Retry-After`. An admin-consent error during sign-in shows as a plain message with the tenant name.
 - **Offline and failures.** Ops queue while offline and replay in order when the connection returns. A failed op is retried with backoff; after it fails for good, the local change is reverted and the UI shows why.
 
@@ -137,6 +137,7 @@ Keep the UniFFI surface small and coarse. Lists cross as pages, never whole mail
 - `query_count(query) -> u32` and `query_page(query, offset, limit) -> Vec<ThreadRow>` for any list: an account's inbox, the unified inbox, a section, a search
 - `open_thread(id) -> ThreadDetail` with sanitized HTML per message
 - `perform(action, target) -> UndoToken` and `undo(token)`
+- `thread_labels(thread)`: a Gmail account's own labels, marked when the conversation has them, for Label…
 - `compose(...)`, `send(draft) -> UndoToken`
 - `snooze(target, until)`, sections CRUD
 - `vips()` and `set_vips(addresses, vip)`. Rows and reader messages carry a `vip` flag, and new-mail events say whether the sender is a VIP, so the app can limit banners to VIPs.

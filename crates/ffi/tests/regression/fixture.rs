@@ -87,13 +87,58 @@ impl App {
             ("Junk", Some(MailboxRole::Spam)),
             ("Projects", None),
         ];
+        self.account_with(AccountKind::Imap, address, &folders)
+    }
+
+    /// A Gmail account with Gmail's folders, the labels Clients and
+    /// Receipts, and no server. Deliver with `deliver_gmail`.
+    pub fn gmail_account(&self, address: &str) -> Account {
+        let folders = [
+            ("INBOX", Some(MailboxRole::Inbox)),
+            ("[Gmail]/All Mail", Some(MailboxRole::All)),
+            ("[Gmail]/Sent Mail", Some(MailboxRole::Sent)),
+            ("[Gmail]/Drafts", Some(MailboxRole::Drafts)),
+            ("[Gmail]/Trash", Some(MailboxRole::Trash)),
+            ("[Gmail]/Spam", Some(MailboxRole::Spam)),
+            ("[Gmail]/Starred", Some(MailboxRole::System)),
+            ("Clients", None),
+            ("Receipts", None),
+        ];
+        self.account_with(AccountKind::Gmail, address, &folders)
+    }
+
+    /// A message in a Gmail mailbox and, as on Gmail, in All Mail with a UID.
+    pub fn deliver_gmail(&self, account: &Account, role: MailboxRole, mail: &Mail) -> MessageId {
+        let id = self.deliver(account, role, mail);
+        let all = self.mailbox(account.id, MailboxRole::All);
+        self.jolta
+            .store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO message_mailbox (mailbox_id, message_id, uid)
+                     VALUES (?1, ?2, (SELECT coalesce(max(uid), 0) + 1 FROM message_mailbox WHERE mailbox_id = ?1))",
+                    (all, id),
+                )?)
+            })
+            .unwrap();
+        id
+    }
+
+    pub fn named_mailbox(&self, account: AccountId, name: &str) -> MailboxId {
+        self.jolta
+            .store
+            .read(|c| Ok(store::mailboxes(c, account)?.into_iter().find(|m| m.name == name).expect("the mailbox exists").id))
+            .unwrap()
+    }
+
+    fn account_with(&self, kind: AccountKind, address: &str, folders: &[(&str, Option<MailboxRole>)]) -> Account {
         self.jolta
             .store
             .write(|tx| {
                 let account = store::insert_account(
                     tx,
                     &NewAccount {
-                        kind: AccountKind::Imap,
+                        kind,
                         address: address.into(),
                         display_name: address.split('@').next().unwrap_or_default().into(),
                         username: address.into(),

@@ -19,6 +19,10 @@ pub enum Action {
     Flag,
     Unflag,
     MoveTo(MailboxId),
+    /// Adds a Gmail label to the thread's messages, which stay where they are.
+    AddLabel(MailboxId),
+    /// Takes a Gmail label off the thread's messages.
+    RemoveLabel(MailboxId),
     /// Move to the Snoozed mailbox until this unix time, then back.
     Snooze(i64),
 }
@@ -111,8 +115,67 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
             }
             (OpKind::Move { from, to }, messages)
         }
+        // A Gmail label is a mailbox like any other, and every message
+        // outside Trash and Spam is also in All Mail. Adding a label is a
+        // move from All Mail that keeps the All Mail link, taking it off is
+        // a move back, like archiving takes the Inbox label off.
+        Action::AddLabel(label) | Action::RemoveLabel(label) => {
+            check_label(conn, account, label)?;
+            let all = role_mailbox(conn, account, MailboxRole::All)?
+                .ok_or_else(|| Error::Other("This account has no All Mail folder.".into()))?;
+            let (from, to) = if matches!(action, Action::AddLabel(_)) { (all, label) } else { (label, all) };
+            let messages = ids(
+                conn,
+                "SELECT m.id FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
+                 WHERE m.thread_id = ?1 AND mm.mailbox_id = ?2",
+                params![thread, from],
+            )?;
+            (OpKind::Move { from, to }, messages)
+        }
     };
     queue(conn, account, &kind, &messages)
+}
+
+pub const NO_LABELS: &str = "Labels are a Gmail feature. Use Move (v) instead.";
+
+/// A label the user can put on a conversation, and whether it has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Label {
+    pub mailbox: MailboxId,
+    pub name: String,
+    pub applied: bool,
+}
+
+/// The account's own labels, the mailboxes without a role, by name. A
+/// thread has a label when any of its messages has it, as in Gmail.
+pub fn labels(conn: &Connection, thread: ThreadId) -> Result<Vec<Label>> {
+    let account = thread_account(conn, thread)?;
+    require_labels(conn, account)?;
+    let mut stmt = conn.prepare(
+        "SELECT b.id, b.name, EXISTS (SELECT 1 FROM message_mailbox mm JOIN message m ON m.id = mm.message_id
+                                       WHERE mm.mailbox_id = b.id AND m.thread_id = ?2)
+         FROM mailbox b WHERE b.account_id = ?1 AND b.role IS NULL AND b.selectable
+         ORDER BY b.name COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map(params![account, thread], |r| Ok(Label { mailbox: r.get(0)?, name: r.get(1)?, applied: r.get(2)? }))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn require_labels(conn: &Connection, account: AccountId) -> Result<()> {
+    if store::account(conn, account)?.kind.has_labels() { Ok(()) } else { Err(Error::Other(NO_LABELS.into())) }
+}
+
+fn check_label(conn: &Connection, account: AccountId, label: MailboxId) -> Result<()> {
+    require_labels(conn, account)?;
+    let is_label: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM mailbox WHERE id = ?1 AND account_id = ?2 AND role IS NULL AND selectable)",
+        params![label, account],
+        |r| r.get(0),
+    )?;
+    if !is_label {
+        return Err(Error::Other(format!("Mailbox {} isn't a label of this account.", label.0)));
+    }
+    Ok(())
 }
 
 /// Where archiving puts mail. Gmail has no Archive folder: archiving
@@ -365,6 +428,149 @@ mod tests {
                 let (queued, _) = store::op(c, op)?.unwrap();
                 assert_eq!(queued.kind, OpKind::Empty { mailbox: MailboxId(2) });
                 assert_eq!(undo(c, op)?, None, "emptying has no undo");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A Gmail account with the labels Work and Avocats beside Gmail's own
+    /// mailboxes. Thread 2 has two messages in the inbox; message 4 already
+    /// has Work.
+    fn gmail(c: &Connection) -> Result<()> {
+        c.execute_batch(
+            "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (2, 'gmail', 'g@x', 'g@x', 'g', 0);
+             INSERT INTO mailbox (id, account_id, remote_id, name, role, selectable) VALUES
+               (10, 2, 'INBOX', 'INBOX', 'inbox', 1), (11, 2, '[Gmail]/All Mail', 'All Mail', 'all', 1),
+               (12, 2, 'Work', 'Work', NULL, 1), (13, 2, '[Gmail]/Trash', 'Trash', 'trash', 1),
+               (14, 2, '[Gmail]/Starred', 'Starred', 'system', 1), (15, 2, 'Snoozed', 'Snoozed', 'snoozed', 1),
+               (16, 2, 'Avocats', 'Avocats', NULL, 1);
+             INSERT INTO thread (id, account_id) VALUES (2, 2);
+             INSERT INTO message (id, account_id, remote_id, thread_id, date, flags) VALUES
+               (4, 2, 'gm:4', 2, 0, 0), (5, 2, 'gm:5', 2, 0, 0);
+             INSERT INTO message_mailbox (mailbox_id, message_id, uid) VALUES
+               (11, 4, 104), (11, 5, 105), (10, 4, NULL), (10, 5, NULL), (12, 4, NULL);",
+        )?;
+        Ok(())
+    }
+
+    fn links(c: &Connection, mailbox: i64) -> Result<Vec<(i64, Option<u32>)>> {
+        Ok(c.prepare("SELECT message_id, uid FROM message_mailbox WHERE mailbox_id = ?1 ORDER BY message_id")?
+            .query_map([mailbox], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Labelling a conversation in Gmail keeps it in the inbox and in All
+    /// Mail, and sends a move from All Mail, which Gmail turns into
+    /// +X-GM-LABELS for the messages' All Mail UIDs.
+    #[test]
+    fn adding_a_label_keeps_the_conversation_where_it_is() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                gmail(c)?;
+                let inbox_before = links(c, 10)?;
+                let (account, op) = perform(c, ThreadId(2), Action::AddLabel(MailboxId(16)), Context::Inbox)?.expect("queued");
+                assert_eq!(account, AccountId(2));
+                assert_eq!(links(c, 16)?, [(4, None), (5, None)], "both messages have the label");
+                assert_eq!(links(c, 10)?, inbox_before, "still in the inbox");
+                assert_eq!(links(c, 11)?, [(4, Some(104)), (5, Some(105))], "still in All Mail with their UIDs");
+                let (queued, _) = store::op(c, op)?.unwrap();
+                assert_eq!(queued.kind, OpKind::Move { from: MailboxId(11), to: MailboxId(16) });
+                assert_eq!(queued.messages, [(MessageId(4), Some(104)), (MessageId(5), Some(105))], "sent by All Mail UID");
+
+                let (_, work) = perform(c, ThreadId(2), Action::AddLabel(MailboxId(12)), Context::Inbox)?.expect("queued");
+                assert_eq!(store::op(c, work)?.unwrap().0.messages, [(MessageId(5), Some(105))], "message 4 already had Work");
+                assert_eq!(links(c, 12)?, [(4, None), (5, None)]);
+                assert_eq!(perform(c, ThreadId(2), Action::AddLabel(MailboxId(12)), Context::Inbox)?, None, "nothing left to label");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Only Gmail's All Mail keeps a message moved out of it; an IMAP
+    /// server's \All folder is left to the server, as before.
+    #[test]
+    fn a_move_out_of_an_imap_all_folder_still_moves() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                c.execute_batch("INSERT INTO mailbox (id, account_id, remote_id, name, role) VALUES (4, 1, 'All', 'All', 'all');
+                                 INSERT INTO message_mailbox (mailbox_id, message_id, uid) VALUES (4, 3, 9);")?;
+                queue(c, AccountId(1), &OpKind::Move { from: MailboxId(4), to: MailboxId(3) }, &[MessageId(3)])?.expect("queued");
+                assert_eq!(links(c, 4)?, [], "the IMAP move took it out of All");
+                assert_eq!(links(c, 3)?, [(2, Some(7)), (3, None)]);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn undo_takes_an_added_label_off_again() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                gmail(c)?;
+                let before = (links(c, 10)?, links(c, 11)?, links(c, 12)?);
+                let (_, op) = perform(c, ThreadId(2), Action::AddLabel(MailboxId(12)), Context::Inbox)?.unwrap();
+                assert_eq!(undo(c, op)?, None, "unsent, so dropped");
+                assert_eq!((links(c, 10)?, links(c, 11)?, links(c, 12)?), before, "message 4 keeps the Work it had");
+
+                let (_, op) = perform(c, ThreadId(2), Action::AddLabel(MailboxId(12)), Context::Inbox)?.unwrap();
+                assert_eq!(store::claim_op(c, AccountId(2))?.map(|o| o.id), Some(op));
+                let (_, back) = undo(c, op)?.expect("an op on its way gets its opposite");
+                let (inverse, _) = store::op(c, back)?.unwrap();
+                assert_eq!(inverse.kind, OpKind::Move { from: MailboxId(12), to: MailboxId(11) }, "Gmail sends -X-GM-LABELS");
+                assert_eq!(inverse.messages.iter().map(|(m, _)| m.0).collect::<Vec<_>>(), [5], "only the message it labelled");
+                assert_eq!((links(c, 10)?, links(c, 11)?, links(c, 12)?), before);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn removing_a_label_keeps_the_conversation_in_the_inbox() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                gmail(c)?;
+                let before = (links(c, 10)?, links(c, 11)?, links(c, 12)?);
+                let (_, op) = perform(c, ThreadId(2), Action::RemoveLabel(MailboxId(12)), Context::Inbox)?.expect("queued");
+                assert_eq!(links(c, 12)?, [], "the label is off");
+                assert_eq!(links(c, 10)?, before.0, "still in the inbox");
+                assert_eq!(links(c, 11)?, before.1, "still in All Mail");
+                let (queued, _) = store::op(c, op)?.unwrap();
+                assert_eq!(queued.kind, OpKind::Move { from: MailboxId(12), to: MailboxId(11) });
+                assert_eq!(queued.messages.iter().map(|(m, _)| m.0).collect::<Vec<_>>(), [4]);
+                assert_eq!(perform(c, ThreadId(2), Action::RemoveLabel(MailboxId(12)), Context::Inbox)?, None);
+
+                assert_eq!(undo(c, op)?, None);
+                assert_eq!((links(c, 10)?, links(c, 11)?, links(c, 12)?), before, "undo puts it back");
+
+                let (_, op) = perform(c, ThreadId(2), Action::RemoveLabel(MailboxId(12)), Context::Inbox)?.unwrap();
+                store::claim_op(c, AccountId(2))?;
+                store::finish_op(c, op)?;
+                let (_, back) = undo(c, op)?.expect("a sent op gets its opposite");
+                assert_eq!(store::op(c, back)?.unwrap().0.kind, OpKind::Move { from: MailboxId(11), to: MailboxId(12) }, "Gmail sends +X-GM-LABELS");
+                assert_eq!((links(c, 10)?, links(c, 11)?, links(c, 12)?), before);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn labels_are_the_accounts_own_and_only_on_gmail() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                gmail(c)?;
+                let names = labels(c, ThreadId(2))?.into_iter().map(|l| (l.name, l.applied)).collect::<Vec<_>>();
+                assert_eq!(names, [("Avocats".to_string(), false), ("Work".to_string(), true)], "no Inbox, All Mail, Trash, Starred or Snoozed");
+                for action in [Action::AddLabel(MailboxId(10)), Action::AddLabel(MailboxId(14)), Action::RemoveLabel(MailboxId(11)), Action::AddLabel(MailboxId(3))] {
+                    assert!(perform(c, ThreadId(2), action, Context::Inbox).is_err(), "{action:?} is no label of this account");
+                }
+                let refused = |r: Result<_>| matches!(r, Err(Error::Other(m)) if m == NO_LABELS);
+                assert!(refused(labels(c, ThreadId(1)).map(|_| ())), "an IMAP account has no labels");
+                assert!(refused(perform(c, ThreadId(1), Action::AddLabel(MailboxId(3)), Context::Inbox).map(|_| ())));
                 Ok(())
             })
             .unwrap();

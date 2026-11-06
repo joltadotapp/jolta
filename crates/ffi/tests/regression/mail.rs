@@ -56,6 +56,53 @@ fn triage_an_inbox() {
     assert!(!app.events.seen("action failed"));
 }
 
+/// Label… on Gmail adds a label and leaves the conversation in the inbox,
+/// choosing it again takes the label off, and undo reverses each. On an
+/// IMAP account there are no labels to offer.
+#[test]
+fn label_a_gmail_conversation() {
+    let app = App::new();
+    let work = app.gmail_account("work@test.invalid");
+    let ask = Mail::new("client@test.invalid", "work@test.invalid", "Kickoff", "Monday at ten?").at(now() - 3600);
+    let first = app.deliver_gmail(&work, MailboxRole::Inbox, &ask);
+    app.deliver_gmail(&work, MailboxRole::Inbox, &Mail::reply(&ask, "client@test.invalid", "Or Tuesday."));
+    let kickoff = app.thread_of(first);
+    let clients = app.named_mailbox(work.id, "Clients");
+    let in_clients = format!("mailbox:{}", clients.0);
+
+    let account = app.core.accounts().unwrap().into_iter().find(|a| a.id == work.id.0).unwrap();
+    assert!(account.has_labels);
+    let names = |labels: Vec<jolta_ffi::LabelChoice>| labels.into_iter().map(|l| (l.name, l.applied)).collect::<Vec<_>>();
+    assert_eq!(names(app.core.thread_labels(kickoff.0).unwrap()), [("Clients".into(), false), ("Receipts".into(), false)]);
+
+    let added = app.core.perform(ThreadAction::AddLabel { mailbox_id: clients.0 }, vec![kickoff.0], ListContext::Inbox).unwrap();
+    assert_eq!(app.subjects("in:inbox"), ["Re: Kickoff"], "still in the inbox");
+    assert_eq!(app.subjects(&in_clients), ["Re: Kickoff"], "and in Clients");
+    assert_eq!(app.list(&in_clients)[0].message_count, 2);
+    assert_eq!(names(app.core.thread_labels(kickoff.0).unwrap())[0], ("Clients".into(), true));
+    assert_eq!(app.count("SELECT count(*) FROM op WHERE state = 'pending' AND kind = 'move'"), 1, "one op for the server");
+    app.core.undo(added).unwrap();
+    assert!(app.subjects(&in_clients).is_empty());
+    assert_eq!(app.subjects("in:inbox"), ["Re: Kickoff"]);
+    assert_eq!(app.count(PENDING), 0);
+
+    app.core.perform(ThreadAction::AddLabel { mailbox_id: clients.0 }, vec![kickoff.0], ListContext::Inbox).unwrap();
+    let removed = app.core.perform(ThreadAction::RemoveLabel { mailbox_id: clients.0 }, vec![kickoff.0], ListContext::Inbox).unwrap();
+    assert!(app.subjects(&in_clients).is_empty(), "the label is off");
+    assert_eq!(app.subjects("in:inbox"), ["Re: Kickoff"], "still in the inbox");
+    app.core.undo(removed).unwrap();
+    assert_eq!(app.subjects(&in_clients), ["Re: Kickoff"], "undo puts the label back");
+    assert_eq!(app.subjects("in:inbox"), ["Re: Kickoff"]);
+
+    let home = app.account("home@test.invalid");
+    let note = app.deliver(&home, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "home@test.invalid", "Dinner", "At eight."));
+    let account = app.core.accounts().unwrap().into_iter().find(|a| a.id == home.id.0).unwrap();
+    assert!(!account.has_labels);
+    let refused = app.core.thread_labels(app.thread_of(note).0).map(|_| ()).unwrap_err().to_string();
+    assert!(refused.contains("Labels are a Gmail feature"), "{refused}");
+    assert!(!app.events.seen("action failed"));
+}
+
 /// Flags and "mark all as read" act on what the list shows, and undo
 /// restores exactly what changed.
 #[test]
