@@ -52,6 +52,9 @@ pub struct AccountInfo {
     pub provider: String,
     pub address: String,
     pub display_name: String,
+    /// Gmail: conversations take labels (`thread_labels`). Elsewhere Label…
+    /// isn't offered and Move is the way to file.
+    pub has_labels: bool,
 }
 
 impl From<jolta_core::Account> for AccountInfo {
@@ -59,6 +62,7 @@ impl From<jolta_core::Account> for AccountInfo {
         AccountInfo {
             id: a.id.0,
             kind: a.kind.to_string(),
+            has_labels: a.kind.has_labels(),
             provider: a.provider_label().to_string(),
             address: a.address,
             display_name: a.display_name,
@@ -365,6 +369,9 @@ pub enum ThreadAction {
     Flag,
     Unflag,
     MoveTo { mailbox_id: i64 },
+    /// Puts a Gmail label on the thread, which stays where it is.
+    AddLabel { mailbox_id: i64 },
+    RemoveLabel { mailbox_id: i64 },
     /// Hide the thread until this unix time.
     Snooze { until: i64 },
 }
@@ -449,6 +456,14 @@ pub struct AuditInfo {
     pub at: i64,
 }
 
+/// A label for the Label… picker; `applied` gets the checkmark.
+#[derive(uniffi::Record)]
+pub struct LabelChoice {
+    pub mailbox_id: i64,
+    pub name: String,
+    pub applied: bool,
+}
+
 #[derive(uniffi::Record)]
 pub struct SnoozeChoice {
     pub label: String,
@@ -484,6 +499,8 @@ impl From<ThreadAction> for Action {
             ThreadAction::Flag => Action::Flag,
             ThreadAction::Unflag => Action::Unflag,
             ThreadAction::MoveTo { mailbox_id } => Action::MoveTo(MailboxId(mailbox_id)),
+            ThreadAction::AddLabel { mailbox_id } => Action::AddLabel(MailboxId(mailbox_id)),
+            ThreadAction::RemoveLabel { mailbox_id } => Action::RemoveLabel(MailboxId(mailbox_id)),
             ThreadAction::Snooze { until } => Action::Snooze(until),
         }
     }
@@ -919,6 +936,13 @@ impl Core {
         Ok(self.running_engine()?.empty(&ids)?)
     }
 
+    /// The labels of the thread's Gmail account, marked when the thread has
+    /// them. Fails with a message to show for an account without labels.
+    pub fn thread_labels(&self, thread_id: i64) -> Result<Vec<LabelChoice>> {
+        let labels = self.jolta.store.read(|c| jolta_core::actions::labels(c, ThreadId(thread_id)))?;
+        Ok(labels.into_iter().map(|l| LabelChoice { mailbox_id: l.mailbox.0, name: l.name, applied: l.applied }).collect())
+    }
+
     pub fn undo(&self, tokens: Vec<i64>) -> Result<()> {
         let ops: Vec<OpId> = tokens.into_iter().map(OpId).collect();
         Ok(self.running_engine()?.undo(&ops)?)
@@ -1087,13 +1111,7 @@ impl Core {
         if let Some(engine) = engine {
             engine.settings_changed(id);
         }
-        Ok(AccountInfo {
-            id: account.id.0,
-            kind: account.kind.to_string(),
-            provider: account.provider_label().to_string(),
-            address: account.address,
-            display_name: account.display_name,
-        })
+        Ok(AccountInfo::from(account))
     }
 
     /// Hides or shows several folders at once.
@@ -1354,13 +1372,7 @@ impl Core {
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }
-                Ok::<_, jolta_core::Error>(AccountInfo {
-                    id: account.id.0,
-                    kind: account.kind.to_string(),
-                    provider: account.provider_label().to_string(),
-                    address: account.address,
-                    display_name: account.display_name,
-                })
+                Ok::<_, jolta_core::Error>(AccountInfo::from(account))
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })?

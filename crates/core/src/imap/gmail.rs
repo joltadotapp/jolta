@@ -154,6 +154,16 @@ fn label_of(m: &Mailbox) -> Option<String> {
     }
 }
 
+/// The STORE items for a move between labels: the label added, then the
+/// one taken off. All Mail is no label, so adding a label (a move out of All
+/// Mail) only adds one, and archiving or taking a label off (a move into it)
+/// only takes one off.
+fn label_stores(from: Option<&Mailbox>, to: Option<&Mailbox>) -> (Option<String>, Option<String>) {
+    let add = to.and_then(label_of).map(|l| format!("+X-GM-LABELS ({})", quote(&l)));
+    let remove = from.and_then(label_of).map(|l| format!("-X-GM-LABELS ({})", quote(&l)));
+    (add, remove)
+}
+
 fn quote(label: &str) -> String {
     if label.starts_with('\\') { label.to_string() } else { format!("\"{}\"", label.replace('\\', "\\\\").replace('"', "\\\"")) }
 }
@@ -349,8 +359,8 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, op: &store::Op) -> R
                 session.uid_mv(&set, &t.remote_id).await?;
                 return Ok(vec![]);
             }
-            if let Some(label) = to.as_ref().and_then(label_of) {
-                let add = format!("+X-GM-LABELS ({})", quote(&label));
+            let (add, remove) = label_stores(from.as_ref(), to.as_ref());
+            if let Some(add) = add {
                 let stored: std::result::Result<Vec<_>, _> = match session.uid_store(&set, &add).await {
                     Ok(updates) => updates.try_collect().await,
                     Err(e) => Err(e),
@@ -366,8 +376,8 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, op: &store::Op) -> R
                     session.uid_store(&set, &add).await?.try_collect::<Vec<_>>().await?;
                 }
             }
-            if let Some(label) = from.as_ref().and_then(label_of) {
-                session.uid_store(&set, format!("-X-GM-LABELS ({})", quote(&label))).await?.try_collect::<Vec<_>>().await?;
+            if let Some(remove) = remove {
+                session.uid_store(&set, remove).await?.try_collect::<Vec<_>>().await?;
             }
             Ok(vec![all_id])
         }
@@ -390,6 +400,31 @@ mod tests {
         assert_eq!(unescape("\\\\Inbox"), "\\Inbox");
         assert_eq!(unescape("Work"), "Work");
         assert_eq!(unescape("a\\\"b"), "a\"b");
+    }
+
+    #[test]
+    fn label_changes_become_x_gm_labels_stores() {
+        let mailbox = |id, remote: &str, role| Mailbox {
+            id: MailboxId(id),
+            account_id: AccountId(1),
+            remote_id: remote.into(),
+            name: remote.into(),
+            role,
+            delimiter: Some("/".into()),
+            selectable: true,
+            uidvalidity: None,
+            highest_modseq: None,
+            hidden: false,
+            synced: true,
+        };
+        let all = mailbox(1, "[Gmail]/All Mail", Some(MailboxRole::All));
+        let inbox = mailbox(2, "INBOX", Some(MailboxRole::Inbox));
+        let work = mailbox(3, "Clients/Acme \"B\"", None);
+        let stores = |from: &Mailbox, to: &Mailbox| label_stores(Some(from), Some(to));
+        assert_eq!(stores(&all, &work), (Some(r#"+X-GM-LABELS ("Clients/Acme \"B\"")"#.into()), None), "adding a label");
+        assert_eq!(stores(&work, &all), (None, Some(r#"-X-GM-LABELS ("Clients/Acme \"B\"")"#.into())), "taking it off");
+        assert_eq!(stores(&inbox, &all), (None, Some("-X-GM-LABELS (\\Inbox)".into())), "archiving");
+        assert_eq!(stores(&inbox, &work), (Some(r#"+X-GM-LABELS ("Clients/Acme \"B\"")"#.into()), Some("-X-GM-LABELS (\\Inbox)".into())), "moving");
     }
 
     #[test]

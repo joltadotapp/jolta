@@ -11,6 +11,8 @@ enum PaletteMode: Equatable {
     /// A snippet to insert at the cursor of the message being written.
     case snippets
     case move
+    /// Gmail labels to add to or take off the conversation under the cursor.
+    case label
     /// A theme to show, previewed as the selection moves.
     case themes
 }
@@ -25,11 +27,13 @@ private struct PaletteItem: Identifiable {
     var theme: ThemePalette?
     /// Runs with the palette left open, for items that switch it to another list.
     var keepsOpen = false
+    /// A label the conversation already has.
+    var checked = false
     let run: () -> Void
 }
 
 /// ⌘K: every command, mailbox and section by name. The same panel picks a
-/// snooze time (H), a destination folder (V, L) and a theme.
+/// snooze time (H), a destination folder (V), a Gmail label (L) and a theme.
 struct PaletteView: View {
     @Bindable var model: AppModel
     let mode: PaletteMode
@@ -50,6 +54,7 @@ struct PaletteView: View {
         case .remind: "Remind me if no reply… in 3 days, fri, next week"
         case .snippets: "Insert a snippet"
         case .move: "Move to folder"
+        case .label: "Add or remove a label"
         case .themes: "Choose a theme"
         }
     }
@@ -61,6 +66,7 @@ struct PaletteView: View {
         case .remind: "bell"
         case .snippets: "text.badge.plus"
         case .themes: "paintpalette"
+        case .label: "tag"
         case .commands, .move: "magnifyingglass"
         }
     }
@@ -71,6 +77,7 @@ struct PaletteView: View {
         case .commands: all = commandItems
         case .snooze, .sendLater, .remind: return timeItems
         case .move: all = moveItems
+        case .label: all = labelItems
         case .snippets: all = snippetItems
         case .themes: all = themeItems
         }
@@ -100,6 +107,7 @@ struct PaletteView: View {
                 switch c {
                 case .propose: model.shownInvitation?.newTime != nil
                 case .decline: model.shownInvitation != nil || model.shownProposal != nil
+                case .label: model.cursorHasLabels
                 default: c.answer == nil || model.shownInvitation != nil
                 }
             }
@@ -236,6 +244,21 @@ struct PaletteView: View {
         }
     }
 
+    /// The account's labels, checked when the conversation has them:
+    /// choosing a checked one takes it off, an unchecked one adds it.
+    private var labelItems: [PaletteItem] {
+        guard let row = model.cursorRow, let labels = try? model.core.threadLabels(threadId: row.threadId) else { return [] }
+        return labels.map { label in
+            PaletteItem(id: "label-\(label.mailboxId)", title: label.name, icon: "tag", checked: label.applied) { [model] in
+                if label.applied {
+                    model.act(.removeLabel(mailboxId: label.mailboxId), label: "Removed \(label.name)", threadID: row.threadId)
+                } else {
+                    model.act(.addLabel(mailboxId: label.mailboxId), label: "Labelled \(label.name)", threadID: row.threadId)
+                }
+            }
+        }
+    }
+
     private static let whenFormat: DateFormatter = {
         let f = DateFormatter()
         f.setLocalizedDateFormatFromTemplate("EEE d MMM HH:mm")
@@ -284,7 +307,7 @@ struct PaletteView: View {
                         return .handled
                     }
                     .onChange(of: text) { selected = 0 }
-                if let row = model.cursorRow, mode == .snooze || mode == .move {
+                if let row = model.cursorRow, [.snooze, .move, .label].contains(mode) {
                     Text(row.subject).lineLimit(1).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
                 }
             }
@@ -309,7 +332,8 @@ struct PaletteView: View {
                         }
                         if list.isEmpty {
                             Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”"
-                                 : mode == .snippets && text.isEmpty ? "No snippets yet. Add them in Settings › Snippets." : "Nothing matches")
+                                 : mode == .snippets && text.isEmpty ? "No snippets yet. Add them in Settings › Snippets."
+                                 : mode == .label && text.isEmpty ? "This account has no labels yet. Make them in Gmail." : "Nothing matches")
                                 .foregroundStyle(Color(Theme.text3))
                                 .padding(20)
                         }
@@ -374,6 +398,9 @@ struct PaletteView: View {
                 HStack(spacing: 4) { Image(systemName: "checkmark"); Text(use.label) }
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(Theme.text3))
+            }
+            if item.checked {
+                Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(Theme.text2))
             }
             if let keys = item.keys {
                 HStack(spacing: 3) { ForEach(keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: $0.uppercased(), focused: on) } }

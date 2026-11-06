@@ -254,11 +254,12 @@ final class AppModel {
         }
         // `-JoltaTheme tokyo-night` previews that theme, for screenshots.
         if let id = defaults.string(forKey: "JoltaTheme"), let theme = ThemePalette.named(id) { ThemeStore.shared.startPreview(theme) }
-        // `-JoltaPalette commands|snooze|move|themes` opens the palette, for screenshots.
+        // `-JoltaPalette commands|snooze|move|label|themes` opens the palette, for screenshots.
         switch defaults.string(forKey: "JoltaPalette") {
         case "commands": palette = .commands
         case "snooze": palette = .snooze
         case "move": palette = .move
+        case "label": palette = .label
         case "themes": palette = .themes
         default: break
         }
@@ -624,6 +625,23 @@ final class AppModel {
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
+    }
+
+    /// Label… for the conversation under the cursor: the label picker on
+    /// Gmail, else the core's reason there are no labels to pick.
+    func openLabels() {
+        guard let row = cursorRow else { return }
+        do {
+            _ = try core.threadLabels(threadId: row.threadId)
+            palette = .label
+        } catch {
+            notify("\(error)")
+        }
+    }
+
+    /// Whether the conversation under the cursor is on an account with labels.
+    var cursorHasLabels: Bool {
+        accounts.first { $0.id == cursorRow?.accountId }?.account.hasLabels == true
     }
 
     /// Marks everything unread in a list read; the current list by default.

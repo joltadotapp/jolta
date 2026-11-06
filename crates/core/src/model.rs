@@ -96,6 +96,14 @@ text_enum!(AccountKind {
     Graph => "graph",
 });
 
+impl AccountKind {
+    /// Gmail files a message under any number of labels. IMAP folders and
+    /// Microsoft 365's hold a message in one place, so there Jolta only moves.
+    pub fn has_labels(self) -> bool {
+        self == AccountKind::Gmail
+    }
+}
+
 // How a connection is protected: TLS from the first byte, an upgrade with
 // STARTTLS, or none (only sensible for a server on this machine).
 text_enum!(Security {

@@ -74,6 +74,24 @@ fn uid_in(conn: &Connection, id: MessageId, mailbox: MailboxId) -> Result<Option
 /// changed with their UIDs before the change, so undo restores exactly them.
 pub fn apply_local(conn: &Connection, kind: &OpKind, messages: &[MessageId]) -> Result<Vec<(MessageId, Option<u32>)>> {
     let mut changed = Vec::new();
+    // Gmail's All Mail holds every message outside Trash and Spam, so a move
+    // out of it to a label adds the label and keeps the All Mail link.
+    let keeps_all = match *kind {
+        OpKind::Move { from, to } => {
+            let found: Option<(bool, bool, String)> = conn
+                .query_row(
+                    "SELECT f.role IS 'all', coalesce((SELECT role IN ('trash', 'spam') FROM mailbox WHERE id = ?2), 0), a.kind
+                     FROM mailbox f JOIN account a ON a.id = f.account_id WHERE f.id = ?1",
+                    params![from, to],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            found.is_some_and(|(from_all, to_bin, account)| {
+                from_all && !to_bin && account.parse::<AccountKind>().is_ok_and(AccountKind::has_labels)
+            })
+        }
+        _ => false,
+    };
     for &id in messages {
         match *kind {
             OpKind::Flags { add, remove } => {
@@ -105,6 +123,13 @@ pub fn apply_local(conn: &Connection, kind: &OpKind, messages: &[MessageId]) -> 
                     continue;
                 }
                 let uid = uid_in(conn, id, from)?;
+                if keeps_all {
+                    let added = conn.execute("INSERT INTO message_mailbox (mailbox_id, message_id, uid) VALUES (?1, ?2, NULL) ON CONFLICT DO NOTHING", params![to, id])?;
+                    if added > 0 {
+                        changed.push((id, uid));
+                    }
+                    continue;
+                }
                 conn.execute("DELETE FROM message_mailbox WHERE message_id = ?1 AND mailbox_id = ?2", params![id, from])?;
                 conn.execute(
                     "INSERT INTO message_mailbox (mailbox_id, message_id, uid) VALUES (?1, ?2, NULL)
