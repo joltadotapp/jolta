@@ -146,7 +146,7 @@ fn tools() -> Value {
         },
         {
             "name": "label",
-            "description": "File a thread under a mailbox from list_mailboxes. On Gmail a label is added and the thread stays where it is; on other accounts the thread moves to that folder, out of the inbox.",
+            "description": "File a thread under a mailbox from list_mailboxes. On Gmail one of the user's own labels is added and the thread stays where it is; a Gmail system mailbox, or a folder on other accounts, gets the thread moved there, out of the inbox.",
             "inputSchema": {"type": "object", "properties": {
                 "thread_id": thread,
                 "mailbox_id": {"type": "integer", "description": "From list_mailboxes."}
