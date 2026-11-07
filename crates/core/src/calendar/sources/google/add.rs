@@ -269,7 +269,7 @@ fn original_start(rid: &Moment, here: Tz) -> Value {
 
 /// A start or end as Google takes it: a date for an all-day event, else
 /// the wall-clock time and its zone; a floating time in the Mac's zone.
-fn when(span: &Span, start: bool, here: Tz) -> Value {
+pub(super) fn when(span: &Span, start: bool, here: Tz) -> Value {
     match span {
         Span::AllDay { start: s, end: e } => json!({ "date": (if start { s } else { e }).format("%Y-%m-%d").to_string() }),
         Span::Timed { start: s, end: e } => {

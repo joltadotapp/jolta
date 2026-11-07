@@ -225,9 +225,30 @@ pub(super) fn moment_from_text(text: &str) -> Option<Moment> {
     Some(Moment::Time(crate::calendar::Local { wall, zone }))
 }
 
+/// Rows a calendar op still has to send: an edit of that event or
+/// occurrence, or a create or delete of its whole series. A sync, or any
+/// other version from the server, leaves them as the user saved them, with
+/// the ETag and text the op's edit started from, so its write stays guarded
+/// by that version and a change made elsewhere meanwhile goes through the
+/// op's merge instead of being lost or overwriting the edit.
+const HELD: &str = "EXISTS (SELECT 1 FROM calendar_op o WHERE o.calendar_id = event.calendar_id AND o.uid = event.uid
+       AND o.state IN ('pending', 'sending') AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete')))";
+
+/// Whether a calendar op still has to send the row with this UID and
+/// recurrence id (`HELD`).
+fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Option<&Moment>) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND state IN ('pending', 'sending')
+               AND (recurrence_id = ?3 OR kind IN ('create', 'delete')))",
+        )?
+        .query_row(params![calendar, uid, recurrence_id.map(moment_text).unwrap_or_default()], |r| r.get(0))?)
+}
+
 /// Replaces the events of one remote object and rebuilds the occurrences of
-/// every series it touched. An unchanged ETag skips the work, so applying the
-/// same batch twice is harmless. False when nothing changed.
+/// every series it touched, except rows a calendar op still has to send
+/// (`HELD`). An unchanged ETag skips the work, so applying the same batch
+/// twice is harmless. False when nothing changed.
 pub fn apply_item(
     conn: &Connection,
     calendar: CalendarId,
@@ -248,10 +269,12 @@ pub fn apply_item(
         }
     }
     let mut uids = item_uids(conn, calendar, remote_id)?;
-    conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
+    conn.prepare_cached(&format!("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2 AND NOT {HELD}"))?.execute(params![calendar, remote_id])?;
     for e in events {
-        insert_event(conn, calendar, remote_id, etag, e, blob)?;
         uids.insert(e.uid.clone());
+        if !held(conn, calendar, &e.uid, e.recurrence_id.as_ref())? {
+            insert_event(conn, calendar, remote_id, etag, e, blob)?;
+        }
     }
     for uid in &uids {
         rebuild_series(conn, calendar, uid, horizon)?;
@@ -317,18 +340,20 @@ pub enum Removal {
     Unlisted,
 }
 
-/// Deletes the events of one remote object. Series they belonged to keep
-/// their other events, rebuilt without them. False when there were none.
+/// Deletes the events of one remote object, except rows a calendar op
+/// still has to send (`HELD`). Series they belonged to keep their other
+/// events, rebuilt without them. False when there were none.
 pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, removal: Removal, horizon: &Horizon) -> Result<bool> {
     let mut uids = item_uids(conn, calendar, remote_id)?;
-    let mut deleted =
-        conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2", params![calendar, remote_id])?;
+    let mut deleted = conn
+        .prepare_cached(&format!("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2 AND NOT {HELD}"))?
+        .execute(params![calendar, remote_id])?;
     // The series may be gone already, left out of an earlier listing, while
     // its changed occurrences stayed: find them by the id they are filed under.
     if removal == Removal::Deleted {
         uids.extend(filed_under_uids(conn, calendar, remote_id)?);
         deleted += conn
-            .prepare_cached("DELETE FROM event WHERE calendar_id = ?1 AND json_extract(data, '$.master_id') = ?2")?
+            .prepare_cached(&format!("DELETE FROM event WHERE calendar_id = ?1 AND json_extract(data, '$.master_id') = ?2 AND NOT {HELD}"))?
             .execute(params![calendar, remote_id])?;
     }
     for uid in &uids {

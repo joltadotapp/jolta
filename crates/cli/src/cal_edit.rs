@@ -1,11 +1,12 @@
-//! `jolta cal create`, `edit`, `delete`, `ops`, `undo`, `caps` and
-//! `new-local`: calendar edits through the op queue, as the app makes them.
+//! `jolta cal create`, `edit`, `delete`, `ops`, `undo`, `apply-mine`,
+//! `caps` and `new-local`: calendar edits through the op queue, as the app
+//! makes them.
 
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
 use clap::Args;
 use jolta_core::Jolta;
-use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, OpState, Undone};
+use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Undone};
 use jolta_core::calendar::series::Horizon;
 use jolta_core::calendar::{CalendarId, EventData, EventId, Local, Span, Zone, caps, tz};
 use jolta_core::store;
@@ -36,9 +37,25 @@ pub struct CreateArgs {
     location: Option<String>,
     #[command(flatten)]
     when: When,
+    /// Provider fields Jolta doesn't model, as a JSON object merged into the
+    /// Google or Microsoft 365 request ('{"eventType":"outOfOffice"}').
+    #[arg(long, conflicts_with = "line")]
+    extra: Option<String>,
+    /// An iCalendar line added to a CalDAV event, such as X-JOLTA-HOLD:1.
+    #[arg(long)]
+    line: Vec<String>,
+    #[command(flatten)]
+    send: Send,
+}
+
+#[derive(Args)]
+pub struct Send {
     /// Keep the op waiting this many seconds before the worker may send it.
     #[arg(long)]
     hold: Option<i64>,
+    /// Wait until the op is settled, through holds and retries.
+    #[arg(long)]
+    wait: bool,
 }
 
 #[derive(Args)]
@@ -51,15 +68,15 @@ pub struct EditArgs {
     location: Option<String>,
     #[command(flatten)]
     when: When,
-    #[arg(long)]
-    hold: Option<i64>,
+    #[command(flatten)]
+    send: Send,
 }
 
 #[derive(Args)]
 pub struct DeleteArgs {
     event: i64,
-    #[arg(long)]
-    hold: Option<i64>,
+    #[command(flatten)]
+    send: Send,
 }
 
 fn horizon() -> Horizon {
@@ -125,25 +142,37 @@ impl When {
 }
 
 /// Queues an edit as the app does, holds it when asked, then sends what is
-/// due, as the app's worker would.
-async fn submit(jolta: &Jolta, edit: Edit, hold: Option<i64>) -> Result<()> {
+/// due, as the app's worker would, or with `--wait` everything up to this
+/// op's end.
+async fn submit(jolta: &Jolta, edit: Edit, send: &Send) -> Result<()> {
     let now = Utc::now().timestamp();
     let h = horizon();
     let id = jolta.store.write(|tx| {
         let id = ops::queue(tx, &edit, now, &h)?;
-        if let (Some(id), Some(hold)) = (id, hold) {
+        if let (Some(id), Some(hold)) = (id, send.hold) {
             store::hold_calendar_op(tx, id, now + hold)?;
         }
         Ok(id)
     })?;
     match id {
         None => println!("Nothing changed; no op queued."),
-        Some(id) => {
-            send_due(jolta).await?;
-            print_op(&jolta.store.read(|c| store::calendar_op(c, id))?);
-        }
+        Some(id) => settle_op(jolta, id, send.wait).await?,
     }
     Ok(())
+}
+
+/// Sends what is due and prints the op; with `wait`, until it is settled.
+async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Result<()> {
+    loop {
+        send_due(jolta).await?;
+        let op = jolta.store.read(|c| store::calendar_op(c, id))?;
+        if !wait || !matches!(op.state, OpState::Pending | OpState::Sending) {
+            print_op(&op);
+            return Ok(());
+        }
+        let left = (op.send_after - Utc::now().timestamp()).clamp(1, 60);
+        tokio::time::sleep(std::time::Duration::from_secs(left as u64)).await;
+    }
 }
 
 async fn send_due(jolta: &Jolta) -> Result<()> {
@@ -166,7 +195,16 @@ fn stored_event(jolta: &Jolta, id: i64) -> Result<(CalendarId, String, EventData
 pub async fn create(jolta: &Jolta, a: CreateArgs) -> Result<()> {
     let span = a.when.span(None)?.context("--start is needed")?;
     let event = EventData { title: a.title, location: a.location.unwrap_or_default(), ..EventData::new(ops::new_uid()?, span) };
-    submit(jolta, Edit::quiet(CalendarId(a.calendar), Change::Create(vec![event])), a.hold).await
+    let extra = match (a.extra, a.line) {
+        (Some(json), _) => match serde_json::from_str(&json).context("--extra is not JSON")? {
+            serde_json::Value::Object(fields) => Some(Extra::Json(fields)),
+            _ => bail!("--extra must be a JSON object"),
+        },
+        (None, lines) if !lines.is_empty() => Some(Extra::Lines(lines)),
+        (None, _) => None,
+    };
+    let edit = Edit { extra, ..Edit::quiet(CalendarId(a.calendar), Change::Create(vec![event])) };
+    submit(jolta, edit, &a.send).await
 }
 
 pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
@@ -180,7 +218,7 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
     if let Some(span) = a.when.span(Some(&event.span))? {
         event.span = span;
     }
-    submit(jolta, Edit::quiet(calendar, Change::Update(event)), a.hold).await
+    submit(jolta, Edit::quiet(calendar, Change::Update(event)), &a.send).await
 }
 
 pub async fn delete(jolta: &Jolta, a: DeleteArgs) -> Result<()> {
@@ -188,10 +226,22 @@ pub async fn delete(jolta: &Jolta, a: DeleteArgs) -> Result<()> {
     if !rid.is_empty() {
         bail!("#{} is one changed occurrence; deleting one occurrence isn't possible yet, delete the series", a.event);
     }
-    submit(jolta, Edit::quiet(calendar, Change::Delete { uid: event.uid }), a.hold).await
+    submit(jolta, Edit::quiet(calendar, Change::Delete { uid: event.uid }), &a.send).await
 }
 
-pub fn list_ops(jolta: &Jolta) -> Result<()> {
+pub async fn apply_mine(jolta: &Jolta, op: i64, wait: bool) -> Result<()> {
+    let h = horizon();
+    match jolta.store.write(|tx| ops::apply_mine(tx, CalendarOpId(op), Utc::now().timestamp(), &h))? {
+        None => println!("The event already is as you had it; no op queued."),
+        Some(id) => settle_op(jolta, id, wait).await?,
+    }
+    Ok(())
+}
+
+pub async fn list_ops(jolta: &Jolta, send: bool) -> Result<()> {
+    if send {
+        send_due(jolta).await?;
+    }
     let ops = jolta.store.read(|c| store::calendar_ops(c, 50))?;
     if ops.is_empty() {
         println!("No calendar ops.");
@@ -210,8 +260,9 @@ fn print_op(op: &CalendarOp) {
         _ => String::new(),
     };
     let error = op.error.as_deref().map(|e| format!(", last error: {e}")).unwrap_or_default();
+    let lost = if op.lost.is_empty() { String::new() } else { format!(", the server kept: {}", op.lost.iter().map(|f| f.noun()).collect::<Vec<_>>().join(", ")) };
     println!(
-        "op {:>4}  {:<7} {:<6} {:<30} calendar {}  tried: {}, attempts: {}{wait}{error}",
+        "op {:>4}  {:<8} {:<6} {:<30} calendar {}  tried: {}, attempts: {}{wait}{error}{lost}",
         op.id.0,
         op.state,
         op.write.kind(),

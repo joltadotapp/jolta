@@ -217,9 +217,21 @@ pub enum CalCommand {
     /// Delete an event, or a series with its changed occurrences, through the op queue.
     Delete(crate::cal_edit::DeleteArgs),
     /// The calendar op queue, oldest first, with each op's state.
-    Ops,
+    Ops {
+        /// Send the ops that are due first, as the app's worker does.
+        #[arg(long)]
+        send: bool,
+    },
     /// Take back a calendar op: drop it if it was never sent, else queue its opposite.
     Undo { op: i64 },
+    /// Settle a conflict the user's way: queue the edit's lost fields over
+    /// the server's version, or the delete again.
+    ApplyMine {
+        op: i64,
+        /// Wait until the new op is settled.
+        #[arg(long)]
+        wait: bool,
+    },
     /// What Jolta can do with a calendar's events.
     Caps { calendar: i64 },
     /// Time one-week occurrence queries over the store.
@@ -241,8 +253,9 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Create(a) => crate::cal_edit::create(jolta, a).await,
         CalCommand::Edit(a) => crate::cal_edit::edit(jolta, a).await,
         CalCommand::Delete(a) => crate::cal_edit::delete(jolta, a).await,
-        CalCommand::Ops => crate::cal_edit::list_ops(jolta),
+        CalCommand::Ops { send } => crate::cal_edit::list_ops(jolta, send).await,
         CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,
+        CalCommand::ApplyMine { op, wait } => crate::cal_edit::apply_mine(jolta, op, wait).await,
         CalCommand::Caps { calendar } => crate::cal_edit::print_caps(jolta, calendar),
         CalCommand::Enable { account, port } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;

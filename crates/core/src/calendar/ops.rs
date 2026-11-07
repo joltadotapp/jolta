@@ -6,6 +6,15 @@
 //! scheduler's worker (`run_due`) sends due ops, one at a time per event and
 //! in order, and `settle` records how each went. A local calendar has no
 //! server: the store is its truth, so its ops only carry undo.
+//!
+//! An op's update or delete carries the version of the server object its
+//! edit started from (`Held`), and every write is guarded by it. A sync
+//! leaves the rows an op still has to send alone (`store::apply_item`), so
+//! a change made elsewhere meanwhile reaches the op as a 412: the op then
+//! merges the user's edit with the server's version field by field
+//! (`merge::three_way`) and writes again, or ends in `conflict` when both
+//! changed the same field, keeping the server's value until the user picks
+//! theirs with Apply mine.
 
 use std::fmt;
 use std::str::FromStr;
@@ -14,9 +23,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
 
-use super::change::Field;
+use super::change::{FIELDS, Field};
 use super::series::Horizon;
-use super::{Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, caps};
+use super::sources::{self, OpWrite, Source, Version, Written};
+use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, caps, merge, rsvp};
 use crate::model::text_enum;
 use crate::{Error, Jolta, Result, store};
 
@@ -26,6 +36,10 @@ pub use crate::engine::{MAX_ATTEMPTS, UNDO_SEND_SECONDS};
 
 /// Ops sent at once, across events.
 pub const AT_ONCE: usize = 4;
+
+/// Writes one op makes after 412s, each merged with the server's version,
+/// before it gives up: Google's `answer` uses the same bound.
+const MERGE_ROUNDS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CalendarOpId(pub i64);
@@ -62,6 +76,14 @@ pub enum Extra {
     Lines(Vec<String>),
 }
 
+/// The server object an update or delete writes over, at the version the
+/// op's edit started from: its remote id and ETag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Held {
+    pub remote_id: String,
+    pub etag: Option<String>,
+}
+
 /// What an op does to one event, with what undo needs to take it back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Write {
@@ -89,6 +111,15 @@ impl Write {
             Write::Create(events) | Write::Delete(events) => events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()),
             Write::Update { event, .. } => Some(event),
         }
+    }
+
+    /// Every event the write touches, on either side.
+    fn events(&self) -> impl Iterator<Item = &EventData> {
+        let (a, b): (&[EventData], &[EventData]) = match self {
+            Write::Create(events) | Write::Delete(events) => (events, &[]),
+            Write::Update { base, event } => (std::slice::from_ref(base), std::slice::from_ref(event)),
+        };
+        a.iter().chain(b)
     }
 
     /// Makes `base` the version this write starts from, for the row it names.
@@ -126,9 +157,13 @@ pub struct CalendarOp {
     pub notify: Notify,
     pub message: Option<String>,
     pub extra: Option<Extra>,
-    /// Makes a retried create land on the same object: the UID for a local
+    /// Makes a retried create land on the same object: Google's event id,
+    /// Graph's transactionId, the CalDAV resource path, the UID for a local
     /// calendar.
     pub remote_key: String,
+    /// For an update or delete on a server: the object and version it
+    /// writes over.
+    pub held: Option<Held>,
     pub send_after: i64,
     pub state: OpState,
     /// Claimed by the worker at least once, so it may have reached the server.
@@ -171,16 +206,15 @@ impl Edit {
 
 /// Applies the edit to the store and queues it for the server. None when
 /// the edit changes nothing, so saving the same edit twice queues one op.
-/// Nothing here waits on the network.
+/// Nothing here waits on the network. An edit the calendar's provider
+/// can't hold is refused before anything changes.
 pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
     let calendar = store::calendar(conn, edit.calendar)?;
     if !caps::of(&calendar).writable {
         return Err(Error::Other(format!("{} is read-only", calendar.name)));
     }
-    if calendar.source != CalendarSource::Local {
-        return Err(Error::Other(format!("Jolta can't change events in {} yet", calendar.name)));
-    }
-    let Some((write, remote_key)) = plan(conn, &calendar, &edit.change)? else { return Ok(None) };
+    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change)? else { return Ok(None) };
+    check(&calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref())?;
     let first = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;
     let (uid, recurrence_id) = (first.uid.clone(), if matches!(write, Write::Update { .. }) { first.recurrence_id } else { None });
     let scope = if recurrence_id.is_some() { Scope::This } else { Scope::All };
@@ -199,6 +233,7 @@ pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Res
             message: edit.message.clone(),
             extra: edit.extra.clone(),
             remote_key,
+            held,
             send_after: now + delay,
             state: OpState::Pending,
             tried: false,
@@ -212,9 +247,43 @@ pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Res
     Ok(Some(id))
 }
 
+/// Refuses what the calendar's provider can't take from Jolta yet:
+/// meetings with guests, whose changes email people (the Send an update?
+/// dialog comes first), and any change the provider's request can't carry.
+fn check(calendar: &Calendar, write: &Write, key: &str, held: Option<&Held>, extra: Option<&Extra>) -> Result<()> {
+    if calendar.source == CalendarSource::Local {
+        return Ok(());
+    }
+    if write.events().any(|e| e.attendees.iter().any(|a| !a.is_me)) {
+        return Err(Error::Other(format!("Jolta can't change meetings with guests in {} yet", calendar.name)));
+    }
+    let held = rsvp::Stored {
+        id: EventId(0),
+        remote_id: held.map(|h| h.remote_id.clone()).unwrap_or_default(),
+        etag: held.and_then(|h| h.etag.clone()),
+        raw: None,
+        data: write.event().cloned().ok_or_else(|| Error::Other("an edit without an event".into()))?,
+    };
+    let request = match write {
+        Write::Create(events) => OpWrite::Create { events, key, extra },
+        Write::Update { base, event } => OpWrite::Update { held: &held, base, event, extra },
+        Write::Delete(_) => OpWrite::Delete { held: &held },
+    };
+    sources::writable(calendar.source, &request).map_err(|e| Error::Other(format!("{e}, so Jolta didn't change {}", calendar.name)))
+}
+
+/// A write against what the store holds, with where it lands.
+struct Planned {
+    write: Write,
+    remote_key: String,
+    held: Option<Held>,
+}
+
 /// The write a change makes against what the store holds, with the key a
-/// retried create reuses. None when the store already shows the change.
-fn plan(conn: &Connection, calendar: &Calendar, change: &Change) -> Result<Option<(Write, String)>> {
+/// retried create reuses and the version an update or delete writes over.
+/// None when the store already shows the change.
+fn plan(conn: &Connection, calendar: &Calendar, change: &Change) -> Result<Option<Planned>> {
+    let on_server = calendar.source != CalendarSource::Local;
     match change {
         Change::Create(events) => {
             let Some(uid) = events.first().map(|e| e.uid.clone()) else { return Err(Error::Other("nothing to create".into())) };
@@ -225,23 +294,23 @@ fn plan(conn: &Connection, calendar: &Calendar, change: &Change) -> Result<Optio
             if !stored.is_empty() {
                 return if same_events(&stored, events) { Ok(None) } else { Err(Error::Other(format!("{uid} is already in {}", calendar.name))) };
             }
-            Ok(Some((Write::Create(events.clone()), remote_key(calendar, &uid))))
+            let key = remote_key(conn, calendar, &uid)?;
+            Ok(Some(Planned { write: Write::Create(events.clone()), remote_key: key, held: None }))
         }
         Change::Update(event) => {
             let base = stored(conn, calendar.id, &event.uid, event.recurrence_id.as_ref())?
-                .ok_or_else(|| Error::NotFound(format!("event {} in {}", event.uid, calendar.name)))?
-                .event;
-            if base == *event {
+                .ok_or_else(|| Error::NotFound(format!("event {} in {}", event.uid, calendar.name)))?;
+            if base.event == *event {
                 return Ok(None);
             }
-            Ok(Some((Write::Update { base, event: event.clone() }, remote_key(calendar, &event.uid))))
+            let held = on_server.then(|| Held { remote_id: base.remote_id.clone(), etag: base.etag.clone() });
+            Ok(Some(Planned { write: Write::Update { base: base.event, event: event.clone() }, remote_key: base.remote_id, held }))
         }
         Change::Delete { uid } => {
-            let stored = series(conn, calendar.id, uid)?;
-            if stored.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some((Write::Delete(stored), remote_key(calendar, uid))))
+            let events = series(conn, calendar.id, uid)?;
+            let Some(first) = stored(conn, calendar.id, uid, None)?.or(stored_any(conn, calendar.id, uid)?) else { return Ok(None) };
+            let held = on_server.then(|| Held { remote_id: first.remote_id.clone(), etag: first.etag.clone() });
+            Ok(Some(Planned { write: Write::Delete(events), remote_key: first.remote_id, held }))
         }
     }
 }
@@ -250,10 +319,22 @@ fn same_events(a: &[EventData], b: &[EventData]) -> bool {
     a.len() == b.len() && a.iter().all(|e| b.contains(e))
 }
 
-/// Where a retried create lands. A local calendar's events are filed under
-/// their UID, as `jolta cal import` files them.
-fn remote_key(_calendar: &Calendar, uid: &str) -> String {
-    uid.to_string()
+/// Where a new event lands, so a retried create finds the first try's
+/// object: Google finds it by the UID, which also names the id it gives
+/// the event; Graph's transactionId comes from the UID, the CalDAV
+/// resource is named from it, a local calendar files it under the UID. An
+/// event created again under the same UID, as Undo of a delete does, gets
+/// a transactionId and resource name of its own: Graph answers a
+/// transactionId it saw with the event it made then.
+fn remote_key(conn: &Connection, calendar: &Calendar, uid: &str) -> Result<String> {
+    let earlier = store::calendar_creates(conn, calendar.id, uid)?;
+    let seed = if earlier == 0 { uid.to_string() } else { format!("{uid}\n{earlier}") };
+    Ok(match calendar.source {
+        CalendarSource::Google => sources::google::event_id(uid),
+        CalendarSource::Graph => sources::graph::transaction_id(&calendar.remote_id, &seed),
+        CalendarSource::CalDav => sources::caldav::resource_path(calendar, &seed)?,
+        _ => uid.to_string(),
+    })
 }
 
 /// A stored event with what the store keeps beside it.
@@ -261,7 +342,22 @@ pub struct Stored {
     pub id: EventId,
     pub remote_id: String,
     pub etag: Option<String>,
+    /// The hash of the object's text in the blob store.
+    pub blob: Option<String>,
     pub event: EventData,
+}
+
+const STORED_COLS: &str = "id, remote_id, etag, blob, data";
+
+type StoredRow = (EventId, String, Option<String>, Option<String>, String);
+
+fn stored_row(r: &rusqlite::Row) -> rusqlite::Result<StoredRow> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+}
+
+fn to_stored((id, remote_id, etag, blob, data): StoredRow) -> Result<Stored> {
+    let event = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}")))?;
+    Ok(Stored { id, remote_id, etag, blob, event })
 }
 
 /// The stored event with this UID and recurrence id: the series or single
@@ -269,16 +365,22 @@ pub struct Stored {
 pub fn stored(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Option<&Moment>) -> Result<Option<Stored>> {
     let rid = recurrence_id.map(store::moment_text).unwrap_or_default();
     conn.query_row(
-        "SELECT id, remote_id, etag, data FROM event WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id = ?3 ORDER BY id LIMIT 1",
+        &format!("SELECT {STORED_COLS} FROM event WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id = ?3 ORDER BY id LIMIT 1"),
         params![calendar, uid, rid],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, String>(3)?)),
+        stored_row,
     )
     .optional()?
-    .map(|(id, remote_id, etag, data)| {
-        let event = serde_json::from_str(&data).map_err(|e| Error::Other(format!("stored event {id}: {e}")))?;
-        Ok(Stored { id, remote_id, etag, event })
-    })
+    .map(to_stored)
     .transpose()
+}
+
+/// Any stored event with this UID, for a changed occurrence stored without
+/// its series.
+fn stored_any(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Option<Stored>> {
+    conn.query_row(&format!("SELECT {STORED_COLS} FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY id LIMIT 1"), params![calendar, uid], stored_row)
+        .optional()?
+        .map(to_stored)
+        .transpose()
 }
 
 /// Every stored event with this UID: a series with its changed occurrences.
@@ -289,6 +391,8 @@ fn series(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Vec<Even
 }
 
 /// Writes `write` into the event tables and rebuilds the series' occurrences.
+/// An edited row keeps its remote id, ETag and text: the version the
+/// server still has until the op reaches it.
 fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &str, horizon: &Horizon) -> Result<()> {
     let uid = match write {
         Write::Create(events) => {
@@ -298,11 +402,11 @@ fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &st
             events.first().map(|e| e.uid.clone())
         }
         Write::Update { event, .. } => {
-            let (remote_id, etag) = match stored(conn, calendar, &event.uid, event.recurrence_id.as_ref())? {
-                Some(s) => (s.remote_id, s.etag),
-                None => (stored(conn, calendar, &event.uid, None)?.map_or_else(|| remote_key.to_string(), |s| s.remote_id), None),
+            let (remote_id, etag, blob) = match stored(conn, calendar, &event.uid, event.recurrence_id.as_ref())? {
+                Some(s) => (s.remote_id, s.etag, s.blob),
+                None => (stored(conn, calendar, &event.uid, None)?.map_or_else(|| remote_key.to_string(), |s| s.remote_id), None, None),
             };
-            store::insert_event(conn, calendar, &remote_id, etag.as_deref(), event, None)?;
+            store::insert_event(conn, calendar, &remote_id, etag.as_deref(), event, blob.as_deref())?;
             Some(event.uid.clone())
         }
         Write::Delete(events) => {
@@ -317,14 +421,20 @@ fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &st
     Ok(())
 }
 
-/// Puts the store back as it was before `op`.
+/// Puts the store back as it was before `op`. Events a delete took come
+/// back under the object and version it held.
 fn revert(conn: &Connection, op: &CalendarOp, horizon: &Horizon) -> Result<()> {
     let back = match &op.write {
         Write::Create(events) => Write::Delete(events.clone()),
         Write::Update { base, event } => Write::Update { base: event.clone(), event: base.clone() },
         Write::Delete(events) => Write::Create(events.clone()),
     };
-    apply(conn, op.calendar, &back, &op.remote_key, horizon)
+    let key = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
+    apply(conn, op.calendar, &back, key, horizon)?;
+    if let (Write::Delete(_), Some(held)) = (&op.write, &op.held) {
+        store::set_item_version(conn, op.calendar, &held.remote_id, held.etag.as_deref(), None)?;
+    }
+    Ok(())
 }
 
 /// How Undo went.
@@ -365,12 +475,70 @@ pub fn undo(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horizon) ->
     }
 }
 
+/// An op that ended in `conflict`, as the event's detail shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub op: CalendarOpId,
+    /// "Changed elsewhere while you edited. Your new time wasn't saved."
+    pub message: String,
+    /// "Apply mine", or "Delete anyway" for a delete.
+    pub action: String,
+}
+
+/// The conflict the event's newest op ended in, if it did.
+pub fn conflict(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Option<Conflict>> {
+    let Some(id) = store::newest_calendar_op(conn, calendar, uid)? else { return Ok(None) };
+    let op = store::calendar_op(conn, id)?;
+    if op.state != OpState::Conflict {
+        return Ok(None);
+    }
+    Ok(Some(match op.write {
+        Write::Delete(_) => Conflict { op: id, message: "Changed elsewhere after you deleted it, so it wasn't deleted.".into(), action: "Delete anyway".into() },
+        _ => Conflict { op: id, message: format!("Changed elsewhere while you edited. {}", unsaved(&op.lost)), action: "Apply mine".into() },
+    }))
+}
+
+/// "Your new time wasn't saved." for the fields the server kept.
+fn unsaved(lost: &[Field]) -> String {
+    let nouns: Vec<&str> = lost.iter().map(|f| f.noun()).collect();
+    match nouns.as_slice() {
+        [] => "Your change wasn't saved.".into(),
+        [one] => format!("Your new {one} wasn't saved."),
+        [rest @ .., last] => format!("Your new {} and {last} weren't saved.", rest.join(", ")),
+    }
+}
+
+/// Apply mine: queues the user's side of a conflict over the server's
+/// version the store now holds, the fields the server kept taken from the
+/// op's edit, or the delete again.
+pub fn apply_mine(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
+    let op = store::calendar_op(conn, id)?;
+    if op.state != OpState::Conflict || store::newest_calendar_op(conn, op.calendar, &op.uid)? != Some(id) {
+        return Err(Error::Other("That change was settled since".into()));
+    }
+    let change = match &op.write {
+        Write::Delete(_) => Change::Delete { uid: op.uid.clone() },
+        Write::Update { event: mine, .. } => {
+            let mut event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?
+                .ok_or_else(|| Error::NotFound(format!("event {} in its calendar", op.uid)))?
+                .event;
+            for &field in &op.lost {
+                field.copy(&mut event, mine);
+            }
+            Change::Update(event)
+        }
+        Write::Create(_) => return Err(Error::Other("A new event has nothing to apply".into())),
+    };
+    queue(conn, &Edit { calendar: op.calendar, change, notify: op.notify, message: op.message.clone(), extra: op.extra.clone() }, now, horizon)
+}
+
 /// What came of one attempt to send an op.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settled {
     pub op: CalendarOpId,
     pub calendar: CalendarId,
-    /// The op failed for good and its change was taken back.
+    /// The op failed, met a conflict or found its event deleted, and its
+    /// change wasn't saved: what to tell the user.
     pub failure: Option<Failure>,
 }
 
@@ -382,13 +550,54 @@ pub struct Failure {
     pub event: Option<EventId>,
 }
 
+/// An object as the server left it, with the hash of its text in the blob
+/// store.
+pub type Landed = (Version, Option<String>);
+
+/// What reaching the server came to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sent {
+    /// The server holds the change: the object as it is now; none after a
+    /// delete, or on a local calendar, whose store is its server.
+    Done(Option<Landed>),
+    /// Changed elsewhere meanwhile, and the server's value stayed for the
+    /// fields in `lost`: the object as it is now, the user's other changes
+    /// merged in.
+    Conflict { version: Option<Landed>, lost: Vec<Field> },
+    /// The event was deleted on the server.
+    Gone,
+}
+
 /// Records how sending a claimed op went. A failed attempt waits and is
 /// tried again, backing off as sync does; after `MAX_ATTEMPTS` the op
 /// fails for good and the store goes back to the version before it.
-pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<(), String>, now: i64, horizon: &Horizon) -> Result<Settled> {
+pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent, String>, now: i64, horizon: &Horizon) -> Result<Settled> {
+    let calendar = store::calendar(conn, op.calendar)?;
+    let title = op.write.event().map(|e| e.title.as_str()).unwrap_or("the event");
     let mut failure = None;
     match sent {
-        Ok(()) => store::set_calendar_op_state(conn, op.id, OpState::Done, None)?,
+        Ok(Sent::Done(version)) => {
+            store::settle_calendar_op(conn, op.id, OpState::Done)?;
+            land(conn, op, version.as_ref(), horizon)?;
+        }
+        Ok(Sent::Conflict { version, lost }) => {
+            store::settle_calendar_op(conn, op.id, OpState::Conflict)?;
+            store::set_calendar_op_lost(conn, op.id, &lost)?;
+            land(conn, op, version.as_ref(), horizon)?;
+            let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
+            let message = match op.write {
+                Write::Delete(_) => format!("{title} changed in {} after you deleted it, so it wasn't deleted.", place(&calendar)),
+                _ => format!("{title} changed in {} while you edited it. {}", place(&calendar), unsaved(&lost)),
+            };
+            failure = Some(Failure { message, event });
+        }
+        Ok(Sent::Gone) => {
+            store::settle_calendar_op(conn, op.id, OpState::Gone)?;
+            store::end_later_calendar_ops(conn, op, OpState::Gone, "the event was deleted on the server")?;
+            let remote_id = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
+            store::remove_item(conn, op.calendar, remote_id, store::Removal::Deleted, horizon)?;
+            failure = Some(Failure { message: format!("{title} was deleted in {} while you edited it. Your change wasn't saved.", place(&calendar)), event: None });
+        }
         Err(reason) if op.attempts + 1 < MAX_ATTEMPTS => {
             let wait = super::scheduler::backoff(op.attempts + 1, std::time::Duration::from_secs(300)).as_secs() as i64;
             store::fail_calendar_attempt(conn, op.id, &reason, Some(now + wait))?;
@@ -401,7 +610,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<(), 
             // which is what the server still has and what its Undo restores.
             let over = match &op.write {
                 Write::Create(_) => {
-                    store::fail_later_calendar_ops(conn, op, &format!("the event was never saved: {reason}"))?;
+                    store::end_later_calendar_ops(conn, op, OpState::Failed, &format!("the event was never saved: {reason}"))?;
                     None
                 }
                 _ => store::next_calendar_op_over(conn, op)?,
@@ -410,18 +619,50 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<(), 
                 Some(mut next) => {
                     if let Write::Update { base, .. } = &op.write {
                         next.write.rebase(base);
-                        store::set_calendar_op_base(conn, &next)?;
+                        next.held.clone_from(&op.held);
+                        store::rewrite_calendar_op(conn, &next)?;
                     }
                 }
                 None => revert(conn, op, horizon)?,
             }
-            let title = op.write.event().map(|e| e.title.as_str()).unwrap_or("the event");
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
             failure = Some(Failure { message: format!("Jolta couldn't save the change to {title}: {reason}"), event });
         }
     }
     store::refresh_changed_locally(conn, op.calendar, &op.uid)?;
     Ok(Settled { op: op.id, calendar: op.calendar, failure })
+}
+
+/// Stores the version an op left on the server as a sync would, and makes
+/// it the version the event's later ops on the same object write over:
+/// their edits start from this one's.
+fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, horizon: &Horizon) -> Result<()> {
+    let Some((v, blob)) = version else { return Ok(()) };
+    let from = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
+    store::refile_event_rows(conn, op.calendar, &op.uid, from, &v.remote_id)?;
+    store::apply_item(conn, op.calendar, &v.remote_id, v.etag.as_deref(), &v.events, blob.as_deref(), horizon)?;
+    store::set_item_version(conn, op.calendar, &v.remote_id, v.etag.as_deref(), blob.as_deref())?;
+    for mut later in store::later_calendar_ops(conn, op)? {
+        if later.held.as_ref().is_some_and(|h| h.remote_id == from) {
+            later.held = Some(Held { remote_id: v.remote_id.clone(), etag: v.etag.clone() });
+            if let Write::Delete(_) = later.write {
+                for e in &v.events {
+                    later.write.rebase(e);
+                }
+            }
+            store::rewrite_calendar_op(conn, &later)?;
+        }
+    }
+    Ok(())
+}
+
+/// Where a change made elsewhere was made, for the sentences about it.
+fn place(calendar: &Calendar) -> &'static str {
+    match calendar.source {
+        CalendarSource::Google => "Google Calendar",
+        CalendarSource::Graph => "Outlook",
+        _ => "another calendar app",
+    }
 }
 
 /// Sends every due op, up to `AT_ONCE` at a time, and records how each went.
@@ -439,7 +680,7 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
             return Ok(out);
         }
         let sent = futures::future::join_all(ops.into_iter().map(|op| async move {
-            let result = send(jolta, &op).await;
+            let result = send(jolta, &op).await.map_err(|e| e.to_string());
             (op, result)
         }))
         .await;
@@ -450,15 +691,147 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
     }
 }
 
-/// Reaches the op's server. A local calendar's store is its server, which
-/// `queue` already wrote.
-async fn send(jolta: &Jolta, op: &CalendarOp) -> std::result::Result<(), String> {
+/// Reaches the op's server and keeps the text of the object it left there.
+/// A local calendar's store is its server, which `queue` already wrote.
+async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
     let id = op.calendar;
-    let calendar = jolta.store.read_async(move |c| store::calendar(c, id)).await.map_err(|e| e.to_string())?;
-    match calendar.source {
-        CalendarSource::Local => Ok(()),
-        _ => Err(format!("Jolta can't send changes to {} yet", calendar.name)),
+    let calendar = jolta.store.read_async(move |c| store::calendar(c, id)).await?;
+    if calendar.source == CalendarSource::Local {
+        return Ok(Sent::Done(None));
     }
+    let source = super::sync::calendar_source(jolta, &calendar).await?;
+    let raw = match (&op.held, &op.write) {
+        (Some(held), Write::Update { event, .. }) => {
+            let (cal, uid, rid, remote) = (op.calendar, op.uid.clone(), event.recurrence_id, held.remote_id.clone());
+            let blob = jolta.store.read_async(move |c| Ok(stored(c, cal, &uid, rid.as_ref())?.filter(|s| s.remote_id == remote).and_then(|s| s.blob))).await?;
+            blob.map(|hash| jolta.blobs.get(&hash)).transpose()?
+        }
+        _ => None,
+    };
+    let delivered = deliver(&Bound { source: &source, calendar: &calendar }, op, raw).await?;
+    let keep = |v: Option<Version>| -> Result<Option<Landed>> {
+        v.map(|v| {
+            let blob = v.raw.as_ref().map(|r| jolta.blobs.put(r)).transpose()?;
+            Ok((v, blob))
+        })
+        .transpose()
+    };
+    Ok(match delivered {
+        Delivered::Done(v) => Sent::Done(keep(v)?),
+        Delivered::Conflict { version, lost } => Sent::Conflict { version: keep(version)?, lost },
+        Delivered::Gone => Sent::Gone,
+    })
+}
+
+/// What the server made of an op, before its text is kept.
+#[derive(Clone, Debug, PartialEq)]
+enum Delivered {
+    Done(Option<Version>),
+    Conflict { version: Option<Version>, lost: Vec<Field> },
+    Gone,
+}
+
+/// The server one op writes to: a calendar's source, or a test's.
+pub(crate) trait Remote {
+    async fn write(&self, write: &OpWrite<'_>) -> Result<Written>;
+    async fn fetch(&self, remote_id: &str, uid: &str, alarms: &[Alarm]) -> Result<Option<Version>>;
+}
+
+struct Bound<'a> {
+    source: &'a Source,
+    calendar: &'a Calendar,
+}
+
+impl Remote for Bound<'_> {
+    async fn write(&self, write: &OpWrite<'_>) -> Result<Written> {
+        self.source.write(self.calendar, write).await
+    }
+
+    async fn fetch(&self, remote_id: &str, uid: &str, alarms: &[Alarm]) -> Result<Option<Version>> {
+        self.source.fetch(self.calendar, remote_id, uid, alarms).await
+    }
+}
+
+/// Sends the op's write, guarded by the version it holds. A 412 brings the
+/// server's version, which the user's edit is merged into field by field
+/// before the next write; a delete goes ahead only while the event is the
+/// version the user deleted. `raw` is the held object's text, for CalDAV.
+async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) -> Result<Delivered> {
+    let extra = op.extra.as_ref();
+    let held_as = |held: &Held, data: &EventData, raw: Option<Vec<u8>>| rsvp::Stored {
+        id: EventId(0),
+        remote_id: held.remote_id.clone(),
+        etag: held.etag.clone(),
+        raw,
+        data: data.clone(),
+    };
+    match &op.write {
+        Write::Create(events) => match remote.write(&OpWrite::Create { events, key: &op.remote_key, extra }).await? {
+            Written::Saved(v) => Ok(Delivered::Done(v)),
+            Written::Stale | Written::Gone => Err(Error::Other("the server refused the new event".into())),
+        },
+        Write::Update { base, event } => {
+            let Some(held) = &op.held else { return Err(Error::Other("an edit without the version it changes".into())) };
+            let (mut base, mut mine) = (base.clone(), event.clone());
+            let mut held = held_as(held, &base, raw);
+            let mut lost: Vec<Field> = Vec::new();
+            for _ in 0..MERGE_ROUNDS {
+                match remote.write(&OpWrite::Update { held: &held, base: &base, event: &mine, extra }).await? {
+                    Written::Saved(v) => return Ok(if lost.is_empty() { Delivered::Done(v) } else { Delivered::Conflict { version: v, lost } }),
+                    Written::Gone => return Ok(Delivered::Gone),
+                    Written::Stale => {
+                        let Some(now) = remote.fetch(&held.remote_id, &mine.uid, &mine.alarms).await? else { return Ok(Delivered::Gone) };
+                        let Some(theirs) = now.events.iter().find(|e| same_row(e, &mine)).cloned() else { return Ok(Delivered::Gone) };
+                        let merged = merge::three_way(&base, &mine, &theirs);
+                        for field in merged.lost {
+                            if !lost.contains(&field) {
+                                lost.push(field);
+                            }
+                        }
+                        lost.sort();
+                        if merged.event == theirs {
+                            return Ok(if lost.is_empty() { Delivered::Done(Some(now)) } else { Delivered::Conflict { version: Some(now), lost } });
+                        }
+                        held = held_as(&Held { remote_id: now.remote_id.clone(), etag: now.etag.clone() }, &theirs, now.raw.clone());
+                        (base, mine) = (theirs, merged.event);
+                    }
+                }
+            }
+            Err(Error::Other("it kept changing on the server".into()))
+        }
+        Write::Delete(events) => {
+            let Some(first) = events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()) else { return Ok(Delivered::Done(None)) };
+            let Some(held) = &op.held else { return Err(Error::Other("a delete without the version it removes".into())) };
+            let mut held = held_as(held, first, None);
+            for _ in 0..MERGE_ROUNDS {
+                match remote.write(&OpWrite::Delete { held: &held }).await? {
+                    Written::Saved(_) | Written::Gone => return Ok(Delivered::Done(None)),
+                    Written::Stale => {
+                        let Some(now) = remote.fetch(&held.remote_id, &first.uid, &first.alarms).await? else { return Ok(Delivered::Done(None)) };
+                        let Some(theirs) = now.events.iter().find(|e| same_row(e, first)) else { return Ok(Delivered::Done(None)) };
+                        let changed: Vec<Field> = FIELDS.into_iter().filter(|f| f.differs(first, theirs)).collect();
+                        if !changed.is_empty() {
+                            return Ok(Delivered::Conflict { version: Some(now), lost: changed });
+                        }
+                        held = held_as(&Held { remote_id: now.remote_id.clone(), etag: now.etag.clone() }, first, None);
+                    }
+                }
+            }
+            Err(Error::Other("it kept changing on the server".into()))
+        }
+    }
+}
+
+/// Whether two events are the same row of a series: the same UID and the
+/// same recurrence id, compared as moments.
+fn same_row(a: &EventData, b: &EventData) -> bool {
+    let here = super::tz::here();
+    a.uid == b.uid
+        && match (&a.recurrence_id, &b.recurrence_id) {
+            (None, None) => true,
+            (Some(x), Some(y)) => x.names(y, here),
+            _ => false,
+        }
 }
 
 /// A calendar on this Mac only, shown and the user's own.
@@ -556,7 +929,8 @@ mod tests {
     }
 
     fn send_all(s: &Store, result: std::result::Result<(), String>) -> Vec<Settled> {
-        claim(s).iter().map(|op| s.write(|tx| settle(tx, op, result.clone(), NOW, &horizon())).unwrap()).collect()
+        let sent = result.map(|()| Sent::Done(None));
+        claim(s).iter().map(|op| s.write(|tx| settle(tx, op, sent.clone(), NOW, &horizon())).unwrap()).collect()
     }
 
     fn state(s: &Store, id: CalendarOpId) -> (OpState, bool) {
@@ -803,21 +1177,312 @@ mod tests {
         assert_eq!(shown(&s).len(), 3, "and undo brings them all back");
     }
 
+    fn remote_calendar(s: &Store, source: CalendarSource, access: Access) -> CalendarId {
+        s.write(|tx| {
+            store::add_calendar(tx, source, &RemoteCalendar { remote_id: format!("{source}-{access}"), name: format!("{source}"), color: None, zone: None, access, primary: true, refresh: None })
+        })
+        .unwrap()
+        .id
+    }
+
+    /// Check 1: a write only goes to a calendar the user can write, and
+    /// meetings with guests wait for the Send an update? dialog.
     #[test]
-    fn only_writable_local_calendars_take_ops_for_now() {
+    fn only_writable_calendars_take_ops_and_meetings_with_guests_wait() {
         let (s, _) = setup("refused");
-        let remote = |source, access| {
-            s.write(|tx| {
-                store::add_calendar(tx, source, &RemoteCalendar { remote_id: format!("{source}"), name: format!("{source}"), color: None, zone: None, access, primary: true, refresh: None })
-            })
-            .unwrap()
-            .id
-        };
-        for cal in [remote(CalendarSource::Webcal, Access::Read), remote(CalendarSource::Google, Access::Owner)] {
+        for cal in [remote_calendar(&s, CalendarSource::Webcal, Access::Read), remote_calendar(&s, CalendarSource::Google, Access::Read)] {
             let e = Edit::quiet(cal, Change::Create(vec![event("u9", "Nope", "2026-11-24 09:00")]));
             assert!(s.write(|tx| queue(tx, &e, NOW, &horizon())).is_err());
         }
+        let google = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let guest = crate::calendar::Attendee {
+            person: crate::calendar::Person { address: "ann@example.com".into(), name: "Ann".into() },
+            role: crate::calendar::Role::Required,
+            response: crate::calendar::Response::NeedsAction,
+            comment: String::new(),
+            is_me: false,
+        };
+        let meeting = EventData { attendees: vec![guest], ..event("u8", "Review", "2026-11-24 09:00") };
+        let err = s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![meeting])), NOW, &horizon())).unwrap_err();
+        assert!(err.to_string().contains("meetings with guests"), "{err}");
+        let oof = EventData { categories: vec!["Away".into()], ..event("u7", "Away", "2026-11-24 09:00") };
+        let err = s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![oof])), NOW, &horizon())).unwrap_err();
+        assert!(err.to_string().contains("can't hold categories"), "refused at once, not after five tries: {err}");
         assert!(shown(&s).is_empty(), "nothing was written");
+        assert!(s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![event("u6", "Lunch", "2026-11-24 12:00")])), NOW, &horizon())).unwrap().is_some());
+    }
+
+    /// A calendar server for the op tests: objects by remote id, each with
+    /// a version that is its ETag, guarded writes, and a log of requests.
+    #[derive(Default)]
+    struct Server {
+        objects: std::sync::Mutex<std::collections::BTreeMap<String, (u32, EventData)>>,
+        /// Creates answered with an id of the server's own, as Graph does.
+        names_itself: bool,
+        /// Writes that reach the server and then lose their answer.
+        lose_answers: std::sync::Mutex<u32>,
+        log: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Server {
+        fn put(&self, id: &str, e: EventData) {
+            let mut objects = self.objects.lock().unwrap();
+            let version = objects.get(id).map_or(1, |(v, _)| v + 1);
+            objects.insert(id.into(), (version, e));
+        }
+
+        fn edit(&self, id: &str, change: impl FnOnce(&mut EventData)) {
+            let mut e = self.objects.lock().unwrap()[id].1.clone();
+            change(&mut e);
+            self.put(id, e);
+        }
+
+        fn get(&self, id: &str) -> Option<EventData> {
+            self.objects.lock().unwrap().get(id).map(|(_, e)| e.clone())
+        }
+
+        fn version(&self, id: &str) -> Option<Version> {
+            self.objects.lock().unwrap().get(id).map(|(v, e)| Version { remote_id: id.into(), etag: Some(v.to_string()), events: vec![e.clone()], raw: None })
+        }
+
+        fn log(&self) -> Vec<String> {
+            std::mem::take(&mut self.log.lock().unwrap())
+        }
+
+        fn answer(&self, v: Option<Version>) -> Result<Written> {
+            let mut lose = self.lose_answers.lock().unwrap();
+            if *lose > 0 {
+                *lose -= 1;
+                return Err(Error::Other("timed out".into()));
+            }
+            Ok(Written::Saved(v))
+        }
+    }
+
+    impl Remote for Server {
+        async fn write(&self, write: &OpWrite<'_>) -> Result<Written> {
+            match *write {
+                OpWrite::Create { events, key, .. } => {
+                    self.log.lock().unwrap().push(format!("create {key}"));
+                    let id = if self.names_itself { format!("server-{key}") } else { key.to_string() };
+                    match self.get(&id) {
+                        Some(e) if e.uid == events[0].uid => {}
+                        Some(_) => return Err(Error::Other("taken".into())),
+                        None => self.put(&id, events[0].clone()),
+                    }
+                    self.answer(self.version(&id))
+                }
+                OpWrite::Update { held, base, event, .. } => {
+                    self.log.lock().unwrap().push(format!("update {} at {}", held.remote_id, held.etag.as_deref().unwrap_or("-")));
+                    let Some(now) = self.version(&held.remote_id) else { return Ok(Written::Gone) };
+                    if now.etag != held.etag {
+                        return Ok(Written::Stale);
+                    }
+                    self.edit(&held.remote_id, |e| {
+                        for f in FIELDS.into_iter().filter(|f| f.differs(base, event)) {
+                            f.copy(e, event);
+                        }
+                    });
+                    self.answer(self.version(&held.remote_id))
+                }
+                OpWrite::Delete { held } => {
+                    self.log.lock().unwrap().push(format!("delete {} at {}", held.remote_id, held.etag.as_deref().unwrap_or("-")));
+                    let Some(now) = self.version(&held.remote_id) else { return Ok(Written::Gone) };
+                    if now.etag != held.etag {
+                        return Ok(Written::Stale);
+                    }
+                    self.objects.lock().unwrap().remove(&held.remote_id);
+                    self.answer(None)
+                }
+            }
+        }
+
+        async fn fetch(&self, remote_id: &str, _: &str, _: &[Alarm]) -> Result<Option<Version>> {
+            self.log.lock().unwrap().push(format!("fetch {remote_id}"));
+            Ok(self.version(remote_id))
+        }
+    }
+
+    /// Sends every due op to `server`, as the worker does.
+    fn run(s: &Store, server: &Server) -> Vec<Settled> {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        claim(s)
+            .iter()
+            .map(|op| {
+                let sent = rt.block_on(deliver(server, op, None)).map_err(|e| e.to_string()).map(|d| match d {
+                    Delivered::Done(v) => Sent::Done(v.map(|v| (v, None))),
+                    Delivered::Conflict { version, lost } => Sent::Conflict { version: version.map(|v| (v, None)), lost },
+                    Delivered::Gone => Sent::Gone,
+                });
+                s.write(|tx| settle(tx, op, sent, NOW, &horizon())).unwrap()
+            })
+            .collect()
+    }
+
+    /// A Google calendar holding "Standup" as `g1` at version 1, on the
+    /// server and synced into the store.
+    fn synced(name: &str) -> (Store, CalendarId, Server) {
+        let (s, _) = setup(name);
+        let cal = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let server = Server::default();
+        server.put("g1", event("u1", "Standup", "2026-11-24 09:00"));
+        sync(&s, cal, &server);
+        (s, cal, server)
+    }
+
+    /// What a sync stores: every object as the server has it.
+    fn sync(s: &Store, cal: CalendarId, server: &Server) {
+        let objects = server.objects.lock().unwrap().clone();
+        s.write(|tx| {
+            for (id, (v, e)) in &objects {
+                store::apply_item(tx, cal, id, Some(&v.to_string()), std::slice::from_ref(e), None, &horizon())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn shown_where(s: &Store) -> Vec<(String, String, String)> {
+        s.read(|c| Ok(c.prepare("SELECT title, location, coalesce(etag, '-') FROM event ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?))
+            .unwrap()
+    }
+
+    fn triples(list: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        list.iter().map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string())).collect()
+    }
+
+    /// The hole U1 left: a sync rewrote the rows of an edit that hadn't
+    /// reached the server and cleared its mark. Now the edit stays, and the
+    /// change made elsewhere meanwhile is merged in when the edit is sent.
+    #[test]
+    fn an_edit_waiting_to_be_sent_survives_a_sync_and_merges_with_it() {
+        let (s, cal, server) = synced("survives");
+        let edit = q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 09:00"))).unwrap();
+        server.edit("g1", |e| e.location = "Room 9".into());
+        sync(&s, cal, &server);
+        assert_eq!(shown_where(&s), triples(&[("Daily", "", "1")]), "the edit and the version it started from stay");
+        assert_eq!(not_synced(&s, cal, "u1"), [true]);
+
+        let settled = run(&s, &server);
+        assert!(settled[0].failure.is_none());
+        assert_eq!(server.log(), ["update g1 at 1", "fetch g1", "update g1 at 2"]);
+        assert_eq!((server.get("g1").unwrap().title.as_str(), server.get("g1").unwrap().location.as_str()), ("Daily", "Room 9"), "both changes on the server");
+        assert_eq!(shown_where(&s), triples(&[("Daily", "Room 9", "3")]));
+        assert_eq!((state(&s, edit).0, not_synced(&s, cal, "u1")), (OpState::Done, vec![false]));
+        assert!(s.read(|c| store::calendar_op(c, edit)).unwrap().lost.is_empty());
+
+        sync(&s, cal, &server);
+        assert_eq!(shown_where(&s), triples(&[("Daily", "Room 9", "3")]), "the next sync agrees");
+    }
+
+    #[test]
+    fn a_delete_waiting_to_be_sent_stays_deleted_through_a_sync() {
+        let (s, cal, server) = synced("delete-sync");
+        q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
+        sync(&s, cal, &server);
+        assert!(shown(&s).is_empty());
+        run(&s, &server);
+        assert_eq!(server.log(), ["delete g1 at 1"]);
+        assert!(server.get("g1").is_none() && shown(&s).is_empty());
+    }
+
+    #[test]
+    fn a_field_changed_on_both_sides_keeps_the_servers_until_apply_mine() {
+        let (s, cal, server) = synced("conflict");
+        let mine = event("u1", "Daily", "2026-11-24 10:00");
+        let edit = q(&s, cal, Change::Update(mine)).unwrap();
+        server.edit("g1", |e| e.title = "Weekly".into());
+
+        let settled = run(&s, &server);
+        let failure = settled[0].failure.clone().expect("the user hears of it");
+        assert_eq!(failure.message, "Daily changed in Google Calendar while you edited it. Your new title wasn't saved.");
+        let op = s.read(|c| store::calendar_op(c, edit)).unwrap();
+        assert_eq!((op.state, op.lost.as_slice()), (OpState::Conflict, [Field::Title].as_slice()));
+        assert_eq!(shown(&s), pairs(&[("24 10:00", "Weekly")]), "the server's title, and the new time, which only the user changed");
+        assert_eq!(server.get("g1").unwrap().title, "Weekly");
+        let notice = s.read(|c| conflict(c, cal, "u1")).unwrap().expect("the detail shows it");
+        assert_eq!((notice.message.as_str(), notice.action.as_str()), ("Changed elsewhere while you edited. Your new title wasn't saved.", "Apply mine"));
+        assert!(s.write(|tx| undo(tx, edit, NOW, &horizon())).is_err());
+
+        let again = s.write(|tx| apply_mine(tx, edit, NOW, &horizon())).unwrap().expect("queued");
+        assert_eq!(shown(&s), pairs(&[("24 10:00", "Daily")]));
+        assert!(s.read(|c| conflict(c, cal, "u1")).unwrap().is_none(), "the notice goes");
+        run(&s, &server);
+        assert_eq!((state(&s, again).0, server.get("g1").unwrap().title.as_str()), (OpState::Done, "Daily"));
+    }
+
+    #[test]
+    fn an_event_deleted_elsewhere_is_never_recreated() {
+        let (s, cal, server) = synced("gone");
+        let edit = q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 09:00"))).unwrap();
+        let later = q(&s, cal, Change::Update(event("u1", "Daily sync", "2026-11-24 09:00"))).unwrap();
+        server.objects.lock().unwrap().remove("g1");
+        let settled = run(&s, &server);
+        assert_eq!(settled[0].failure.clone().unwrap().message, "Daily was deleted in Google Calendar while you edited it. Your change wasn't saved.");
+        assert_eq!((state(&s, edit).0, state(&s, later).0), (OpState::Gone, OpState::Gone), "the edit behind it can't land either");
+        assert!(shown(&s).is_empty(), "gone from the store");
+        assert!(server.objects.lock().unwrap().is_empty(), "and not made again");
+        assert!(claim(&s).is_empty());
+    }
+
+    /// Check 4: a create whose first try reached the server but lost its
+    /// answer is sent again to the same object, which keeps one event.
+    #[test]
+    fn a_create_whose_answer_was_lost_makes_one_event() {
+        let (s, _) = setup("lost-answer");
+        let cal = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let server = Server { lose_answers: std::sync::Mutex::new(1), ..Server::default() };
+        let create = q(&s, cal, Change::Create(vec![event("u1", "Standup", "2026-11-24 09:00")])).unwrap();
+        assert!(run(&s, &server)[0].failure.is_none(), "a lost answer is tried again");
+        assert_eq!(state(&s, create), (OpState::Pending, true));
+        run(&s, &server);
+        let key = sources::google::event_id("u1");
+        assert_eq!(server.log(), [format!("create {key}"), format!("create {key}")]);
+        assert_eq!(server.objects.lock().unwrap().len(), 1);
+        assert_eq!(shown_where(&s), triples(&[("Standup", "", "1")]), "stored under the server's version");
+        assert_eq!(state(&s, create).0, OpState::Done);
+    }
+
+    /// Graph names a new event itself: the stored rows move to its id, and
+    /// an edit queued behind the create writes over the version it made.
+    #[test]
+    fn an_edit_behind_a_create_writes_over_the_object_the_server_named() {
+        let (s, _) = setup("named");
+        let cal = remote_calendar(&s, CalendarSource::Graph, Access::Owner);
+        let server = Server { names_itself: true, ..Server::default() };
+        q(&s, cal, Change::Create(vec![event("u1", "Standup", "2026-11-24 09:00")])).unwrap();
+        let edit = q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 09:00"))).unwrap();
+        run(&s, &server);
+        assert_eq!(shown_where(&s), triples(&[("Daily", "", "1")]), "the edit stays shown over the created version");
+        run(&s, &server);
+        let log = server.log();
+        let id = log[0].trim_start_matches("create ").to_string();
+        assert_eq!(log, [format!("create {id}"), format!("update server-{id} at 1")]);
+        assert_eq!((state(&s, edit).0, server.get(&format!("server-{id}")).unwrap().title.as_str()), (OpState::Done, "Daily"));
+        assert_eq!(s.read(|c| Ok(c.query_row("SELECT remote_id FROM event", [], |r| r.get::<_, String>(0))?)).unwrap(), format!("server-{id}"));
+    }
+
+    #[test]
+    fn a_delete_of_an_event_changed_elsewhere_keeps_it() {
+        let (s, cal, server) = synced("delete-conflict");
+        let delete = q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
+        server.edit("g1", |e| e.title = "Weekly".into());
+        let settled = run(&s, &server);
+        assert_eq!(settled[0].failure.clone().unwrap().message, "Standup changed in Google Calendar after you deleted it, so it wasn't deleted.");
+        assert_eq!(shown(&s), pairs(&[("24 09:00", "Weekly")]), "back, as the server has it");
+        assert_eq!(s.read(|c| conflict(c, cal, "u1")).unwrap().unwrap().action, "Delete anyway");
+        s.write(|tx| apply_mine(tx, delete, NOW, &horizon())).unwrap();
+        run(&s, &server);
+        assert!(server.get("g1").is_none() && shown(&s).is_empty());
+
+        let (s, cal, server) = synced("delete-same");
+        q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
+        server.edit("g1", |_| {});
+        run(&s, &server);
+        assert_eq!(server.log(), ["delete g1 at 1", "fetch g1", "delete g1 at 2"], "a new ETag over the same event deletes it");
+        assert!(server.get("g1").is_none());
     }
 
     #[test]
@@ -828,7 +1493,7 @@ mod tests {
         assert_eq!(s.read(|c| store::calendar_op(c, id)).unwrap().send_after, NOW + UNDO_SEND_SECONDS);
         assert!(s.write(|tx| store::claim_calendar_ops(tx, NOW, AT_ONCE)).unwrap().is_empty(), "not due inside the window");
         assert_eq!(claim(&s).len(), 1);
-        s.write(|tx| settle(tx, &store::calendar_op(tx, id)?, Ok(()), NOW, &horizon())).unwrap();
+        s.write(|tx| settle(tx, &store::calendar_op(tx, id)?, Ok(Sent::Done(None)), NOW, &horizon())).unwrap();
         assert!(s.write(|tx| undo(tx, id, NOW, &horizon())).is_err(), "an update that went out can't be taken back");
     }
 }

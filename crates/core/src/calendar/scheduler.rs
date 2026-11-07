@@ -155,6 +155,8 @@ impl Scheduler {
             }
         }
         if !changed.is_empty() {
+            // A calendar syncs right after a change of the user's reaches it.
+            self.state().wanted.extend(changed.iter().copied());
             (self.sink)(Event::CalendarsChanged(changed));
         }
         let next = self.jolta.store.read_async(store::next_calendar_op_due).await?;

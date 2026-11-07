@@ -73,7 +73,7 @@ impl CalDav {
 }
 
 /// The resource's name in the collection: the same for the same UID.
-fn resource_name(uid: &str) -> String {
+pub(super) fn resource_name(uid: &str) -> String {
     let hash = Sha256::digest(uid.as_bytes());
     format!("jolta-{}.ics", hex::encode(&hash[..16]))
 }

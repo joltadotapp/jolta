@@ -12,6 +12,9 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 mod add;
+mod write;
+
+pub(crate) use write::{resource_path, writable};
 
 use super::dav::{self, APPLE, CALDAV, CALENDARSERVER, DAV, MultiStatus, href_key};
 use super::{Change, Gone, Known, SyncBatch, http_client, http_error, vanished};

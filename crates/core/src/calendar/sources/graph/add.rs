@@ -21,7 +21,7 @@ use crate::{Error, Result};
 
 /// PidLidGlobalObjectId and PidLidCleanGlobalObjectId, which Graph reads
 /// back as `iCalUId`.
-const GLOBAL_OBJECT_IDS: [&str; 2] =
+pub(super) const GLOBAL_OBJECT_IDS: [&str; 2] =
     ["Binary {6ED8DA90-450B-101B-98DA-00AA003F1305} Id 0x0003", "Binary {6ED8DA90-450B-101B-98DA-00AA003F1305} Id 0x0023"];
 
 impl GraphCalendar {
@@ -153,7 +153,7 @@ fn occurrence_writes<'a>(sent: &'a EventData, copy: &'a NewCopy<'a>) -> Vec<Occu
 
 /// The `If-Match` value for a stored change key: Graph's ETag is
 /// `W/"<changeKey>"`.
-fn if_match(etag: &str) -> String {
+pub(super) fn if_match(etag: &str) -> String {
     if etag.starts_with("W/") { etag.to_string() } else { format!("W/\"{etag}\"") }
 }
 
@@ -187,7 +187,7 @@ fn show_as(answer: Option<Answer>) -> &'static str {
 
 /// A start or end as Graph takes it: the wall-clock time and its zone,
 /// midnight for an all-day event, a floating time in the Mac's zone.
-fn when(span: &Span, start: bool, here: Tz) -> Value {
+pub(super) fn when(span: &Span, start: bool, here: Tz) -> Value {
     let (wall, zone) = match span {
         Span::AllDay { start: s, end: e } => ((if start { s } else { e }).and_time(NaiveTime::MIN), here),
         Span::Timed { start: s, end: e } => {
@@ -202,7 +202,7 @@ fn when(span: &Span, start: bool, here: Tz) -> Value {
 }
 
 /// The same id for the same calendar and UID.
-fn transaction_id(calendar: &str, uid: &str) -> String {
+pub(crate) fn transaction_id(calendar: &str, uid: &str) -> String {
     let hash = Sha256::digest(format!("{calendar}\n{uid}").as_bytes());
     hex::encode(&hash[..16])
 }
@@ -210,7 +210,7 @@ fn transaction_id(calendar: &str, uid: &str) -> String {
 /// A Global Object ID holding `uid` as Exchange writes one for a meeting
 /// from outside Outlook: the class id, no date, and "vCal-Uid", version 1,
 /// the UID and a zero byte as its data ([MS-OXOCAL] 2.2.1.27).
-fn global_object_id(uid: &str) -> String {
+pub(super) fn global_object_id(uid: &str) -> String {
     let mut data = b"vCal-Uid".to_vec();
     data.extend_from_slice(&1u32.to_le_bytes());
     data.extend_from_slice(uid.as_bytes());
