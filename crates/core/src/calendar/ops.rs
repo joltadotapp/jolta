@@ -908,6 +908,14 @@ fn end_waiting(conn: &Connection, op: &CalendarOp, error: &str, horizon: &Horizo
 fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: bool, horizon: &Horizon) -> Result<()> {
     let Some((v, blob)) = version else { return Ok(()) };
     let from = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
+    // A version that doesn't name the occurrence the op wrote would stand
+    // in for its series; the calendar is listed again instead.
+    if let Some(rid) = &op.recurrence_id
+        && v.remote_id != from
+        && !v.events.iter().any(|e| e.recurrence_id.is_some_and(|r| r.names(rid, horizon.here)))
+    {
+        return store::forget_calendar_cursor(conn, op.calendar);
+    }
     // A new changed occurrence became an instance with an id of its own:
     // only its row moves there, and only ops on that occurrence follow it.
     if let Write::Update { event, fresh: true, .. } = &op.write

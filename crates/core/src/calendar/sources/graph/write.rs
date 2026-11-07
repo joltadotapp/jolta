@@ -198,11 +198,15 @@ async fn fetch(api: &impl Api, remote_id: &str, uid: &str, me: &str, here: Tz) -
 
 /// Graph's answer as the event to store, under the stored event's UID. A
 /// series master is read again with the occurrences it cancelled, which
-/// only a GET that names them returns; a changed occurrence is read on its
-/// series' clock, so its series comes too.
+/// only a GET that names them returns, and an instance with the start that
+/// names its occurrence; a changed occurrence is read on its series'
+/// clock, so its series comes too.
 async fn version(api: &impl Api, reply: Value, uid: &str, me: &str, here: Tz) -> Result<Version> {
     let reply = match (reply["type"].as_str(), reply["id"].as_str()) {
         (Some("seriesMaster"), Some(id)) => get_ok(api, &format!("/me/events/{}?$select={FIELDS},cancelledOccurrences", encode(id))).await?,
+        // A PATCH's answer leaves out the `originalStart` that names an
+        // instance's occurrence (Microsoft 365 test account, 2026-11-07).
+        (Some("exception" | "occurrence"), Some(id)) if reply["originalStart"].is_null() => get_ok(api, &format!("/me/events/{}?$select={FIELDS}", encode(id))).await?,
         _ => reply,
     };
     let raw = serde_json::to_vec(&reply).ok();
@@ -484,5 +488,28 @@ mod tests {
         assert!(done.is_err(), "a 400 on an event still there is a failure");
         let (done, seen) = sent(OpWrite::Delete { held: &held }, vec![(204, Value::Null)]).await;
         assert_eq!((done.unwrap(), seen), (Written::Saved(None), vec!["DELETE /me/events/AAMk1 If-Match W/\"ck1\"".to_string()]));
+    }
+
+    /// Graph's answer to a PATCH of an instance leaves out `originalStart`
+    /// (Microsoft 365 test account, 2026-11-07), which names its occurrence:
+    /// stored without it, the instance would stand in for its series.
+    #[tokio::test]
+    async fn a_changed_instance_lands_as_its_occurrence() {
+        let base = EventData { recurrence_id: Some(crate::calendar::Moment::Time(crate::calendar::Local { wall: chrono::NaiveDateTime::parse_from_str("2026-12-01 09:00", "%Y-%m-%d %H:%M").unwrap(), zone: crate::calendar::Zone::Tz(Brussels) })), ..standup() };
+        let held = Stored { id: EventId(1), remote_id: "AAMk1-x".into(), etag: Some("ck1".into()), raw: None, data: base.clone() };
+        let mine = EventData { title: "Standup, later".into(), ..base.clone() };
+        let mut patched = graph("AAMk1-x", "ck2");
+        patched["type"] = json!("exception");
+        patched["seriesMasterId"] = json!("AAMk1");
+        let mut read_back = patched.clone();
+        read_back["originalStart"] = json!("2026-12-01T08:00:00Z");
+        let mut master = graph("AAMk1", "ck2");
+        master["type"] = json!("seriesMaster");
+        master["recurrence"] = json!({ "pattern": { "type": "weekly", "interval": 1, "daysOfWeek": ["tuesday"] }, "range": { "type": "noEnd", "startDate": "2026-11-24", "recurrenceTimeZone": "Europe/Brussels" } });
+        let update = OpWrite::Update { held: &held, base: &base, event: &mine, extra: None, dropped: &[] };
+        let (done, seen) = sent(update, vec![(200, patched), (200, read_back), (200, master)]).await;
+        let Written::Saved(Some(v)) = done.unwrap() else { panic!("saved") };
+        assert_eq!(seen[1], "GET /me/events/AAMk1-x", "read back with the fields that name it: {seen:?}");
+        assert!(v.events[0].recurrence_id.as_ref().is_some_and(|r| r.names(base.recurrence_id.as_ref().unwrap(), Brussels)), "{:?}", v.events[0].recurrence_id);
     }
 }
