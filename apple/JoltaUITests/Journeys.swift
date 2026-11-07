@@ -434,6 +434,66 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(moved.waitForExistence(timeout: 5), "the moved occurrence stays")
     }
 
+    /// A meeting the user organizes on a Google calendar: a person added in
+    /// the editor, ⌘↩ and the scope prompt's 1, then Send an update? names
+    /// the new person; Esc goes back to the editor, Return sends with the
+    /// undo window and Z takes it back before anything goes out. ⌘⌫ asks to
+    /// cancel the meeting, and Return keeps it.
+    func testMeetingUpdate() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        let meeting = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Team sync,")).firstMatch
+        XCTAssertTrue(meeting.waitForExistence(timeout: 5), "the daily meeting is in the week")
+        meeting.click()
+        app.typeKey("e", modifierFlags: [])
+        let people = app.textFields["editor-people"]
+        XCTAssertTrue(people.waitForExistence(timeout: 5), "the organizer gets the People field")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "person-chip").count, 2, "a chip per guest, the user left out")
+        people.click()
+        people.typeText("ward@example.com\r")
+        let chips = app.descendants(matching: .any).matching(identifier: "person-chip")
+        XCTAssertTrue(waitUntil { chips.count == 3 }, "Return adds the typed address as a chip")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Save and send")).firstMatch.waitForExistence(timeout: 5), "Save says it sends")
+
+        app.typeKey(.return, modifierFlags: .command)
+        let prompt = app.descendants(matching: .any).matching(identifier: "scope-prompt").firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "one occurrence of a series asks which events first")
+        app.typeKey("1", modifierFlags: [])
+        let dialog = app.descendants(matching: .any).matching(identifier: "send-dialog").firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5), "then Send an update?")
+        XCTAssertTrue(text(app, "Invite 1 new person?").exists)
+        XCTAssertTrue(text(app, "ward@example.com gets an invitation. The 2 others get nothing.").exists)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Esc keeps editing")
+        XCTAssertTrue(people.exists, "with the editor still open")
+
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Return sends")
+        XCTAssertTrue(text(app, "Update sent to 1 person").waitForExistence(timeout: 5), "the toast offers Undo while the update waits")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(text(app, "Undone").waitForExistence(timeout: 5), "Z takes it back before it goes")
+
+        XCTAssertTrue(meeting.waitForExistence(timeout: 5))
+        meeting.click()
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(people.waitForExistence(timeout: 5))
+        XCTAssertEqual(chips.count, 2, "the new person went with the undo")
+        app.typeKey(.delete, modifierFlags: .command)
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "deleting one occurrence asks which events")
+        app.typeKey("3", modifierFlags: [])
+        let cancel = app.descendants(matching: .any).matching(identifier: "cancel-dialog").firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "then whether to cancel the meeting")
+        XCTAssertTrue(text(app, "Cancel the meeting for 2 people?").exists)
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(cancel.waitForNonExistence(timeout: 5), "Return keeps the meeting")
+        XCTAssertTrue(meeting.exists, "and the meeting stays")
+    }
+
     /// Settings › Calendar makes a calendar on this Mac, which the calendar
     /// sidebar then lists with the others.
     func testNewCalendarOnThisMac() throws {
