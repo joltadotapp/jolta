@@ -8,7 +8,7 @@ use clap::Args;
 use jolta_core::Jolta;
 use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Undone};
 use jolta_core::calendar::series::Horizon;
-use jolta_core::calendar::{CalendarId, EventData, EventId, Local, Span, Zone, caps, tz};
+use jolta_core::calendar::{CalendarId, EventData, EventId, Local, Span, Zone, caps, draft, tz};
 use jolta_core::store;
 
 use crate::truncate;
@@ -297,6 +297,41 @@ pub fn print_caps(jolta: &Jolta, calendar: i64) -> Result<()> {
     println!("  move {:?}, video {:?}, remove video {}", k.move_within, k.video, k.remove_video);
     println!("  options {:?}", k.options);
     println!("  show as {:?}, max people {:?}", k.show_as, k.max_people);
+    Ok(())
+}
+
+pub fn print_draft(jolta: &Jolta, event: i64) -> Result<()> {
+    let here = tz::here();
+    let (d, problems) = jolta.store.read(|c| {
+        let d = draft::draft_for_event(c, EventId(event), None, here)?;
+        let problems = draft::check_draft(c, &d, here)?;
+        Ok((d, problems))
+    })?;
+    let when = match d.span {
+        Span::Timed { start, end } => format!("{} to {} ({:?})", start.wall.format("%a %-d %b %H:%M"), end.wall.format("%H:%M"), start.zone),
+        Span::AllDay { start, end } => format!("all day {} to {}", start.format("%a %-d %b"), (end - Duration::days(1)).format("%a %-d %b")),
+    };
+    println!("{} in calendar {}", if d.title.is_empty() { "(no title)" } else { &d.title }, d.calendar);
+    println!("  when: {when}{}", d.repeat.as_deref().map(|r| format!(", {r}")).unwrap_or_default());
+    if let Some(o) = &d.organizer {
+        println!("  organizer: {}", if o.name.is_empty() { &o.address } else { &o.name });
+    }
+    for p in &d.people {
+        println!("  person: {} ({:?}, {:?}){}", p.person.address, p.role, p.response, if p.is_me { ", you" } else { "" });
+    }
+    for (label, value) in [("room", &d.room), ("location", &d.location), ("description", &d.description)] {
+        if !value.is_empty() {
+            println!("  {label}: {}", truncate(&value.replace('\n', " / "), 80));
+        }
+    }
+    println!("  show as {:?}, reminder {:?}, visibility {:?}", d.show_as, d.reminder, d.visibility);
+    match &d.notice {
+        Some(n) => println!("  locked ({} fields): {n}", d.locks.len()),
+        None => println!("  nothing locked"),
+    }
+    for p in problems {
+        println!("  {}: {}{}", p.field.map_or("event".into(), |f| format!("{f:?}")), p.text, if p.blocking { "" } else { " (warning)" });
+    }
     Ok(())
 }
 

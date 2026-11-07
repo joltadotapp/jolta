@@ -17,6 +17,7 @@ uniffi::setup_scaffolding!();
 
 mod ai;
 pub mod calendar;
+pub mod editor;
 mod find_time;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]

@@ -234,6 +234,12 @@ pub enum CalCommand {
     },
     /// What Jolta can do with a calendar's events.
     Caps { calendar: i64 },
+    /// The event as the editor opens it: its fields, what is locked and
+    /// why, and what is wrong with it for its calendar.
+    Draft {
+        /// The event's id, as `jolta cal list` shows it after the title.
+        event: i64,
+    },
     /// Time one-week occurrence queries over the store.
     Bench {
         #[arg(long, default_value_t = 200)]
@@ -257,6 +263,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,
         CalCommand::ApplyMine { op, wait } => crate::cal_edit::apply_mine(jolta, op, wait).await,
         CalCommand::Caps { calendar } => crate::cal_edit::print_caps(jolta, calendar),
+        CalCommand::Draft { event } => crate::cal_edit::print_draft(jolta, event),
         CalCommand::Enable { account, port } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
             if sync::needs_consent(&a) {
