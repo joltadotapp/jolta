@@ -493,8 +493,11 @@ pub fn is_occurrence(master: &EventData, rid: &Moment, here: Tz) -> bool {
 /// series: those the new rule no longer has an occurrence for, and on
 /// Microsoft 365 every one once the time or the pattern changes, as
 /// Exchange deletes them then; a new end alone keeps those before it
-/// (Microsoft 365 test account, 2026-11-07). A series made single loses
-/// them all.
+/// (Microsoft 365 test account, 2026-11-07). A series that counted its
+/// occurrences and now ends on a day loses them all there too: Exchange
+/// reset a moved occurrence before the new end when a COUNT became an
+/// UNTIL (Microsoft 365 test account, 2026-11-07, with guests). A series
+/// made single loses them all.
 fn dropped(conn: &Connection, calendar: &Calendar, base: &EventData, event: &EventData, here: Tz) -> Result<Vec<Row>> {
     if event.recurrence_id.is_some() || base.recurrence.is_none() {
         return Ok(Vec::new());
@@ -506,7 +509,9 @@ fn dropped(conn: &Connection, calendar: &Calendar, base: &EventData, event: &Eve
     let pattern = |r: Option<&super::Recurrence>| {
         r.map(|r| r.rules.iter().map(|rule| rule.split(';').filter(|p| !p.starts_with("UNTIL=") && !p.starts_with("COUNT=")).collect::<Vec<_>>().join(";")).collect::<Vec<_>>())
     };
-    let exchange_resets = calendar.source == CalendarSource::Graph && (base.span != event.span || pattern(base.recurrence.as_ref()) != pattern(event.recurrence.as_ref()));
+    let ends = |r: Option<&super::Recurrence>| r.map(|r| r.rules.iter().map(|rule| (rule.contains("COUNT="), rule.contains("UNTIL="))).collect::<Vec<_>>());
+    let exchange_resets = calendar.source == CalendarSource::Graph
+        && (base.span != event.span || pattern(base.recurrence.as_ref()) != pattern(event.recurrence.as_ref()) || ends(base.recurrence.as_ref()) != ends(event.recurrence.as_ref()));
     Ok(changed_rows(conn, calendar.id, &event.uid)?
         .into_iter()
         .filter(|r| {

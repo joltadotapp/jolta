@@ -184,7 +184,7 @@ mod tests {
 
     use super::*;
     use crate::calendar::draft::{self, EventDraft};
-    use crate::calendar::ops::{Scope, Undone};
+    use crate::calendar::ops::{Scope, Undone, Write};
     use crate::calendar::{Access, Bounds, EventId, Zone};
     use crate::store::{RemoteCalendar, Store};
 
@@ -605,5 +605,21 @@ mod tests {
         let plan = s.read(|c| draft::plan_delete_drafted(c, &moved_unsaved, Brussels)).unwrap();
         assert_eq!(plan.prompt.as_deref(), Some("You're deleting Standup on Tue 10 Nov."), "the stored occurrence, which the delete takes");
     }
+    /// Exchange reset a moved occurrence before the new end when a series of
+    /// a number of occurrences was ended on a day (Microsoft 365 test
+    /// account, 2026-11-07): the split's shortening takes it out there and
+    /// keeps it elsewhere.
+    #[test]
+    fn ending_a_counted_series_on_microsoft_365_drops_every_changed_occurrence() {
+        for (source, dropped) in [(CalendarSource::Graph, 1), (CalendarSource::Google, 0)] {
+            let (s, cal) = store(&format!("count-until-{source}"), source);
+            let mut d = opened(&s, cal, "2026-11-17 09:00");
+            d.span = timed("2026-11-17 10:00", 30);
+            let op = save(&s, &d, Scope::Following).unwrap();
+            let Write::Update { dropped: rows, .. } = s.read(|c| store::calendar_op(c, op)).unwrap().write else { panic!("the shortening is an update") };
+            assert_eq!(rows.len(), dropped, "{source}: the 3 Nov change, before the split");
+        }
+    }
+
 }
 
