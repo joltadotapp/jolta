@@ -850,7 +850,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
         Ok(Sent::Conflict { version, lost }) => {
             // The server kept the occurrence a delete took out: the series
             // comes back as it was, then the occurrence as the server has it.
-            if let Write::Cancel { series, .. } = &op.write {
+            if let Write::Cancel { occurrence, .. } = &op.write {
                 revert(conn, op, horizon)?;
                 // A delete of the whole series behind this one put aside
                 // the series with this occurrence taken out; its Undo brings
@@ -858,8 +858,10 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
                 let kept: Vec<EventData> = version.iter().flat_map(|(v, _)| &v.events).filter(|e| e.uid == op.uid && e.recurrence_id.is_some()).cloned().collect();
                 for mut later in store::later_calendar_ops(conn, op)? {
                     let Write::Delete(events) = &mut later.write else { continue };
-                    if let Some(master) = events.iter_mut().find(|e| e.recurrence_id.is_none()) {
-                        *master = series.clone();
+                    // Only this occurrence's EXDATE goes: later edits and
+                    // other occurrences taken out stay put aside.
+                    if let (Some(rec), Some(rid)) = (events.iter_mut().find(|e| e.recurrence_id.is_none()).and_then(|m| m.recurrence.as_mut()), occurrence.recurrence_id) {
+                        rec.exdates.retain(|x| !x.names(&rid, horizon.here));
                     }
                     for k in &kept {
                         events.retain(|e| !same_row(e, k));
@@ -2064,6 +2066,8 @@ mod tests {
         let (s, cal, server, series) = synced_series("cancel-then-delete");
         let rid = Moment::Time(at("2026-12-01 09:00"));
         let one = q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: rid }).unwrap();
+        let other = Moment::Time(at("2026-12-08 09:00"));
+        q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: other }).unwrap();
         let all = q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
         server.put("g1_instance", EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup, theirs", "2026-12-01 09:00") });
         server.put("g1", series);
@@ -2072,10 +2076,10 @@ mod tests {
         let version = server.version("g1_instance").map(|v| (v, None));
         s.write(|tx| settle(tx, &claimed[0], Ok(Sent::Conflict { version, lost: vec![Field::Title] }), NOW, &horizon())).unwrap();
         assert_eq!(state(&s, one).0, OpState::Conflict);
-        assert_eq!(claim(&s).iter().map(|o| o.id).collect::<Vec<_>>(), [all], "the series delete is next");
+        assert_eq!(claim(&s).iter().map(|o| o.recurrence_id).collect::<Vec<_>>(), [Some(other)], "the next op of the series goes");
         let Write::Delete(kept) = s.read(|c| store::calendar_op(c, all)).unwrap().write else { panic!("a delete") };
         let master = kept.iter().find(|e| e.recurrence_id.is_none()).unwrap();
-        assert!(master.recurrence.as_ref().unwrap().exdates.is_empty(), "its Undo brings the series back whole");
+        assert_eq!(master.recurrence.as_ref().unwrap().exdates, [other], "its Undo brings back the rejected occurrence and keeps the other taken out");
         assert!(kept.iter().any(|e| e.recurrence_id == Some(rid) && e.title == "Standup, theirs"), "with the occurrence the server kept");
     }
 
