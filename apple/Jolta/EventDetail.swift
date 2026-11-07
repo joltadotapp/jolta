@@ -150,6 +150,18 @@ struct EventDetailCard: View {
                     .padding(.top, 6)
                     .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
             }
+            HStack(spacing: 6) {
+                Button { cal.edit(event) } label: { HStack(spacing: 5) { Text("Edit"); KeyCap(key: "E") } }
+                    .accessibilityIdentifier("event-detail-edit")
+                if cal.detailDeletable {
+                    Button { cal.deleteSelected() } label: { HStack(spacing: 5) { Text("Delete"); KeyCap(key: "⌫") } }
+                        .accessibilityIdentifier("event-detail-delete")
+                }
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11.5))
+            .foregroundStyle(Color(Theme.text2))
+            .padding(.top, 10)
             if let m = detail.meeting {
                 HStack(spacing: 6) {
                     JoinButton(title: m.provider.short.isEmpty ? "Join" : "Join \(m.provider.short)", live: live) { CalendarModel.join(m) }

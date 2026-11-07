@@ -200,6 +200,9 @@ struct CalendarSettings: View {
             if !cal.groups.contains(where: { $0.id == "local" }) {
                 SettingsSection("On this Mac only", footer: Self.localFooter) { NewLocalCalendarField(model: model) }
             }
+            SettingsSection("New events") {
+                NewEventDefaults(model: model)
+            }
             SettingsSection("Invitations") {
                 FileResponsesRow(core: model.core)
             }
@@ -451,5 +454,63 @@ struct CalendarIntroSheet: View {
         .background(Color(Theme.bg))
         .foregroundStyle(Color(Theme.text))
         .onAppear { if switches == nil { switches = CalendarSwitches(model: model) } }
+    }
+}
+
+/// The calendar new events go to and how long they last.
+struct NewEventDefaults: View {
+    let model: AppModel
+    @State private var calendar: Int64?
+    @State private var minutes = 30
+    @State private var failure: String?
+
+    private static let lengths = [15, 30, 45, 60, 90, 120]
+
+    var body: some View {
+        let writable = model.calendar.groups.flatMap(\.calendars).map(\.info).filter(\.writable)
+        SettingsRow(title: "Default calendar", detail: failure ?? "C and double-click make events here.",
+                    detailColor: failure == nil ? Color(Theme.text3) : .red) {
+            Picker("Default calendar", selection: Binding(get: { calendar ?? -1 }, set: setCalendar)) {
+                if calendar == nil { Text("None").tag(Int64(-1)) }
+                ForEach(writable, id: \.id) { c in Text(c.name).tag(c.id) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .disabled(writable.isEmpty)
+        }
+        SettingsRow(title: "Default length", detail: "How long a new event lasts.") {
+            Picker("Default length", selection: Binding(get: { minutes }, set: setLength)) {
+                ForEach(Self.lengths, id: \.self) { m in Text(m < 60 ? "\(m) minutes" : m == 60 ? "1 hour" : m == 90 ? "1.5 hours" : "2 hours").tag(m) }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        calendar = (try? model.core.defaultCalendar()) ?? nil
+        minutes = Int((try? model.core.defaultEventLength()) ?? 30)
+    }
+
+    private func setCalendar(_ id: Int64) {
+        guard id >= 0 else { return }
+        do {
+            try model.core.setDefaultCalendar(calendarId: id)
+            calendar = id
+            failure = nil
+            model.calendar.reloadCalendars()
+        } catch {
+            failure = "\(error)"
+        }
+    }
+
+    private func setLength(_ m: Int) {
+        do {
+            try model.core.setDefaultEventLength(minutes: Int64(m))
+            minutes = m
+        } catch {
+            failure = "\(error)"
+        }
     }
 }

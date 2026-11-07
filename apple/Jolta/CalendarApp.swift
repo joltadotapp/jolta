@@ -5,6 +5,7 @@ import AppKit
 extension AppModel {
     func startCalendar() {
         calendar.onChange = { [weak self] in self?.scheduleReminders() }
+        calendar.toast = { [weak self] text, token in self?.notify(text, calendarUndo: token) }
         notifier.onOpenEvent = { [weak self] id, fireAt in
             guard let self else { return }
             showMainWindow()
@@ -136,8 +137,14 @@ extension AppModel {
             if event.keyCode == 53 { palette = nil; showsHelp = false }
             return true
         }
-        if event.characters == "?" { showsHelp = true; return true }
         let cal = calendar
+        // The editor's fields and buttons take the keys; Esc closes it.
+        if cal.editor != nil || cal.discard != nil {
+            guard event.keyCode == 53, cal.discard == nil else { return false }
+            cal.closeEditor()
+            return true
+        }
+        if event.characters == "?" { showsHelp = true; return true }
         switch command {
         case .today: cal.goToday()
         case .next: cal.shift(1); CalendarBench.shared?.mark("key handled")
@@ -156,9 +163,13 @@ extension AppModel {
             default: .up
             }
             cal.moveSelection(move)
+        case .newEvent: cal.newEvent()
+        case .edit: cal.editSelected()
+        case .delete: cal.deleteSelected()
+        case .undo: undo()
         case .open: cal.openSelected()
         case .close: if cal.detail != nil { cal.closeDetail() } else { cal.selectedID = nil }
-        case .dayPanel, .mail, .calendar, .joinNext, nil: break
+        case .dayPanel, .mail, .calendar, .joinNext, .duplicate, nil: break
         }
         return true
     }

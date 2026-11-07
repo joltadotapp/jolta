@@ -60,6 +60,9 @@ struct JoltaApp: App {
                     .disabled(model?.mode != .mail)
                 Button("Join Next Meeting") { model?.joinNextMeeting() }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
+                Button("Duplicate Event") { model?.calendar.duplicateSelected() }
+                    .keyboardShortcut("d")
+                    .disabled(model?.mode != .calendar || model?.calendar.selected == nil || model?.calendar.editor != nil)
                 Divider()
                 Button("Command Palette") { model?.palette = .commands }
                     .keyboardShortcut("k")

@@ -194,7 +194,7 @@ extension AppModel {
 
 /// Calendar mode's keys, in one table for the key handler and the help sheet.
 enum CalendarCommand: String, CaseIterable, Identifiable {
-    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, dayPanel, mail, calendar, joinNext
+    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, newEvent, edit, duplicate, delete, undo, dayPanel, mail, calendar, joinNext
 
     var id: String { rawValue }
 
@@ -212,6 +212,11 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case .move: "↑↓←→"
         case .open: "↩"
         case .close: "esc"
+        case .newEvent: "c"
+        case .edit: "e"
+        case .duplicate: "⌘D"
+        case .delete: "⌫"
+        case .undo: "z"
         case .dayPanel: "⇧C"
         case .mail: "⌘1"
         case .calendar: "⌘2"
@@ -233,6 +238,11 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case .move: "Move between events"
         case .open: "Open event"
         case .close: "Close event"
+        case .newEvent: "New event"
+        case .edit: "Edit event"
+        case .duplicate: "Duplicate event"
+        case .delete: "Delete event"
+        case .undo: "Undo"
         case .dayPanel: "Today beside mail"
         case .mail: "Mail"
         case .calendar: "Calendar"
@@ -246,6 +256,7 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case 123, 124, 125, 126: return .move
         case 36, 76: return .open
         case 53: return .close
+        case 51, 117: return .delete
         default: break
         }
         if digit(event) != nil { return .toggleCalendar }

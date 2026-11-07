@@ -1,0 +1,857 @@
+@preconcurrency import JoltaFFI
+import SwiftUI
+
+/// One open editor: the core's draft, its problems, and the typed time
+/// fields. The core decides what is locked, what is wrong and what saving
+/// does; this keeps the fields in step with the draft.
+@MainActor
+@Observable
+final class EventEditorModel {
+    let core: Core
+    var draft: EventDraft {
+        didSet { if draft != oldValue { changed() } }
+    }
+    private(set) var problems: [DraftProblem] = []
+    /// What the typed time fields show until they are read.
+    var startText = ""
+    var endText = ""
+    /// Why the last save or delete didn't go through.
+    var failure: String?
+    /// The occurrence being edited, hidden in the grid while the draft shows.
+    let editing: String?
+    @ObservationIgnored var onChange: (() -> Void)?
+
+    init(core: Core, draft: EventDraft, editing: String?) {
+        self.core = core
+        self.draft = draft
+        self.editing = editing
+        refreshTexts()
+        check()
+    }
+
+    var isNew: Bool { draft.base == nil }
+    var isReadOnly: Bool { draft.locks.contains(.title) && draft.locks.contains(.showAs) }
+
+    func locked(_ field: DraftField) -> Bool { draft.locks.contains(field) }
+
+    func problems(_ field: DraftField?) -> [DraftProblem] { problems.filter { $0.field == field } }
+
+    var canSave: Bool { !problems.contains(where: \.blocking) }
+
+    private func changed() {
+        failure = nil
+        check()
+        onChange?()
+    }
+
+    private func check() {
+        problems = (try? core.checkDraft(draft: draft)) ?? []
+    }
+
+    // MARK: Times
+
+    /// Start and end, for a timed draft.
+    var interval: (start: Date, end: Date)? {
+        guard case .timed(let s, let e) = draft.time else { return nil }
+        return (Date(timeIntervalSince1970: TimeInterval(s)), Date(timeIntervalSince1970: TimeInterval(e)))
+    }
+
+    var isAllDay: Bool { if case .allDay = draft.time { true } else { false } }
+
+    /// The first day: the start's day, or an all-day event's first day.
+    var day: Date {
+        switch draft.time {
+        case .timed(let s, _): Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(s)))
+        case .allDay(let first, _): CalendarModel.date(key: first) ?? .now
+        }
+    }
+
+    /// Minutes the event lasts, or its days.
+    var lengthText: String {
+        switch draft.time {
+        case .timed(let s, let e):
+            let m = Int(e - s) / 60
+            guard m > 0 else { return "" }
+            return m < 60 ? "\(m) min" : m % 60 == 0 ? "\(m / 60) h" : "\(m / 60) h \(m % 60)"
+        case .allDay(let first, let last):
+            guard let a = CalendarModel.date(key: first), let b = CalendarModel.date(key: last) else { return "" }
+            let days = (Calendar.current.dateComponents([.day], from: a, to: b).day ?? 0) + 1
+            return days == 1 ? "1 day" : "\(days) days"
+        }
+    }
+
+    func refreshTexts() {
+        if let (start, end) = interval {
+            startText = CalendarModel.clockTime(start)
+            endText = CalendarModel.clockTime(end)
+        } else {
+            startText = ""
+            endText = ""
+        }
+    }
+
+    private func at(_ day: Date, minutes: Int) -> Int64 {
+        Int64((Calendar.current.date(byAdding: .minute, value: minutes, to: Calendar.current.startOfDay(for: day)) ?? day).timeIntervalSince1970)
+    }
+
+    private func minutes(of date: Date) -> Int {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return (c.hour ?? 0) * 60 + (c.minute ?? 0)
+    }
+
+    /// Moves the event to `date`, keeping its times and length.
+    func setDay(_ date: Date) {
+        switch draft.time {
+        case .timed(let s, let e):
+            let start = at(date, minutes: minutes(of: Date(timeIntervalSince1970: TimeInterval(s))))
+            draft.time = .timed(start: start, end: start + (e - s))
+        case .allDay(let first, let last):
+            guard let a = CalendarModel.date(key: first), let b = CalendarModel.date(key: last) else { return }
+            let days = Calendar.current.dateComponents([.day], from: a, to: b).day ?? 0
+            let end = Calendar.current.date(byAdding: .day, value: days, to: date) ?? date
+            draft.time = .allDay(firstDay: CalendarModel.dayKey(date), lastDay: CalendarModel.dayKey(end))
+        }
+    }
+
+    /// Moves the draft to the typed start as it is typed, keeping the
+    /// length; the field's text stays as typed until `commit`.
+    func followStart() {
+        guard let (start, end) = interval, let m = core.parseTimeInput(text: startText) else { return }
+        let new = at(start, minutes: Int(m))
+        let newEnd = new + Int64(end.timeIntervalSince(start))
+        draft.time = .timed(start: new, end: newEnd)
+        endText = CalendarModel.clockTime(Date(timeIntervalSince1970: TimeInterval(newEnd)))
+    }
+
+    /// The typed end, on the start's day.
+    func followEnd() {
+        guard let (start, _) = interval, let m = core.parseTimeInput(text: endText) else { return }
+        draft.time = .timed(start: Int64(start.timeIntervalSince1970), end: at(start, minutes: Int(m)))
+    }
+
+    /// Leaving a time field or saving: what was typed counts, and the field
+    /// shows the time it became, or the time it was when it isn't one.
+    func commit() {
+        followStart()
+        followEnd()
+        refreshTexts()
+    }
+
+    func setLength(minutes: Int) {
+        guard let (start, _) = interval else { return }
+        let s = Int64(start.timeIntervalSince1970)
+        draft.time = .timed(start: s, end: s + Int64(minutes * 60))
+        refreshTexts()
+    }
+
+    /// ⌥↑ and ⌥↓: 15 minutes later or earlier. The start keeps the length.
+    func nudge(start: Bool, by minutes: Int) {
+        guard let (s, e) = interval else { return }
+        let d = Int64(minutes * 60)
+        let (a, b) = (Int64(s.timeIntervalSince1970), Int64(e.timeIntervalSince1970))
+        draft.time = start ? .timed(start: a + d, end: b + d) : .timed(start: a, end: b + d)
+        refreshTexts()
+    }
+
+    func setAllDay(_ on: Bool, defaultMinutes: Int) {
+        if on, let (start, end) = interval {
+            let last = end.addingTimeInterval(-1) > start ? end.addingTimeInterval(-1) : start
+            draft.time = .allDay(firstDay: CalendarModel.dayKey(start), lastDay: CalendarModel.dayKey(last))
+        } else if !on, case .allDay = draft.time {
+            let start = at(day, minutes: 9 * 60)
+            draft.time = .timed(start: start, end: start + Int64(defaultMinutes * 60))
+        }
+        refreshTexts()
+    }
+}
+
+// MARK: - Panel
+
+/// The editor docked on the right of calendar mode, 400 points wide and full
+/// height, beside the week, which draws the draft as it changes.
+struct EventEditorPanel: View {
+    let model: AppModel
+    let editor: EventEditorModel
+    @FocusState private var focus: Focus?
+    @State private var showsZone = false
+
+    enum Focus: Hashable { case title, start, end, room, location, description }
+
+    private var cal: CalendarModel { model.calendar }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let notice = editor.draft.notice {
+                        HStack(alignment: .top, spacing: 9) {
+                            Image(systemName: "lock").font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).padding(.top, 2)
+                            Text(notice).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text2))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
+                        .padding(.bottom, 10)
+                        .accessibilityIdentifier("editor-notice")
+                    }
+                    title
+                    whenSection
+                    if !editor.draft.people.isEmpty { peopleSection }
+                    placeSection
+                    descriptionSection
+                    calendarSection
+                    settingsSection
+                    ForEach(editor.problems(nil), id: \.text) { ProblemLine(problem: $0).padding(.top, 8) }
+                    if let failure = editor.failure { ProblemLine(problem: DraftProblem(field: nil, text: failure, blocking: true)).padding(.top, 8) }
+                }
+                .padding(.leading, 16)
+                .padding(.trailing, 20)
+                .padding(.bottom, 16)
+            }
+            .scrollIndicators(.never)
+            footer
+        }
+        .frame(width: 400)
+        .frame(maxHeight: .infinity)
+        .background(Color(Theme.side))
+        .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+        .font(.system(size: 12.5))
+        .foregroundStyle(Color(Theme.text))
+        .onAppear { if !editor.isReadOnly { focus = .title } }
+        .onChange(of: focus) { old, _ in
+            if old == .start || old == .end { editor.commit() }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("event-editor")
+    }
+
+    // MARK: Header and footer
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text(editor.isNew ? "New event" : "Event")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.2)
+                .foregroundStyle(Color(Theme.text3))
+            Spacer()
+            Button { cal.closeEditor() } label: {
+                HStack(spacing: 6) {
+                    KeyHint(key: "Esc")
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundStyle(Color(Theme.text3))
+                .padding(.horizontal, 6)
+                .frame(height: 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close (Esc)")
+        }
+        .padding(.leading, 20)
+        .padding(.trailing, 10)
+        .frame(height: 40)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            if !editor.isNew && !editor.isReadOnly {
+                Button { cal.deleteFromEditor() } label: {
+                    HStack(spacing: 7) { Text("Delete"); KeyHint(key: "⌘⌫") }
+                        .foregroundStyle(Color(NSColor(hex: 0xC9302C)))
+                        .padding(.horizontal, 6)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.delete, modifiers: .command)
+                .accessibilityIdentifier("editor-delete")
+            }
+            Spacer()
+            if editor.isReadOnly {
+                EditorButton(title: "Done", key: "⌘↩", primary: true) { cal.closeEditor() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .accessibilityIdentifier("editor-done")
+            } else {
+                EditorButton(title: "Cancel", key: "Esc") { cal.closeEditor() }
+                    .keyboardShortcut(.cancelAction)
+                EditorButton(title: "Save", key: "⌘↩", primary: true) {
+                    commitTimes()
+                    cal.saveEditor()
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!editor.canSave)
+                .accessibilityIdentifier("editor-save")
+            }
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 16)
+        .frame(height: 54)
+        .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+
+    /// A time typed counts when the user saves with ⌘↩ from its field.
+    private func commitTimes() {
+        editor.commit()
+    }
+
+    // MARK: Fields
+
+    private var title: some View {
+        Group {
+            if editor.locked(.title) {
+                HStack {
+                    Text(editor.draft.title.isEmpty ? "(no title)" : editor.draft.title).lineLimit(2)
+                    Spacer(minLength: 8)
+                    LockGlyph()
+                }
+                .accessibilityIdentifier("editor-title")
+            } else {
+                TextField("Title", text: binding(\.title))
+                    .textFieldStyle(.plain)
+                    .focused($focus, equals: .title)
+                    .accessibilityIdentifier("editor-title")
+            }
+        }
+        .font(.system(size: 20, weight: .semibold))
+        .tracking(-0.3)
+        .padding(.vertical, 5)
+        .padding(.leading, 30)
+        .padding(.bottom, 8)
+    }
+
+    private var whenSection: some View {
+        EditorSection {
+            EditorRow(icon: "clock") {
+                if editor.locked(.time) {
+                    HStack(spacing: 6) {
+                        Text(Self.dayText(editor.day)).foregroundStyle(Color(Theme.text))
+                        if editor.interval != nil {
+                            Text("\(editor.startText) to \(editor.endText)").font(.system(size: 12, weight: .medium, design: .monospaced))
+                        }
+                        Text(editor.lengthText).foregroundStyle(Color(Theme.text3))
+                        Spacer(minLength: 4)
+                        LockGlyph()
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        DayChip(day: editor.day) { editor.setDay($0) }
+                        if editor.interval != nil {
+                            timeField(timeText(start: true), focus: .start, id: "editor-start", start: true)
+                            Text("to").foregroundStyle(Color(Theme.text3))
+                            timeField(timeText(start: false), focus: .end, id: "editor-end", start: false)
+                            Menu {
+                                ForEach([15, 30, 45, 60, 90, 120], id: \.self) { m in
+                                    Button(m < 60 ? "\(m) minutes" : m == 60 ? "1 hour" : m == 90 ? "1.5 hours" : "2 hours") { editor.setLength(minutes: m) }
+                                }
+                            } label: { Text(editor.lengthText).foregroundStyle(Color(Theme.text3)) }
+                                .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
+                                .fixedSize()
+                                .help("Length")
+                        } else {
+                            Text(editor.lengthText).foregroundStyle(Color(Theme.text3))
+                        }
+                    }
+                }
+            }
+            EditorRow(icon: nil) {
+                HStack(spacing: 14) {
+                    if !editor.locked(.time) {
+                        Toggle("All day", isOn: Binding(get: { editor.isAllDay }, set: { editor.setAllDay($0, defaultMinutes: cal.defaultLength) }))
+                            .toggleStyle(.checkbox)
+                            .foregroundStyle(Color(Theme.text2))
+                    }
+                    Button { showsZone.toggle() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "globe").foregroundStyle(Color(Theme.text3))
+                            Text(zoneCity).underline(color: Color(Theme.text3).opacity(0.6))
+                        }
+                        .foregroundStyle(Color(Theme.text2))
+                    }
+                    .buttonStyle(.plain)
+                    .help("The event's time zone")
+                    Spacer()
+                }
+                .font(.system(size: 12))
+            }
+            if showsZone {
+                EditorRow(icon: nil) {
+                    Text(editor.draft.zoneText ?? (editor.draft.zone.isEmpty ? "Floating: the same clock time in every zone" : editor.draft.zone))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text3))
+                }
+            }
+            ForEach(editor.problems(.time), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+            EditorRow(icon: "repeat") {
+                HStack {
+                    Text(editor.draft.repeat ?? "Does not repeat").foregroundStyle(Color(editor.draft.repeat == nil ? Theme.text2 : Theme.text))
+                    Spacer()
+                    if editor.locked(.repeat) { LockGlyph() }
+                }
+            }
+        }
+    }
+
+    /// The city of the event's zone, or the Mac's for floating and all-day times ("Brussels").
+    private var zoneCity: String {
+        let zone = editor.draft.zone.isEmpty ? TimeZone.current.identifier : editor.draft.zone
+        return (zone.split(separator: "/").last.map(String.init) ?? zone).replacingOccurrences(of: "_", with: " ")
+    }
+
+    private func timeText(start: Bool) -> Binding<String> {
+        Binding(get: { start ? editor.startText : editor.endText }, set: { if start { editor.startText = $0 } else { editor.endText = $0 } })
+    }
+
+    private func timeField(_ text: Binding<String>, focus field: Focus, id: String, start: Bool) -> some View {
+        TextField(start ? "Start" : "End", text: text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .multilineTextAlignment(.center)
+            .frame(width: 46)
+            .fieldBox(focused: focus == field)
+            .focused($focus, equals: field)
+            .onSubmit { editor.commit() }
+            .onChange(of: text.wrappedValue) { start ? editor.followStart() : editor.followEnd() }
+            .onKeyPress(keys: [.upArrow, .downArrow], phases: .down) { press in
+                guard press.modifiers.contains(.option) else { return .ignored }
+                editor.commit()
+                editor.nudge(start: start, by: press.key == .upArrow ? 15 : -15)
+                return .handled
+            }
+            .accessibilityIdentifier(id)
+            .help("Type 9, 930, 14:30 or 2pm. ⌥↑ and ⌥↓ move it by 15 minutes.")
+    }
+
+    private var peopleSection: some View {
+        EditorSection {
+            EditorRow(icon: "person.2", top: true) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let o = editor.draft.organizer, !editor.draft.people.contains(where: { $0.address.caseInsensitiveCompare(o.address) == .orderedSame }) {
+                        PersonLine(name: o.name.isEmpty ? o.address : o.name, detail: "Organizer")
+                    }
+                    ForEach(editor.draft.people, id: \.address) { p in
+                        PersonLine(name: p.isMe ? "You" : p.name.isEmpty ? p.address : p.name, detail: Self.personDetail(p, organizer: editor.draft.organizer))
+                    }
+                }
+            }
+            ForEach(editor.problems(.people), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+        }
+    }
+
+    static func personDetail(_ p: DraftPerson, organizer: PersonRecord?) -> String {
+        if let o = organizer, o.address.caseInsensitiveCompare(p.address) == .orderedSame { return "Organizer" }
+        let answer = p.response == .needsAction ? "no answer" : p.response.word.capitalized
+        return p.role == .optional ? "Optional, \(answer)" : answer
+    }
+
+    /// A locked row with nothing to say is left out, as is a location that
+    /// only names the meeting's video call ("Microsoft Teams Meeting").
+    private func shows(_ field: DraftField, _ value: String) -> Bool {
+        guard editor.locked(field) else { return true }
+        if value.isEmpty { return false }
+        guard field == .location, let m = editor.draft.meeting else { return true }
+        let v = value.lowercased()
+        return !(v == m.joinUrl.lowercased() || (!m.provider.short.isEmpty && v.contains(m.provider.short.lowercased())))
+    }
+
+    private var placeSection: some View {
+        EditorSection {
+            if shows(.room, editor.draft.room) {
+                EditorRow(icon: "building.2") {
+                    plainOrField(.room, text: \.room, prompt: "Add a room", focus: .room, id: "editor-room")
+                }
+            }
+            ForEach(editor.problems(.room), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+            if shows(.location, editor.draft.location) {
+                EditorRow(icon: "mappin") {
+                    plainOrField(.location, text: \.location, prompt: "Add a location", focus: .location, id: "editor-location")
+                }
+            }
+            if let m = editor.draft.meeting {
+                EditorRow(icon: "video") {
+                    HStack {
+                        Text("\(m.provider.name) meeting")
+                        Spacer()
+                        LockGlyph().help("The video call stays as it is.")
+                    }
+                }
+            } else if let video = editor.draft.video {
+                EditorRow(icon: "video") {
+                    HStack {
+                        Text("\(video.name) meeting · link made on save").foregroundStyle(Color(Theme.text2))
+                        Spacer()
+                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color(Theme.text3))
+                            .help("Remove the video call")
+                    }
+                }
+                ForEach(editor.problems(.video), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+            }
+        }
+    }
+
+    private var descriptionSection: some View {
+        EditorSection {
+            EditorRow(icon: "text.alignleft", top: true) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if editor.locked(.description) {
+                        if !editor.draft.description.isEmpty {
+                            Text(editor.draft.description).foregroundStyle(Color(Theme.text2)).fixedSize(horizontal: false, vertical: true).lineLimit(8)
+                        } else {
+                            Text("No description").foregroundStyle(Color(Theme.text3))
+                        }
+                    } else {
+                        TextField("Add a description", text: binding(\.description), axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .lineLimit(3...10)
+                            .padding(.vertical, 6)
+                            .fieldBox(focused: focus == .description, height: nil)
+                            .focused($focus, equals: .description)
+                            .accessibilityIdentifier("editor-description")
+                    }
+                    if let note = editor.draft.descriptionNote {
+                        Text(note).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                    }
+                    if editor.draft.meeting != nil && !editor.locked(.description) {
+                        Text("The meeting's join details stay below your text.").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                    }
+                }
+            }
+        }
+    }
+
+    private var calendarSection: some View {
+        EditorSection {
+            EditorRow(icon: "calendar") {
+                let current = cal.calendarInfo(editor.draft.calendarId)
+                HStack(spacing: 6) {
+                    if editor.isNew && !editor.locked(.calendar) {
+                        Menu {
+                            ForEach(cal.groups) { group in
+                                Section(group.title) {
+                                    ForEach(group.calendars) { entry in
+                                        Button { editor.draft.calendarId = entry.info.id } label: {
+                                            Text(entry.info.writable ? entry.info.name : "\(entry.info.name) (read-only)")
+                                        }
+                                        .disabled(!entry.info.writable)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text(current?.name ?? "Choose a calendar")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .frame(width: 170, alignment: .leading)
+                        .padding(.leading, 20)
+                        .fieldBox(chevrons: true)
+                        .overlay(alignment: .leading) { CalendarDot(color: current?.color).padding(.leading, 8).allowsHitTesting(false) }
+                        .accessibilityIdentifier("editor-calendar")
+                    } else {
+                        CalendarDot(color: current?.color)
+                        Text(current?.name ?? "")
+                    }
+                    Spacer()
+                    if let group = cal.groups.first(where: { $0.calendars.contains { $0.info.id == editor.draft.calendarId } }) {
+                        Text(group.detail.isEmpty ? group.title : group.detail)
+                            .foregroundStyle(Color(Theme.text3))
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
+            }
+            ForEach(editor.problems(.calendar), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+        }
+    }
+
+    private var settingsSection: some View {
+        EditorSection {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Your settings").font(.system(size: 11, weight: .semibold)).tracking(0.2).foregroundStyle(Color(Theme.text3))
+                Text("Only you see these. Never emailed.").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 3)
+            SettingLine(label: "Show as", locked: editor.locked(.showAs), value: editor.draft.showAs.word) {
+                ForEach(cal.showAsChoices(editor.draft.calendarId), id: \.self) { choice in
+                    Button(choice.word) { editor.draft.showAs = choice }
+                }
+            }
+            SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word) {
+                ForEach(DraftReminder.menu(isNew: editor.isNew), id: \.self) { choice in
+                    Button(choice.word) { editor.draft.reminder = choice }
+                }
+            }
+            SettingLine(label: "Visibility", locked: editor.locked(.visibility), value: editor.draft.visibility.word) {
+                ForEach([EventVisibility.default, .private], id: \.self) { choice in
+                    Button(choice.word) { editor.draft.visibility = choice }
+                }
+            }
+            ForEach(editor.problems(.showAs) + editor.problems(.reminder) + editor.problems(.visibility), id: \.text) { ProblemLine(problem: $0) }
+        }
+    }
+
+    @ViewBuilder
+    private func plainOrField(_ field: DraftField, text: WritableKeyPath<EventDraft, String>, prompt: String, focus value: Focus, id: String) -> some View {
+        if editor.locked(field) {
+            HStack {
+                Text(editor.draft[keyPath: text].isEmpty ? "None" : editor.draft[keyPath: text])
+                    .foregroundStyle(Color(editor.draft[keyPath: text].isEmpty ? Theme.text3 : Theme.text))
+                Spacer()
+                LockGlyph()
+            }
+            .accessibilityIdentifier(id)
+        } else {
+            TextField(prompt, text: binding(text))
+                .textFieldStyle(.plain)
+                .focused($focus, equals: value)
+                .frame(maxWidth: .infinity)
+                .fieldBox(focused: focus == value)
+                .accessibilityIdentifier(id)
+        }
+    }
+
+    private func binding(_ key: WritableKeyPath<EventDraft, String>) -> Binding<String> {
+        Binding(get: { editor.draft[keyPath: key] }, set: { editor.draft[keyPath: key] = $0 })
+    }
+
+    private static let dayFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        return f
+    }()
+
+    /// "Tue 24 Nov", as the mockup writes it, without the comma some locales add.
+    static func dayText(_ date: Date) -> String { dayFormat.string(from: date).replacingOccurrences(of: ",", with: "") }
+}
+
+// MARK: - Pieces
+
+extension View {
+    /// The mockup's `.f`: a raised box with a hairline, 26 points tall.
+    func fieldBox(focused: Bool = false, height: CGFloat? = 26, chevrons: Bool = false) -> some View {
+        padding(.horizontal, 8)
+            .padding(.trailing, chevrons ? 14 : 0)
+            .frame(height: height)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.raise)))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(focused ? Theme.accent : Theme.line), lineWidth: 1))
+            .overlay(alignment: .trailing) {
+                if chevrons {
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color(Theme.text3)).padding(.trailing, 7).allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+/// "Tue 24 Nov", which opens a month to pick another day.
+private struct DayChip: View {
+    let day: Date
+    let pick: (Date) -> Void
+    @State private var open = false
+
+    var body: some View {
+        Button { open.toggle() } label: {
+            Text(EventEditorPanel.dayText(day)).foregroundStyle(Color(Theme.text)).fieldBox(focused: open)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("editor-day")
+        .popover(isPresented: $open, arrowEdge: .bottom) {
+            DatePicker("Day", selection: Binding(get: { day }, set: { pick($0); open = false }), displayedComponents: .date)
+                .labelsHidden()
+                .datePickerStyle(.graphical)
+                .padding(12)
+        }
+    }
+}
+
+/// A group of rows with a hairline above, as in the mockup's `.sec`.
+private struct EditorSection<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) { content }
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+}
+
+/// An icon column on the left in place of a label.
+private struct EditorRow<Content: View>: View {
+    let icon: String?
+    var top = false
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: top ? .top : .center, spacing: 14) {
+            Group {
+                if let icon { Image(systemName: icon) } else { Color.clear }
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(Color(Theme.text3))
+            .frame(width: 16, height: 16)
+            .padding(.top, top ? 4 : 0)
+            content.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minHeight: 26)
+    }
+}
+
+private struct SettingLine<Choices: View>: View {
+    let label: String
+    let locked: Bool
+    let value: String
+    @ViewBuilder let choices: Choices
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label).foregroundStyle(Color(Theme.text2)).frame(width: 96, alignment: .leading)
+            if locked {
+                Text(value)
+                Spacer()
+                LockGlyph()
+            } else {
+                Menu { choices } label: { Text(value) }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 134, alignment: .leading)
+                    .fieldBox(chevrons: true)
+                    .accessibilityIdentifier("editor-\(label.lowercased().replacingOccurrences(of: " ", with: "-"))")
+                Spacer()
+            }
+        }
+        .frame(minHeight: 26)
+    }
+}
+
+private struct PersonLine: View {
+    let name: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(name).lineLimit(1)
+            Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            Spacer(minLength: 4)
+            LockGlyph()
+        }
+        .frame(minHeight: 22)
+    }
+}
+
+struct ProblemLine: View {
+    let problem: DraftProblem
+
+    var body: some View {
+        Label(problem.text, systemImage: problem.blocking ? "exclamationmark.circle" : "info.circle")
+            .font(.system(size: 11.5))
+            .foregroundStyle(problem.blocking ? Color(NSColor(hex: 0xC9302C)) : Color(Theme.text3))
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("editor-problem")
+    }
+}
+
+private struct LockGlyph: View {
+    var body: some View {
+        Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(Color(Theme.text3)).accessibilityLabel("Locked")
+    }
+}
+
+private struct CalendarDot: View {
+    let color: String?
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3).fill(Color(CalendarColor.color(color, .bar))).frame(width: 10, height: 10)
+    }
+}
+
+/// A key shown inside a button, outlined in the button's text color.
+private struct KeyHint: View {
+    let key: String
+
+    var body: some View {
+        Text(key)
+            .font(.system(size: 10, weight: .medium))
+            .padding(.horizontal, 4)
+            .frame(minWidth: 16, minHeight: 16)
+            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.foreground.opacity(0.5), lineWidth: 1))
+            .opacity(0.8)
+    }
+}
+
+private struct EditorButton: View {
+    let title: String
+    let key: String
+    var primary = false
+    let action: () -> Void
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Text(title)
+                KeyHint(key: key)
+            }
+            .font(.system(size: 12.5, weight: primary ? .semibold : .medium))
+            .foregroundStyle(primary ? Color(Theme.raise) : Color(Theme.text))
+            .padding(.leading, 12)
+            .padding(.trailing, 10)
+            .frame(height: 28)
+            .background {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(primary ? Color(Theme.accent) : Color(Theme.kbd))
+                    .strokeBorder(primary ? .clear : Color(Theme.line), lineWidth: 1)
+            }
+            .opacity(enabled ? 1 : 0.5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+extension ShowAs {
+    var word: String {
+        switch self {
+        case .free: "Free"
+        case .tentative: "Tentative"
+        case .busy: "Busy"
+        case .outOfOffice: "Out of office"
+        case .elsewhere: "Working elsewhere"
+        }
+    }
+}
+
+extension EventVisibility {
+    var word: String {
+        switch self {
+        case .default: "Default"
+        case .public: "Public"
+        case .private: "Private"
+        case .confidential: "Confidential"
+        }
+    }
+}
+
+extension DraftReminder {
+    var word: String {
+        switch self {
+        case .default: "Calendar default"
+        case .off: "None"
+        case .before(let m) where m == 0: "At the start"
+        case .before(let m) where m % 1440 == 0: m == 1440 ? "1 day before" : "\(m / 1440) days before"
+        case .before(let m) where m % 60 == 0: m == 60 ? "1 hour before" : "\(m / 60) hours before"
+        case .before(let m): "\(m) minutes before"
+        }
+    }
+
+    static func menu(isNew: Bool) -> [DraftReminder] {
+        (isNew ? [.default] : []) + [.off, .before(minutes: 0), .before(minutes: 5), .before(minutes: 10), .before(minutes: 15),
+                                     .before(minutes: 30), .before(minutes: 60), .before(minutes: 1440)]
+    }
+}
