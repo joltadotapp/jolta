@@ -19,18 +19,19 @@ final class EventEditorModel {
     @ObservationIgnored private var endBeforeTyping: Date?
     /// Why the last save or delete didn't go through.
     var failure: String?
-    /// The occurrence being edited, hidden in the grid while the draft shows.
-    let editing: String?
+    /// The stored occurrence being edited, hidden in the grid while the draft shows.
+    let event: CalEvent?
     @ObservationIgnored var onChange: (() -> Void)?
 
-    init(core: Core, draft: EventDraft, editing: String?) {
+    init(core: Core, draft: EventDraft, event: CalEvent?) {
         self.core = core
         self.draft = draft
-        self.editing = editing
+        self.event = event
         refreshTexts()
         check()
     }
 
+    var editing: String? { event?.id }
     var isNew: Bool { draft.base == nil }
     var isReadOnly: Bool { draft.locks.contains(.title) && draft.locks.contains(.showAs) }
 
@@ -798,7 +799,7 @@ private struct CalendarDot: View {
 }
 
 /// A key shown inside a button, outlined in the button's text color.
-private struct KeyHint: View {
+struct KeyHint: View {
     let key: String
 
     var body: some View {
@@ -811,7 +812,7 @@ private struct KeyHint: View {
     }
 }
 
-private struct EditorButton: View {
+struct EditorButton: View {
     let title: String
     let key: String
     var primary = false
