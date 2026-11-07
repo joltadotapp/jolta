@@ -19,6 +19,11 @@ final class EventEditorModel {
     @ObservationIgnored private var endBeforeTyping: Date?
     /// Why the last save or delete didn't go through.
     var failure: String?
+    /// The Repeat row's sentence: the series' rule as it opened, then the
+    /// one the repeat editor made.
+    private(set) var repeatText: String?
+    /// The repeat editor, while it is open.
+    var repeatPicker: RepeatPicker?
     /// The stored occurrence being edited, hidden in the grid while the draft shows.
     let event: CalEvent?
     @ObservationIgnored var onChange: (() -> Void)?
@@ -27,6 +32,7 @@ final class EventEditorModel {
         self.core = core
         self.draft = draft
         self.event = event
+        repeatText = draft.repeat
         refreshTexts()
         check()
     }
@@ -174,6 +180,27 @@ final class EventEditorModel {
         refreshTexts()
     }
 
+    // MARK: Repeat
+
+    /// ⌘R or the Repeat row: the repeat editor on the draft as it is now.
+    func openRepeat() {
+        guard !locked(.repeat), repeatPicker == nil else { return }
+        commit()
+        do {
+            repeatPicker = try RepeatPicker(core: core, draft: draft)
+        } catch {
+            failure = "\(error)"
+        }
+    }
+
+    /// Done: the rule the repeat editor made goes into the draft.
+    func finishRepeat() {
+        guard let picker = repeatPicker, picker.canFinish else { return }
+        repeatPicker = nil
+        repeatText = picker.summary.text
+        draft.rule = picker.rule
+    }
+
     func setAllDay(_ on: Bool, defaultMinutes: Int) {
         if on, let (start, end) = interval {
             let last = end.addingTimeInterval(-1) > start ? end.addingTimeInterval(-1) : start
@@ -293,7 +320,7 @@ struct EventEditorPanel: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut(.delete, modifiers: .command)
+                .keyboardShortcut(editor.repeatPicker == nil ? KeyboardShortcut(.delete, modifiers: .command) : nil)
                 .accessibilityIdentifier("editor-delete")
             }
             Spacer()
@@ -302,13 +329,14 @@ struct EventEditorPanel: View {
                     .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityIdentifier("editor-done")
             } else {
+                // The repeat popover takes Esc and Return while it is open.
                 EditorButton(title: "Cancel", key: "Esc") { cal.closeEditor() }
-                    .keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(editor.repeatPicker == nil ? .cancelAction : nil)
                 EditorButton(title: "Save", key: "⌘↩", primary: true) {
                     commitTimes()
                     cal.saveEditor()
                 }
-                .keyboardShortcut(.return, modifiers: .command)
+                .keyboardShortcut(editor.repeatPicker == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
                 .disabled(!editor.canSave)
                 .accessibilityIdentifier("editor-save")
             }
@@ -413,13 +441,38 @@ struct EventEditorPanel: View {
                 }
             }
             ForEach(editor.problems(.time), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
-            EditorRow(icon: "repeat") {
-                HStack {
-                    Text(editor.draft.repeat ?? "Does not repeat").foregroundStyle(Color(editor.draft.repeat == nil ? Theme.text2 : Theme.text))
-                    Spacer()
-                    if editor.locked(.repeat) { LockGlyph() }
-                }
+            EditorRow(icon: "repeat") { repeatRow }
+            ForEach(editor.problems(.repeat), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+        }
+    }
+
+    @ViewBuilder
+    private var repeatRow: some View {
+        let text = Text(editor.repeatText ?? "Does not repeat").foregroundStyle(Color(editor.repeatText == nil ? Theme.text2 : Theme.text))
+        if editor.locked(.repeat) {
+            HStack {
+                text
+                Spacer()
+                LockGlyph()
             }
+        } else {
+            Button { editor.openRepeat() } label: {
+                HStack {
+                    text
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color(Theme.text3))
+                }
+                .padding(.horizontal, 6)
+                .frame(height: 26)
+                .background { if editor.repeatPicker != nil { RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)) } }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, -6)
+            .keyboardShortcut("r", modifiers: .command)
+            .help("Repeat (⌘R)")
+            .accessibilityIdentifier("editor-repeat")
+            .anchorPreference(key: RepeatRowAnchor.self, value: .bounds) { $0 }
         }
     }
 
@@ -659,6 +712,12 @@ struct EventEditorPanel: View {
 }
 
 // MARK: - Pieces
+
+/// The Repeat row's bounds, which the repeat popover's arrow points at.
+struct RepeatRowAnchor: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
+}
 
 extension View {
     /// The mockup's `.f`: a raised box with a hairline, 26 points tall.

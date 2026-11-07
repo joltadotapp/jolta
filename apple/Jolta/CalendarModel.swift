@@ -738,7 +738,10 @@ final class CalendarModel {
 
     private func hasChanges(_ editor: EventEditorModel) -> Bool {
         if editor.isReadOnly { return false }
-        if editor.isNew { return !editor.draft.title.isEmpty || !editor.draft.description.isEmpty || !editor.draft.location.isEmpty || !editor.draft.room.isEmpty }
+        if editor.isNew {
+            let d = editor.draft
+            return !d.title.isEmpty || !d.description.isEmpty || !d.location.isEmpty || !d.room.isEmpty || d.rule != nil
+        }
         return (try? core.planSave(draft: editor.draft))?.unchanged == false
     }
 

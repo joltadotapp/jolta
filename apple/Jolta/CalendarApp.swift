@@ -138,6 +138,17 @@ extension AppModel {
             return true
         }
         let cal = calendar
+        // The repeat popover moves with ↑ and ↓; Return is Done, Esc Cancel.
+        if let editor = cal.editor, let picker = editor.repeatPicker, cal.discard == nil {
+            switch event.keyCode {
+            case 126: picker.move(-1)
+            case 125: picker.move(1)
+            case 36, 76: editor.finishRepeat()
+            case 53: editor.repeatPicker = nil
+            default: return false
+            }
+            return true
+        }
         // The editor's fields and buttons take the keys; Esc closes it.
         if cal.editor != nil || cal.discard != nil {
             guard event.keyCode == 53, cal.discard == nil else { return false }

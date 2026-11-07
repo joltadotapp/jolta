@@ -49,6 +49,11 @@ struct CalendarModeView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .overlayPreferenceValue(RepeatRowAnchor.self) { anchor in
+            if let editor = cal.editor, let picker = editor.repeatPicker, let anchor {
+                RepeatPopoverLayer(editor: editor, picker: picker, row: anchor)
+            }
+        }
         .animation(.snappy(duration: 0.2), value: cal.editor.map(ObjectIdentifier.init))
         .confirmation(Binding(get: { cal.discard }, set: { cal.discard = $0 }))
         .overlay {
@@ -64,6 +69,30 @@ struct CalendarModeView: View {
             }
         }
         .animation(.snappy(duration: 0.22), value: model.toast)
+    }
+}
+
+/// The repeat popover over the grid, 14 points left of the editor, its arrow
+/// at the Repeat row. A click anywhere else cancels it.
+private struct RepeatPopoverLayer: View {
+    let editor: EventEditorModel
+    let picker: RepeatPicker
+    let row: Anchor<CGRect>
+    @State private var height: CGFloat = 400
+
+    var body: some View {
+        GeometryReader { geo in
+            let rowMid = geo[row].midY
+            let top = min(max(12, rowMid - 140), max(12, geo.size.height - height - 12))
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { editor.repeatPicker = nil }
+                RepeatPopover(picker: picker, day: editor.day, arrowY: rowMid - top, cancel: { editor.repeatPicker = nil }, done: { editor.finishRepeat() })
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                    .offset(x: geo.size.width - 400 - 14 - 340, y: top)
+            }
+        }
     }
 }
 
