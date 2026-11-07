@@ -172,6 +172,8 @@ pub struct DeletePlan {
     pub title: String,
     /// For one occurrence of a series, the scope prompt's choices.
     pub scopes: Vec<ScopeChoice>,
+    /// The prompt's line: "You're deleting Standup on Tue 24 Nov."
+    pub prompt: Option<String>,
 }
 
 /// Minutes from `now` to the next half hour, for a new event without a slot.
@@ -622,7 +624,12 @@ fn edit(conn: &Connection, draft: &EventDraft, calendar: &Calendar, scope: Scope
             // A field changed elsewhere since the editor opened keeps the
             // server's value, as for one event.
             let now = stored_now(conn, draft, base)?.ok_or_else(gone)?;
-            let lost = if now == *base { Vec::new() } else { merge::three_way(base, &event_of(draft), &now).lost };
+            let mut lost = if now == *base { Vec::new() } else { merge::three_way(base, &event_of(draft), &now).lost };
+            // An occurrence has no rule of its own: the series' says whether
+            // the rule changed elsewhere too.
+            if draft.rule != draft.rule_was && series.recurrence != draft.rule_was && series.recurrence != draft.rule {
+                lost.push(Field::Repeat);
+            }
             let kept = reset(draft, base, &lost);
             return Ok((Edit::quiet(draft.calendar, Change::Update(whole_series(&kept, &series, tz::here())?)), lost));
         }
@@ -870,7 +877,16 @@ fn nouns(fields: &[Field]) -> String {
 pub fn plan_delete(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -> Result<DeletePlan> {
     let draft = draft_for_event(conn, event, at, here)?;
     let refusal = (!draft.locks.is_empty()).then(|| draft.notice.clone().unwrap_or_else(|| "This event can't be deleted here.".into()));
-    Ok(DeletePlan { refusal, title: draft.title.clone(), scopes: delete_scopes(conn, &draft, here)? })
+    let scopes = delete_scopes(conn, &draft, here)?;
+    let prompt = (!scopes.is_empty()).then(|| {
+        let day = match draft.span.start() {
+            Moment::Date(d) => d,
+            Moment::Time(t) => t.wall.date(),
+        };
+        let title = if draft.title.trim().is_empty() { "(no title)" } else { draft.title.trim() };
+        format!("You're deleting {title} on {}.", day.format("%a %-d %b"))
+    });
+    Ok(DeletePlan { refusal, title: draft.title.clone(), scopes, prompt })
 }
 
 fn delete_scopes(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Vec<ScopeChoice>> {

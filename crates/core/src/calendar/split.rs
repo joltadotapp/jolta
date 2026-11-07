@@ -497,8 +497,11 @@ mod tests {
         assert_eq!(shown(&s), before, "nothing doubled");
     }
 
+    /// A shortening that failed for good may still have reached the server:
+    /// the old series comes back and the calendar is listed again, and the
+    /// new series stays, so no event is lost either way.
     #[test]
-    fn a_split_whose_old_series_cant_be_ended_takes_the_new_one_back() {
+    fn a_split_whose_shortening_fails_loses_no_event() {
         let (s, cal) = store("split-stuck", CalendarSource::Local);
         let mut d = opened(&s, cal, "2026-11-10 09:00");
         d.title = "Planning".into();
@@ -508,9 +511,41 @@ mod tests {
             settle_all(&s, Err("offline".into()));
         }
         assert_eq!(s.read(|c| store::calendar_op(c, op)).unwrap().state, ops::OpState::Failed);
-        assert_eq!(shown(&s), rows(&BEFORE), "the old series whole and the new one deleted again, not eleven occurrences");
-        let newest = s.read(|c| store::calendar_ops(c, 1)).unwrap().remove(0);
-        assert_eq!(newest.write.kind(), "delete", "the new series' delete is queued like any other");
+        let now = shown(&s);
+        assert!(rows(&BEFORE).iter().all(|r| now.contains(r)), "the old series whole: {now:?}");
+        assert!(now.iter().any(|(_, t, old)| t == "Planning" && !old), "and the new series kept");
+        assert_ne!(s.read(|c| store::calendar_ops(c, 1)).unwrap()[0].write.kind(), "delete", "nothing deleted on a guess");
+        assert!(s.read(|c| store::calendar(c, cal)).unwrap().cursor.is_none(), "the calendar is listed again");
+    }
+
+    /// The server kept the old series' rule: the new series goes again, and
+    /// the op ends failed, so no Apply mine shortens the old one alone.
+    #[test]
+    fn a_split_whose_old_rule_changed_elsewhere_takes_the_new_series_back() {
+        let (s, cal) = store("split-conflict", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-11-10 09:00");
+        d.title = "Planning".into();
+        let op = save(&s, &d, Scope::Following).unwrap();
+        settle_all(&s, Ok(ops::Sent::Done { version: None, merged: false }));
+        settle_all(&s, Ok(ops::Sent::Conflict { version: None, lost: vec![crate::calendar::change::Field::Repeat] }));
+        assert_eq!(s.read(|c| store::calendar_op(c, op)).unwrap().state, ops::OpState::Failed);
+        assert_eq!(s.read(|c| ops::conflict(c, cal, "s1")).unwrap(), None, "no Apply mine");
+        assert_eq!(s.read(|c| store::calendar_ops(c, 1)).unwrap()[0].write.kind(), "delete", "the new series' delete is queued");
+    }
+
+    #[test]
+    fn all_events_keeps_a_rule_changed_elsewhere_meanwhile() {
+        let (s, cal) = store("all-rule", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-11-17 09:00");
+        d.rule = Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=4".into()], ..Recurrence::default() });
+        let master = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
+        let moved = s.read(|c| ops::stored(c, cal, "s1", Some(&Moment::Time(at("2026-11-03 09:00"))))).unwrap().unwrap().event;
+        let eight = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=8".into()], ..Recurrence::default() }), ..master };
+        s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &[eight, moved], None, &horizon())).unwrap();
+        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), NOW, &horizon(), Brussels)).unwrap();
+        assert!(saved.message.contains("wasn't saved"), "{}", saved.message);
+        let now = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
+        assert_eq!(now.recurrence.unwrap().rules, ["FREQ=WEEKLY;COUNT=8"], "the rule changed elsewhere stays");
     }
 
     #[test]

@@ -843,10 +843,18 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
             land(conn, op, version.as_ref(), !merged, horizon)?;
         }
         Ok(Sent::Conflict { version, lost }) => {
-            store::settle_calendar_op(conn, op.id, OpState::Conflict)?;
+            // The server kept the occurrence a delete took out: the series
+            // comes back as it was, then the occurrence as the server has it.
+            if let Write::Cancel { .. } = op.write {
+                revert(conn, op, horizon)?;
+            }
+            // A split whose old series kept its rule elsewhere: the new
+            // series goes again, and nothing is left to apply.
+            let compensated = op.after.is_some() && lost.contains(&Field::Repeat);
+            store::settle_calendar_op(conn, op.id, if compensated { OpState::Failed } else { OpState::Conflict })?;
             store::set_calendar_op_lost(conn, op.id, &lost)?;
             land(conn, op, version.as_ref(), false, horizon)?;
-            if lost.contains(&Field::Repeat) {
+            if compensated {
                 take_back_new_series(conn, op, now, horizon)?;
             }
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
@@ -900,7 +908,13 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
                 }
                 None => revert(conn, op, horizon)?,
             }
-            take_back_new_series(conn, op, now, horizon)?;
+            // The old series' shortening may have reached the server before
+            // its answer was lost: the calendar is listed again, which shows
+            // what the server has. Deleting the new series here could lose
+            // the events after the split.
+            if op.after.is_some() {
+                store::forget_calendar_cursor(conn, op.calendar)?;
+            }
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
             failure = Some(Failure { message: format!("Jolta couldn't save the change to {title}: {reason}"), event });
         }
@@ -909,9 +923,9 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
     Ok(Settled { op: op.id, calendar: op.calendar, failure })
 }
 
-/// This and following whose old series couldn't be ended: the new series,
-/// made already, is deleted again, guarded by its version as any delete,
-/// so the old series alone shows the events.
+/// This and following whose old series the server kept whole: the new
+/// series, made already, is deleted again, guarded by its version as any
+/// delete, so the old series alone shows the events.
 fn take_back_new_series(conn: &Connection, op: &CalendarOp, now: i64, horizon: &Horizon) -> Result<()> {
     let Some(first) = op.after else { return Ok(()) };
     let first = store::calendar_op(conn, first)?;
@@ -950,15 +964,14 @@ fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: boo
     {
         return store::forget_calendar_cursor(conn, op.calendar);
     }
-    // A new changed occurrence became an instance with an id of its own:
-    // only its row moves there, and only ops on that occurrence follow it.
-    if let Write::Update { event, fresh: true, .. } = &op.write
-        && v.remote_id != from
-    {
-        store::refile_occurrence(conn, op.calendar, &op.uid, event.recurrence_id.as_ref(), from, &v.remote_id)?;
+    // An occurrence the server holds as an instance with an id of its own,
+    // written by the op or kept against its delete: only its row moves
+    // there, and only ops on that occurrence follow it.
+    if op.recurrence_id.is_some() && v.remote_id != from {
+        store::refile_occurrence(conn, op.calendar, &op.uid, op.recurrence_id.as_ref(), from, &v.remote_id)?;
         store::apply_item(conn, op.calendar, &v.remote_id, v.etag.as_deref(), &v.events, blob.as_deref(), horizon)?;
         for mut later in store::later_calendar_ops(conn, op)? {
-            if later.recurrence_id != event.recurrence_id || later.held.as_ref().is_none_or(|h| h.remote_id != from) {
+            if later.recurrence_id != op.recurrence_id || later.held.as_ref().is_none_or(|h| h.remote_id != from) {
                 continue;
             }
             later.held = Some(Held { remote_id: v.remote_id.clone(), etag: if clean { v.etag.clone() } else { later.held.and_then(|h| h.etag) } });
@@ -1994,6 +2007,33 @@ mod tests {
         assert_eq!(state(&s, op).0, OpState::Done);
         assert_eq!(shown(&s), shown_before, "the moved occurrence stays at 15:00");
         assert_eq!(s.read(|c| series_rows(c, cal)).unwrap(), 2);
+    }
+
+    /// An occurrence changed elsewhere after the user deleted it stays, as
+    /// the server has it, and its series with it.
+    #[test]
+    fn deleting_an_occurrence_changed_elsewhere_keeps_it_and_its_series() {
+        let (s, cal, server, series) = synced_series("cancel-stale");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let op = q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: rid }).unwrap();
+        let theirs = EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup, theirs", "2026-12-01 09:00") };
+        server.put("g1_instance", theirs);
+        server.put("g1", series.clone());
+        let settled = s.write(|tx| store::claim_calendar_ops(tx, NOW + 3600, AT_ONCE)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let sent = rt.block_on(deliver(&server, &settled[0], None)).map_err(|e| e.to_string()).map(|d| match d {
+            Delivered::Done { version, merged } => Sent::Done { version: version.map(|v| (v, None)), merged },
+            Delivered::Conflict { version, lost } => Sent::Conflict { version: version.map(|v| (v, None)), lost },
+            Delivered::Gone => Sent::Gone,
+        });
+        assert!(matches!(sent, Ok(Sent::Conflict { .. })), "{sent:?}");
+        s.write(|tx| settle(tx, &settled[0], sent, NOW, &horizon())).unwrap();
+        assert_eq!(state(&s, op).0, OpState::Conflict);
+        let master = s.read(|c| stored(c, cal, "u1", None)).unwrap().unwrap().event;
+        assert!(master.recurrence.as_ref().unwrap().exdates.is_empty(), "the series is whole again");
+        assert_eq!(s.read(|c| stored(c, cal, "u1", Some(&rid))).unwrap().unwrap().event.title, "Standup, theirs");
+        assert_eq!(s.read(|c| conflict(c, cal, "u1")).unwrap().unwrap().action, "Delete anyway");
+        assert!(s.write(|tx| apply_mine(tx, op, NOW, &horizon())).unwrap().is_some(), "and Delete anyway queues the delete again");
     }
 
     fn series_rows(c: &Connection, cal: CalendarId) -> Result<i64> {
