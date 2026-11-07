@@ -137,6 +137,9 @@ pub fn of(calendar: &Calendar) -> Capabilities {
         },
         CalendarSource::CalDav => Capabilities {
             hold_update: Hold::NeverForMeetingFields,
+            // iCloud mailed only the guest a change of people added or
+            // removed (iCloud test account, 2026-11-08); Fastmail is unknown.
+            new_people_only: calendar.remote_id.contains("icloud.com"),
             move_within: MoveRule::Native,
             options: OrganizerOptions { request_responses: true, allow_new_time_proposals: true, ..Default::default() },
             show_as: vec![ShowAs::Free, ShowAs::Busy],
@@ -222,6 +225,8 @@ mod tests {
 
         let i = of(&calendar(CalendarSource::CalDav, Access::Owner));
         assert_eq!((i.hold_update, i.new_people_only, i.sends_itself), (Hold::NeverForMeetingFields, false, true));
+        let icloud = of(&Calendar { remote_id: "https://p01-caldav.icloud.com/1/calendars/home/".into(), ..calendar(CalendarSource::CalDav, Access::Owner) });
+        assert!(icloud.new_people_only, "iCloud mails only the people added or removed");
         assert!(i.video.is_empty());
 
         let l = of(&calendar(CalendarSource::Local, Access::Owner));

@@ -550,8 +550,8 @@ mod tests {
         assert!(buttons(&g).contains(&("Send", Some(Notify::Changed), ChoiceStyle::Primary)) && buttons(&g).contains(&("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart)));
         let m = dialog(&people, &caps_of(Graph), "Microsoft 365", false).unwrap();
         assert_eq!(buttons(&m), [("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::Changed), ChoiceStyle::Primary)]);
-        let i = dialog(&people, &caps_of(CalDav), "iCloud", false).unwrap();
-        assert_eq!(i.title, "iCloud will email 6 people", "iCloud's scheduling may tell everyone");
+        let i = dialog(&people, &caps_of(CalDav), "Your calendar server", false).unwrap();
+        assert_eq!(i.title, "Your calendar server will email 6 people", "a CalDAV server not measured may tell everyone");
 
         let mut gone = before.clone();
         gone.attendees.retain(|a| !a.person.address.starts_with("els"));
