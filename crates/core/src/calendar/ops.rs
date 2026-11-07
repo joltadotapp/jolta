@@ -591,6 +591,9 @@ mod tests {
         let second = q(&s, cal, Change::Create(vec![event("u2", "Lunch", "2026-11-25 12:00")])).unwrap();
         assert_eq!(s.write(|tx| undo(tx, second, NOW, &h)).unwrap(), Undone::Dropped);
         assert_eq!(shown(&s), pairs(&[("24 09:00", "Standup")]), "the new event is gone");
+        let third = q(&s, cal, Change::Create(vec![event("u3", "Coffee", "2026-11-26 15:00")])).unwrap();
+        assert!(third.0 > second.0, "a dropped op's id, an undo token, is never given out again");
+        assert!(s.write(|tx| undo(tx, second, NOW, &h)).is_err(), "so its stale token undoes nothing");
         assert_eq!(state(&s, create).0, OpState::Done);
     }
 

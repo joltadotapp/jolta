@@ -4,9 +4,10 @@
 -- `target` is the event as the user saved it, or for a move the
 -- destination calendar id. `remote_key` makes a retried create land on
 -- the same object: Graph's transactionId, Google's event id, the CalDAV
--- resource name. Ops that email people wait until `send_after`.
+-- resource name. Ops that email people wait until `send_after`. An id is
+-- an undo token, so a dropped op's id is never given out again.
 CREATE TABLE calendar_op (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     calendar_id INTEGER NOT NULL REFERENCES calendar(id) ON DELETE CASCADE,
     uid TEXT NOT NULL,
     recurrence_id TEXT NOT NULL DEFAULT '',
