@@ -18,6 +18,9 @@ struct Target {
     extra: Option<Extra>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     held: Option<Held>,
+    /// A sync passed over a server version of the op's rows (`apply_item`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    passed_over: bool,
 }
 
 const COLS: &str = "id, calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key,
@@ -55,6 +58,7 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
         message: r.get(7)?,
         extra: target.extra,
         held: target.held,
+        passed_over: target.passed_over,
         remote_key: r.get(10)?,
         send_after: r.get(11)?,
         state: r.get(12)?,
@@ -94,7 +98,7 @@ pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<Calendar
 /// An op's `base` and `target` columns.
 fn written(op: &CalendarOp) -> Result<(Option<String>, String)> {
     let (base, events) = columns(&op.write);
-    let target = Target { events: events.to_vec(), extra: op.extra.clone(), held: op.held.clone() };
+    let target = Target { events: events.to_vec(), extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over };
     Ok((base.map(to_json).transpose()?, to_json(&target)?))
 }
 

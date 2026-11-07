@@ -164,6 +164,9 @@ pub struct CalendarOp {
     /// For an update or delete on a server: the object and version it
     /// writes over.
     pub held: Option<Held>,
+    /// A sync passed over a server version of the op's rows while it
+    /// waited, so taking it back leaves the store behind the server.
+    pub passed_over: bool,
     pub send_after: i64,
     pub state: OpState,
     /// Claimed by the worker at least once, so it may have reached the server.
@@ -234,6 +237,7 @@ pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Res
             extra: edit.extra.clone(),
             remote_key,
             held,
+            passed_over: false,
             send_after: now + delay,
             state: OpState::Pending,
             tried: false,
@@ -422,8 +426,13 @@ fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &st
 }
 
 /// Puts the store back as it was before `op`. Events a delete took come
-/// back under the object and version it held.
+/// back under the object and version it held. When a sync passed over a
+/// server version meanwhile, the calendar is listed whole on its next sync
+/// to catch up.
 fn revert(conn: &Connection, op: &CalendarOp, horizon: &Horizon) -> Result<()> {
+    if store::calendar_op(conn, op.id)?.passed_over {
+        store::forget_calendar_cursor(conn, op.calendar)?;
+    }
     let back = match &op.write {
         Write::Create(events) => Write::Delete(events.clone()),
         Write::Update { base, event } => Write::Update { base: event.clone(), event: base.clone() },
@@ -558,8 +567,9 @@ pub type Landed = (Version, Option<String>);
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sent {
     /// The server holds the change: the object as it is now; none after a
-    /// delete, or on a local calendar, whose store is its server.
-    Done(Option<Landed>),
+    /// delete, or on a local calendar, whose store is its server. `merged`
+    /// when a change made elsewhere was merged in first.
+    Done { version: Option<Landed>, merged: bool },
     /// Changed elsewhere meanwhile, and the server's value stayed for the
     /// fields in `lost`: the object as it is now, the user's other changes
     /// merged in.
@@ -576,14 +586,14 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
     let title = op.write.event().map(|e| e.title.as_str()).unwrap_or("the event");
     let mut failure = None;
     match sent {
-        Ok(Sent::Done(version)) => {
+        Ok(Sent::Done { version, merged }) => {
             store::settle_calendar_op(conn, op.id, OpState::Done)?;
-            land(conn, op, version.as_ref(), horizon)?;
+            land(conn, op, version.as_ref(), !merged, horizon)?;
         }
         Ok(Sent::Conflict { version, lost }) => {
             store::settle_calendar_op(conn, op.id, OpState::Conflict)?;
             store::set_calendar_op_lost(conn, op.id, &lost)?;
-            land(conn, op, version.as_ref(), horizon)?;
+            land(conn, op, version.as_ref(), false, horizon)?;
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
             let message = match op.write {
                 Write::Delete(_) => format!("{title} changed in {} after you deleted it, so it wasn't deleted.", place(&calendar)),
@@ -633,25 +643,32 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
     Ok(Settled { op: op.id, calendar: op.calendar, failure })
 }
 
-/// Stores the version an op left on the server as a sync would, and makes
-/// it the version the event's later ops on the same object write over:
-/// their edits start from this one's.
-fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, horizon: &Horizon) -> Result<()> {
+/// Stores the version an op left on the server as a sync would. The
+/// event's later ops on the same object follow it to the id the server gave
+/// it. When the write was `clean`, holding only this op's change, it is
+/// also the version they write over, since their edits start from this
+/// one's; after a merge it holds a change they haven't seen, so they keep
+/// the version they hold and meet it as a 412 of their own.
+fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: bool, horizon: &Horizon) -> Result<()> {
     let Some((v, blob)) = version else { return Ok(()) };
     let from = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
     store::refile_event_rows(conn, op.calendar, &op.uid, from, &v.remote_id)?;
     store::apply_item(conn, op.calendar, &v.remote_id, v.etag.as_deref(), &v.events, blob.as_deref(), horizon)?;
-    store::set_item_version(conn, op.calendar, &v.remote_id, v.etag.as_deref(), blob.as_deref())?;
+    if clean {
+        store::set_item_version(conn, op.calendar, &v.remote_id, v.etag.as_deref(), blob.as_deref())?;
+    }
     for mut later in store::later_calendar_ops(conn, op)? {
-        if later.held.as_ref().is_some_and(|h| h.remote_id == from) {
-            later.held = Some(Held { remote_id: v.remote_id.clone(), etag: v.etag.clone() });
+        let Some(held) = later.held.as_mut().filter(|h| h.remote_id == from) else { continue };
+        held.remote_id.clone_from(&v.remote_id);
+        if clean {
+            held.etag.clone_from(&v.etag);
             if let Write::Delete(_) = later.write {
                 for e in &v.events {
                     later.write.rebase(e);
                 }
             }
-            store::rewrite_calendar_op(conn, &later)?;
         }
+        store::rewrite_calendar_op(conn, &later)?;
     }
     Ok(())
 }
@@ -697,7 +714,7 @@ async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
     let id = op.calendar;
     let calendar = jolta.store.read_async(move |c| store::calendar(c, id)).await?;
     if calendar.source == CalendarSource::Local {
-        return Ok(Sent::Done(None));
+        return Ok(Sent::Done { version: None, merged: false });
     }
     let source = super::sync::calendar_source(jolta, &calendar).await?;
     let raw = match (&op.held, &op.write) {
@@ -717,7 +734,7 @@ async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
         .transpose()
     };
     Ok(match delivered {
-        Delivered::Done(v) => Sent::Done(keep(v)?),
+        Delivered::Done { version, merged } => Sent::Done { version: keep(version)?, merged },
         Delivered::Conflict { version, lost } => Sent::Conflict { version: keep(version)?, lost },
         Delivered::Gone => Sent::Gone,
     })
@@ -726,7 +743,8 @@ async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
 /// What the server made of an op, before its text is kept.
 #[derive(Clone, Debug, PartialEq)]
 enum Delivered {
-    Done(Option<Version>),
+    /// Written; `merged` when a change made elsewhere was merged in first.
+    Done { version: Option<Version>, merged: bool },
     Conflict { version: Option<Version>, lost: Vec<Field> },
     Gone,
 }
@@ -767,7 +785,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
     };
     match &op.write {
         Write::Create(events) => match remote.write(&OpWrite::Create { events, key: &op.remote_key, extra }).await? {
-            Written::Saved(v) => Ok(Delivered::Done(v)),
+            Written::Saved(version) => Ok(Delivered::Done { version, merged: false }),
             Written::Stale | Written::Gone => Err(Error::Other("the server refused the new event".into())),
         },
         Write::Update { base, event } => {
@@ -775,12 +793,15 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             let (mut base, mut mine) = (base.clone(), event.clone());
             let mut held = held_as(held, &base, raw);
             let mut lost: Vec<Field> = Vec::new();
-            for _ in 0..MERGE_ROUNDS {
+            for round in 0..MERGE_ROUNDS {
                 match remote.write(&OpWrite::Update { held: &held, base: &base, event: &mine, extra }).await? {
-                    Written::Saved(v) => return Ok(if lost.is_empty() { Delivered::Done(v) } else { Delivered::Conflict { version: v, lost } }),
+                    Written::Saved(version) if lost.is_empty() => return Ok(Delivered::Done { version, merged: round > 0 }),
+                    Written::Saved(version) => return Ok(Delivered::Conflict { version, lost }),
                     Written::Gone => return Ok(Delivered::Gone),
                     Written::Stale => {
-                        let Some(now) = remote.fetch(&held.remote_id, &mine.uid, &mine.alarms).await? else { return Ok(Delivered::Gone) };
+                        // Google gives no reminders for an event on the
+                        // calendar's defaults; the held version's stand in.
+                        let Some(now) = remote.fetch(&held.remote_id, &mine.uid, &base.alarms).await? else { return Ok(Delivered::Gone) };
                         let Some(theirs) = now.events.iter().find(|e| same_row(e, &mine)).cloned() else { return Ok(Delivered::Gone) };
                         let merged = merge::three_way(&base, &mine, &theirs);
                         for field in merged.lost {
@@ -790,7 +811,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
                         }
                         lost.sort();
                         if merged.event == theirs {
-                            return Ok(if lost.is_empty() { Delivered::Done(Some(now)) } else { Delivered::Conflict { version: Some(now), lost } });
+                            return Ok(if lost.is_empty() { Delivered::Done { version: Some(now), merged: true } } else { Delivered::Conflict { version: Some(now), lost } });
                         }
                         held = held_as(&Held { remote_id: now.remote_id.clone(), etag: now.etag.clone() }, &theirs, now.raw.clone());
                         (base, mine) = (theirs, merged.event);
@@ -800,15 +821,15 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             Err(Error::Other("it kept changing on the server".into()))
         }
         Write::Delete(events) => {
-            let Some(first) = events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()) else { return Ok(Delivered::Done(None)) };
+            let Some(first) = events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()) else { return Ok(Delivered::Done { version: None, merged: false }) };
             let Some(held) = &op.held else { return Err(Error::Other("a delete without the version it removes".into())) };
             let mut held = held_as(held, first, None);
             for _ in 0..MERGE_ROUNDS {
                 match remote.write(&OpWrite::Delete { held: &held }).await? {
-                    Written::Saved(_) | Written::Gone => return Ok(Delivered::Done(None)),
+                    Written::Saved(_) | Written::Gone => return Ok(Delivered::Done { version: None, merged: false }),
                     Written::Stale => {
-                        let Some(now) = remote.fetch(&held.remote_id, &first.uid, &first.alarms).await? else { return Ok(Delivered::Done(None)) };
-                        let Some(theirs) = now.events.iter().find(|e| same_row(e, first)) else { return Ok(Delivered::Done(None)) };
+                        let Some(now) = remote.fetch(&held.remote_id, &first.uid, &first.alarms).await? else { return Ok(Delivered::Done { version: None, merged: false }) };
+                        let Some(theirs) = now.events.iter().find(|e| same_row(e, first)) else { return Ok(Delivered::Done { version: None, merged: false }) };
                         let changed: Vec<Field> = FIELDS.into_iter().filter(|f| f.differs(first, theirs)).collect();
                         if !changed.is_empty() {
                             return Ok(Delivered::Conflict { version: Some(now), lost: changed });
@@ -929,7 +950,7 @@ mod tests {
     }
 
     fn send_all(s: &Store, result: std::result::Result<(), String>) -> Vec<Settled> {
-        let sent = result.map(|()| Sent::Done(None));
+        let sent = result.map(|()| Sent::Done { version: None, merged: false });
         claim(s).iter().map(|op| s.write(|tx| settle(tx, op, sent.clone(), NOW, &horizon())).unwrap()).collect()
     }
 
@@ -1310,7 +1331,7 @@ mod tests {
             .iter()
             .map(|op| {
                 let sent = rt.block_on(deliver(server, op, None)).map_err(|e| e.to_string()).map(|d| match d {
-                    Delivered::Done(v) => Sent::Done(v.map(|v| (v, None))),
+                    Delivered::Done { version, merged } => Sent::Done { version: version.map(|v| (v, None)), merged },
                     Delivered::Conflict { version, lost } => Sent::Conflict { version: version.map(|v| (v, None)), lost },
                     Delivered::Gone => Sent::Gone,
                 });
@@ -1377,6 +1398,22 @@ mod tests {
         assert_eq!(shown_where(&s), triples(&[("Daily", "Room 9", "3")]), "the next sync agrees");
     }
 
+    /// A sync passes over the server's version of a row an op holds; when
+    /// the op is then taken back, the next sync lists the calendar whole.
+    #[test]
+    fn taking_back_an_op_a_sync_passed_over_lists_the_calendar_again() {
+        let (s, cal, server) = synced("passed-over");
+        s.write(|tx| store::set_calendar_cursor(tx, cal, Some("token-1"), None)).unwrap();
+        let edit = q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 09:00"))).unwrap();
+        sync(&s, cal, &server);
+        assert_eq!(s.read(|c| store::calendar(c, cal)).unwrap().cursor.as_deref(), Some("token-1"), "an unchanged server passes nothing over");
+        server.objects.lock().unwrap().remove("g1");
+        s.write(|tx| store::remove_item(tx, cal, "g1", store::Removal::Deleted, &horizon())).unwrap();
+        assert_eq!(shown(&s), pairs(&[("24 09:00", "Daily")]), "the edit stays while it waits");
+        assert_eq!(s.write(|tx| undo(tx, edit, NOW, &horizon())).unwrap(), Undone::Dropped);
+        assert_eq!(s.read(|c| store::calendar(c, cal)).unwrap().cursor, None, "the next sync lists everything and finds it gone");
+    }
+
     #[test]
     fn a_delete_waiting_to_be_sent_stays_deleted_through_a_sync() {
         let (s, cal, server) = synced("delete-sync");
@@ -1411,6 +1448,24 @@ mod tests {
         assert!(s.read(|c| conflict(c, cal, "u1")).unwrap().is_none(), "the notice goes");
         run(&s, &server);
         assert_eq!((state(&s, again).0, server.get("g1").unwrap().title.as_str()), (OpState::Done, "Daily"));
+    }
+
+    /// An edit queued behind one that merged a change made elsewhere hasn't
+    /// seen that change: it meets it as a 412 of its own and keeps the
+    /// server's value where both changed the same field.
+    #[test]
+    fn an_edit_behind_a_merged_one_still_meets_the_change_made_elsewhere() {
+        let (s, cal, server) = synced("behind-merge");
+        let first = q(&s, cal, Change::Update(EventData { location: "Room 2".into(), ..event("u1", "Standup", "2026-11-24 09:00") })).unwrap();
+        let second = q(&s, cal, Change::Update(EventData { location: "Room 2".into(), ..event("u1", "Daily", "2026-11-24 09:00") })).unwrap();
+        server.edit("g1", |e| e.title = "Weekly".into());
+        run(&s, &server);
+        assert_eq!(state(&s, first).0, OpState::Done);
+        run(&s, &server);
+        let op = s.read(|c| store::calendar_op(c, second)).unwrap();
+        assert_eq!((op.state, op.lost.as_slice()), (OpState::Conflict, [Field::Title].as_slice()));
+        assert_eq!(server.get("g1").unwrap().title, "Weekly", "the title changed elsewhere isn't overwritten");
+        assert_eq!(server.get("g1").unwrap().location, "Room 2");
     }
 
     #[test]
@@ -1493,7 +1548,7 @@ mod tests {
         assert_eq!(s.read(|c| store::calendar_op(c, id)).unwrap().send_after, NOW + UNDO_SEND_SECONDS);
         assert!(s.write(|tx| store::claim_calendar_ops(tx, NOW, AT_ONCE)).unwrap().is_empty(), "not due inside the window");
         assert_eq!(claim(&s).len(), 1);
-        s.write(|tx| settle(tx, &store::calendar_op(tx, id)?, Ok(Sent::Done(None)), NOW, &horizon())).unwrap();
+        s.write(|tx| settle(tx, &store::calendar_op(tx, id)?, Ok(Sent::Done { version: None, merged: false }), NOW, &horizon())).unwrap();
         assert!(s.write(|tx| undo(tx, id, NOW, &horizon())).is_err(), "an update that went out can't be taken back");
     }
 }

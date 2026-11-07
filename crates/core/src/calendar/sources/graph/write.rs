@@ -94,8 +94,14 @@ async fn fetch(api: &impl Api, remote_id: &str, uid: &str, me: &str, here: Tz) -
 }
 
 /// Graph's answer as the event to store, under the stored event's UID. A
-/// changed occurrence is read on its series' clock, so its series comes too.
+/// series master is read again with the occurrences it cancelled, which
+/// only a GET that names them returns; a changed occurrence is read on its
+/// series' clock, so its series comes too.
 async fn version(api: &impl Api, reply: Value, uid: &str, me: &str, here: Tz) -> Result<Version> {
+    let reply = match (reply["type"].as_str(), reply["id"].as_str()) {
+        (Some("seriesMaster"), Some(id)) => get_ok(api, &format!("/me/events/{}?$select={FIELDS},cancelledOccurrences", encode(id))).await?,
+        _ => reply,
+    };
     let raw = serde_json::to_vec(&reply).ok();
     let g: GraphEvent = serde_json::from_value(reply).map_err(|e| Error::Other(format!("Microsoft 365 reply: {e}")))?;
     let master: Option<GraphEvent> = match (&g.series_master_id, g.kind.as_str()) {
@@ -336,6 +342,26 @@ mod tests {
         let Written::Saved(Some(v)) = first.unwrap() else { panic!("saved") };
         assert_eq!((v.remote_id.as_str(), v.etag.as_deref(), v.events[0].uid.as_str()), ("AAMk1", Some("ck1"), "u1@jolta.app"), "the stored event keeps Jolta's UID");
         assert_eq!(again.unwrap(), Written::Saved(Some(v)));
+    }
+
+    /// A PATCH answer leaves out the occurrences a series cancelled, so the
+    /// series is read again with them before it is stored.
+    #[tokio::test]
+    async fn a_series_is_stored_with_the_occurrences_it_cancelled() {
+        let base = standup();
+        let held = Stored { id: EventId(1), remote_id: "AAMk1".into(), etag: Some("ck1".into()), raw: None, data: base.clone() };
+        let mine = EventData { title: "Daily".into(), ..base.clone() };
+        let master = |cancelled: Value| {
+            let mut m = graph("AAMk1", "ck2");
+            m["type"] = json!("seriesMaster");
+            m["recurrence"] = json!({ "pattern": { "type": "daily", "interval": 1 }, "range": { "type": "noEnd", "startDate": "2026-11-24", "recurrenceTimeZone": "Europe/Brussels" } });
+            m["cancelledOccurrences"] = cancelled;
+            m
+        };
+        let (done, seen) = sent(OpWrite::Update { held: &held, base: &base, event: &mine, extra: None }, vec![(200, master(json!([]))), (200, master(json!(["OID.AAMk1.2026-11-25"])))]).await;
+        let Written::Saved(Some(v)) = done.unwrap() else { panic!("saved") };
+        assert_eq!(seen.last().unwrap(), "GET /me/events/AAMk1");
+        assert_eq!(v.events[0].recurrence.as_ref().unwrap().exdates.len(), 1, "the cancelled 25th stays cancelled");
     }
 
     #[tokio::test]

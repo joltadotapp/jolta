@@ -245,6 +245,37 @@ fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Optio
         .query_row(params![calendar, uid, recurrence_id.map(moment_text).unwrap_or_default()], |r| r.get(0))?)
 }
 
+/// Marks the ops whose rows of `remote_id` a server version just passed
+/// over: the rows still there after its delete.
+fn passed_over(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result<()> {
+    conn.prepare_cached(
+        "UPDATE calendar_op SET target = json_set(target, '$.passed_over', json('true'))
+         WHERE calendar_id = ?1 AND state IN ('pending', 'sending')
+           AND uid IN (SELECT uid FROM event WHERE calendar_id = ?1 AND remote_id = ?2)",
+    )?
+    .execute(params![calendar, remote_id])?;
+    Ok(())
+}
+
+/// Marks the waiting ops of `uid`: a server version of their rows went
+/// unstored. An op that lands stores the server's version anyway; one that
+/// is dropped or fails for good asks for the calendar to be listed again.
+fn mark_passed_over(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<()> {
+    conn.prepare_cached(
+        "UPDATE calendar_op SET target = json_set(target, '$.passed_over', json('true'))
+         WHERE calendar_id = ?1 AND uid = ?2 AND state IN ('pending', 'sending')",
+    )?
+    .execute(params![calendar, uid])?;
+    Ok(())
+}
+
+/// Drops a calendar's sync cursor, so its next sync lists it whole again
+/// and stores what earlier rounds passed over.
+pub fn forget_calendar_cursor(conn: &Connection, calendar: CalendarId) -> Result<()> {
+    conn.execute("UPDATE calendar SET cursor = NULL WHERE id = ?1", [calendar])?;
+    Ok(())
+}
+
 /// Replaces the events of one remote object and rebuilds the occurrences of
 /// every series it touched, except rows a calendar op still has to send
 /// (`HELD`). An unchanged ETag skips the work, so applying the same batch
@@ -270,9 +301,12 @@ pub fn apply_item(
     }
     let mut uids = item_uids(conn, calendar, remote_id)?;
     conn.prepare_cached(&format!("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2 AND NOT {HELD}"))?.execute(params![calendar, remote_id])?;
+    passed_over(conn, calendar, remote_id)?;
     for e in events {
         uids.insert(e.uid.clone());
-        if !held(conn, calendar, &e.uid, e.recurrence_id.as_ref())? {
+        if held(conn, calendar, &e.uid, e.recurrence_id.as_ref())? {
+            mark_passed_over(conn, calendar, &e.uid)?;
+        } else {
             insert_event(conn, calendar, remote_id, etag, e, blob)?;
         }
     }
@@ -348,6 +382,7 @@ pub fn remove_item(conn: &Connection, calendar: CalendarId, remote_id: &str, rem
     let mut deleted = conn
         .prepare_cached(&format!("DELETE FROM event WHERE calendar_id = ?1 AND remote_id = ?2 AND NOT {HELD}"))?
         .execute(params![calendar, remote_id])?;
+    passed_over(conn, calendar, remote_id)?;
     // The series may be gone already, left out of an earlier listing, while
     // its changed occurrences stayed: find them by the id they are filed under.
     if removal == Removal::Deleted {
