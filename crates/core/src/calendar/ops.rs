@@ -382,7 +382,11 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<(), 
         }
         Err(reason) => {
             store::fail_calendar_attempt(conn, op.id, &reason, None)?;
-            revert(conn, op, horizon)?;
+            // A later edit of the event is in the store and carries this
+            // one's change with it; putting the old version back would hide it.
+            if !store::later_calendar_op_waits(conn, op)? {
+                revert(conn, op, horizon)?;
+            }
             let title = op.write.event().map(|e| e.title.as_str()).unwrap_or("the event");
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
             failure = Some(Failure { message: format!("Jolta couldn't save the change to {title}: {reason}"), event });
@@ -663,6 +667,32 @@ mod tests {
         assert_eq!(shown(&s), pairs(&[("24 09:00", "Standup")]), "back to the version before the edit");
         assert_eq!(not_synced(&s, cal, "u1"), [false]);
         assert!(s.write(|tx| undo(tx, edit, NOW, &horizon())).is_err(), "a failed op has nothing to undo");
+    }
+
+    #[test]
+    fn a_failed_op_keeps_the_later_edit_waiting_behind_it() {
+        let (s, cal) = setup("fail-later");
+        q(&s, cal, Change::Create(vec![event("u1", "Standup", "2026-11-24 09:00")])).unwrap();
+        send_all(&s, Ok(()));
+        let first = q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 10:00"))).unwrap();
+        let second = q(&s, cal, Change::Update(event("u1", "Daily sync", "2026-11-24 11:00"))).unwrap();
+        for _ in 0..MAX_ATTEMPTS {
+            send_all(&s, Err("timed out".into()));
+        }
+        assert_eq!(state(&s, first).0, OpState::Failed);
+        assert_eq!(shown(&s), pairs(&[("24 11:00", "Daily sync")]), "the later edit stays in the store");
+        send_all(&s, Ok(()));
+        assert_eq!(state(&s, second).0, OpState::Done);
+        assert_eq!(shown(&s), pairs(&[("24 11:00", "Daily sync")]));
+    }
+
+    #[test]
+    fn the_next_due_time_skips_ops_waiting_behind_a_held_one() {
+        let (s, cal) = setup("due");
+        let held = q(&s, cal, Change::Create(vec![event("u1", "Standup", "2026-11-24 09:00")])).unwrap();
+        s.write(|tx| store::hold_calendar_op(tx, held, NOW + 600)).unwrap();
+        q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 10:00"))).unwrap();
+        assert_eq!(s.read(store::next_calendar_op_due).unwrap(), Some(NOW + 600), "the edit behind it isn't due before the held op");
     }
 
     /// Check 2: changing one occurrence writes its own row; the series row

@@ -74,7 +74,7 @@ fn roles(people: &[Attendee]) -> std::collections::BTreeMap<String, super::Role>
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Classified {
     /// Changes the guests hear about: time, repeat, location, meeting link,
-    /// title, description, status.
+    /// title, description, status, and a kept guest's role.
     pub meeting: Vec<Field>,
     /// The user's own: alarms, color, categories, show as, visibility.
     pub own: Vec<Field>,
@@ -110,6 +110,10 @@ pub fn classify(before: &EventData, after: &EventData, me: &[String]) -> Classif
         if has(&was, p) { &mut out.kept } else { &mut out.added }.push(p.clone());
     }
     out.removed = was.into_iter().filter(|p| !has(&now, p)).collect();
+    let role = |e: &EventData, p: &Person| e.attendees.iter().find(|a| a.person.address.eq_ignore_ascii_case(&p.address)).map(|a| a.role);
+    if out.kept.iter().any(|p| role(before, p) != role(after, p)) {
+        out.meeting.push(Field::People);
+    }
     out
 }
 
@@ -213,6 +217,12 @@ mod tests {
         alias.attendees[0].person.address = "alias@example.com".into();
         let c = classify(&alias, &alias, &["alias@example.com".into()]);
         assert_eq!(addresses(&c.kept), ["ann@example.com", "bo@example.com"], "one of the user's addresses is never a guest");
+
+        let mut optional = before.clone();
+        optional.attendees[1].role = Role::Optional;
+        let c = classify(&before, &optional, &[]);
+        assert_eq!(c.meeting, [Field::People], "a guest made optional hears about it");
+        assert!(!c.is_own_only());
 
         let mut renamed_case = before.clone();
         renamed_case.attendees[1].person.address = "Ann@Example.com".into();

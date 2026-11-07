@@ -141,9 +141,26 @@ pub fn has_calendar_claims(conn: &Connection) -> Result<bool> {
     Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM calendar_op WHERE state = 'sending')", [], |r| r.get(0))?)
 }
 
-/// When the next waiting op is due, if one waits.
+/// When the next op the worker could claim is due, if one waits. An op
+/// waiting behind an older op of its event counts from that op.
 pub fn next_calendar_op_due(conn: &Connection) -> Result<Option<i64>> {
-    Ok(conn.query_row("SELECT min(send_after) FROM calendar_op WHERE state = 'pending'", [], |r| r.get(0))?)
+    Ok(conn.query_row(
+        "SELECT min(o.send_after) FROM calendar_op o
+         WHERE o.state = 'pending'
+           AND NOT EXISTS (SELECT 1 FROM calendar_op p WHERE p.calendar_id = o.calendar_id AND p.uid = o.uid
+                             AND p.id < o.id AND p.state IN ('pending', 'sending'))",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether a newer op for the same event waits or is on its way.
+pub fn later_calendar_op_waits(conn: &Connection, op: &CalendarOp) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state IN ('pending', 'sending'))",
+        params![op.calendar, op.uid, op.id.0],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn set_calendar_op_state(conn: &Connection, id: CalendarOpId, state: OpState, error: Option<&str>) -> Result<()> {
