@@ -90,8 +90,9 @@ final class EventEditorModel {
         }
     }
 
+    /// The wall-clock time on `day`, so a day with a clock change keeps it.
     private func at(_ day: Date, minutes: Int) -> Int64 {
-        Int64((Calendar.current.date(byAdding: .minute, value: minutes, to: Calendar.current.startOfDay(for: day)) ?? day).timeIntervalSince1970)
+        Int64(CalendarModel.at(day, minutes: minutes).timeIntervalSince1970)
     }
 
     private func minutes(of date: Date) -> Int {

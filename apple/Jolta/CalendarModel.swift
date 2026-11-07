@@ -669,8 +669,7 @@ final class CalendarModel {
 
     /// Double-click on empty time: a new event on that half hour.
     func newEvent(day: CalendarDay, minute: Int) {
-        let start = Self.calendar.date(byAdding: .minute, value: minute / 30 * 30, to: day.start) ?? day.start
-        let s = Int64(start.timeIntervalSince1970)
+        let s = Int64(Self.at(day.start, minutes: minute / 30 * 30).timeIntervalSince1970)
         newEvent(at: .timed(start: s, end: s + Int64(defaultLength * 60)))
     }
 
@@ -807,6 +806,12 @@ final class CalendarModel {
     }
 
     static func date(key: String) -> Date? { keyFormat.date(from: key) }
+
+    /// `minutes` after midnight on the clock of `day`, not that many minutes
+    /// after it: on a day with a clock change the two differ by an hour.
+    static func at(_ day: Date, minutes: Int) -> Date {
+        calendar.date(bySettingHour: minutes / 60 % 24, minute: minutes % 60, second: 0, of: day) ?? day
+    }
 
     // MARK: Meetings
 
