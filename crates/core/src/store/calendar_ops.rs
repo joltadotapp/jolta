@@ -64,11 +64,7 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
 /// Stores a new op, waiting as `pending` until `op.send_after`. The id,
 /// state and counters of `op` are ignored.
 pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<CalendarOpId> {
-    let (base, events): (Option<&[EventData]>, &[EventData]) = match &op.write {
-        Write::Create(events) => (None, events),
-        Write::Update { base, event } => (Some(std::slice::from_ref(base)), std::slice::from_ref(event)),
-        Write::Delete(events) => (Some(events), &[]),
-    };
+    let (base, events) = columns(&op.write);
     let target = Target { events: events.to_vec(), extra: op.extra.clone() };
     conn.execute(
         "INSERT INTO calendar_op (calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key, send_after, created)
@@ -89,6 +85,15 @@ pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<Calendar
         ],
     )?;
     Ok(CalendarOpId(conn.last_insert_rowid()))
+}
+
+/// The events a write keeps in its `base` and `target` columns.
+fn columns(write: &Write) -> (Option<&[EventData]>, &[EventData]) {
+    match write {
+        Write::Create(events) => (None, events),
+        Write::Update { base, event } => (Some(std::slice::from_ref(base)), std::slice::from_ref(event)),
+        Write::Delete(events) => (Some(events), &[]),
+    }
 }
 
 fn to_json<T: serde::Serialize + ?Sized>(v: &T) -> Result<String> {
@@ -154,13 +159,29 @@ pub fn next_calendar_op_due(conn: &Connection) -> Result<Option<i64>> {
     )?)
 }
 
-/// Whether a newer op for the same event waits or is on its way.
-pub fn later_calendar_op_waits(conn: &Connection, op: &CalendarOp) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state IN ('pending', 'sending'))",
-        params![op.calendar, op.uid, op.id.0],
-        |r| r.get(0),
-    )?)
+/// The oldest newer op that waits or is on its way and rewrites the row
+/// `op` wrote: an edit of the same event or occurrence, or a create or
+/// delete of the whole series.
+pub fn next_calendar_op_over(conn: &Connection, op: &CalendarOp) -> Result<Option<CalendarOp>> {
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {COLS} FROM calendar_op
+                 WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state IN ('pending', 'sending')
+                   AND (recurrence_id = ?4 OR (recurrence_id = '' AND kind IN ('create', 'delete')))
+                 ORDER BY id LIMIT 1"
+            ),
+            params![op.calendar, op.uid, op.id.0, op.recurrence_id.as_ref().map(moment_text).unwrap_or_default()],
+            op_row,
+        )
+        .optional()?)
+}
+
+/// Rewrites an op's `base` column from its write.
+pub fn set_calendar_op_base(conn: &Connection, op: &CalendarOp) -> Result<()> {
+    let base = columns(&op.write).0.map(to_json).transpose()?;
+    conn.execute("UPDATE calendar_op SET base = ?2 WHERE id = ?1", params![op.id.0, base])?;
+    Ok(())
 }
 
 pub fn set_calendar_op_state(conn: &Connection, id: CalendarOpId, state: OpState, error: Option<&str>) -> Result<()> {

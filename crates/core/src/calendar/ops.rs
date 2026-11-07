@@ -91,6 +91,19 @@ impl Write {
         }
     }
 
+    /// Makes `base` the version this write starts from, for the row it names.
+    fn rebase(&mut self, base: &EventData) {
+        match self {
+            Write::Update { base: b, .. } => *b = base.clone(),
+            Write::Delete(events) => {
+                if let Some(e) = events.iter_mut().find(|e| e.recurrence_id == base.recurrence_id) {
+                    *e = base.clone();
+                }
+            }
+            Write::Create(_) => {}
+        }
+    }
+
     /// The change that takes this one back.
     fn undo(&self) -> Change {
         match self {
@@ -382,10 +395,18 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<(), 
         }
         Err(reason) => {
             store::fail_calendar_attempt(conn, op.id, &reason, None)?;
-            // A later edit of the event is in the store and carries this
-            // one's change with it; putting the old version back would hide it.
-            if !store::later_calendar_op_waits(conn, op)? {
-                revert(conn, op, horizon)?;
+            // A later edit of the same row is in the store and carries this
+            // one's change with it; putting the old version back would hide
+            // it. That edit now starts from the version before this one,
+            // which is what the server still has and what its Undo restores.
+            match store::next_calendar_op_over(conn, op)? {
+                Some(mut next) => {
+                    if let Write::Update { base, .. } = &op.write {
+                        next.write.rebase(base);
+                        store::set_calendar_op_base(conn, &next)?;
+                    }
+                }
+                None => revert(conn, op, horizon)?,
             }
             let title = op.write.event().map(|e| e.title.as_str()).unwrap_or("the event");
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
@@ -684,6 +705,39 @@ mod tests {
         send_all(&s, Ok(()));
         assert_eq!(state(&s, second).0, OpState::Done);
         assert_eq!(shown(&s), pairs(&[("24 11:00", "Daily sync")]));
+    }
+
+    #[test]
+    fn undo_after_a_failed_edit_goes_back_to_the_version_before_it() {
+        let (s, cal) = setup("fail-undo");
+        q(&s, cal, Change::Create(vec![event("u1", "A", "2026-11-24 09:00")])).unwrap();
+        send_all(&s, Ok(()));
+        q(&s, cal, Change::Update(event("u1", "B", "2026-11-24 10:00"))).unwrap();
+        let c = q(&s, cal, Change::Update(event("u1", "C", "2026-11-24 11:00"))).unwrap();
+        for _ in 0..MAX_ATTEMPTS {
+            send_all(&s, Err("timed out".into()));
+        }
+        assert_eq!(s.write(|tx| undo(tx, c, NOW, &horizon())).unwrap(), Undone::Dropped);
+        assert_eq!(shown(&s), pairs(&[("24 09:00", "A")]), "B never saved, so undoing C goes back to A");
+    }
+
+    /// A failed change to the series rolls back though an edit of one
+    /// occurrence waits: that edit rewrites another row.
+    #[test]
+    fn a_failed_series_edit_rolls_back_past_an_occurrence_edit() {
+        let (s, cal) = setup("fail-series");
+        let series = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=3".into()], ..Default::default() }), ..event("u1", "Standup", "2026-11-10 09:00") };
+        let moved = EventData { recurrence_id: Some(Moment::Time(at("2026-11-17 09:00"))), ..event("u1", "Moved", "2026-11-17 14:00") };
+        q(&s, cal, Change::Create(vec![series.clone(), moved.clone()])).unwrap();
+        send_all(&s, Ok(()));
+        q(&s, cal, Change::Update(EventData { title: "Daily".into(), ..series })).unwrap();
+        let occurrence = q(&s, cal, Change::Update(EventData { title: "Moved later".into(), ..moved })).unwrap();
+        for _ in 0..MAX_ATTEMPTS {
+            send_all(&s, Err("timed out".into()));
+        }
+        send_all(&s, Ok(()));
+        assert_eq!(state(&s, occurrence).0, OpState::Done);
+        assert_eq!(shown(&s), pairs(&[("10 09:00", "Standup"), ("17 14:00", "Moved later"), ("24 09:00", "Standup")]), "the series is back, the occurrence edit stays");
     }
 
     #[test]
