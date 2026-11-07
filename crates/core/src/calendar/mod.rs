@@ -6,6 +6,7 @@ pub mod availability;
 pub mod caps;
 pub mod card;
 pub mod change;
+pub mod description;
 pub mod detail;
 pub mod filing;
 pub mod freebusy;
