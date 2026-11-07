@@ -62,13 +62,34 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
         true => added_copy(&calendar)?,
         false => guest_copy(&calendar, &target.me, &target.event.data, std::slice::from_ref(&target.me))?,
     }
-    let source = sync::calendar_source(jolta, &calendar).await?;
+    take(jolta, &calendar, &target, added.then_some((account, uid)), removing.occurrence.as_ref().map(|(_, day)| day.as_str())).await
+}
+
+/// Decline and remove's second step, for the user's copy of a meeting
+/// someone else organizes, from the event itself: the whole event, or the
+/// occurrence `rid`. The organizer hears nothing more.
+pub async fn remove_copy(jolta: &Jolta, event: super::EventId, rid: Option<Moment>) -> Result<Removed> {
+    let scope = rid.map_or(Scope::Series, Scope::Occurrence);
+    let (calendar, target) = rsvp::target_of(jolta, event, &scope, None).await?;
+    route(calendar.source)?;
+    guest_copy(&calendar, &target.me, &target.event.data, std::slice::from_ref(&target.me))?;
+    let day = rid.map(|r| match r {
+        Moment::Date(d) => d.format("%a %-d %b").to_string(),
+        Moment::Time(t) => t.wall.format("%a %-d %b").to_string(),
+    });
+    take(jolta, &calendar, &target, None, day.as_deref()).await
+}
+
+/// Takes the copy `target` out of `calendar` through its server and the
+/// store. `added` names the account and UID of a copy the user added.
+async fn take(jolta: &Jolta, calendar: &Calendar, target: &rsvp::Target, added: Option<(AccountId, String)>, day: Option<&str>) -> Result<Removed> {
+    let source = sync::calendar_source(jolta, calendar).await?;
     // A CalDAV server knows aliases the copy may not show.
-    if !added {
-        guest_copy(&calendar, &target.me, &target.event.data, &source.addresses().await)?;
+    if added.is_none() {
+        guest_copy(calendar, &target.me, &target.event.data, &source.addresses().await)?;
     }
-    let gone = source.remove(&calendar, &target).await?;
-    if added && target.occurrence.is_none() && matches!(gone, Gone::Deleted(_) | Gone::Already) {
+    let gone = source.remove(calendar, target).await?;
+    if let Some((account, uid)) = added.filter(|_| target.occurrence.is_none() && matches!(gone, Gone::Deleted(_) | Gone::Already)) {
         jolta.store.write_async(move |tx| store::forget_added(tx, account, &uid)).await?;
     }
     let id = calendar.id;
@@ -88,10 +109,10 @@ pub async fn remove(jolta: &Jolta, message: MessageId) -> Result<Removed> {
         }
         Gone::Changed => {
             sync::sync_calendar(jolta, id).await?;
-            return Err(Error::Other(said(&calendar, &gone, None)));
+            return Err(Error::Other(said(calendar, &gone, None)));
         }
     }
-    Ok(Removed { text: said(&calendar, &gone, removing.occurrence.as_ref().map(|(_, day)| day.as_str())), calendar: id })
+    Ok(Removed { text: said(calendar, &gone, day), calendar: id })
 }
 
 /// Refuses what Remove from calendar leaves alone: a copy in a calendar the

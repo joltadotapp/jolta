@@ -12,7 +12,7 @@ use super::{CalDav, href_key, join, path_escape};
 use crate::calendar::change::Field;
 use crate::calendar::ical_edit::{Component, Object, Prop, utc_stamp, vevent, write_event, write_field};
 use crate::calendar::ops::Extra;
-use crate::calendar::{Calendar, EventData, ical, rsvp, tz};
+use crate::calendar::{Calendar, EventData, Person, ical, rsvp, tz};
 use crate::{Error, Result};
 
 const PRODID: &str = concat!("-//Jolta//Jolta ", env!("CARGO_PKG_VERSION"), "//EN");
@@ -23,7 +23,7 @@ impl CalDav {
         match *write {
             OpWrite::Create { events, key, extra } => {
                 let url = join(&collection, &path_escape(key))?;
-                let text = created_text(events, extra)?;
+                let text = organized(&created_text(events, extra)?, &events[0].uid, &self.organizer().await);
                 let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-None-Match", "*")];
                 let reply = self.exchange("PUT", &url, &headers, &text).await?;
                 match reply.status {
@@ -39,11 +39,13 @@ impl CalDav {
             OpWrite::Update { held, base, event, extra, dropped } => {
                 let (Some(etag), Some(raw)) = (held.etag.as_deref(), held.raw.as_deref()) else { return Ok(Written::Stale) };
                 let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, dropped, tz::here())?;
+                let text = organized(&text, &event.uid, &self.organizer().await);
                 self.put_over(&collection, held, etag, text).await
             }
             OpWrite::Occurrence { series, base, event, extra } => {
                 let (Some(etag), Some(raw)) = (series.etag.as_deref(), series.raw.as_deref()) else { return Ok(Written::Stale) };
                 let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, &[], tz::here())?;
+                let text = organized(&text, &event.uid, &self.organizer().await);
                 self.put_over(&collection, series, etag, text).await
             }
             OpWrite::Cancel { held, occurrence, .. } => {
@@ -63,6 +65,15 @@ impl CalDav {
                 }
             }
         }
+    }
+
+    /// The user as the organizer of a meeting made here: the account's
+    /// address when the server lists it among the principal's, else the
+    /// first the server lists, which a scheduling server takes as its own.
+    async fn organizer(&self) -> Person {
+        let me = self.me().await;
+        let address = me.iter().find(|a| a.eq_ignore_ascii_case(&self.address)).or(me.first()).cloned().unwrap_or_else(|| self.address.clone());
+        Person { address, name: String::new() }
     }
 
     /// Writes `text` over the resource `held` while it is still at `etag`.
@@ -152,14 +163,29 @@ pub(crate) fn cancelled_text(text: &str, occurrence: &EventData, here: Tz) -> Re
     Ok(obj.to_string())
 }
 
-/// The fields Jolta writes into a resource. Guests and video calls wait
-/// for the units that send invitations and make meetings.
+/// The fields Jolta writes into a resource. Video calls wait for the unit
+/// that makes meetings.
 fn editable(field: Field) -> Result<()> {
     match field {
-        Field::People => Err(cannot("Jolta", "change guests on this calendar yet")),
         Field::MeetingLink => Err(cannot("Jolta", "change the video call on this calendar yet")),
         _ => Ok(()),
     }
+}
+
+/// `text` with `organizer` on each VEVENT of `uid` that has guests and no
+/// ORGANIZER: a scheduling server invites the guests of a meeting only when
+/// one of the account's addresses organizes it (RFC 6638, section 3.2).
+pub(crate) fn organized(text: &str, uid: &str, organizer: &Person) -> String {
+    let mut obj = Object::parse(text);
+    let mut changed = false;
+    for event in obj.events_mut(uid) {
+        let guests = event.props().any(|p| p.is("ATTENDEE"));
+        if guests && event.prop("ORGANIZER").is_none() {
+            event.add(Prop::new("ORGANIZER", &format!("mailto:{}", organizer.address)));
+            changed = true;
+        }
+    }
+    if changed { obj.to_string() } else { text.to_string() }
 }
 
 fn lines(extra: Option<&Extra>) -> Result<Vec<Prop>> {
@@ -430,4 +456,41 @@ mod tests {
         assert_eq!(dav.write(&calendar, &OpWrite::Delete { held: &stored }).await.unwrap(), Written::Saved(None));
         assert_eq!(server.await.unwrap(), ["DELETE /cal/standup.ics If-Match \"1\""]);
     }
+    /// A meeting iCloud scheduled: a guest who stays keeps their line with
+    /// what the server added, a new one gets RSVP from Request responses, a
+    /// removed one goes, and only the user organizes.
+    #[test]
+    fn guests_change_line_by_line() {
+        let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m@example.com\r\nDTSTAMP:20261101T120000Z\r\n\
+            DTSTART:20261124T090000Z\r\nDTEND:20261124T093000Z\r\nSUMMARY:Review\r\nORGANIZER:mailto:me@icloud.com\r\n\
+            ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;SCHEDULE-STATUS=2.0:mailto:ann@example.com\r\n\
+            ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:bo@example.com\r\nSEQUENCE:1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let base = read(text).remove(0);
+        let mut e = base.clone();
+        e.attendees.retain(|a| a.person.address != "bo@example.com");
+        e.attendees.push(crate::calendar::Attendee {
+            person: crate::calendar::Person { address: "cy@example.com".into(), name: String::new() },
+            role: crate::calendar::Role::Optional,
+            response: crate::calendar::Response::NeedsAction,
+            comment: String::new(),
+            is_me: false,
+        });
+        let out = edited_text(text, &base, &e, None, &[], Brussels).unwrap().replace("\r\n ", "");
+        assert!(out.contains("ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;SCHEDULE-STATUS=2.0:mailto:ann@example.com\r\n"), "kept byte for byte: {out}");
+        assert!(!out.contains("bo@example.com"));
+        assert!(out.contains("ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:cy@example.com"), "{out}");
+        assert_eq!(organized(&out, "m@example.com", &Person { address: "other@icloud.com".into(), name: String::new() }), out, "an organizer stays");
+
+        let mut quiet = e.clone();
+        quiet.options.request_responses = false;
+        quiet.options.allow_new_times = false;
+        let out = edited_text(text, &base, &quiet, None, &[], Brussels).unwrap().replace("\r\n ", "");
+        assert!(out.contains("X-MICROSOFT-DISALLOW-COUNTER:TRUE") && out.contains("RSVP=FALSE:mailto:cy@example.com"), "{out}");
+        assert_eq!(read(&out)[0].options.allow_new_times, false, "read back");
+
+        let new = EventData { attendees: e.attendees.clone(), ..EventData::new("n@jolta.app", base.span) };
+        let created = organized(&created_text(std::slice::from_ref(&new), None).unwrap(), "n@jolta.app", &Person { address: "me@icloud.com".into(), name: String::new() });
+        assert!(created.contains("ORGANIZER:mailto:me@icloud.com\r\n"), "a new meeting names the user as organizer: {created}");
+    }
+
 }

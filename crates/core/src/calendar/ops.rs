@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use super::change::{FIELDS, Field};
 use super::series::Horizon;
-use super::sources::{self, OpWrite, Source, Version, Written};
+use super::sources::{self, OpWrite, Source, Tell, Version, Written};
 use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, merge, rsvp, series as occurrences};
 use crate::model::text_enum;
 use crate::{Error, Jolta, Result, store};
@@ -137,15 +137,6 @@ impl Write {
             Write::Create(events) | Write::Delete(events) => events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()),
             Write::Update { event, .. } | Write::Cancel { occurrence: event, .. } => Some(event),
         }
-    }
-
-    /// Every event the write touches, on either side.
-    fn events(&self) -> impl Iterator<Item = &EventData> {
-        let (a, b): (&[EventData], &[EventData]) = match self {
-            Write::Create(events) | Write::Delete(events) => (events, &[]),
-            Write::Update { base, event, .. } | Write::Cancel { series: base, occurrence: event, .. } => (std::slice::from_ref(base), std::slice::from_ref(event)),
-        };
-        a.iter().chain(b)
     }
 
     /// Makes `base` the version this write starts from, for the row it names.
@@ -270,7 +261,7 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
         return Err(Error::Other(format!("{} is read-only", calendar.name)));
     }
     let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change, horizon.here)? else { return Ok(None) };
-    check(&calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref())?;
+    check(conn, &calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref(), Some(edit.notify))?;
     let first = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;
     let (uid, recurrence_id) = (first.uid.clone(), if matches!(write, Write::Update { .. } | Write::Cancel { .. }) { first.recurrence_id } else { None });
     let scope = match (link.following, recurrence_id) {
@@ -318,18 +309,57 @@ pub fn refusal(conn: &Connection, edit: &Edit) -> Result<Option<String>> {
         return Ok(Some(format!("{} is read-only", calendar.name)));
     }
     let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change, super::tz::here())? else { return Ok(None) };
-    Ok(check(&calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref()).err().map(|e| e.to_string()))
+    Ok(check(conn, &calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref(), None).err().map(|e| e.to_string()))
 }
 
-/// Refuses what the calendar's provider can't take from Jolta yet:
-/// meetings with guests, whose changes email people (the Send an update?
-/// dialog comes first), and any change the provider's request can't carry.
-fn check(calendar: &Calendar, write: &Write, key: &str, held: Option<&Held>, extra: Option<&Extra>) -> Result<()> {
+/// Refuses what the calendar's provider can't take from Jolta: a change to
+/// a meeting someone else organizes beyond the user's own settings (check
+/// 1), a write `notify` says tells nobody where the server mails the
+/// guests anyway, and any change the provider's request can't carry.
+/// `notify` is None when only the change is checked, before the user chose.
+fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held: Option<&Held>, extra: Option<&Extra>, notify: Option<Notify>) -> Result<()> {
     if calendar.source == CalendarSource::Local {
         return Ok(());
     }
-    if write.events().any(|e| e.attendees.iter().any(|a| !a.is_me)) {
-        return Err(Error::Other(format!("Jolta can't change meetings with guests in {} yet", calendar.name)));
+    let account = match calendar.account_id {
+        Some(a) => store::account(conn, a)?.address,
+        None => String::new(),
+    };
+    let caps = caps::of(calendar);
+    let title = write.event().map_or("the event", |e| e.title.as_str());
+    let mails = match write {
+        Write::Create(events) => events.iter().any(|e| !super::draft::guests(calendar, &account, e).is_empty()),
+        Write::Update { base, event, .. } => {
+            let mut me = super::draft::mine(calendar, &account, base);
+            me.extend(super::draft::mine(calendar, &account, event));
+            let c = super::change::classify(base, event, &me);
+            if let Some(o) = super::draft::other_organizer(calendar, &account, base).or(super::draft::other_organizer(calendar, &account, event))
+                && !c.is_own_only()
+            {
+                return Err(Error::Other(format!("{} organizes {}, so only your own settings can change", super::change::name(o), base.title)));
+            }
+            !c.is_own_only() && !(super::draft::guests(calendar, &account, base).is_empty() && super::draft::guests(calendar, &account, event).is_empty())
+        }
+        Write::Delete(events) => {
+            if let Some(o) = events.iter().find_map(|e| super::draft::other_organizer(calendar, &account, e)) {
+                return Err(Error::Other(format!("{} organizes {title}; decline it instead", super::change::name(o))));
+            }
+            events.iter().any(|e| !super::draft::guests(calendar, &account, e).is_empty())
+        }
+        Write::Cancel { series, occurrence, .. } => {
+            if let Some(o) = super::draft::other_organizer(calendar, &account, series).or(super::draft::other_organizer(calendar, &account, occurrence)) {
+                return Err(Error::Other(format!("{} organizes {title}; decline it instead", super::change::name(o))));
+            }
+            !super::draft::guests(calendar, &account, occurrence).is_empty()
+        }
+    };
+    match notify {
+        Some(Notify::Nobody) if mails && caps.hold_update == caps::Hold::NeverForMeetingFields => {
+            return Err(Error::Other(format!("{} emails the guests of {title} about this change, so Jolta can't save it without sending", caps::mailer(calendar))));
+        }
+        Some(Notify::Outside) if !caps.outside_only => return Err(Error::Other(format!("{} can't mail only some guests", caps::mailer(calendar)))),
+        Some(Notify::Changed) if !caps.new_people_only => return Err(Error::Other(format!("{} can't mail only the people added or removed", caps::mailer(calendar)))),
+        _ => {}
     }
     // A repeat rule the provider can't hold, set here, is refused here, as
     // the repeat editor greys it.
@@ -1120,7 +1150,7 @@ enum Delivered {
 
 /// The server one op writes to: a calendar's source, or a test's.
 pub(crate) trait Remote {
-    async fn write(&self, write: &OpWrite<'_>) -> Result<Written>;
+    async fn write(&self, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written>;
     async fn fetch(&self, remote_id: &str, uid: &str, alarms: &[Alarm]) -> Result<Option<Version>>;
     /// The occurrence `rid` of the series held as `series`, changed or not.
     async fn fetch_occurrence(&self, series: &rsvp::Stored, rid: &Moment, alarms: &[Alarm]) -> Result<Option<Version>>;
@@ -1132,8 +1162,8 @@ struct Bound<'a> {
 }
 
 impl Remote for Bound<'_> {
-    async fn write(&self, write: &OpWrite<'_>) -> Result<Written> {
-        self.source.write(self.calendar, write).await
+    async fn write(&self, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
+        self.source.write(self.calendar, write, tell).await
     }
 
     async fn fetch(&self, remote_id: &str, uid: &str, alarms: &[Alarm]) -> Result<Option<Version>> {
@@ -1151,6 +1181,7 @@ impl Remote for Bound<'_> {
 /// version the user deleted. `raw` is the held object's text, for CalDAV.
 async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) -> Result<Delivered> {
     let extra = op.extra.as_ref();
+    let tell = Tell { notify: op.notify, message: op.message.as_deref() };
     let held_as = |held: &Held, data: &EventData, raw: Option<Vec<u8>>| rsvp::Stored {
         id: EventId(0),
         remote_id: held.remote_id.clone(),
@@ -1159,7 +1190,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
         data: data.clone(),
     };
     match &op.write {
-        Write::Create(events) => match remote.write(&OpWrite::Create { events, key: &op.remote_key, extra }).await? {
+        Write::Create(events) => match remote.write(&OpWrite::Create { events, key: &op.remote_key, extra }, tell).await? {
             Written::Saved(version) => Ok(Delivered::Done { version, merged: false }),
             Written::Stale | Written::Gone => Err(Error::Other("the server refused the new event".into())),
         },
@@ -1174,7 +1205,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
                     true => OpWrite::Occurrence { series: &held, base: &base, event: &mine, extra },
                     false => OpWrite::Update { held: &held, base: &base, event: &mine, extra, dropped: &dropped },
                 };
-                let written = match remote.write(&request).await? {
+                let written = match remote.write(&request, tell).await? {
                     // An instance not found may only have moved: its series says.
                     Written::Gone if mine.recurrence_id.is_some() => Written::Stale,
                     written => written,
@@ -1217,7 +1248,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             let mut held = held_as(held, occurrence, raw);
             let mut changed = row.is_some();
             for _ in 0..MERGE_ROUNDS {
-                match remote.write(&OpWrite::Cancel { held: &held, occurrence, changed }).await? {
+                match remote.write(&OpWrite::Cancel { held: &held, occurrence, changed }, tell).await? {
                     Written::Saved(version) => return Ok(Delivered::Done { version, merged: false }),
                     Written::Gone => return Ok(Delivered::Done { version: None, merged: false }),
                     Written::Stale => {
@@ -1248,7 +1279,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             let Some(held) = &op.held else { return Err(Error::Other("a delete without the version it removes".into())) };
             let mut held = held_as(held, first, None);
             for _ in 0..MERGE_ROUNDS {
-                match remote.write(&OpWrite::Delete { held: &held }).await? {
+                match remote.write(&OpWrite::Delete { held: &held }, tell).await? {
                     Written::Saved(_) | Written::Gone => return Ok(Delivered::Done { version: None, merged: false }),
                     Written::Stale => {
                         let Some(now) = remote.fetch(&held.remote_id, &first.uid, &first.alarms).await? else { return Ok(Delivered::Done { version: None, merged: false }) };
@@ -1642,10 +1673,12 @@ mod tests {
         .id
     }
 
-    /// Check 1: a write only goes to a calendar the user can write, and
-    /// meetings with guests wait for the Send an update? dialog.
+    /// Check 1: a write only goes to a calendar the user can write. A
+    /// meeting's change that the server mails its guests about anyway is
+    /// never queued as telling nobody, and one that mails waits the undo
+    /// window.
     #[test]
-    fn only_writable_calendars_take_ops_and_meetings_with_guests_wait() {
+    fn only_writable_calendars_take_ops_and_meetings_wait_to_send() {
         let (s, _) = setup("refused");
         for cal in [remote_calendar(&s, CalendarSource::Webcal, Access::Read), remote_calendar(&s, CalendarSource::Google, Access::Read)] {
             let e = Edit::quiet(cal, Change::Create(vec![event("u9", "Nope", "2026-11-24 09:00")]));
@@ -1660,12 +1693,19 @@ mod tests {
             is_me: false,
         };
         let meeting = EventData { attendees: vec![guest], ..event("u8", "Review", "2026-11-24 09:00") };
-        let err = s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![meeting])), NOW, &horizon())).unwrap_err();
-        assert!(err.to_string().contains("meetings with guests"), "{err}");
+        let graph = remote_calendar(&s, CalendarSource::Graph, Access::Owner);
+        let err = s.write(|tx| queue(tx, &Edit::quiet(graph, Change::Create(vec![meeting.clone()])), NOW, &horizon())).unwrap_err();
+        assert!(err.to_string().contains("can't save it without sending"), "Exchange invites whatever Jolta asks: {err}");
+        let err = s.write(|tx| queue(tx, &Edit { notify: Notify::Outside, ..Edit::quiet(graph, Change::Create(vec![meeting.clone()])) }, NOW, &horizon())).unwrap_err();
+        assert!(err.to_string().contains("only some guests"), "{err}");
+        let sent = s.write(|tx| queue(tx, &Edit { notify: Notify::All, ..Edit::quiet(graph, Change::Create(vec![meeting.clone()])) }, NOW, &horizon())).unwrap().unwrap();
+        assert_eq!(s.read(|c| store::calendar_op(c, sent)).unwrap().send_after, NOW + UNDO_SEND_SECONDS, "an invitation waits the undo window");
+        let quiet = s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![EventData { uid: "u8g".into(), ..meeting }])), NOW, &horizon())).unwrap().unwrap();
+        assert_eq!(s.read(|c| store::calendar_op(c, quiet)).unwrap().send_after, NOW, "Google saves a meeting without sending, at once");
         let oof = EventData { categories: vec!["Away".into()], ..event("u7", "Away", "2026-11-24 09:00") };
         let err = s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![oof])), NOW, &horizon())).unwrap_err();
         assert!(err.to_string().contains("can't hold categories"), "refused at once, not after five tries: {err}");
-        assert!(shown(&s).is_empty(), "nothing was written");
+        assert_eq!(shown(&s).len(), 2, "only the two meetings queued were written");
         assert!(s.write(|tx| queue(tx, &Edit::quiet(google, Change::Create(vec![event("u6", "Lunch", "2026-11-24 12:00")])), NOW, &horizon())).unwrap().is_some());
     }
 
@@ -1679,6 +1719,8 @@ mod tests {
         /// Writes that reach the server and then lose their answer.
         lose_answers: std::sync::Mutex<u32>,
         log: std::sync::Mutex<Vec<String>>,
+        /// The notify of each write the server took: what mailed people.
+        told: std::sync::Mutex<Vec<Notify>>,
     }
 
     impl Server {
@@ -1717,7 +1759,8 @@ mod tests {
     }
 
     impl Remote for Server {
-        async fn write(&self, write: &OpWrite<'_>) -> Result<Written> {
+        async fn write(&self, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
+            let took = || self.told.lock().unwrap().push(tell.notify);
             match *write {
                 OpWrite::Create { events, key, .. } => {
                     self.log.lock().unwrap().push(format!("create {key}"));
@@ -1740,6 +1783,7 @@ mod tests {
                             f.copy(e, event);
                         }
                     });
+                    took();
                     self.answer(self.version(&held.remote_id))
                 }
                 OpWrite::Occurrence { series, event, .. } => {
@@ -2156,4 +2200,68 @@ mod tests {
         s.write(|tx| settle(tx, &store::calendar_op(tx, id)?, Ok(Sent::Done { version: None, merged: false }), NOW, &horizon())).unwrap();
         assert!(s.write(|tx| undo(tx, id, NOW, &horizon())).is_err(), "an update that went out can't be taken back");
     }
+    fn guest(address: &str) -> crate::calendar::Attendee {
+        crate::calendar::Attendee {
+            person: crate::calendar::Person { address: address.into(), name: String::new() },
+            role: crate::calendar::Role::Required,
+            response: crate::calendar::Response::Accepted,
+            comment: String::new(),
+            is_me: false,
+        }
+    }
+
+    /// Check 4 for a meeting: Undo inside the undo window sends nothing, the
+    /// same save twice queues one update, and a retry after the server took
+    /// the update but the answer was lost writes nothing more, so the guests
+    /// get one mail.
+    #[test]
+    fn an_update_to_guests_goes_out_once() {
+        let (s, _) = setup("tell-once");
+        let cal = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let server = Server { lose_answers: std::sync::Mutex::new(1), ..Server::default() };
+        server.put("g1", EventData { attendees: vec![guest("ann@example.com")], ..event("u1", "Standup", "2026-11-24 09:00") });
+        sync(&s, cal, &server);
+        let mut moved = server.get("g1").unwrap();
+        moved.title = "Daily".into();
+        let update = Edit { notify: Notify::All, ..Edit::quiet(cal, Change::Update(moved.clone())) };
+
+        let first = s.write(|tx| queue(tx, &update, NOW, &horizon())).unwrap().unwrap();
+        assert_eq!(s.write(|tx| undo(tx, first, NOW, &horizon())).unwrap(), Undone::Dropped);
+        assert_eq!((claim(&s).len(), server.log().len()), (0, 0), "nothing went out");
+        assert_eq!(shown(&s), pairs(&[("24 09:00", "Standup")]), "back as it was");
+
+        let op = s.write(|tx| queue(tx, &update, NOW, &horizon())).unwrap().unwrap();
+        assert_eq!(s.write(|tx| queue(tx, &update, NOW, &horizon())).unwrap(), None, "the same save again queues nothing");
+        assert!(run(&s, &server)[0].failure.is_none(), "a lost answer is tried again");
+        run(&s, &server);
+        assert_eq!(server.log(), ["update g1 at 1", "update g1 at 1", "fetch g1"], "the retry finds its change made and writes nothing");
+        assert_eq!(*server.told.lock().unwrap(), [Notify::All], "one update reached the guests");
+        assert_eq!(state(&s, op).0, OpState::Done);
+        assert!(s.write(|tx| undo(tx, op, NOW, &horizon())).is_err(), "an update that went out can't be taken back");
+    }
+
+    /// Check 1: a guest's copy takes the user's own settings and nothing
+    /// that would change the meeting, and is never deleted through the
+    /// queue: the user declines instead.
+    #[test]
+    fn a_guests_copy_takes_only_the_users_own_settings() {
+        let (s, _) = setup("guest-copy");
+        let cal = remote_calendar(&s, CalendarSource::Graph, Access::Owner);
+        let server = Server::default();
+        let theirs = EventData {
+            organizer: Some(crate::calendar::Person { address: "jan@example.com".into(), name: "Jan Peeters".into() }),
+            attendees: vec![guest("jan@example.com"), crate::calendar::Attendee { is_me: true, ..guest("me@example.com") }],
+            ..event("u1", "Planning", "2026-11-24 09:00")
+        };
+        server.put("m1", theirs.clone());
+        sync(&s, cal, &server);
+        let renamed = EventData { title: "Mine now".into(), ..theirs.clone() };
+        let err = s.write(|tx| queue(tx, &Edit { notify: Notify::All, ..Edit::quiet(cal, Change::Update(renamed)) }, NOW, &horizon())).unwrap_err();
+        assert!(err.to_string().contains("Jan Peeters organizes Planning"), "{err}");
+        let err = s.write(|tx| queue(tx, &Edit::quiet(cal, Change::Delete { uid: "u1".into() }), NOW, &horizon())).unwrap_err();
+        assert!(err.to_string().contains("decline it instead"), "{err}");
+        let free = EventData { show_as: crate::calendar::ShowAs::Free, ..theirs };
+        assert!(s.write(|tx| queue(tx, &Edit::quiet(cal, Change::Update(free)), NOW, &horizon())).unwrap().is_some(), "show as is the user's own");
+    }
+
 }

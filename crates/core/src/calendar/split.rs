@@ -14,15 +14,18 @@ use chrono::Duration;
 use chrono_tz::Tz;
 use rusqlite::Connection;
 
-use super::ops::{self, CalendarOpId, Change, Edit, Extra, Link};
+use super::ops::{self, CalendarOpId, Change, Edit, Extra, Link, Notify};
 use super::series::{self, Horizon};
-use super::{CalendarId, CalendarSource, EventData, EventStatus, Local, Moment, Recurrence, Span, merge, recur, repeat, tz};
+use super::{Attendee, CalendarId, CalendarSource, EventData, EventStatus, Local, Moment, Recurrence, Response, Span, merge, recur, repeat, tz};
 use crate::{Error, Result, store};
 
 /// Queues This and following for the occurrence `edited` names by its
 /// recurrence id, saved as `edited`, the new series repeating by `rule`.
-/// Returns the op that shortens the old series, Undo's token for both.
-pub fn queue_following(conn: &Connection, calendar: CalendarId, edited: &EventData, rule: &Recurrence, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
+/// Returns the op that shortens the old series, Undo's token for both. Both
+/// tell the guests what `notify` says: the new series is a new invitation,
+/// which they answer again.
+#[allow(clippy::too_many_arguments)]
+pub fn queue_following(conn: &Connection, calendar: CalendarId, edited: &EventData, rule: &Recurrence, notify: Notify, message: Option<String>, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
     let here = horizon.here;
     let cal = store::calendar(conn, calendar)?;
     let at = edited.recurrence_id.ok_or_else(|| Error::Other("This and following needs an occurrence".into()))?;
@@ -48,7 +51,12 @@ pub fn queue_following(conn: &Connection, calendar: CalendarId, edited: &EventDa
     let taken_out = old_rule.exdates.iter().filter(|x| !before(x, &at, here)).copied();
     let cancelled = rows.iter().filter(|e| later(e) && e.status == EventStatus::Cancelled).filter_map(|e| e.recurrence_id);
     new_rule.exdates = taken_out.chain(cancelled).filter_map(|m| shift.moment(&m, here)).collect();
-    let new_master = EventData { uid: new_uid.clone(), recurrence_id: None, recurrence: Some(new_rule), sequence: 0, master_id: None, ..edited.clone() };
+    let fresh: Vec<Attendee> = edited
+        .attendees
+        .iter()
+        .map(|a| if a.is_me { a.clone() } else { Attendee { response: Response::NeedsAction, comment: String::new(), ..a.clone() } })
+        .collect();
+    let new_master = EventData { uid: new_uid.clone(), recurrence_id: None, recurrence: Some(new_rule), sequence: 0, master_id: None, attendees: fresh, ..edited.clone() };
 
     let mut events = vec![new_master.clone()];
     for theirs in rows.iter().filter(|e| later(e) && e.status != EventStatus::Cancelled && !e.recurrence_id.is_some_and(|r| r.names(&at, here))) {
@@ -68,9 +76,10 @@ pub fn queue_following(conn: &Connection, calendar: CalendarId, edited: &EventDa
     let ended = ended(&master, &at, here);
 
     let extra = (cal.source == CalendarSource::CalDav).then(|| Extra::Lines(vec![format!("RELATED-TO:{}", edited.uid)]));
-    let create = Edit { extra, ..Edit::quiet(calendar, Change::Create(events)) };
+    let create = Edit { extra, notify, message: message.clone(), ..Edit::quiet(calendar, Change::Create(events)) };
     let first = ops::queue_op(conn, &create, Link { after: None, following: true }, now, horizon)?;
-    ops::queue_op(conn, &Edit::quiet(calendar, Change::Update(ended)), Link { after: first, following: true }, now, horizon)
+    let shorten = Edit { notify, message, ..Edit::quiet(calendar, Change::Update(ended)) };
+    ops::queue_op(conn, &shorten, Link { after: first, following: true }, now, horizon)
 }
 
 /// The series `master` ended with the occurrence before `at`: for This
@@ -248,7 +257,7 @@ mod tests {
     }
 
     fn save(s: &Store, d: &EventDraft, scope: Scope) -> Option<CalendarOpId> {
-        s.write(|tx| draft::save_draft(tx, d, Some(scope), NOW, &horizon(), Brussels)).unwrap().op
+        s.write(|tx| draft::save_draft(tx, d, Some(scope), None, None, NOW, &horizon(), Brussels)).unwrap().op
     }
 
     fn scopes(s: &Store, d: &EventDraft) -> Vec<(Scope, Option<String>)> {
@@ -363,7 +372,7 @@ mod tests {
     #[test]
     fn deleting_one_occurrence_takes_out_that_one_alone() {
         let (s, cal) = store("delete-one", CalendarSource::Local);
-        let del = |d: &EventDraft, scope| s.write(|tx| draft::delete_drafted(tx, d, Some(scope), NOW, &horizon(), Brussels)).unwrap();
+        let del = |d: &EventDraft, scope| s.write(|tx| draft::delete_drafted(tx, d, Some(scope), None, NOW, &horizon(), Brussels)).unwrap();
         let unchanged = opened(&s, cal, "2026-11-10 09:00");
         let plan = s.read(|c| draft::plan_delete(c, master_id(&s, cal), Some(timed("2026-11-10 09:00", 30).bounds(Brussels)), Brussels)).unwrap();
         assert_eq!(plan.scopes.iter().map(|c| c.scope).collect::<Vec<_>>(), [Scope::This, Scope::Following, Scope::All]);
@@ -396,7 +405,7 @@ mod tests {
     fn deleting_a_sent_occurrence_delete_says_it_cant_be_undone() {
         let (s, cal) = store("delete-sent", CalendarSource::Local);
         let d = opened(&s, cal, "2026-11-10 09:00");
-        let op = s.write(|tx| draft::delete_drafted(tx, &d, Some(Scope::This), NOW, &horizon(), Brussels)).unwrap().op.unwrap();
+        let op = s.write(|tx| draft::delete_drafted(tx, &d, Some(Scope::This), None, NOW, &horizon(), Brussels)).unwrap().op.unwrap();
         let claimed = s.write(|tx| store::claim_calendar_ops(tx, NOW + 60, 4)).unwrap();
         s.write(|tx| ops::settle(tx, &claimed[0], Ok(ops::Sent::Done { version: None, merged: false }), NOW, &horizon())).unwrap();
         let err = s.write(|tx| ops::undo(tx, op, NOW, &horizon())).unwrap_err().to_string();
@@ -412,7 +421,7 @@ mod tests {
         let mut d = opened(&s, cal, "2026-11-10 09:00");
         d.rule = Some(Recurrence { rules: vec!["FREQ=WEEKLY;BYDAY=TU,TH".into()], ..Recurrence::default() });
         assert_eq!(scopes(&s, &d).iter().map(|c| c.0).collect::<Vec<_>>(), [Scope::Following, Scope::All], "a new rule is never for one event");
-        assert!(s.write(|tx| draft::save_draft(tx, &d, None, NOW, &horizon(), Brussels)).is_err(), "a series occurrence needs its scope");
+        assert!(s.write(|tx| draft::save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).is_err(), "a series occurrence needs its scope");
         let unchanged = opened(&s, cal, "2026-11-10 09:00");
         assert!(s.read(|c| draft::plan_save(c, &unchanged, Brussels)).unwrap().scopes.is_empty(), "nothing changed, nothing to ask");
     }
@@ -542,7 +551,7 @@ mod tests {
         let moved = s.read(|c| ops::stored(c, cal, "s1", Some(&Moment::Time(at("2026-11-03 09:00"))))).unwrap().unwrap().event;
         let eight = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=8".into()], ..Recurrence::default() }), ..master };
         s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &[eight, moved], None, &horizon())).unwrap();
-        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), NOW, &horizon(), Brussels)).unwrap();
+        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), None, None, NOW, &horizon(), Brussels)).unwrap();
         assert!(saved.message.contains("wasn't saved"), "{}", saved.message);
         let now = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
         assert_eq!(now.recurrence.unwrap().rules, ["FREQ=WEEKLY;COUNT=8"], "the rule changed elsewhere stays");
@@ -558,7 +567,7 @@ mod tests {
         let moved = s.read(|c| ops::stored(c, cal, "s1", Some(&Moment::Time(at("2026-11-03 09:00"))))).unwrap().unwrap().event;
         let theirs = |e: &EventData| EventData { title: "Theirs".into(), ..e.clone() };
         s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &[theirs(&master), theirs(&moved)], None, &horizon())).unwrap();
-        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), NOW, &horizon(), Brussels)).unwrap();
+        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), None, None, NOW, &horizon(), Brussels)).unwrap();
         assert!(saved.message.contains("your new title wasn't saved"), "{}", saved.message);
         let now = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
         assert_eq!((now.title.as_str(), now.location.as_str()), ("Theirs", "Room 1"), "their title, my location");
@@ -569,11 +578,11 @@ mod tests {
         let (s, cal) = store("split-uid", CalendarSource::Local);
         let mut d = opened(&s, cal, "2026-11-10 09:00");
         d.title = "Planning".into();
-        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::Following), NOW, &horizon(), Brussels)).unwrap();
+        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::Following), None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_ne!(saved.uid, "s1");
         let rows = s.read(|c| ops::series(c, cal, &saved.uid)).unwrap();
         assert_eq!(rows[0].title, "Planning", "the UID the view selects is the new series'");
-        let this = s.write(|tx| draft::save_draft(tx, &opened(&s, cal, "2026-10-27 09:00"), None, NOW, &horizon(), Brussels)).unwrap();
+        let this = s.write(|tx| draft::save_draft(tx, &opened(&s, cal, "2026-10-27 09:00"), None, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(this.uid, "s1", "nothing changed, the same event");
     }
 

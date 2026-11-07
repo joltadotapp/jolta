@@ -12,11 +12,11 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Timelike, U
 use chrono_tz::Tz;
 use rusqlite::Connection;
 
-use super::change::Field;
+use super::change::{self, CancelDialog, Field, UpdateDialog};
 use super::ops::{self, CalendarOpId, Change, Edit, Extra, Scope};
 use super::series::{self, Horizon};
 use super::{
-    Alarm, AlarmTrigger, Attendee, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Local, Meeting, MeetingProvider,
+    Alarm, AlarmTrigger, Attendee, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Local, Meeting, MeetingOptions, MeetingProvider,
     Moment, Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, caps, description, detail, merge, repeat, split, tz,
 };
 use crate::{Error, Result, store};
@@ -28,6 +28,8 @@ pub enum DraftField {
     Time,
     Repeat,
     People,
+    /// The organizer options under People.
+    Options,
     Room,
     Location,
     Video,
@@ -38,11 +40,12 @@ pub enum DraftField {
     Visibility,
 }
 
-const EVERY_FIELD: [DraftField; 12] = [
+const EVERY_FIELD: [DraftField; 13] = [
     DraftField::Title,
     DraftField::Time,
     DraftField::Repeat,
     DraftField::People,
+    DraftField::Options,
     DraftField::Room,
     DraftField::Location,
     DraftField::Video,
@@ -77,6 +80,8 @@ pub struct EventDraft {
     pub span: Span,
     /// Everyone on the event but rooms, with their answers.
     pub people: Vec<Attendee>,
+    /// What the organizer lets the guests do.
+    pub options: MeetingOptions,
     /// One room's address.
     pub room: String,
     pub location: String,
@@ -131,8 +136,8 @@ pub struct Problem {
     pub blocking: bool,
 }
 
-/// What saving needs before it can go ahead. U5a adds the Send an update?
-/// dialog here.
+/// What saving needs before it can go ahead: the scope prompt, then the
+/// Send an update? dialog.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavePlan {
     /// The draft says what the stored event says: saving only closes.
@@ -142,6 +147,9 @@ pub struct SavePlan {
     pub scopes: Vec<ScopeChoice>,
     /// The prompt's line: "You moved Standup to 10:00."
     pub prompt: Option<String>,
+    /// Send an update?, for a change the guests of a meeting the user
+    /// organizes would hear about. Saving then takes one of its choices.
+    pub dialog: Option<UpdateDialog>,
 }
 
 /// One row of the scope prompt.
@@ -166,7 +174,7 @@ pub struct Saved {
     pub message: String,
 }
 
-/// Whether and how an event can be deleted. U5a adds the cancel dialog.
+/// Whether and how an event can be deleted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeletePlan {
     /// Why it can't be, if it can't.
@@ -176,6 +184,22 @@ pub struct DeletePlan {
     pub scopes: Vec<ScopeChoice>,
     /// The prompt's line: "You're deleting Standup on Tue 24 Nov."
     pub prompt: Option<String>,
+    /// For a meeting the user organizes, the cancel dialog for each scope
+    /// (one for an event that doesn't repeat), in the order of `scopes`.
+    pub cancel: Vec<(Scope, CancelDialog)>,
+    /// For a meeting someone else organizes: Decline and remove? goes in
+    /// place of a delete.
+    pub decline: Option<Decline>,
+}
+
+/// "Decline and remove?" for a meeting someone else organizes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decline {
+    pub title: String,
+    /// "Jan Peeters gets your decline, and the meeting leaves your calendar."
+    pub body: String,
+    /// The organizer, for "Tell Jan Peeters", ticked by default.
+    pub organizer: String,
 }
 
 /// Minutes from `now` to the next half hour, for a new event without a slot.
@@ -214,6 +238,7 @@ pub fn draft_for_new(conn: &Connection, calendar: Option<CalendarId>, span: Opti
         title: String::new(),
         span,
         people: Vec::new(),
+        options: MeetingOptions::default(),
         room: String::new(),
         location: String::new(),
         description: String::new(),
@@ -285,6 +310,7 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         title: e.title.clone(),
         span: e.span,
         people: e.attendees.iter().filter(|a| !is_room(a)).cloned().collect(),
+        options: e.options,
         // A location that only repeats the room, as saving a room puts it
         // there, isn't one of its own.
         location: if mirrors_room(&e.location, &room) { String::new() } else { e.location.clone() },
@@ -320,31 +346,16 @@ fn occurrence_span(series: &Span, at: Bounds, here: Tz) -> Span {
 
 /// What the user may not change in `event` of `calendar`, and the one
 /// sentence that says why (the read-only table in section 5). `account` is
-/// the address of the calendar's account; the attendees a calendar marks
-/// as the user count as the user only in the account's own calendar
-/// (`Calendar::is_own`): Google marks the owner of a calendar shared with
-/// the account the same way.
+/// the address of the calendar's account. In a meeting someone else
+/// organizes only the user's own settings stay open.
 /// `rule` is the series' rule, for a series or one of its occurrences, and
 /// `series_span` the series' own time.
 pub fn access(calendar: &Calendar, account: &str, event: &EventData, rule: Option<&Recurrence>, series_span: &Span, here: Tz) -> (Vec<DraftField>, Option<String>) {
     if !caps::of(calendar).writable {
         return (EVERY_FIELD.to_vec(), Some("This calendar is read-only.".into()));
     }
-    let own = calendar.is_own(account);
-    let is_me = |p: &Person| {
-        p.address.eq_ignore_ascii_case(account) && !account.is_empty()
-            || own && event.attendees.iter().any(|a| a.is_me && a.person.address.eq_ignore_ascii_case(&p.address))
-    };
-    // An attendee the calendar marks as its owner isn't a guest, as for the
-    // op queue: in a shared calendar that is the owner's own event.
-    let guests = event.attendees.iter().any(|a| !is_room(a) && !a.is_me && !is_me(&a.person));
-    let organizer = event.organizer.as_ref().filter(|o| !is_me(o));
-    if guests {
-        let first = match organizer {
-            Some(o) => format!("{} organizes this meeting. ", if o.name.is_empty() { &o.address } else { &o.name }),
-            None => String::new(),
-        };
-        return (EVERY_FIELD.to_vec(), Some(format!("{first}Jolta can't change meetings with guests yet.")));
+    if let Some(o) = other_organizer(calendar, account, event) {
+        return (MEETING_FIELDS.to_vec(), Some(format!("{} organizes this meeting. You can change only your own settings.", change::name(o))));
     }
     if let Some(rule) = rule
         && calendar.source == CalendarSource::Graph
@@ -353,6 +364,49 @@ pub fn access(calendar: &Calendar, account: &str, event: &EventData, rule: Optio
         return (vec![DraftField::Repeat], Some("Microsoft 365 can't change this repeat rule.".into()));
     }
     (Vec::new(), None)
+}
+
+/// What only a meeting's organizer changes; the user's own settings stay.
+const MEETING_FIELDS: [DraftField; 10] = [
+    DraftField::Title,
+    DraftField::Time,
+    DraftField::Repeat,
+    DraftField::People,
+    DraftField::Options,
+    DraftField::Room,
+    DraftField::Location,
+    DraftField::Video,
+    DraftField::Description,
+    DraftField::Calendar,
+];
+
+/// The user's addresses on `event`: the account's, and in a calendar the
+/// account owns (`Calendar::is_own`) the attendees it marks as the user.
+/// Google marks the owner of a calendar shared with the account the same
+/// way, and that owner isn't the user.
+pub fn mine(calendar: &Calendar, account: &str, event: &EventData) -> Vec<String> {
+    let own = calendar.is_own(account);
+    let marked = event.attendees.iter().filter(|a| own && a.is_me).map(|a| a.person.address.clone());
+    (!account.is_empty()).then(|| account.to_string()).into_iter().chain(marked).collect()
+}
+
+/// The organizer of `event` when it is a meeting with guests that someone
+/// other than the user organizes: the user may change only their own
+/// settings, and its dialogs are a guest's (check 1).
+pub fn other_organizer<'a>(calendar: &Calendar, account: &str, event: &'a EventData) -> Option<&'a Person> {
+    let me = mine(calendar, account, event);
+    let is_me = |address: &str| me.iter().any(|m| m.eq_ignore_ascii_case(address.trim()));
+    // The attendee a calendar marks as its owner is no guest: the user, or
+    // in a calendar shared with the user, its owner.
+    let guests = event.attendees.iter().any(|a| !is_room(a) && !a.is_me && !is_me(&a.person.address));
+    event.organizer.as_ref().filter(|o| guests && !is_me(&o.address))
+}
+
+/// Everyone on `event` the server mails about a change: guests and rooms,
+/// never the user.
+pub fn guests<'a>(calendar: &Calendar, account: &str, event: &'a EventData) -> Vec<&'a Attendee> {
+    let me = mine(calendar, account, event);
+    event.attendees.iter().filter(|a| !a.is_me && !me.iter().any(|m| m.eq_ignore_ascii_case(&a.person.address))).collect()
 }
 
 fn mirrors_room(location: &str, room: &str) -> bool {
@@ -386,6 +440,7 @@ fn changed(draft: &EventDraft, base: &EventData) -> Vec<DraftField> {
             DraftField::Time => draft.span != was.span,
             DraftField::Repeat => draft.rule != draft.rule_was,
             DraftField::People => people(&draft.people) != people(&was.people),
+            DraftField::Options => draft.options != was.options,
             DraftField::Room => !draft.room.trim().eq_ignore_ascii_case(&was.room),
             DraftField::Location => draft.location != was.location,
             DraftField::Video => draft.video.is_some(),
@@ -426,6 +481,7 @@ fn event_of(draft: &EventDraft) -> EventData {
                 }
                 e.attendees = attendees;
             }
+            DraftField::Options => e.options = draft.options,
             DraftField::Location => {}
             DraftField::Description => {
                 let base = draft.base.as_ref().map(|b| description::split(&b.description, b.description_html));
@@ -504,8 +560,6 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
     if !room.is_empty() {
         if !is_address(room) {
             problem(Some(DraftField::Room), format!("{room} isn't an email address. Type the room's address."), true);
-        } else if calendar.source != CalendarSource::Local && (touched.contains(&DraftField::Room) || !stored) {
-            problem(Some(DraftField::Room), format!("Jolta can't book a room on {} calendars yet.", provider(&calendar)), true);
         }
     }
     let new_people = touched.contains(&DraftField::People) || !stored;
@@ -523,8 +577,6 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
             problem(Some(DraftField::People), format!("{} can't have guests.", calendar.name), true);
         } else if let Some(max) = caps.max_people.filter(|m| draft.people.len() > *m) {
             problem(Some(DraftField::People), format!("{} takes at most {max} people.", provider(&calendar)), true);
-        } else if calendar.source != CalendarSource::Local {
-            problem(Some(DraftField::People), format!("Jolta can't invite people on {} calendars yet.", provider(&calendar)), true);
         }
     }
     if let Some(video) = draft.video {
@@ -685,7 +737,8 @@ pub fn plan_save(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Save
     let touched = draft.base.as_ref().map_or_else(Vec::new, |b| changed(draft, b));
     let unchanged = draft.base.is_some() && touched.is_empty();
     let occurrence = draft.base.as_ref().and_then(|b| b.recurrence_id);
-    let (Some(at), false) = (occurrence, unchanged) else { return Ok(SavePlan { unchanged, scopes: Vec::new(), prompt: None }) };
+    let dialog = if unchanged { None } else { send_dialog(conn, draft)? };
+    let (Some(at), false) = (occurrence, unchanged) else { return Ok(SavePlan { unchanged, scopes: Vec::new(), prompt: None, dialog }) };
     let calendar = store::calendar(conn, draft.calendar)?;
     let series = series_of(conn, draft)?.ok_or_else(|| Error::Other(format!("{} was deleted while you edited it.", draft.title)))?;
     let mut scopes = Vec::new();
@@ -713,7 +766,44 @@ pub fn plan_save(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Save
         ([DraftField::Time], Moment::Time(t)) => format!("You moved {title} to {}.", t.wall.format("%H:%M")),
         _ => format!("You changed {title}."),
     };
-    Ok(SavePlan { unchanged, scopes, prompt: Some(prompt) })
+    Ok(SavePlan { unchanged, scopes, prompt: Some(prompt), dialog })
+}
+
+/// The calendar's account address, and what the change the draft makes is.
+fn classified(conn: &Connection, draft: &EventDraft) -> Result<(Calendar, String, change::Classified)> {
+    let calendar = store::calendar(conn, draft.calendar)?;
+    let account = account_of(conn, &calendar)?.unwrap_or_default();
+    let after = event_of(draft);
+    let before = draft.base.clone().unwrap_or_else(|| EventData::new(draft.uid.clone(), draft.span));
+    let mut me = mine(&calendar, &account, &before);
+    me.extend(mine(&calendar, &account, &after));
+    let c = change::classify(&before, &after, &me);
+    Ok((calendar, account, c))
+}
+
+/// Send an update?, when saving the draft emails people: never for a
+/// meeting someone else organizes (check 1).
+fn send_dialog(conn: &Connection, draft: &EventDraft) -> Result<Option<UpdateDialog>> {
+    let (calendar, account, c) = classified(conn, draft)?;
+    if draft.base.as_ref().is_some_and(|b| other_organizer(&calendar, &account, b).is_some()) {
+        return Ok(None);
+    }
+    Ok(change::dialog(&c, &caps::of(&calendar), caps::mailer(&calendar), draft.base.is_none()))
+}
+
+/// The toast's words for a save that mails people: "Update sent to 6
+/// people", said as the update waits the undo window.
+fn sent_line(c: &change::Classified, notify: ops::Notify, creating: bool, mailer: &str) -> String {
+    let people = |n: usize| if n == 1 { "1 person".to_string() } else { format!("{n} people") };
+    let (what, n) = match (creating, notify) {
+        (true, _) => ("Invitation", c.added.len()),
+        (false, ops::Notify::Changed) => ("Update", c.added.len() + c.removed.len()),
+        (false, _) => ("Update", c.kept.len() + c.added.len() + c.removed.len()),
+    };
+    match notify {
+        ops::Notify::Outside => format!("{what} sent to guests who don't use {mailer} Calendar"),
+        _ => format!("{what} sent to {}", people(n)),
+    }
 }
 
 /// `draft` with the fields in `lost` back as `base` had them.
@@ -731,6 +821,7 @@ fn reset(draft: &EventDraft, base: &EventData, lost: &[Field]) -> EventDraft {
                 out.people.clone_from(&was.people);
                 out.room.clone_from(&was.room);
             }
+            Field::Options => out.options = was.options,
             Field::Alarms => out.reminder = was.reminder,
             Field::ShowAs => out.show_as = was.show_as,
             Field::Visibility => out.visibility = was.visibility,
@@ -757,6 +848,7 @@ fn whole_series(draft: &EventDraft, series: &EventData, here: Tz) -> Result<Even
             DraftField::Time => whole.span = moved(&series.span, &base.span, &draft.span, here)?,
             DraftField::Title => whole.title.clone_from(&draft.title),
             DraftField::People => whole.people.clone_from(&draft.people),
+            DraftField::Options => whole.options = draft.options,
             DraftField::Room => whole.room.clone_from(&draft.room),
             DraftField::Location => whole.location.clone_from(&draft.location),
             DraftField::Video => whole.video = draft.video,
@@ -830,12 +922,14 @@ fn at_instant(m: &Moment, here: Tz) -> DateTime<Utc> {
     }
 }
 
-/// Saves the draft through the op queue, telling nobody. A change to one
-/// occurrence of a series needs its `scope`. When the stored event changed
+/// Saves the draft through the op queue. A change to one occurrence of a
+/// series needs its `scope`, and one the guests would hear about the
+/// `notify` of one of the Send an update? dialog's choices; any other save
+/// tells nobody, whatever `notify` says. When the stored event changed
 /// since the editor opened it, the user's changes are merged into it field
 /// by field; a field both changed keeps the stored value and the message
 /// says so.
-pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
+pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, notify: Option<ops::Notify>, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
     if let Some(p) = check_draft(conn, draft, here)?.into_iter().find(|p| p.blocking) {
         return Err(Error::Other(p.text));
     }
@@ -847,20 +941,36 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
         (false, Some(s)) if plan.scopes.iter().any(|c| c.scope == s) => s,
         (false, _) => return Err(Error::Other(format!("Choose {} to save {title}.", plan.scopes.iter().map(|c| c.label.as_str()).collect::<Vec<_>>().join(", ")))),
     };
+    let notify = match (&plan.dialog, notify) {
+        (None, _) => ops::Notify::Nobody,
+        (Some(d), Some(n)) if d.choices.iter().any(|c| c.notify == Some(n)) => n,
+        (Some(d), _) => {
+            let offered: Vec<&str> = d.choices.iter().filter(|c| c.notify.is_some()).map(|c| c.label.as_str()).collect();
+            return Err(Error::Other(format!("{} Choose {}.", d.title, offered.join(", "))));
+        }
+    };
+    let message = message.filter(|m| !m.trim().is_empty() && notify != ops::Notify::Nobody);
+    let told = match notify {
+        ops::Notify::Nobody => None,
+        n => Some(sent_line(&classified(conn, draft)?.2, n, draft.base.is_none(), caps::mailer(&calendar))),
+    };
     if scope == Scope::Following {
         let edited = event_of(draft);
         let rule = draft.rule.clone().ok_or_else(|| Error::Other(format!("{title} doesn't repeat")))?;
-        let op = split::queue_following(conn, draft.calendar, &edited, &rule, now, horizon)?;
+        let op = split::queue_following(conn, draft.calendar, &edited, &rule, notify, message, now, horizon)?;
         let uid = match op {
             Some(id) => store::calendar_op(conn, id)?.after.map(|a| store::calendar_op(conn, a)).transpose()?.map_or_else(|| draft.uid.clone(), |a| a.uid),
             None => draft.uid.clone(),
         };
-        return Ok(Saved { op, calendar: draft.calendar, uid, message: format!("Saved {title} from this event on") });
+        return Ok(Saved { op, calendar: draft.calendar, uid, message: told.unwrap_or_else(|| format!("Saved {title} from this event on")) });
     }
-    let (edit, lost) = edit(conn, draft, &calendar, scope)?;
+    let (mut edit, lost) = edit(conn, draft, &calendar, scope)?;
+    edit.notify = notify;
+    edit.message = message;
     let creating = matches!(edit.change, Change::Create(_));
     let op = ops::queue(conn, &edit, now, horizon)?;
     let message = match (creating, lost.as_slice(), plan.scopes.is_empty(), scope) {
+        _ if told.is_some() && lost.is_empty() => told.unwrap_or_default(),
         (true, _, _, _) => format!("Added {title}"),
         (false, [], false, Scope::All) => format!("Saved all events of {title}"),
         (false, [], _, _) => format!("Saved {title}"),
@@ -899,8 +1009,16 @@ pub fn plan_delete_drafted(conn: &Connection, draft: &EventDraft, here: Tz) -> R
 }
 
 fn delete_plan(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<DeletePlan> {
-    let refusal = (!draft.locks.is_empty()).then(|| draft.notice.clone().unwrap_or_else(|| "This event can't be deleted here.".into()));
-    let scopes = delete_scopes(conn, draft, here)?;
+    let calendar = store::calendar(conn, draft.calendar)?;
+    let account = account_of(conn, &calendar)?.unwrap_or_default();
+    let other = draft.base.as_ref().and_then(|b| other_organizer(&calendar, &account, b)).cloned();
+    // A meeting someone else organizes is declined, which locks only its
+    // meeting fields; anything else locked can't be deleted here.
+    let refusal = (other.is_none() && draft.locks.contains(&DraftField::Title)).then(|| draft.notice.clone().unwrap_or_else(|| "This event can't be deleted here.".into()));
+    let mut scopes = delete_scopes(conn, draft, here)?;
+    if other.is_some() {
+        scopes.retain(|c| c.scope != Scope::Following);
+    }
     let prompt = (!scopes.is_empty()).then(|| {
         let day = match draft.span.start() {
             Moment::Date(d) => d,
@@ -909,7 +1027,37 @@ fn delete_plan(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Delete
         let title = if draft.title.trim().is_empty() { "(no title)" } else { draft.title.trim() };
         format!("You're deleting {title} on {}.", day.format("%a %-d %b"))
     });
-    Ok(DeletePlan { refusal, title: draft.title.clone(), scopes, prompt })
+    let caps = caps::of(&calendar);
+    let people = draft.base.as_ref().map_or(0, |b| guests(&calendar, &account, b).len());
+    let cancel = match (&other, people > 0 && caps.sends_itself) {
+        (None, true) => {
+            let list: Vec<Scope> = if scopes.is_empty() { vec![Scope::All] } else { scopes.iter().map(|c| c.scope).collect() };
+            list.into_iter().map(|s| (s, change::cancel_dialog(people, &caps, caps::mailer(&calendar), s))).collect()
+        }
+        _ => Vec::new(),
+    };
+    let decline = other.map(|o| Decline {
+        title: "Decline and remove?".into(),
+        body: format!("{} gets your decline, and the meeting leaves your calendar.", change::name(&o)),
+        organizer: change::name(&o).to_string(),
+    });
+    Ok(DeletePlan { refusal, title: draft.title.clone(), scopes, prompt, cancel, decline })
+}
+
+/// Who a delete tells, from its plan: a meeting the user organizes is
+/// cancelled for its guests, with the user's words where the cancellation
+/// carries them; a meeting someone else organizes is declined instead.
+fn cancelling(plan: &DeletePlan, scope: Scope, message: Option<String>) -> Result<(ops::Notify, Option<String>, Option<String>)> {
+    if let Some(d) = &plan.decline {
+        return Err(Error::Other(format!("{} organizes this meeting. Decline it instead.", d.organizer)));
+    }
+    Ok(match plan.cancel.iter().find(|(s, _)| *s == scope) {
+        Some((_, dialog)) => {
+            let line = format!("Cancellation sent to {} {}", dialog.people, if dialog.people == 1 { "person" } else { "people" });
+            (ops::Notify::All, message.filter(|m| dialog.message && !m.trim().is_empty()), Some(line))
+        }
+        None => (ops::Notify::Nobody, None, None),
+    })
 }
 
 fn delete_scopes(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Vec<ScopeChoice>> {
@@ -922,23 +1070,27 @@ fn delete_scopes(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Vec<
     Ok(scopes)
 }
 
-/// Deletes a single event, or a whole series, through the op queue, telling nobody.
-pub fn delete_event(conn: &Connection, event: EventId, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
+/// Deletes a single event, or a whole series, through the op queue. A
+/// meeting the user organizes is cancelled for its guests, with `message`
+/// where the cancellation carries one; anything else tells nobody.
+pub fn delete_event(conn: &Connection, event: EventId, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
     let plan = plan_delete(conn, event, None, here)?;
-    if let Some(refusal) = plan.refusal {
+    if let Some(refusal) = plan.refusal.clone() {
         return Err(Error::Other(refusal));
     }
+    let (notify, message, told) = cancelling(&plan, Scope::All, message)?;
     let (calendar, uid): (CalendarId, String) = conn.query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let op = ops::queue(conn, &Edit::quiet(calendar, Change::Delete { uid: uid.clone() }), now, horizon)?;
+    let edit = Edit { notify, message, ..Edit::quiet(calendar, Change::Delete { uid: uid.clone() }) };
+    let op = ops::queue(conn, &edit, now, horizon)?;
     let title = if plan.title.is_empty() { "(no title)".into() } else { plan.title };
-    Ok(Saved { op, calendar, uid, message: format!("Deleted {title}") })
+    Ok(Saved { op, calendar, uid, message: told.unwrap_or_else(|| format!("Deleted {title}")) })
 }
 
 /// Deletes the stored event a draft opened, found again by its UID: the
 /// row may have been replaced by a sync, or left the period on screen. An
 /// occurrence of a series goes for `scope`: itself, it and the ones after
 /// it, or the whole series.
-pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
+pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
     let base = draft.base.as_ref().ok_or_else(|| Error::Other("A new event has nothing to delete".into()))?;
     let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
     let scopes = delete_scopes(conn, draft, here)?;
@@ -947,8 +1099,10 @@ pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope
             Some(s) => s,
             None => ops::stored(conn, draft.calendar, &base.uid, None)?.ok_or_else(|| Error::Other(format!("{} is already gone.", base.title)))?,
         };
-        return delete_event(conn, stored.id, now, horizon, here);
+        return delete_event(conn, stored.id, message, now, horizon, here);
     };
+    let plan = plan_delete_drafted(conn, draft, here)?;
+    let (notify, message, told) = cancelling(&plan, scope.unwrap_or(Scope::All), message)?;
     let (_, locks_notice) = locks_now(conn, draft, &store::calendar(conn, draft.calendar)?)?;
     if let Some(notice) = locks_notice.filter(|_| !draft.locks.is_empty()) {
         return Err(Error::Other(notice));
@@ -962,8 +1116,9 @@ pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope
         Some(Scope::All) => Change::Delete { uid: base.uid.clone() },
         _ => return Err(Error::Other(format!("Choose {} to delete {title}.", scopes.iter().map(|c| c.label.as_str()).collect::<Vec<_>>().join(", ")))),
     };
-    let op = ops::queue(conn, &Edit::quiet(draft.calendar, change), now, horizon)?;
+    let op = ops::queue(conn, &Edit { notify, message, ..Edit::quiet(draft.calendar, change) }, now, horizon)?;
     let message = match scope {
+        _ if told.is_some() => told.unwrap_or_default(),
         Some(Scope::This) => format!("Deleted {title} on {}", match at {
             Moment::Date(d) => d,
             Moment::Time(t) => t.wall.date(),
@@ -1068,13 +1223,17 @@ mod tests {
 
         let theirs = meeting("jan@example.com", vec![attendee("jan@example.com", false, Role::Chair), attendee(ME, true, Role::Required)]);
         assert_eq!(
-            sentence(&google, ME, &theirs),
-            (true, Some("Jan Peeters organizes this meeting. Jolta can't change meetings with guests yet.".into())),
-            "someone else's meeting"
+            open(&google, ME, &theirs),
+            (MEETING_FIELDS.to_vec(), Some("Jan Peeters organizes this meeting. You can change only your own settings.".into())),
+            "someone else's meeting leaves the user's own settings open"
         );
+        let (locks, _) = open(&google, ME, &theirs);
+        assert!(![DraftField::ShowAs, DraftField::Reminder, DraftField::Visibility].iter().any(|f| locks.contains(f)));
 
         let mine = meeting(ME, vec![attendee(ME, true, Role::Chair), attendee("els@example.com", false, Role::Required)]);
-        assert_eq!(sentence(&google, ME, &mine), (true, Some("Jolta can't change meetings with guests yet.".into())), "the user's own meeting with guests");
+        assert_eq!(open(&google, ME, &mine), (Vec::new(), None), "the user's own meeting with guests is open");
+        let alias = meeting("me.alias@example.com", vec![attendee("me.alias@example.com", true, Role::Chair), attendee("els@example.com", false, Role::Required)]);
+        assert_eq!(open(&google, ME, &alias), (Vec::new(), None), "an alias the user's own calendar marks organizes as the user");
 
         let shared = calendar(CalendarSource::CalDav, Access::Write, "https://dav.example.com/cal/team/");
         assert_eq!(open(&shared, ME, &alone), (Vec::new(), None), "a shared calendar with write access is open");
@@ -1098,10 +1257,10 @@ mod tests {
         let organized = meeting(owner, vec![attendee(owner, true, Role::Chair), attendee("els@example.com", false, Role::Required)]);
         let primary = calendar(CalendarSource::Google, Access::Owner, ME);
         let shared = calendar(CalendarSource::Google, Access::Owner, "team@group.calendar.google.com");
-        assert_eq!(open(&primary, ME, &organized).1, Some("Jolta can't change meetings with guests yet.".into()), "in the primary calendar the marked organizer is the user");
+        assert_eq!(open(&primary, ME, &organized), (Vec::new(), None), "in the primary calendar the marked organizer is the user");
         assert_eq!(
             open(&shared, ME, &organized).1,
-            Some("Jan Peeters organizes this meeting. Jolta can't change meetings with guests yet.".into()),
+            Some("Jan Peeters organizes this meeting. You can change only your own settings.".into()),
             "in a shared calendar the marked organizer is its owner"
         );
         let owners_own = EventData { attendees: vec![attendee(owner, true, Role::Chair)], ..organized };
@@ -1152,7 +1311,7 @@ mod tests {
     fn create_edit_and_delete_through_the_queue_with_undo() {
         let (s, cal) = setup("flow");
         let d = new_draft(&s, cal, "Design review");
-        let saved = s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(saved.message, "Added Design review");
         let id = event_id(&s, cal, &d.uid);
 
@@ -1161,16 +1320,16 @@ mod tests {
         d.span = span("2026-11-24 15:00", "2026-11-24 16:00");
         d.reminder = Reminder::Before(10);
         assert!(!s.read(|c| plan_save(c, &d, Brussels)).unwrap().unchanged);
-        let saved = s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(saved.message, "Saved Design review");
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!((stored.span, stored.alarms.as_slice()), (d.span, [Alarm { trigger: AlarmTrigger::MinutesBefore(10), email: false }].as_slice()));
 
-        let again = s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        let again = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(again.op, None, "the same save twice queues one op");
 
         let id = event_id(&s, cal, &d.uid);
-        let deleted = s.write(|tx| delete_event(tx, id, NOW, &horizon(), Brussels)).unwrap();
+        let deleted = s.write(|tx| delete_event(tx, id, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(deleted.message, "Deleted Design review");
         assert!(s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().is_none());
         s.write(|tx| ops::undo(tx, deleted.op.unwrap(), NOW, &horizon())).unwrap();
@@ -1182,7 +1341,7 @@ mod tests {
     fn a_change_made_while_editing_is_merged_not_overwritten() {
         let (s, cal) = setup("merge");
         let d = new_draft(&s, cal, "Standup");
-        s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let id = event_id(&s, cal, &d.uid);
         let mut editing = s.read(|c| draft_for_event(c, id, None, Brussels)).unwrap();
 
@@ -1193,7 +1352,7 @@ mod tests {
 
         editing.span = span("2026-11-24 16:00", "2026-11-24 16:30");
         editing.title = "Standup moved".into();
-        let saved = s.write(|tx| save_draft(tx, &editing, None, NOW, &horizon(), Brussels)).unwrap();
+        let saved = s.write(|tx| save_draft(tx, &editing, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!((stored.location.as_str(), stored.span), ("Room 2.14", editing.span), "the other field stays, the user's time lands");
         assert_eq!(stored.title, "Daily standup", "both changed the title: the stored one stays");
@@ -1244,7 +1403,7 @@ mod tests {
         let queued = |reminder: Reminder| {
             let mut d = s.read(|c| draft_for_new(c, Some(google), Some(span("2026-11-24 14:00", "2026-11-24 15:00")), now, Brussels)).unwrap();
             d.reminder = reminder;
-            let op = s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap().op.unwrap();
+            let op = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap().op.unwrap();
             s.read(|c| store::calendar_op(c, op)).unwrap().extra
         };
         assert_eq!(queued(Reminder::Default), None, "the calendar's own default");
@@ -1258,7 +1417,7 @@ mod tests {
     fn the_refusal_check_sees_the_merged_change() {
         let (s, cal) = setup("refusal");
         let d = new_draft(&s, cal, "Review");
-        s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let mut editing = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
         let mut elsewhere = editing.base.clone().unwrap();
         elsewhere.location = "Room 2.14".into();
@@ -1273,11 +1432,11 @@ mod tests {
     fn delete_finds_the_event_a_draft_opened_again() {
         let (s, cal) = setup("delete");
         let d = new_draft(&s, cal, "Review");
-        s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let mut opened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
         opened.title = "Review moved".into();
-        s.write(|tx| save_draft(tx, &opened, None, NOW, &horizon(), Brussels)).unwrap();
-        let deleted = s.write(|tx| delete_drafted(tx, &opened, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &opened, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let deleted = s.write(|tx| delete_drafted(tx, &opened, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(deleted.message, "Deleted Review moved", "the row was replaced since the draft opened");
         assert!(s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().is_none());
     }
@@ -1287,7 +1446,7 @@ mod tests {
         let (s, cal) = setup("room");
         let mut d = new_draft(&s, cal, "Review");
         d.room = "room-214@example.com".into();
-        s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!(stored.attendees.iter().map(|a| (a.person.address.as_str(), a.role)).collect::<Vec<_>>(), [("room-214@example.com", Role::Room)]);
         assert_eq!(stored.location, "room-214@example.com");
@@ -1296,13 +1455,13 @@ mod tests {
         assert!(s.read(|c| plan_save(c, &reopened, Brussels)).unwrap().unchanged);
 
         reopened.room = "room-301@example.com".into();
-        s.write(|tx| save_draft(tx, &reopened, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &reopened, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!(stored.location, "room-301@example.com", "the location follows the room while the user has none");
 
         let mut reopened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
         reopened.location = "Gent, Belfort".into();
-        s.write(|tx| save_draft(tx, &reopened, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &reopened, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!((stored.location.as_str(), stored.attendees.len()), ("Gent, Belfort", 1), "a location of the user's own stays");
     }
@@ -1335,7 +1494,7 @@ mod tests {
         let mut d = s.read(|c| draft_for_event(c, event_id(&s, cal, "d1"), None, Brussels)).unwrap();
         assert_eq!(d.description, "Old notes");
         d.description = "New notes".into();
-        s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(s.read(|c| ops::stored(c, cal, "d1", None)).unwrap().unwrap().event.description, format!("New notes{block}"));
     }
 
@@ -1356,18 +1515,20 @@ mod tests {
         assert!(occurrence.locks.is_empty(), "a series without guests is open");
         let meeting = EventData {
             title: "Planning".into(),
+            organizer: Some(person("jan@example.com", "Jan Peeters")),
             attendees: vec![Attendee { person: person("els@example.com", ""), role: Role::Required, response: Response::NeedsAction, comment: String::new(), is_me: false }],
             ..EventData::new("m1", span("2026-11-25 09:00", "2026-11-25 09:30"))
         };
         s.write(|tx| ops::queue(tx, &Edit::quiet(cal, Change::Create(vec![meeting])), NOW, &horizon())).unwrap();
         let id = event_id(&s, cal, "m1");
         let mut d = s.read(|c| draft_for_event(c, id, None, Brussels)).unwrap();
-        assert_eq!(d.notice.as_deref(), Some("Jolta can't change meetings with guests yet."));
+        assert_eq!(d.notice.as_deref(), Some("Jan Peeters organizes this meeting. You can change only your own settings."));
         d.title = "Changed".into();
         d.locks.clear();
         d.notice = None;
-        assert!(s.write(|tx| save_draft(tx, &d, None, NOW, &horizon(), Brussels)).is_err(), "the store's locks count, not the draft's");
-        assert!(s.read(|c| plan_delete(c, id, None, Brussels)).unwrap().refusal.is_some());
-        assert!(s.write(|tx| delete_event(tx, id, NOW, &horizon(), Brussels)).is_err());
+        assert!(s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).is_err(), "the store's locks count, not the draft's");
+        let plan = s.read(|c| plan_delete(c, id, None, Brussels)).unwrap();
+        assert_eq!((plan.refusal, plan.decline.map(|d| d.organizer)), (None, Some("Jan Peeters".into())), "a guest declines instead of deleting");
+        assert!(s.write(|tx| delete_event(tx, id, None, NOW, &horizon(), Brussels)).is_err());
     }
 }

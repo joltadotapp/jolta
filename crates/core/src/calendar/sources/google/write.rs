@@ -1,17 +1,18 @@
 //! Calendar ops on Google: `events.insert` at an event id Jolta picks,
 //! `events.patch` of only the changed fields, and `events.delete`, each
-//! with `sendUpdates=none` and every patch and delete guarded by the
-//! event's ETag.
+//! with the `sendUpdates` the op's notify asks for and every patch and
+//! delete guarded by the event's ETag.
 
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{OpWrite, Version, Written, cannot, changed_fields, created_fields, encode, merge_json};
+use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json};
 use super::add::when;
 use super::{BASE, Google, GoogleEvent, Reminder, event, failure};
 use crate::calendar::change::Field;
 use crate::calendar::ical_edit::Prop;
-use crate::calendar::{Alarm, AlarmTrigger, Calendar, EventData, EventStatus, Moment, ShowAs, Visibility, tz};
+use crate::calendar::ops::Notify;
+use crate::calendar::{Alarm, AlarmTrigger, Calendar, EventData, EventStatus, Moment, Response, Role, ShowAs, Visibility, tz};
 use crate::{Error, Result};
 
 const GOOGLE: &str = "Google Calendar";
@@ -34,8 +35,8 @@ impl Http for Google {
 }
 
 impl Google {
-    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>) -> Result<Written> {
-        send(self, calendar, write, tz::here()).await
+    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
+        send(self, calendar, write, tell, tz::here()).await
     }
 
     pub async fn fetch(&self, calendar: &Calendar, remote_id: &str, alarms: &[Alarm]) -> Result<Option<Version>> {
@@ -97,19 +98,31 @@ fn occurrence_body(master: &EventData, changed: &EventData, here: Tz) -> Result<
     patch_body(&base, changed, None, here).map(Some)
 }
 
-async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here: Tz) -> Result<Written> {
+/// Google's `sendUpdates` for the op's notify. Google mails only the guests
+/// a change of people adds or removes, also with `all` (Google test
+/// account, 2026-11-07), so new people only is `all` too.
+fn send_updates(notify: Notify) -> &'static str {
+    match notify {
+        Notify::All | Notify::Changed => "all",
+        Notify::Outside => "externalOnly",
+        Notify::Nobody => "none",
+    }
+}
+
+async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>, here: Tz) -> Result<Written> {
     let events_url = format!("{BASE}/calendars/{}/events", encode(&calendar.remote_id));
+    let updates = send_updates(tell.notify);
     match *write {
         OpWrite::Create { events, extra, .. } => {
             let (master, changed) = split_series(events)?;
-            let mut written = create(google, calendar, master, extra, &events_url, here).await?;
+            let mut written = create(google, calendar, master, extra, &events_url, updates, here).await?;
             // The series' changed occurrences follow as writes of their
             // instances. A retry finds the series made and writes them
             // again, which changes nothing more.
             if let Written::Saved(Some(series)) = &mut written {
                 for e in changed {
                     let id = instance_id(&series.remote_id, e.recurrence_id.as_ref().expect("a changed occurrence"), here);
-                    let url = format!("{events_url}/{}?sendUpdates=none", encode(&id));
+                    let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&id));
                     let (method, body) = match occurrence_body(master, e, here)? {
                         Some(body) => (reqwest::Method::PATCH, Some(body)),
                         None => (reqwest::Method::DELETE, None),
@@ -129,7 +142,7 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
             let Some(etag) = series.etag.as_deref() else { return Ok(Written::Stale) };
             let rid = event.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "change an occurrence without its start"))?;
             let body = patch_body(base, event, extra, here)?;
-            let url = format!("{events_url}/{}?sendUpdates=none", encode(&instance_id(&series.remote_id, rid, here)));
+            let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&instance_id(&series.remote_id, rid, here)));
             let (status, reply) = google.request(reqwest::Method::PATCH, &url, Some(&body), Some(etag)).await?;
             match status {
                 200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, &event.alarms)?))),
@@ -142,7 +155,7 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
             let rid = occurrence.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "delete an occurrence without its start"))?;
             let id = if changed { held.remote_id.clone() } else { instance_id(&held.remote_id, rid, here) };
-            let url = format!("{events_url}/{}?sendUpdates=none", encode(&id));
+            let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&id));
             let (status, reply) = google.request(reqwest::Method::DELETE, &url, None, Some(etag)).await?;
             match status {
                 200..300 => Ok(Written::Saved(None)),
@@ -154,7 +167,7 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
         OpWrite::Update { held, base, event, extra, .. } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
             let body = patch_body(base, event, extra, here)?;
-            let url = format!("{events_url}/{}?sendUpdates=none", encode(&held.remote_id));
+            let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&held.remote_id));
             let (status, reply) = google.request(reqwest::Method::PATCH, &url, Some(&body), Some(etag)).await?;
             match status {
                 200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, &event.alarms)?))),
@@ -165,7 +178,7 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
         }
         OpWrite::Delete { held } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
-            let url = format!("{events_url}/{}?sendUpdates=none", encode(&held.remote_id));
+            let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&held.remote_id));
             let (status, reply) = google.request(reqwest::Method::DELETE, &url, None, Some(etag)).await?;
             match status {
                 200..300 => Ok(Written::Saved(None)),
@@ -178,10 +191,10 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
 }
 
 /// `events.insert` of a series or single event, with the UID Google keeps.
-async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, extra: Option<&crate::calendar::ops::Extra>, events_url: &str, here: Tz) -> Result<Written> {
+async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, extra: Option<&crate::calendar::ops::Extra>, events_url: &str, updates: &str, here: Tz) -> Result<Written> {
     let body = insert_body(std::slice::from_ref(master), extra, here)?;
     let (uid, alarms) = (&master.uid, &master.alarms);
-    let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates=none"), Some(&body), None).await?;
+    let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates={updates}"), Some(&body), None).await?;
     match status {
         200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
         // Google holds the UID already: a retry whose first try
@@ -277,6 +290,30 @@ pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&crate::
     Ok(v)
 }
 
+/// One guest as Google takes it. A room is a resource. Google replaces the
+/// whole list on a patch, so each guest keeps the answer Jolta last read;
+/// a guest who answered since changed the ETag, and the write meets a 412.
+fn attendee(a: &crate::calendar::Attendee) -> Value {
+    let mut v = json!({ "email": a.person.address, "responseStatus": match a.response {
+        Response::Accepted => "accepted",
+        Response::Tentative => "tentative",
+        Response::Declined => "declined",
+        Response::NeedsAction | Response::Delegated => "needsAction",
+    } });
+    if !a.person.name.is_empty() {
+        v["displayName"] = json!(a.person.name);
+    }
+    match a.role {
+        Role::Optional => v["optional"] = json!(true),
+        Role::Room | Role::Resource => v["resource"] = json!(true),
+        Role::Required | Role::Chair | Role::Fyi => {}
+    }
+    if !a.comment.is_empty() {
+        v["comment"] = json!(a.comment);
+    }
+    v
+}
+
 /// Puts `field` of `e` into the body the way Google takes it.
 fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> Result<()> {
     match field {
@@ -347,7 +384,12 @@ fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> 
             })
         }
         Field::Categories => return Err(cannot(GOOGLE, "hold categories")),
-        Field::People => return Err(cannot(GOOGLE, "change guests from Jolta yet")),
+        Field::People => v["attendees"] = json!(e.attendees.iter().map(attendee).collect::<Vec<_>>()),
+        Field::Options => {
+            v["guestsCanSeeOtherGuests"] = json!(!e.options.hide_guests);
+            v["guestsCanInviteOthers"] = json!(e.options.guests_invite);
+            v["guestsCanModify"] = json!(e.options.guests_modify);
+        }
         // A new event's meeting stays in its description; making one is for
         // Add video call.
         Field::MeetingLink if creating => {}
@@ -487,8 +529,12 @@ mod tests {
     }
 
     async fn sent(write: OpWrite<'_>, replies: Vec<(u16, Value)>) -> (Result<Written>, Vec<String>) {
+        told(write, Tell::NOBODY, replies).await
+    }
+
+    async fn told(write: OpWrite<'_>, tell: Tell<'_>, replies: Vec<(u16, Value)>) -> (Result<Written>, Vec<String>) {
         let fake = Fake { replies: Mutex::new(replies.into()), seen: Mutex::new(Vec::new()) };
-        let done = send(&fake, &calendar(), &write, Brussels).await;
+        let done = send(&fake, &calendar(), &write, tell, Brussels).await;
         (done, fake.seen.into_inner().unwrap())
     }
 
@@ -541,4 +587,39 @@ mod tests {
         let fake = Fake { replies: Mutex::new(vec![(200, google("abc", "\"9\"", "u1@jolta.app", "cancelled"))].into()), seen: Mutex::new(Vec::new()) };
         assert_eq!(fetch(&fake, &calendar(), "abc", &[]).await.unwrap(), None);
     }
+    /// The op's notify picks `sendUpdates`, and a patch of the guests sends
+    /// the whole list with each guest's answer, a room as a resource.
+    #[tokio::test]
+    async fn guests_and_send_updates_follow_the_op() {
+        let base = standup();
+        let guest = |address: &str, role, response| crate::calendar::Attendee {
+            person: crate::calendar::Person { address: address.into(), name: String::new() },
+            role,
+            response,
+            comment: String::new(),
+            is_me: false,
+        };
+        let mut e = base.clone();
+        e.attendees = vec![guest("ann@example.com", Role::Optional, Response::Accepted), guest("room@example.com", Role::Room, Response::NeedsAction)];
+        e.options.guests_invite = false;
+        let body = patch_body(&base, &e, None, Brussels).unwrap();
+        assert_eq!(
+            body["attendees"],
+            json!([
+                { "email": "ann@example.com", "responseStatus": "accepted", "optional": true },
+                { "email": "room@example.com", "responseStatus": "needsAction", "resource": true },
+            ])
+        );
+        assert_eq!((body["guestsCanInviteOthers"].as_bool(), body["guestsCanSeeOtherGuests"].as_bool()), (Some(false), Some(true)));
+
+        let held = Stored { id: EventId(1), remote_id: "abc".into(), etag: Some("\"3\"".into()), raw: None, data: base.clone() };
+        let update = OpWrite::Update { held: &held, base: &base, event: &e, extra: None, dropped: &[] };
+        for (notify, query) in [(Notify::All, "all"), (Notify::Changed, "all"), (Notify::Outside, "externalOnly"), (Notify::Nobody, "none")] {
+            let (_, seen) = told(update, Tell { notify, message: None }, vec![(412, json!({}))]).await;
+            assert_eq!(seen, [format!("PATCH /calendars/primary/events/abc?sendUpdates={query} If-Match \"3\"")], "{notify:?}");
+        }
+        let (_, seen) = told(OpWrite::Delete { held: &held }, Tell { notify: Notify::All, message: Some("ignored") }, vec![(204, Value::Null)]).await;
+        assert_eq!(seen, ["DELETE /calendars/primary/events/abc?sendUpdates=all If-Match \"3\""]);
+    }
+
 }

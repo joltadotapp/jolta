@@ -776,7 +776,7 @@ final class CalendarModel {
     private func save(_ editor: EventEditorModel, scope: EditScope?) {
         guard self.editor === editor else { return }
         do {
-            let saved = try core.saveEvent(draft: editor.draft, scope: scope)
+            let saved = try core.saveEvent(draft: editor.draft, scope: scope, notify: nil, message: nil)
             let (uid, calendarID, time) = (saved.uid, editor.draft.calendarId, editor.draft.time)
             dropEditor()
             refresh()
@@ -801,7 +801,7 @@ final class CalendarModel {
             let remove = { [weak self] (scope: EditScope?) in
                 guard let self, self.editor === editor else { return }
                 do {
-                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope))
+                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope, message: nil))
                 } catch {
                     editor.failure = "\(error)"
                 }
@@ -822,12 +822,12 @@ final class CalendarModel {
         do {
             let plan = try core.planDelete(eventId: event.record.eventId, time: event.record.time)
             if let refusal = plan.refusal { return toast?(refusal, nil) ?? () }
-            guard !plan.scopes.isEmpty else { return deleted(try core.deleteEvent(eventId: event.record.eventId)) }
+            guard !plan.scopes.isEmpty else { return deleted(try core.deleteEvent(eventId: event.record.eventId, message: nil)) }
             let draft = try core.draftForEvent(eventId: event.record.eventId, time: event.record.time)
             scopePrompt = deletePrompt(plan) { [weak self] scope in
                 guard let self else { return }
                 do {
-                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope))
+                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope, message: nil))
                 } catch {
                     self.toast?("\(error)", nil)
                 }

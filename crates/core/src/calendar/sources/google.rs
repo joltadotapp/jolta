@@ -23,7 +23,7 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
@@ -99,6 +99,9 @@ struct GoogleEvent {
     color_id: Option<String>,
     sequence: i64,
     source: Option<SourceLink>,
+    guests_can_invite_others: Option<bool>,
+    guests_can_see_other_guests: Option<bool>,
+    guests_can_modify: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -630,6 +633,12 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
         categories: Vec::new(),
         color: g.color_id.as_deref().and_then(event_color).map(str::to_string),
         master_id: g.recurring_event_id.clone(),
+        options: MeetingOptions {
+            hide_guests: g.guests_can_see_other_guests == Some(false),
+            guests_invite: g.guests_can_invite_others != Some(false),
+            guests_modify: g.guests_can_modify,
+            ..MeetingOptions::default()
+        },
     })
 }
 

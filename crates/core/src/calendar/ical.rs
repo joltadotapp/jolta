@@ -221,6 +221,21 @@ fn event(
         None => (plain, false),
     };
 
+    let proposals = !x_props(comp, "X-MICROSOFT-DISALLOW-COUNTER").filter_map(upper).any(|v| v == "TRUE");
+    // RSVP=FALSE is the default, so only a meeting that says it of every
+    // guest and asks none counts as not asking for answers.
+    let rsvp: Vec<Option<bool>> = comp
+        .properties(&Prop::Attendee)
+        .filter(|e| !matches!(param_upper(e, &Param::Cutype).as_deref(), Some("ROOM" | "RESOURCE")))
+        .map(|e| match e.parameter(&Param::Rsvp) {
+            Some(calcard::icalendar::ICalendarParameterValue::Bool(b)) => Some(*b),
+            Some(v) => v.as_text().map(|t| t.trim().eq_ignore_ascii_case("TRUE")),
+            None => None,
+        })
+        .collect();
+    let request_responses = !(rsvp.contains(&Some(false)) && !rsvp.contains(&Some(true)));
+    let options = MeetingOptions { request_responses, allow_new_times: proposals, ..MeetingOptions::default() };
+
     let event = EventData {
         uid,
         recurrence_id,
@@ -243,12 +258,12 @@ fn event(
         categories,
         color,
         master_id: None,
+        options,
     };
     let stamp = comp.property(&Prop::Dtstamp).and_then(|e| match e.values.first() {
         Some(Value::PartialDateTime(dt)) => utc(dt),
         _ => None,
     });
-    let proposals = !x_props(comp, "X-MICROSOFT-DISALLOW-COUNTER").filter_map(upper).any(|v| v == "TRUE");
     Some(Sent { event, dated: start.is_some(), stamp, proposals })
 }
 

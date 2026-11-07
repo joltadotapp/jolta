@@ -61,7 +61,9 @@ pub struct Capabilities {
     pub hold_update: Hold,
     /// Google's `sendUpdates=externalOnly`.
     pub outside_only: bool,
-    /// A change to the people alone mails only those added or removed.
+    /// A change to the people alone mails only those added or removed:
+    /// Exchange's attendees PATCH, and Google's `sendUpdates=all`, which
+    /// mails the other guests nothing (Google test account, 2026-11-07).
     pub new_people_only: bool,
     /// A cancellation can carry the user's message.
     pub cancel_message: bool,
@@ -110,6 +112,7 @@ pub fn of(calendar: &Calendar) -> Capabilities {
     match calendar.source {
         CalendarSource::Google => Capabilities {
             outside_only: true,
+            new_people_only: true,
             repeat: RepeatLimits { hourly: false, ..RepeatLimits::ALL },
             move_within: MoveRule::Native,
             video: vec![MeetingProvider::Meet],
@@ -149,6 +152,19 @@ pub fn of(calendar: &Calendar) -> Capabilities {
             ..base
         },
         CalendarSource::Webcal | CalendarSource::EventKit => none,
+    }
+}
+
+/// Who mails a calendar's guests, by name, for the dialogs: "Google",
+/// "Microsoft 365", "iCloud".
+pub fn mailer(calendar: &Calendar) -> &'static str {
+    match calendar.source {
+        CalendarSource::Google => "Google",
+        CalendarSource::Graph => "Microsoft 365",
+        CalendarSource::CalDav if calendar.remote_id.contains("icloud.com") => "iCloud",
+        CalendarSource::CalDav if calendar.remote_id.contains("fastmail") => "Fastmail",
+        CalendarSource::CalDav => "Your calendar server",
+        CalendarSource::Local | CalendarSource::Webcal | CalendarSource::EventKit => "Jolta",
     }
 }
 
@@ -196,7 +212,7 @@ mod tests {
     #[test]
     fn each_source_matches_the_spec_table() {
         let g = of(&calendar(CalendarSource::Google, Access::Owner));
-        assert_eq!((g.hold_update, g.outside_only, g.cancel_message, g.move_within, g.sends_itself), (Hold::Always, true, false, MoveRule::Native, true));
+        assert_eq!((g.hold_update, g.outside_only, g.new_people_only, g.cancel_message, g.move_within, g.sends_itself), (Hold::Always, true, true, false, MoveRule::Native, true));
         assert_eq!(g.video, [MeetingProvider::Meet]);
         assert_eq!(g.repeat, RepeatLimits { hourly: false, set_pos: true, several_months: true }, "the Google probe of 2026-11-07");
 

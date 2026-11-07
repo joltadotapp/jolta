@@ -489,6 +489,29 @@ impl Core {
         self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options, None).await
     }
 
+    /// Decline and remove, for a meeting someone else organizes: declines
+    /// it, telling the organizer when `tell`, then takes the user's copy out
+    /// of the calendar. `occurrence_only` does both for the occurrence at
+    /// `time`. Returns the words for the toast.
+    pub async fn decline_and_remove(&self, event_id: i64, time: Option<OccurrenceTime>, occurrence_only: bool, tell: bool) -> Result<String> {
+        let at = time.map(Bounds::try_from).transpose()?;
+        let options = AnswerOptions { note: String::new(), notify: tell, occurrence_only };
+        let declined = self.respond(respond::Subject::Event { id: EventId(event_id), at }, InvitationAnswer::Decline, options, None).await?;
+        let here = tz::here();
+        let rid = match at.filter(|_| occurrence_only) {
+            Some(at) => Some(self.jolta.store.read(|c| rsvp::occurrence_at(c, EventId(event_id), at, here))?),
+            None => None,
+        };
+        let jolta = self.jolta.clone();
+        let removed = self
+            .runtime
+            .spawn(async move { remove::remove_copy(&jolta, EventId(event_id), rid).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.calendar_changed([removed.calendar]);
+        Ok(format!("{declined} {}", removed.text))
+    }
+
     /// Every account with its calendar switch and calendars, then the
     /// calendars of no account.
     pub fn calendars(&self) -> Result<CalendarList> {

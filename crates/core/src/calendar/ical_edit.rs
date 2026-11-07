@@ -349,6 +349,11 @@ impl Component {
         before - self.nodes.len()
     }
 
+    /// Keeps only the `name` lines `keep` picks.
+    pub fn retain(&mut self, name: &str, mut keep: impl FnMut(&Prop) -> bool) {
+        self.nodes.retain(|n| !matches!(n, Node::Line(Line { prop: Some(p), .. }) if p.is(name) && !keep(p)));
+    }
+
     /// Changes the `name` lines that `select` picks with `change`, such as
     /// setting PARTSTAT on one ATTENDEE. A line `change` leaves equal stays
     /// byte for byte. Returns how many lines matched.
@@ -669,6 +674,9 @@ pub fn vevent(e: &EventData) -> Component {
         ev.add(person_prop("ORGANIZER", o));
     }
     write_field(&mut ev, Field::People, e);
+    if !e.options.allow_new_times {
+        write_field(&mut ev, Field::Options, e);
+    }
     ev.add(Prop::new("SEQUENCE", &e.sequence.to_string()));
     for field in [Field::Categories, Field::Color, Field::MeetingLink, Field::Alarms] {
         write_field(&mut ev, field, e);
@@ -760,10 +768,31 @@ pub fn write_field(ev: &mut Component, field: super::change::Field, e: &EventDat
                 ev.add(Prop::new("CLASS", class));
             }
         }
+        // A person who stays keeps their line, with what the server added
+        // to it (SCHEDULE-STATUS, their answer); only a new role changes it.
         Field::People => {
-            ev.remove("ATTENDEE");
-            for a in &e.attendees {
-                ev.add(attendee_prop(a));
+            let find = |p: &Prop| p.address().and_then(|address| e.attendees.iter().find(|a| a.person.address.eq_ignore_ascii_case(address)));
+            ev.retain("ATTENDEE", |p| find(p).is_some());
+            let mut kept: Vec<String> = Vec::new();
+            ev.update("ATTENDEE", |_| true, |p| {
+                let Some(a) = find(p) else { return };
+                kept.push(a.person.address.to_lowercase());
+                if line_role(p) != a.role {
+                    let (cutype, role) = kinds(a.role);
+                    p.set_param("CUTYPE", cutype);
+                    p.set_param("ROLE", role);
+                }
+            });
+            for a in e.attendees.iter().filter(|a| !kept.contains(&a.person.address.to_lowercase())) {
+                ev.add(attendee_prop(a, e.options.request_responses));
+            }
+        }
+        Field::Options => {
+            let rsvp = if e.options.request_responses { "TRUE" } else { "FALSE" };
+            ev.update("ATTENDEE", |p| !matches!(p.param("CUTYPE").map(str::to_ascii_uppercase).as_deref(), Some("ROOM" | "RESOURCE")), |p| p.set_param("RSVP", rsvp));
+            ev.remove("X-MICROSOFT-DISALLOW-COUNTER");
+            if !e.options.allow_new_times {
+                ev.add(Prop::new("X-MICROSOFT-DISALLOW-COUNTER", "TRUE"));
             }
         }
         Field::Categories => {
@@ -807,15 +836,33 @@ fn person_prop(name: &str, p: &Person) -> Prop {
     if p.name.is_empty() { prop } else { prop.with_param("CN", &p.name) }
 }
 
-fn attendee_prop(a: &Attendee) -> Prop {
-    let (cutype, role) = match a.role {
+/// CUTYPE and ROLE for a role.
+fn kinds(role: Role) -> (&'static str, &'static str) {
+    match role {
         Role::Required => ("INDIVIDUAL", "REQ-PARTICIPANT"),
         Role::Optional => ("INDIVIDUAL", "OPT-PARTICIPANT"),
         Role::Chair => ("INDIVIDUAL", "CHAIR"),
         Role::Fyi => ("INDIVIDUAL", "NON-PARTICIPANT"),
         Role::Room => ("ROOM", "NON-PARTICIPANT"),
         Role::Resource => ("RESOURCE", "NON-PARTICIPANT"),
-    };
+    }
+}
+
+/// The role an ATTENDEE line gives, as the reader takes it.
+fn line_role(p: &Prop) -> Role {
+    let upper = |name| p.param(name).map(str::to_ascii_uppercase);
+    match (upper("CUTYPE").as_deref(), upper("ROLE").as_deref()) {
+        (Some("ROOM"), _) => Role::Room,
+        (Some("RESOURCE"), _) => Role::Resource,
+        (_, Some("CHAIR")) => Role::Chair,
+        (_, Some("OPT-PARTICIPANT")) => Role::Optional,
+        (_, Some("NON-PARTICIPANT")) => Role::Fyi,
+        _ => Role::Required,
+    }
+}
+
+fn attendee_prop(a: &Attendee, request_responses: bool) -> Prop {
+    let (cutype, role) = kinds(a.role);
     let partstat = match a.response {
         Response::NeedsAction => "NEEDS-ACTION",
         Response::Accepted => "ACCEPTED",
@@ -828,7 +875,7 @@ fn attendee_prop(a: &Attendee) -> Prop {
         .with_param("ROLE", role)
         .with_param("PARTSTAT", partstat);
     if a.response == Response::NeedsAction && cutype == "INDIVIDUAL" {
-        prop.set_param("RSVP", "TRUE");
+        prop.set_param("RSVP", if request_responses { "TRUE" } else { "FALSE" });
     }
     if !a.comment.is_empty() {
         prop.set_param("X-RESPONSE-COMMENT", &a.comment.replace(['\r', '\n'], " "));
@@ -1132,6 +1179,7 @@ mod tests {
             categories: Vec::new(),
             color: None,
             master_id: None,
+            options: Default::default(),
         }
     }
 

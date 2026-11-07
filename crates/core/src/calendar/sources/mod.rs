@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 
 use super::availability::{Availability, Schedule, Unknown, WorkingHours};
 use super::change::{FIELDS, Field};
-use super::ops::Extra;
+use super::ops::{Extra, Notify};
 use super::rsvp::{Rsvp, Stored, Target};
 use super::{Calendar, CalendarSource, EventData};
 use crate::store::{RemoteCalendar, Removal};
@@ -184,12 +184,13 @@ impl Source {
 impl Source {
     /// Sends one calendar op's write. Every update and delete is guarded by
     /// the version Jolta holds; a create lands on the object `key` names, so
-    /// a retry after a lost answer finds the first try's event.
-    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>) -> Result<Written> {
+    /// a retry after a lost answer finds the first try's event. `tell` says
+    /// whom the server mails about it.
+    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
         match self {
             Source::CalDav(s) => s.write(calendar, write).await,
-            Source::Google(s) => s.write(calendar, write).await,
-            Source::Graph(s) => s.write(calendar, write).await,
+            Source::Google(s) => s.write(calendar, write, tell).await,
+            Source::Graph(s) => s.write(calendar, write, tell).await,
             Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
         }
     }
@@ -232,6 +233,19 @@ pub fn writable(source: CalendarSource, write: &OpWrite<'_>) -> Result<()> {
         CalendarSource::Local => Ok(()),
         CalendarSource::Webcal | CalendarSource::EventKit => Err(Error::Other("This calendar is read-only.".into())),
     }
+}
+
+/// Whom the server mails about one write of a calendar op, and the user's
+/// words with a cancellation. A CalDAV server with scheduling mails the
+/// guests of every change itself, so only Google and Microsoft 365 read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tell<'a> {
+    pub notify: Notify,
+    pub message: Option<&'a str>,
+}
+
+impl Tell<'_> {
+    pub const NOBODY: Tell<'static> = Tell { notify: Notify::Nobody, message: None };
 }
 
 /// One write of a calendar op.

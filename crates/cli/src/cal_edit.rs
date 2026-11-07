@@ -319,7 +319,7 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
             print_scopes(&plan.scopes);
         }
         let h = horizon();
-        let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, a.occurrence.scope.map(Into::into), Utc::now().timestamp(), &h, here))?;
+        let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, a.occurrence.scope.map(Into::into), None, None, Utc::now().timestamp(), &h, here))?;
         return finish(jolta, saved, &a.send).await;
     }
     let (calendar, _, mut event) = stored_event(jolta, a.event)?;
@@ -343,7 +343,7 @@ pub async fn delete(jolta: &Jolta, a: DeleteArgs) -> Result<()> {
         let plan = jolta.store.read(|c| draft::plan_delete(c, EventId(a.event), Some(at), here))?;
         print_scopes(&plan.scopes);
         let h = horizon();
-        let saved = jolta.store.write(|tx| draft::delete_drafted(tx, &d, a.occurrence.scope.map(Into::into), Utc::now().timestamp(), &h, here))?;
+        let saved = jolta.store.write(|tx| draft::delete_drafted(tx, &d, a.occurrence.scope.map(Into::into), None, Utc::now().timestamp(), &h, here))?;
         return finish(jolta, saved, &a.send).await;
     }
     let (calendar, rid, event) = stored_event(jolta, a.event)?;
@@ -479,8 +479,8 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     let h = horizon();
     let now = Utc::now().timestamp();
     let saved = match (a.save, a.delete, a.event) {
-        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, now, &h, here))?,
-        (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), now, &h, here))?,
+        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, None, None, now, &h, here))?,
+        (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), None, now, &h, here))?,
         _ => return Ok(()),
     };
     println!("{}", saved.message);
