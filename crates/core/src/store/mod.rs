@@ -37,7 +37,7 @@ pub use outbox::*;
 pub use reminders::*;
 pub use sections::*;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql"), include_str!("schema16.sql"), include_str!("schema17.sql"), include_str!("schema18.sql"), include_str!("schema19.sql"), include_str!("schema20.sql"), include_str!("schema21.sql"), include_str!("schema22.sql"), include_str!("schema23.sql"), include_str!("schema24.sql"), include_str!("schema25.sql"), include_str!("schema26.sql"), include_str!("schema27.sql"), include_str!("schema28.sql"), include_str!("schema29.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql"), include_str!("schema16.sql"), include_str!("schema17.sql"), include_str!("schema18.sql"), include_str!("schema19.sql"), include_str!("schema20.sql"), include_str!("schema21.sql"), include_str!("schema22.sql"), include_str!("schema23.sql"), include_str!("schema24.sql"), include_str!("schema25.sql"), include_str!("schema26.sql"), include_str!("schema27.sql"), include_str!("schema28.sql"), include_str!("schema29.sql"), include_str!("schema30.sql")];
 const READERS: usize = 4;
 const MMAP_BYTES: i64 = 2 << 30;
 const WRITER_CACHE_KIB: i64 = 8_000;
@@ -139,4 +139,53 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Schema 30 rebuilds op, draft and outbox with AUTOINCREMENT. Their
+    /// rows keep their ids, and new ids start above any still remembered
+    /// elsewhere: a sent message's deleted draft, an answer's reply mail
+    /// that was taken back.
+    #[test]
+    fn schema30_keeps_ids_and_counts_past_remembered_ones() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn, WRITER_CACHE_KIB).unwrap();
+        let tx = conn.transaction().unwrap();
+        for sql in &MIGRATIONS[..29] {
+            tx.execute_batch(sql).unwrap();
+        }
+        tx.pragma_update(None, "user_version", 29).unwrap();
+        tx.execute_batch(
+            "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'a@x', 'a@x', 'r', 0);
+             INSERT INTO op (id, account_id, kind, messages, state, created, tried) VALUES (4, 1, 'flags', '1:5', 'pending', 0, 1);
+             INSERT INTO draft (id, account_id, subject, updated) VALUES (2, 1, 'Kept', 0);
+             INSERT INTO outbox (id, account_id, draft_id, blob, message_id, sender, recipients, send_after, created)
+               VALUES (3, 1, 7, 'b', '<m@x>', 'a@x', 'b@x', 0, 0);
+             INSERT INTO invitation_answer (account_id, uid, answer, reply) VALUES (1, 'u', 'accepted', 9);",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let one = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, String>(0)).unwrap();
+        assert_eq!(one("SELECT id || ' ' || messages || ' ' || tried FROM op"), "4 1:5 1");
+        assert_eq!(one("SELECT id || ' ' || subject FROM draft"), "2 Kept");
+        assert_eq!(one("SELECT id || ' ' || draft_id FROM outbox"), "3 7");
+        let next = |sql: &str| {
+            conn.execute(sql, []).unwrap();
+            conn.last_insert_rowid()
+        };
+        assert_eq!(next("INSERT INTO op (account_id, kind, messages, created) VALUES (1, 'flags', '', 0)"), 5);
+        assert_eq!(next("INSERT INTO draft (updated) VALUES (0)"), 8, "past the sent message's draft");
+        assert_eq!(
+            next("INSERT INTO outbox (account_id, blob, message_id, sender, recipients, send_after, created) VALUES (1, '', '', '', '', 0, 0)"),
+            10,
+            "past the answer's reply mail"
+        );
+        assert_eq!(one("SELECT group_concat(name, ' ') FROM (SELECT name FROM sqlite_master WHERE name IN ('op_pending', 'outbox_queued') ORDER BY name)"), "op_pending outbox_queued");
+    }
 }

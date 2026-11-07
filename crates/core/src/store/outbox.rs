@@ -252,3 +252,67 @@ pub fn in_sent(conn: &Connection, account: AccountId, message_id: &str) -> Resul
         |r| r.get(0),
     )?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (std::path::PathBuf, super::super::Store) {
+        let dir = std::env::temp_dir().join(format!("jolta-outbox-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::super::Store::open(&dir.join("jolta.sqlite")).unwrap();
+        store
+            .write(|c| Ok(c.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'a@x', 'a@x', 'r', 0);")?))
+            .unwrap();
+        (dir, store)
+    }
+
+    fn compose(subject: &str) -> Compose {
+        Compose { account: Some(AccountId(1)), subject: subject.into(), ..Compose::default() }
+    }
+
+    /// An outbox row's id is its Undo send token, and an answered
+    /// invitation keeps it to find its reply mail again. A message taken
+    /// back never hands that id to the next one, so a stale token can't
+    /// take back, or send early, a different message.
+    #[test]
+    fn a_message_taken_back_keeps_its_undo_send_token_to_itself() {
+        let (dir, store) = store();
+        store
+            .write(|c| {
+                let queue = |c: &Connection, draft| queue_outbox(c, AccountId(1), Some(draft), "blob", "<m@x>", "a@x", &["b@x".into()], None, 30);
+                let first = save_draft(c, &compose("First"))?;
+                let taken_back = queue(c, first)?;
+                assert_eq!(cancel_send(c, taken_back)?, Some(first));
+                let second = save_draft(c, &compose("Second"))?;
+                let newer = queue(c, second)?;
+                assert_ne!(newer, taken_back, "the token is not given out again");
+                assert_eq!(cancel_send(c, taken_back)?, None, "a stale Undo send takes back nothing");
+                assert_eq!(scheduled(c, 0)?.len(), 1, "the newer message still waits");
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A draft's id is how the app and agents open and save it. A draft
+    /// gone for good never hands that id to a new one, so a compose window
+    /// or an agent's note left over from it can't open or overwrite
+    /// another draft.
+    #[test]
+    fn a_draft_gone_for_good_keeps_its_id_to_itself() {
+        let (dir, store) = store();
+        store
+            .write(|c| {
+                let gone = save_draft(c, &compose("Gone"))?;
+                discard_draft(c, gone)?;
+                draft_synced(c, gone, None, true)?;
+                let newer = save_draft(c, &compose("New"))?;
+                assert_ne!(newer, gone, "the id is not given out again");
+                assert!(draft(c, gone)?.is_none(), "the old id opens nothing");
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+}

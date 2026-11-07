@@ -385,6 +385,26 @@ mod tests {
             .unwrap();
     }
 
+    /// An op's id is its Undo token. An op dropped unsent never hands that
+    /// id to the next op, so a stale Undo, say from an old toast, takes
+    /// back nothing instead of the newer action.
+    #[test]
+    fn a_dropped_op_keeps_its_undo_token_to_itself() {
+        let (_dir, store) = store();
+        let to_work = OpKind::Move { from: MailboxId(1), to: MailboxId(3) };
+        store
+            .write(|c| {
+                let (_, dropped) = queue(c, AccountId(1), &to_work, &[MessageId(3)])?.unwrap();
+                assert_eq!(undo(c, dropped)?, None);
+                let (_, newer) = queue(c, AccountId(1), &to_work, &[MessageId(3)])?.unwrap();
+                assert_ne!(newer, dropped, "the dropped op's token is not given out again");
+                assert_eq!(undo(c, dropped)?, None);
+                assert!(store::op(c, newer)?.is_some(), "a stale Undo leaves the newer op queued");
+                Ok(())
+            })
+            .unwrap();
+    }
+
     /// An op that went back in the queue after an attempt, whether the
     /// attempt failed or a worker stopped mid-send, may have reached the
     /// server, so Undo keeps it and queues the opposite move.
