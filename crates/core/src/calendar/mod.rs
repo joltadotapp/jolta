@@ -17,6 +17,7 @@ pub mod merge;
 mod model;
 pub mod ops;
 pub mod proposal;
+pub mod quick;
 pub mod recur;
 pub mod remind;
 pub mod remove;
