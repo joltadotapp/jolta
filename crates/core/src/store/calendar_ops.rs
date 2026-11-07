@@ -3,17 +3,24 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::calendar::{moment_from_text, moment_text};
-use crate::calendar::ops::{CalendarOp, CalendarOpId, Extra, OpState, Write};
+use crate::calendar::change::Field;
+use crate::calendar::ops::{CalendarOp, CalendarOpId, Extra, Held, OpState, Write};
 use crate::calendar::{CalendarId, EventData};
 use crate::{Error, Result};
 
 /// What an op stores in its `target` column: the events as the user saved
-/// them, none for a delete, with the provider fields Jolta doesn't model.
+/// them, none for a delete, with the provider fields Jolta doesn't model
+/// and the server object an update or delete writes over.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Target {
     events: Vec<EventData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     extra: Option<Extra>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    held: Option<Held>,
+    /// A sync passed over a server version of the op's rows (`apply_item`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    passed_over: bool,
 }
 
 const COLS: &str = "id, calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key,
@@ -50,6 +57,8 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
         notify: r.get(6)?,
         message: r.get(7)?,
         extra: target.extra,
+        held: target.held,
+        passed_over: target.passed_over,
         remote_key: r.get(10)?,
         send_after: r.get(11)?,
         state: r.get(12)?,
@@ -64,8 +73,7 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
 /// Stores a new op, waiting as `pending` until `op.send_after`. The id,
 /// state and counters of `op` are ignored.
 pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<CalendarOpId> {
-    let (base, events) = columns(&op.write);
-    let target = Target { events: events.to_vec(), extra: op.extra.clone() };
+    let (base, target) = written(op)?;
     conn.execute(
         "INSERT INTO calendar_op (calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key, send_after, created)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -77,14 +85,21 @@ pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<Calendar
             op.scope,
             op.notify,
             op.message,
-            base.map(to_json).transpose()?,
-            to_json(&target)?,
+            base,
+            target,
             op.remote_key,
             op.send_after,
             op.created,
         ],
     )?;
     Ok(CalendarOpId(conn.last_insert_rowid()))
+}
+
+/// An op's `base` and `target` columns.
+fn written(op: &CalendarOp) -> Result<(Option<String>, String)> {
+    let (base, events) = columns(&op.write);
+    let target = Target { events: events.to_vec(), extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over };
+    Ok((base.map(to_json).transpose()?, to_json(&target)?))
 }
 
 /// The events a write keeps in its `base` and `target` columns.
@@ -177,26 +192,49 @@ pub fn next_calendar_op_over(conn: &Connection, op: &CalendarOp) -> Result<Optio
         .optional()?)
 }
 
-/// Fails every newer op of the same event that waits, for an event whose
-/// create failed for good: none of them can reach the server.
-pub fn fail_later_calendar_ops(conn: &Connection, op: &CalendarOp, error: &str) -> Result<()> {
+/// Ends every newer op of the same event that waits in `state`, for an
+/// event whose create failed for good or that the server deleted: none of
+/// them can reach it.
+pub fn end_later_calendar_ops(conn: &Connection, op: &CalendarOp, state: OpState, error: &str) -> Result<()> {
     conn.execute(
-        "UPDATE calendar_op SET state = 'failed', error = ?4
+        "UPDATE calendar_op SET state = ?4, error = ?5
          WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state = 'pending'",
-        params![op.calendar, op.uid, op.id.0, error],
+        params![op.calendar, op.uid, op.id.0, state, error],
     )?;
     Ok(())
 }
 
-/// Rewrites an op's `base` column from its write.
-pub fn set_calendar_op_base(conn: &Connection, op: &CalendarOp) -> Result<()> {
-    let base = columns(&op.write).0.map(to_json).transpose()?;
-    conn.execute("UPDATE calendar_op SET base = ?2 WHERE id = ?1", params![op.id.0, base])?;
+/// The newer ops of the same event that wait, oldest first.
+pub fn later_calendar_ops(conn: &Connection, op: &CalendarOp) -> Result<Vec<CalendarOp>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state = 'pending' ORDER BY id"
+    ))?;
+    let rows = stmt.query_map(params![op.calendar, op.uid, op.id.0], op_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// How many creates of this UID the calendar has queued, whatever came of
+/// them.
+pub fn calendar_creates(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<i64> {
+    Ok(conn.query_row("SELECT count(*) FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND kind = 'create'", params![calendar, uid], |r| r.get(0))?)
+}
+
+pub fn set_calendar_op_lost(conn: &Connection, id: CalendarOpId, lost: &[Field]) -> Result<()> {
+    conn.execute("UPDATE calendar_op SET lost = ?2 WHERE id = ?1", params![id.0, to_json(lost)?])?;
     Ok(())
 }
 
-pub fn set_calendar_op_state(conn: &Connection, id: CalendarOpId, state: OpState, error: Option<&str>) -> Result<()> {
-    conn.execute("UPDATE calendar_op SET state = ?2, error = coalesce(?3, error) WHERE id = ?1", params![id.0, state, error])?;
+/// Rewrites an op's `base` and `target` columns from the op.
+pub fn rewrite_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<()> {
+    let (base, target) = written(op)?;
+    conn.execute("UPDATE calendar_op SET base = ?2, target = ?3 WHERE id = ?1", params![op.id.0, base, target])?;
+    Ok(())
+}
+
+/// Settles an op: the server answered, so an earlier attempt's error no
+/// longer stands.
+pub fn settle_calendar_op(conn: &Connection, id: CalendarOpId, state: OpState) -> Result<()> {
+    conn.execute("UPDATE calendar_op SET state = ?2, error = NULL WHERE id = ?1", params![id.0, state])?;
     Ok(())
 }
 
@@ -239,5 +277,25 @@ pub fn refresh_changed_locally(conn: &Connection, calendar: CalendarId, uid: &st
          WHERE calendar_id = ?1 AND uid = ?2",
     )?
     .execute(params![calendar, uid])?;
+    Ok(())
+}
+
+/// Files the rows of `uid` kept under `from` under the server's id `to`,
+/// for a create whose object the server named itself (Graph).
+pub fn refile_event_rows(conn: &Connection, calendar: CalendarId, uid: &str, from: &str, to: &str) -> Result<()> {
+    if from != to {
+        conn.execute("UPDATE event SET remote_id = ?4 WHERE calendar_id = ?1 AND uid = ?2 AND remote_id = ?3", params![calendar, uid, from, to])?;
+    }
+    Ok(())
+}
+
+/// Gives every row of the object `remote_id` the version an op's write
+/// left on the server. Rows a later op holds kept that op's edit, which
+/// starts from the version just written, so its write is guarded by it.
+pub fn set_item_version(conn: &Connection, calendar: CalendarId, remote_id: &str, etag: Option<&str>, blob: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE event SET etag = ?3, blob = coalesce(?4, blob) WHERE calendar_id = ?1 AND remote_id = ?2",
+        params![calendar, remote_id, etag, blob],
+    )?;
     Ok(())
 }

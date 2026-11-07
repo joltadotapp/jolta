@@ -378,6 +378,12 @@ impl Component {
         self.nodes.push(Node::Component(component));
     }
 
+    /// Removes every component named `name` directly inside this one, such
+    /// as a VEVENT's VALARMs.
+    pub fn remove_components(&mut self, name: &str) {
+        self.nodes.retain(|n| !matches!(n, Node::Component(c) if c.name.eq_ignore_ascii_case(name)));
+    }
+
     /// The components directly inside this one, such as a VCALENDAR's
     /// VTIMEZONEs and VEVENTs.
     pub fn components(&self) -> impl Iterator<Item = &Component> {
@@ -389,6 +395,11 @@ impl Component {
 }
 
 impl Prop {
+    /// One unfolded content line such as `X-JOLTA-HOLD;X=1:yes`.
+    pub fn parse(line: &str) -> Option<Prop> {
+        parse_prop(line.trim_end_matches(['\r', '\n']))
+    }
+
     /// A line with a raw value (a date, a URI, a number).
     pub fn new(name: &str, value: &str) -> Prop {
         Prop { name: name.to_ascii_uppercase(), params: Vec::new(), value: value.to_string() }
@@ -628,98 +639,167 @@ fn format_time(t: NaiveDateTime) -> String {
 /// A new VCALENDAR with one VEVENT, for a new event or a reply. Zoned times
 /// carry their IANA TZID without a VTIMEZONE.
 pub fn write_event(e: &EventData, prodid: &str) -> String {
+    let mut cal = Component::new("VCALENDAR");
+    cal.add(Prop::new("VERSION", "2.0"));
+    cal.add(Prop::text_value("PRODID", prodid));
+    cal.add(Prop::new("CALSCALE", "GREGORIAN"));
+    cal.push(vevent(e));
+    Object::new(cal).to_string()
+}
+
+/// The VEVENT for `e`, every field Jolta models written out.
+pub fn vevent(e: &EventData) -> Component {
+    use super::change::Field;
     let mut ev = Component::new("VEVENT");
     ev.add(Prop::text_value("UID", &e.uid));
     ev.add(Prop::new("DTSTAMP", &format!("{}Z", format_time(Utc::now().naive_utc()))));
     if let Some(rid) = &e.recurrence_id {
         ev.add(Prop::moment("RECURRENCE-ID", rid));
     }
-    let (start, end) = match e.span {
-        Span::AllDay { start, end } => (Moment::Date(start), Moment::Date(end)),
-        Span::Timed { start, end } => (Moment::Time(start), Moment::Time(end)),
-    };
-    ev.add(Prop::moment("DTSTART", &start));
-    ev.add(Prop::moment("DTEND", &end));
-    if let Some(r) = &e.recurrence {
-        for rule in &r.rules {
-            ev.add(Prop::new("RRULE", rule));
-        }
-        for m in &r.rdates {
-            ev.add(Prop::moment("RDATE", m));
-        }
-        for m in &r.exdates {
-            ev.add(Prop::moment("EXDATE", m));
-        }
-    }
-    for (name, text) in [("SUMMARY", &e.title), ("LOCATION", &e.location)] {
-        if !text.is_empty() {
-            ev.add(Prop::text_value(name, text));
-        }
-    }
-    if e.description_html {
-        ev.add(Prop::text_value("DESCRIPTION", &html_to_text(&e.description)));
-        ev.add(Prop::text_value("X-ALT-DESC", &e.description).with_param("FMTTYPE", "text/html"));
-    } else if !e.description.is_empty() {
-        ev.add(Prop::text_value("DESCRIPTION", &e.description));
+    for field in [Field::Time, Field::Repeat, Field::Title, Field::Location, Field::Description] {
+        write_field(&mut ev, field, e);
     }
     if let Some(url) = &e.url {
         ev.add(Prop::new("URL", url).with_param("VALUE", "URI"));
     }
-    let status = match e.status {
-        EventStatus::Confirmed => "CONFIRMED",
-        EventStatus::Tentative => "TENTATIVE",
-        EventStatus::Cancelled => "CANCELLED",
-    };
-    ev.add(Prop::new("STATUS", status));
-    ev.add(Prop::new("TRANSP", if e.show_as == ShowAs::Free { "TRANSPARENT" } else { "OPAQUE" }));
-    let microsoft = match e.show_as {
-        ShowAs::Free | ShowAs::Busy => None,
-        ShowAs::Tentative => Some("TENTATIVE"),
-        ShowAs::OutOfOffice => Some("OOF"),
-        ShowAs::Elsewhere => Some("WORKINGELSEWHERE"),
-    };
-    if let Some(status) = microsoft {
-        ev.add(Prop::new("X-MICROSOFT-CDO-BUSYSTATUS", status));
-    }
-    let class = match e.visibility {
-        Visibility::Default => None,
-        Visibility::Public => Some("PUBLIC"),
-        Visibility::Private => Some("PRIVATE"),
-        Visibility::Confidential => Some("CONFIDENTIAL"),
-    };
-    if let Some(class) = class {
-        ev.add(Prop::new("CLASS", class));
+    for field in [Field::Status, Field::ShowAs, Field::Visibility] {
+        write_field(&mut ev, field, e);
     }
     if let Some(o) = &e.organizer {
         ev.add(person_prop("ORGANIZER", o));
     }
-    for a in &e.attendees {
-        ev.add(attendee_prop(a));
-    }
+    write_field(&mut ev, Field::People, e);
     ev.add(Prop::new("SEQUENCE", &e.sequence.to_string()));
-    if !e.categories.is_empty() {
-        let list: Vec<String> = e.categories.iter().map(|c| escape(c)).collect();
-        ev.add(Prop::new("CATEGORIES", &list.join(",")));
+    for field in [Field::Categories, Field::Color, Field::MeetingLink, Field::Alarms] {
+        write_field(&mut ev, field, e);
     }
-    if let Some(color) = &e.color {
-        ev.add(Prop::text_value("COLOR", color));
-    }
-    if let Some(m) = &e.meeting {
-        ev.add(Prop::new("CONFERENCE", &m.join_url).with_param("VALUE", "URI").with_param("FEATURE", "VIDEO"));
-        for phone in &m.phones {
-            ev.add(Prop::new("CONFERENCE", phone).with_param("VALUE", "URI").with_param("FEATURE", "PHONE"));
+    ev
+}
+
+/// Replaces the lines a field is written as in `ev` with `e`'s value; a
+/// field without a value leaves none. Every other line stays as it was.
+pub fn write_field(ev: &mut Component, field: super::change::Field, e: &EventData) {
+    use super::change::Field;
+    match field {
+        Field::Time => {
+            for name in ["DTSTART", "DTEND", "DURATION"] {
+                ev.remove(name);
+            }
+            let (start, end) = match e.span {
+                Span::AllDay { start, end } => (Moment::Date(start), Moment::Date(end)),
+                Span::Timed { start, end } => (Moment::Time(start), Moment::Time(end)),
+            };
+            ev.add(Prop::moment("DTSTART", &start));
+            ev.add(Prop::moment("DTEND", &end));
+        }
+        Field::Repeat => {
+            for name in ["RRULE", "RDATE", "EXDATE"] {
+                ev.remove(name);
+            }
+            if let Some(r) = &e.recurrence {
+                for rule in &r.rules {
+                    ev.add(Prop::new("RRULE", rule));
+                }
+                for m in &r.rdates {
+                    ev.add(Prop::moment("RDATE", m));
+                }
+                for m in &r.exdates {
+                    ev.add(Prop::moment("EXDATE", m));
+                }
+            }
+        }
+        Field::Title | Field::Location => {
+            let (name, text) = if field == Field::Title { ("SUMMARY", &e.title) } else { ("LOCATION", &e.location) };
+            ev.remove(name);
+            if !text.is_empty() {
+                ev.add(Prop::text_value(name, text));
+            }
+        }
+        Field::Description => {
+            ev.remove("DESCRIPTION");
+            ev.remove("X-ALT-DESC");
+            if e.description_html {
+                ev.add(Prop::text_value("DESCRIPTION", &html_to_text(&e.description)));
+                ev.add(Prop::text_value("X-ALT-DESC", &e.description).with_param("FMTTYPE", "text/html"));
+            } else if !e.description.is_empty() {
+                ev.add(Prop::text_value("DESCRIPTION", &e.description));
+            }
+        }
+        Field::Status => {
+            let status = match e.status {
+                EventStatus::Confirmed => "CONFIRMED",
+                EventStatus::Tentative => "TENTATIVE",
+                EventStatus::Cancelled => "CANCELLED",
+            };
+            ev.remove("STATUS");
+            ev.add(Prop::new("STATUS", status));
+        }
+        Field::ShowAs => {
+            ev.remove("TRANSP");
+            ev.remove("X-MICROSOFT-CDO-BUSYSTATUS");
+            ev.add(Prop::new("TRANSP", if e.show_as == ShowAs::Free { "TRANSPARENT" } else { "OPAQUE" }));
+            let microsoft = match e.show_as {
+                ShowAs::Free | ShowAs::Busy => None,
+                ShowAs::Tentative => Some("TENTATIVE"),
+                ShowAs::OutOfOffice => Some("OOF"),
+                ShowAs::Elsewhere => Some("WORKINGELSEWHERE"),
+            };
+            if let Some(status) = microsoft {
+                ev.add(Prop::new("X-MICROSOFT-CDO-BUSYSTATUS", status));
+            }
+        }
+        Field::Visibility => {
+            ev.remove("CLASS");
+            let class = match e.visibility {
+                Visibility::Default => None,
+                Visibility::Public => Some("PUBLIC"),
+                Visibility::Private => Some("PRIVATE"),
+                Visibility::Confidential => Some("CONFIDENTIAL"),
+            };
+            if let Some(class) = class {
+                ev.add(Prop::new("CLASS", class));
+            }
+        }
+        Field::People => {
+            ev.remove("ATTENDEE");
+            for a in &e.attendees {
+                ev.add(attendee_prop(a));
+            }
+        }
+        Field::Categories => {
+            ev.remove("CATEGORIES");
+            if !e.categories.is_empty() {
+                let list: Vec<String> = e.categories.iter().map(|c| escape(c)).collect();
+                ev.add(Prop::new("CATEGORIES", &list.join(",")));
+            }
+        }
+        Field::Color => {
+            ev.remove("COLOR");
+            if let Some(color) = &e.color {
+                ev.add(Prop::text_value("COLOR", color));
+            }
+        }
+        Field::MeetingLink => {
+            ev.remove("CONFERENCE");
+            if let Some(m) = &e.meeting {
+                ev.add(Prop::new("CONFERENCE", &m.join_url).with_param("VALUE", "URI").with_param("FEATURE", "VIDEO"));
+                for phone in &m.phones {
+                    ev.add(Prop::new("CONFERENCE", phone).with_param("VALUE", "URI").with_param("FEATURE", "PHONE"));
+                }
+            }
+        }
+        Field::Alarms => {
+            ev.remove_components("VALARM");
+            for alarm in &e.alarms {
+                ev.push(alarm_component(alarm, &e.title));
+            }
         }
     }
-    for alarm in &e.alarms {
-        ev.push(alarm_component(alarm, &e.title));
-    }
+}
 
-    let mut cal = Component::new("VCALENDAR");
-    cal.add(Prop::new("VERSION", "2.0"));
-    cal.add(Prop::text_value("PRODID", prodid));
-    cal.add(Prop::new("CALSCALE", "GREGORIAN"));
-    cal.push(ev);
-    Object::new(cal).to_string()
+/// The current time as DTSTAMP and LAST-MODIFIED take it.
+pub fn utc_stamp() -> String {
+    format!("{}Z", format_time(Utc::now().naive_utc()))
 }
 
 fn person_prop(name: &str, p: &Person) -> Prop {

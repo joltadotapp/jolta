@@ -49,6 +49,47 @@ impl Field {
             Field::Visibility => a.visibility != b.visibility,
         }
     }
+
+    /// Gives `to` this field's value in `from`.
+    pub fn copy(self, to: &mut EventData, from: &EventData) {
+        match self {
+            Field::Time => to.span = from.span,
+            Field::Repeat => to.recurrence.clone_from(&from.recurrence),
+            Field::Location => to.location.clone_from(&from.location),
+            Field::MeetingLink => to.meeting.clone_from(&from.meeting),
+            Field::Title => to.title.clone_from(&from.title),
+            Field::Description => {
+                to.description.clone_from(&from.description);
+                to.description_html = from.description_html;
+            }
+            Field::Status => to.status = from.status,
+            Field::People => to.attendees.clone_from(&from.attendees),
+            Field::Alarms => to.alarms.clone_from(&from.alarms),
+            Field::Color => to.color.clone_from(&from.color),
+            Field::Categories => to.categories.clone_from(&from.categories),
+            Field::ShowAs => to.show_as = from.show_as,
+            Field::Visibility => to.visibility = from.visibility,
+        }
+    }
+
+    /// The word for it in "Your new time wasn't saved".
+    pub fn noun(self) -> &'static str {
+        match self {
+            Field::Time => "time",
+            Field::Repeat => "repeat",
+            Field::Location => "place",
+            Field::MeetingLink => "video call",
+            Field::Title => "title",
+            Field::Description => "description",
+            Field::Status => "status",
+            Field::People => "guests",
+            Field::Alarms => "alerts",
+            Field::Color => "color",
+            Field::Categories => "categories",
+            Field::ShowAs => "show as",
+            Field::Visibility => "visibility",
+        }
+    }
 }
 
 pub const FIELDS: [Field; 13] = [

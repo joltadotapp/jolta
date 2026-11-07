@@ -13,6 +13,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use super::availability::{Availability, Schedule, Unknown, WorkingHours};
+use super::change::{FIELDS, Field};
+use super::ops::Extra;
 use super::rsvp::{Rsvp, Stored, Target};
 use super::{Calendar, CalendarSource, EventData};
 use crate::store::{RemoteCalendar, Removal};
@@ -177,6 +179,121 @@ impl Source {
             _ => self.answer(calendar, target, &quiet).await.map(|(_, change)| change),
         }
     }
+}
+
+impl Source {
+    /// Sends one calendar op's write. Every update and delete is guarded by
+    /// the version Jolta holds; a create lands on the object `key` names, so
+    /// a retry after a lost answer finds the first try's event.
+    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>) -> Result<Written> {
+        match self {
+            Source::CalDav(s) => s.write(calendar, write).await,
+            Source::Google(s) => s.write(calendar, write).await,
+            Source::Graph(s) => s.write(calendar, write).await,
+            Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
+        }
+    }
+
+    /// The object `remote_id` as the server holds it now, None when it is
+    /// gone. `uid` and `alarms` are the stored event's, for what the
+    /// server's answer leaves out.
+    pub async fn fetch(&self, calendar: &Calendar, remote_id: &str, uid: &str, alarms: &[super::Alarm]) -> Result<Option<Version>> {
+        match self {
+            Source::CalDav(s) => s.fetch(calendar, remote_id).await,
+            Source::Google(s) => s.fetch(calendar, remote_id, alarms).await,
+            Source::Graph(s) => s.fetch(remote_id, uid).await,
+            Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
+        }
+    }
+}
+
+/// Whether the provider can write `write` as it stands: the request it
+/// would send can be built. Checked when the op is queued, so an edit the
+/// provider can't hold is refused at once instead of failing five times.
+pub fn writable(source: CalendarSource, write: &OpWrite<'_>) -> Result<()> {
+    let here = super::tz::here();
+    match source {
+        CalendarSource::Google => google::writable(write, here),
+        CalendarSource::Graph => graph::writable(write, here),
+        CalendarSource::CalDav => caldav::writable(write),
+        CalendarSource::Local => Ok(()),
+        CalendarSource::Webcal | CalendarSource::EventKit => Err(Error::Other("This calendar is read-only.".into())),
+    }
+}
+
+/// One write of a calendar op.
+#[derive(Clone, Copy, Debug)]
+pub enum OpWrite<'a> {
+    /// A new event, or a series with its changed occurrences, at `key`:
+    /// Google's event id, Graph's transactionId, the CalDAV resource path.
+    Create { events: &'a [EventData], key: &'a str, extra: Option<&'a Extra> },
+    /// `event` over `held`, the version Jolta holds, only while the server
+    /// still has that version. `base` is the event the user started from:
+    /// Google and Graph get only the fields that changed from it, CalDAV
+    /// gets them written into the held resource.
+    Update { held: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra> },
+    /// The whole object `held`, only while the server still has that version.
+    Delete { held: &'a Stored },
+}
+
+/// An object as the server holds it, to store as a sync would.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Version {
+    pub remote_id: String,
+    pub etag: Option<String>,
+    pub events: Vec<EventData>,
+    pub raw: Option<Vec<u8>>,
+}
+
+impl From<Version> for Change {
+    fn from(v: Version) -> Change {
+        Change::Upsert { remote_id: v.remote_id, etag: v.etag, events: v.events, raw: v.raw }
+    }
+}
+
+/// What the server made of one write.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Written {
+    /// Done: the object as it is now, none after a delete.
+    Saved(Option<Version>),
+    /// The object changed since the version Jolta holds (412), or Jolta
+    /// holds no version to guard the write with, so nothing was written.
+    Stale,
+    /// The object is gone (404, 410).
+    Gone,
+}
+
+/// The provider fields an edit passes through as a JSON object, merged into
+/// `body` without replacing anything Jolta set there.
+fn merge_json(body: &mut serde_json::Value, extra: Option<&Extra>, provider: &str) -> Result<()> {
+    match extra {
+        None => Ok(()),
+        Some(Extra::Json(fields)) => {
+            let object = body.as_object_mut().expect("a request body is an object");
+            for (k, v) in fields {
+                object.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            Ok(())
+        }
+        Some(Extra::Lines(_)) => Err(Error::Other(format!("{provider} takes extra fields as JSON, not iCalendar lines"))),
+    }
+}
+
+/// The fields a new event sets: those that differ from a blank event,
+/// and its time.
+fn created_fields(e: &EventData) -> Vec<Field> {
+    let blank = EventData::new(e.uid.clone(), e.span);
+    std::iter::once(Field::Time).chain(FIELDS.into_iter().filter(|f| f.differs(&blank, e))).collect()
+}
+
+/// The fields `e` changed from `base`.
+fn changed_fields(base: &EventData, e: &EventData) -> Vec<Field> {
+    FIELDS.into_iter().filter(|f| f.differs(base, e)).collect()
+}
+
+/// The error for a change the provider can't hold.
+fn cannot(provider: &str, what: &str) -> Error {
+    Error::Other(format!("{provider} can't {what}"))
 }
 
 /// An invitation as Add to calendar or Update in your calendar writes it.

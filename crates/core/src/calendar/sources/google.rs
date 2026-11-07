@@ -7,6 +7,9 @@
 
 mod add;
 mod freebusy;
+mod write;
+
+pub(crate) use write::{event_id, writable};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
@@ -735,6 +738,11 @@ fn event_color(id: &str) -> Option<&'static str> {
         "11" => "#dc2127",
         _ => return None,
     })
+}
+
+/// The `colorId` of a color from Google's palette.
+fn color_id(hex: &str) -> Option<&'static str> {
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].into_iter().find(|id| event_color(id).is_some_and(|c| c.eq_ignore_ascii_case(hex)))
 }
 
 fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T> {

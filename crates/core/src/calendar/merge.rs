@@ -1,7 +1,7 @@
 //! The three-way merge of an edit with a change made elsewhere meanwhile,
 //! for a write the server refused with 412.
 
-use super::change::Field;
+use super::change::{FIELDS, Field};
 use super::{Attendee, EventData};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,40 +21,11 @@ pub struct Merged {
 pub fn three_way(base: &EventData, mine: &EventData, theirs: &EventData) -> Merged {
     let mut lost = Vec::new();
     let mut event = theirs.clone();
-    let mut pick = |field: Field| pick(field, base, mine, theirs, &mut lost);
-    if pick(Field::Title) {
-        event.title.clone_from(&mine.title);
-    }
-    if pick(Field::Location) {
-        event.location.clone_from(&mine.location);
-    }
-    if pick(Field::Description) {
-        event.description.clone_from(&mine.description);
-        event.description_html = mine.description_html;
-    }
-    if pick(Field::Time) {
-        event.span = mine.span;
-    }
-    if pick(Field::Repeat) {
-        event.recurrence.clone_from(&mine.recurrence);
-    }
-    if pick(Field::Alarms) {
-        event.alarms.clone_from(&mine.alarms);
-    }
-    if pick(Field::ShowAs) {
-        event.show_as = mine.show_as;
-    }
-    if pick(Field::Visibility) {
-        event.visibility = mine.visibility;
-    }
-    if pick(Field::Categories) {
-        event.categories.clone_from(&mine.categories);
-    }
-    if pick(Field::Color) {
-        event.color.clone_from(&mine.color);
-    }
-    if pick(Field::MeetingLink) {
-        event.meeting.clone_from(&mine.meeting);
+    // Status isn't the user's to merge (C3 spec, section 4): the server's stays.
+    for field in FIELDS.into_iter().filter(|&f| f != Field::People && f != Field::Status) {
+        if pick(field, base, mine, theirs, &mut lost) {
+            field.copy(&mut event, mine);
+        }
     }
     let (attendees, people_lost) = people(&base.attendees, &mine.attendees, &theirs.attendees);
     event.attendees = attendees;

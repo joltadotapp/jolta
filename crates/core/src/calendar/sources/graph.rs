@@ -13,6 +13,10 @@
 
 mod add;
 mod freebusy;
+mod write;
+
+pub(crate) use add::transaction_id;
+pub(crate) use write::writable;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;

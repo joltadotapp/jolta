@@ -599,6 +599,16 @@ final class CalendarModel {
         detailEvent = nil
     }
 
+    /// Settles a conflict the user's way; the queued edit shows at once.
+    func applyMine(_ op: Int64) {
+        do {
+            try core.applyMine(op: op)
+            refresh()
+        } catch {
+            lastError = "\(error)"
+        }
+    }
+
     /// Opens one occurrence from elsewhere (a notification, the menu bar):
     /// its day in the current view, selected and open.
     func reveal(eventID: Int64, time: OccurrenceTime?) {

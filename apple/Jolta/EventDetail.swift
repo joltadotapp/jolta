@@ -73,6 +73,22 @@ struct EventDetailCard: View {
                     .padding(.top, 2)
                     .help("Jolta saved your change here and sends it as soon as it can.")
             }
+            if let conflict = detail.conflict {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(conflict.message, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text2))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(conflict.action) { cal.applyMine(conflict.op) }
+                        .controlSize(.small)
+                        .accessibilityIdentifier("event-detail-apply-mine")
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
+                .padding(.top, 6)
+                .accessibilityIdentifier("event-detail-conflict")
+            }
             VStack(alignment: .leading, spacing: 0) {
                 if let m = detail.meeting {
                     row("Meeting", [m.provider.name, m.meetingId.map { "ID \($0)" }].compactMap { $0 }.joined(separator: " · "))
