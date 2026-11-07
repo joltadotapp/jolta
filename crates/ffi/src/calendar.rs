@@ -240,6 +240,19 @@ pub struct EventDetail {
     pub alarms: Vec<AlarmInfo>,
     /// An edit of it waits to reach the server.
     pub not_synced: bool,
+    /// The user's last edit met a change made elsewhere and the server's
+    /// value stayed for some fields.
+    pub conflict: Option<ConflictInfo>,
+}
+
+/// "Changed elsewhere while you edited. Your new time wasn't saved." with
+/// the button that applies the user's side (`apply_mine(op)`).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct ConflictInfo {
+    pub op: i64,
+    pub message: String,
+    /// "Apply mine", or "Delete anyway".
+    pub action: String,
 }
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -669,11 +682,12 @@ impl Core {
     /// description document, as for `open_thread`.
     pub fn calendar_event(&self, event_id: i64, time: Option<OccurrenceTime>, app_css: String) -> Result<EventDetail> {
         let at = time.map(Bounds::try_from).transpose()?;
-        let (d, account, added, not_synced) = self.jolta.store.read(|c| {
+        let (d, account, added, not_synced, conflict) = self.jolta.store.read(|c| {
             let d = detail::open(c, EventId(event_id), at, tz::here(), &app_css)?;
             let account = d.calendar.account_id.map(|a| store::account(c, a)).transpose()?.map(|a| a.address).unwrap_or_default();
             let added = store::is_added_copy(c, d.calendar.id, &d.event.uid)?;
-            Ok((d, account, added, store::event_not_synced(c, EventId(event_id))?))
+            let conflict = cal::ops::conflict(c, d.calendar.id, &d.event.uid)?;
+            Ok((d, account, added, store::event_not_synced(c, EventId(event_id))?, conflict))
         })?;
         // A copy added for another account is answered from its mail, which
         // tells the organizer; answering the copy would tell nobody.
@@ -735,6 +749,7 @@ impl Core {
                 })
                 .collect(),
             not_synced,
+            conflict: conflict.map(|c| ConflictInfo { op: c.op.0, message: c.message, action: c.action }),
         })
     }
 
@@ -870,6 +885,26 @@ impl Core {
         let calendar = self.jolta.store.write(|tx| {
             let calendar = store::calendar_op(tx, id)?.calendar;
             cal::ops::undo(tx, id, chrono::Utc::now().timestamp(), &horizon)?;
+            Ok(calendar)
+        })?;
+        if let Some(scheduler) = self.scheduler() {
+            scheduler.ops_queued();
+        }
+        self.calendar_changed([calendar]);
+        Ok(())
+    }
+}
+
+#[uniffi::export]
+impl Core {
+    /// Settles a conflict the user's way: their edit's lost fields over the
+    /// server's version, or their delete again, queued as a new edit.
+    pub fn apply_mine(&self, op: i64) -> Result<()> {
+        let id = cal::ops::CalendarOpId(op);
+        let horizon = jolta_core::calendar::series::Horizon::around(chrono::Utc::now(), tz::here());
+        let calendar = self.jolta.store.write(|tx| {
+            let calendar = store::calendar_op(tx, id)?.calendar;
+            cal::ops::apply_mine(tx, id, chrono::Utc::now().timestamp(), &horizon)?;
             Ok(calendar)
         })?;
         if let Some(scheduler) = self.scheduler() {
