@@ -12,6 +12,7 @@
 //! window and compares change keys.
 
 mod add;
+pub(crate) use add::pattern;
 mod freebusy;
 mod write;
 

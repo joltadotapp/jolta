@@ -27,6 +27,10 @@ pub enum MoveRule {
 /// Which repeat rules the calendar holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepeatLimits {
+    /// Rules more often than daily, and BYHOUR, BYMINUTE or BYSECOND.
+    /// Google refuses FREQ=HOURLY and FREQ=MINUTELY with "Invalid recurrence
+    /// rule" and keeps a weekly rule's BYHOUR=9,15 at 09:00 alone (Google
+    /// test account, 2026-11-07).
     pub hourly: bool,
     /// BYSETPOS ("the last weekday of the month").
     pub set_pos: bool,
@@ -106,6 +110,7 @@ pub fn of(calendar: &Calendar) -> Capabilities {
     match calendar.source {
         CalendarSource::Google => Capabilities {
             outside_only: true,
+            repeat: RepeatLimits { hourly: false, ..RepeatLimits::ALL },
             move_within: MoveRule::Native,
             video: vec![MeetingProvider::Meet],
             options: OrganizerOptions { hide_guest_list: true, guests_can_invite: true, guests_can_modify: true, ..Default::default() },
@@ -193,6 +198,7 @@ mod tests {
         let g = of(&calendar(CalendarSource::Google, Access::Owner));
         assert_eq!((g.hold_update, g.outside_only, g.cancel_message, g.move_within, g.sends_itself), (Hold::Always, true, false, MoveRule::Native, true));
         assert_eq!(g.video, [MeetingProvider::Meet]);
+        assert_eq!(g.repeat, RepeatLimits { hourly: false, set_pos: true, several_months: true }, "the Google probe of 2026-11-07");
 
         let m = of(&calendar(CalendarSource::Graph, Access::Owner));
         assert_eq!((m.hold_update, m.new_people_only, m.cancel_message, m.move_within, m.remove_video), (Hold::NeverForMeetingFields, true, true, MoveRule::CopyDelete, false));

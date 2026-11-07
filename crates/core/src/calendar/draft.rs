@@ -539,7 +539,7 @@ fn is_address(s: &str) -> bool {
     !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.') && !s.contains(char::is_whitespace) && !domain.contains('@')
 }
 
-fn provider(calendar: &Calendar) -> &'static str {
+pub(crate) fn provider(calendar: &Calendar) -> &'static str {
     match calendar.source {
         CalendarSource::Google => "Google",
         CalendarSource::Graph => "Microsoft 365",

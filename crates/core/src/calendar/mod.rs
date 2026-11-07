@@ -23,6 +23,7 @@ pub mod quick;
 pub mod recur;
 pub mod remind;
 pub mod remove;
+pub mod repeat;
 pub mod respond;
 pub mod rsvp;
 pub mod scheduler;

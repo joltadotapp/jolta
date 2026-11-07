@@ -572,7 +572,7 @@ fn last_start(rule: &str, until: Until, start: &Span, here: Tz) -> Option<String
     })
 }
 
-fn weekday_code(day: Weekday) -> &'static str {
+pub(crate) fn weekday_code(day: Weekday) -> &'static str {
     match day {
         Weekday::Mon => "MO",
         Weekday::Tue => "TU",
@@ -811,7 +811,7 @@ fn join(items: impl IntoIterator<Item = String>) -> String {
     }
 }
 
-fn day_name(day: Weekday) -> &'static str {
+pub(crate) fn day_name(day: Weekday) -> &'static str {
     match day {
         Weekday::Mon => "Monday",
         Weekday::Tue => "Tuesday",
@@ -823,7 +823,7 @@ fn day_name(day: Weekday) -> &'static str {
     }
 }
 
-fn month_name(month: u32) -> Option<&'static str> {
+pub(crate) fn month_name(month: u32) -> Option<&'static str> {
     const NAMES: [&str; 12] = [
         "January",
         "February",
