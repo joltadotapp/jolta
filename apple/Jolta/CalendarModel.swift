@@ -769,11 +769,18 @@ final class CalendarModel {
         }
     }
 
-    /// ⌘⌫ in the editor: deletes the event it edits.
+    /// ⌘⌫ in the editor: deletes the event it edits, wherever the week is now.
     func deleteFromEditor() {
-        guard let editor, let base = editor.editing, let event = events.first(where: { $0.id == base }) else { return }
-        dropEditor()
-        delete(event)
+        guard let editor, !editor.isNew else { return }
+        do {
+            let saved = try core.deleteDraft(draft: editor.draft)
+            dropEditor()
+            selectedID = nil
+            refresh()
+            toast?(saved.message, saved.token)
+        } catch {
+            editor.failure = "\(error)"
+        }
     }
 
     /// Delete on the selected event, or the detail's Delete.

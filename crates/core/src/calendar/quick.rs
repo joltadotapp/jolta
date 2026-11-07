@@ -10,6 +10,9 @@ use chrono::NaiveTime;
 /// "7:00" and "07" stay in the morning.
 pub fn time(text: &str) -> Option<NaiveTime> {
     let text: String = text.trim().to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if !text.is_ascii() {
+        return None;
+    }
     match text.as_str() {
         "noon" | "midday" | "midi" | "middag" => return NaiveTime::from_hms_opt(12, 0, 0),
         "midnight" | "minuit" | "middernacht" => return NaiveTime::from_hms_opt(0, 0, 0),
@@ -95,7 +98,7 @@ mod tests {
 
     #[test]
     fn refuses_what_is_not_a_time() {
-        for text in ["", "abc", "24:00", "9:60", "13pm", "0am", "12345", "9:5", "tomorrow", "9-10", ":30"] {
+        for text in ["", "abc", "24:00", "9:60", "13pm", "0am", "12345", "9:5", "tomorrow", "9-10", ":30", "９", "1😀"] {
             assert_eq!(time(text), None, "{text:?}");
         }
     }

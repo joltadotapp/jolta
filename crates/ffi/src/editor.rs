@@ -370,6 +370,16 @@ impl Core {
         Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
     }
 
+    /// Deletes the stored event a draft opened, found again by its UID, as
+    /// the editor's Delete does. The returned token undoes it.
+    pub fn delete_draft(&self, draft: EventDraft) -> Result<SavedEdit> {
+        let d = draft::EventDraft::try_from(&draft)?;
+        let h = horizon();
+        let saved = self.jolta.store.write(|tx| draft::delete_drafted(tx, &d, Utc::now().timestamp(), &h, tz::here()))?;
+        self.edited(saved.calendar);
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+    }
+
     /// A time typed in a time field, as minutes after midnight: "930",
     /// "14:30", "2pm", "9u30". None when it isn't a time.
     pub fn parse_time_input(&self, text: String) -> Option<i32> {

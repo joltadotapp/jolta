@@ -117,17 +117,23 @@ final class EventEditorModel {
     /// Moves the draft to the typed start as it is typed, keeping the
     /// length; the field's text stays as typed until `commit`.
     func followStart() {
-        guard let (start, end) = interval, let m = core.parseTimeInput(text: startText) else { return }
+        guard let (start, end) = interval, startText != CalendarModel.clockTime(start), let m = core.parseTimeInput(text: startText) else { return }
         let new = at(start, minutes: Int(m))
         let newEnd = new + Int64(end.timeIntervalSince(start))
         draft.time = .timed(start: new, end: newEnd)
         endText = CalendarModel.clockTime(Date(timeIntervalSince1970: TimeInterval(newEnd)))
     }
 
-    /// The typed end, on the start's day.
+    /// The typed end, on the end's own day, so an event over midnight or
+    /// several days keeps its last day. An end typed before the start on
+    /// the start's day moves to the next day: "22:00 to 1:00".
     func followEnd() {
-        guard let (start, _) = interval, let m = core.parseTimeInput(text: endText) else { return }
-        draft.time = .timed(start: Int64(start.timeIntervalSince1970), end: at(start, minutes: Int(m)))
+        guard let (start, end) = interval, endText != CalendarModel.clockTime(end), let m = core.parseTimeInput(text: endText) else { return }
+        var new = at(end, minutes: Int(m))
+        if new <= Int64(start.timeIntervalSince1970), Calendar.current.isDate(start, inSameDayAs: end) {
+            new = at(Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start, minutes: Int(m))
+        }
+        draft.time = .timed(start: Int64(start.timeIntervalSince1970), end: new)
     }
 
     /// Leaving a time field or saving: what was typed counts, and the field

@@ -13,7 +13,7 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 
 use super::change::Field;
-use super::ops::{self, CalendarOpId, Change, Edit};
+use super::ops::{self, CalendarOpId, Change, Edit, Extra};
 use super::series::{self, Horizon};
 use super::{
     Alarm, AlarmTrigger, Attendee, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Local, Meeting, MeetingProvider,
@@ -491,7 +491,7 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
         problem(Some(DraftField::ShowAs), format!("{} calendars can't show an event this way.", provider(&calendar)), true);
     }
     if out.iter().all(|p| !p.blocking) && !touched.is_empty() {
-        let refusal = match ops::refusal(conn, &edit(draft)) {
+        let refusal = match edit(conn, draft, &calendar).and_then(|(edit, _)| ops::refusal(conn, &edit)) {
             Ok(refusal) => refusal,
             Err(e) => Some(e.to_string()),
         };
@@ -550,10 +550,42 @@ fn provider(calendar: &Calendar) -> &'static str {
     }
 }
 
-fn edit(draft: &EventDraft) -> Edit {
-    let event = event_of(draft);
-    let change = if draft.base.is_some() { Change::Update(event) } else { Change::Create(vec![event]) };
-    Edit::quiet(draft.calendar, change)
+/// The edit saving the draft queues, with the fields a change made
+/// elsewhere kept: the user's changes merged into the stored event when it
+/// changed since the editor opened it.
+fn edit(conn: &Connection, draft: &EventDraft, calendar: &Calendar) -> Result<(Edit, Vec<Field>)> {
+    let mine = event_of(draft);
+    let (change, lost) = match &draft.base {
+        None => (Change::Create(vec![mine]), Vec::new()),
+        Some(base) => {
+            let title = if mine.title.is_empty() { "(no title)" } else { &mine.title };
+            let now_stored = ops::stored(conn, draft.calendar, &base.uid, base.recurrence_id.as_ref())?
+                .ok_or_else(|| Error::Other(format!("{title} was deleted while you edited it.")))?
+                .event;
+            if now_stored == *base {
+                (Change::Update(mine), Vec::new())
+            } else {
+                let merged = merge::three_way(base, &mine, &now_stored);
+                (Change::Update(merged.event), merged.lost)
+            }
+        }
+    };
+    let extra = match (&change, draft.reminder) {
+        (Change::Create(_), Reminder::Off) => no_reminder(calendar.source),
+        _ => None,
+    };
+    Ok((Edit { extra, ..Edit::quiet(draft.calendar, change) }, lost))
+}
+
+/// A new event without alerts carries none to Google and Microsoft 365,
+/// which would otherwise give it the calendar's default.
+fn no_reminder(source: CalendarSource) -> Option<Extra> {
+    let fields = match source {
+        CalendarSource::Google => serde_json::json!({ "reminders": { "useDefault": false, "overrides": [] } }),
+        CalendarSource::Graph => serde_json::json!({ "isReminderOn": false }),
+        _ => return None,
+    };
+    fields.as_object().cloned().map(Extra::Json)
 }
 
 /// What saving the draft needs first.
@@ -569,24 +601,11 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, now: i64, horizon: &Hor
     if let Some(p) = check_draft(conn, draft, here)?.into_iter().find(|p| p.blocking) {
         return Err(Error::Other(p.text));
     }
-    let mine = event_of(draft);
-    let title = if mine.title.is_empty() { "(no title)".to_string() } else { mine.title.clone() };
-    let (change, lost) = match &draft.base {
-        None => (Change::Create(vec![mine]), Vec::new()),
-        Some(base) => {
-            let now_stored = ops::stored(conn, draft.calendar, &base.uid, base.recurrence_id.as_ref())?
-                .ok_or_else(|| Error::Other(format!("{title} was deleted while you edited it.")))?
-                .event;
-            if now_stored == *base {
-                (Change::Update(mine), Vec::new())
-            } else {
-                let merged = merge::three_way(base, &mine, &now_stored);
-                (Change::Update(merged.event), merged.lost)
-            }
-        }
-    };
-    let creating = matches!(change, Change::Create(_));
-    let op = ops::queue(conn, &Edit::quiet(draft.calendar, change), now, horizon)?;
+    let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
+    let calendar = store::calendar(conn, draft.calendar)?;
+    let (edit, lost) = edit(conn, draft, &calendar)?;
+    let creating = matches!(edit.change, Change::Create(_));
+    let op = ops::queue(conn, &edit, now, horizon)?;
     let message = match (creating, lost.as_slice()) {
         (true, _) => format!("Added {title}"),
         (false, []) => format!("Saved {title}"),
@@ -623,11 +642,22 @@ pub fn delete_event(conn: &Connection, event: EventId, now: i64, horizon: &Horiz
     Ok(Saved { op, calendar, message: format!("Deleted {title}") })
 }
 
+/// Deletes the stored event a draft opened, found again by its UID: the
+/// row may have been replaced by a sync, or left the period on screen.
+pub fn delete_drafted(conn: &Connection, draft: &EventDraft, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
+    let base = draft.base.as_ref().ok_or_else(|| Error::Other("A new event has nothing to delete".into()))?;
+    let stored = match ops::stored(conn, draft.calendar, &base.uid, base.recurrence_id.as_ref())? {
+        Some(s) => s,
+        None => ops::stored(conn, draft.calendar, &base.uid, None)?.ok_or_else(|| Error::Other(format!("{} is already gone.", base.title)))?,
+    };
+    delete_event(conn, stored.id, now, horizon, here)
+}
+
 /// The calendar new events go to: the one the user chose in Settings ›
-/// Calendar, else the first shown calendar Jolta can write to.
+/// Calendar, shown or not, else the first shown calendar Jolta can write to.
 pub fn default_calendar(conn: &Connection) -> Result<Option<Calendar>> {
-    let writable: Vec<Calendar> = store::calendars(conn)?.into_iter().filter(|c| c.shown && caps::of(c).writable).collect();
-    Ok(writable.iter().find(|c| c.is_default).or(writable.first()).cloned())
+    let writable: Vec<Calendar> = store::calendars(conn)?.into_iter().filter(|c| caps::of(c).writable).collect();
+    Ok(writable.iter().find(|c| c.is_default).or_else(|| writable.iter().find(|c| c.shown)).cloned())
 }
 
 #[cfg(test)]
@@ -773,6 +803,9 @@ mod tests {
         assert_eq!(defaults, 1, "one default at a time");
         s.write(|tx| store::set_default_calendar(tx, None)).unwrap();
         assert_eq!(s.read(|c| default_calendar(c)).unwrap().map(|c| c.id), Some(family), "cleared: the first in the sidebar's order again");
+        s.write(|tx| store::set_calendar_shown(tx, test, false)).unwrap();
+        s.write(|tx| store::set_default_calendar(tx, Some(test))).unwrap();
+        assert_eq!(s.read(|c| default_calendar(c)).unwrap().map(|c| c.id), Some(test), "a chosen default counts even while hidden");
     }
 
     fn event_id(s: &Store, cal: CalendarId, uid: &str) -> EventId {
@@ -869,6 +902,55 @@ mod tests {
         let mut d = new_draft(&s, cal, "Review");
         d.people = vec![attendee("not an address", false, Role::Required)];
         assert_eq!(fields(&d), [(Some(DraftField::People), true)]);
+    }
+
+    /// Google and Microsoft 365 give a new event without alerts the
+    /// calendar's default reminder; "None" must say so in the request.
+    #[test]
+    fn a_new_event_without_a_reminder_tells_the_provider() {
+        let (s, _) = setup("reminder");
+        let remote = store::RemoteCalendar { remote_id: "me@example.com".into(), name: "Work".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+        let google = s.write(|tx| store::add_calendar(tx, CalendarSource::Google, &remote)).unwrap().id;
+        let now = Utc.timestamp_opt(NOW, 0).unwrap();
+        let queued = |reminder: Reminder| {
+            let mut d = s.read(|c| draft_for_new(c, Some(google), Some(span("2026-11-24 14:00", "2026-11-24 15:00")), now, Brussels)).unwrap();
+            d.reminder = reminder;
+            let op = s.write(|tx| save_draft(tx, &d, NOW, &horizon(), Brussels)).unwrap().op.unwrap();
+            s.read(|c| store::calendar_op(c, op)).unwrap().extra
+        };
+        assert_eq!(queued(Reminder::Default), None, "the calendar's own default");
+        let off = serde_json::json!({ "reminders": { "useDefault": false, "overrides": [] } });
+        assert_eq!(queued(Reminder::Off), off.as_object().cloned().map(Extra::Json));
+    }
+
+    /// Check 4: the dry run behind Save's problems checks the change Save
+    /// will queue, merged with a change made elsewhere.
+    #[test]
+    fn the_refusal_check_sees_the_merged_change() {
+        let (s, cal) = setup("refusal");
+        let d = new_draft(&s, cal, "Review");
+        s.write(|tx| save_draft(tx, &d, NOW, &horizon(), Brussels)).unwrap();
+        let mut editing = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        let mut elsewhere = editing.base.clone().unwrap();
+        elsewhere.location = "Room 2.14".into();
+        s.write(|tx| ops::queue(tx, &Edit::quiet(cal, Change::Update(elsewhere)), NOW, &horizon())).unwrap();
+        editing.title = "Review 2".into();
+        let (edit, lost) = s.read(|c| edit(c, &editing, &store::calendar(c, cal)?)).unwrap();
+        let Change::Update(event) = edit.change else { panic!("an update") };
+        assert_eq!((event.title.as_str(), event.location.as_str(), lost.len()), ("Review 2", "Room 2.14", 0));
+    }
+
+    #[test]
+    fn delete_finds_the_event_a_draft_opened_again() {
+        let (s, cal) = setup("delete");
+        let d = new_draft(&s, cal, "Review");
+        s.write(|tx| save_draft(tx, &d, NOW, &horizon(), Brussels)).unwrap();
+        let mut opened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        opened.title = "Review moved".into();
+        s.write(|tx| save_draft(tx, &opened, NOW, &horizon(), Brussels)).unwrap();
+        let deleted = s.write(|tx| delete_drafted(tx, &opened, NOW, &horizon(), Brussels)).unwrap();
+        assert_eq!(deleted.message, "Deleted Review moved", "the row was replaced since the draft opened");
+        assert!(s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().is_none());
     }
 
     #[test]
