@@ -625,9 +625,7 @@ fn edit(conn: &Connection, draft: &EventDraft, calendar: &Calendar, scope: Scope
         None => (Change::Create(vec![mine]), Vec::new()),
         Some(base) => {
             let title = if mine.title.is_empty() { "(no title)" } else { &mine.title };
-            let now_stored = ops::stored(conn, draft.calendar, &base.uid, base.recurrence_id.as_ref())?
-                .ok_or_else(|| Error::Other(format!("{title} was deleted while you edited it.")))?
-                .event;
+            let now_stored = stored_now(conn, draft, base)?.ok_or_else(|| Error::Other(format!("{title} was deleted while you edited it.")))?;
             if now_stored == *base {
                 (Change::Update(mine), Vec::new())
             } else {
@@ -641,6 +639,17 @@ fn edit(conn: &Connection, draft: &EventDraft, calendar: &Calendar, scope: Scope
         _ => None,
     };
     Ok((Edit { extra, ..Edit::quiet(draft.calendar, change) }, lost))
+}
+
+/// The event the draft opened as the store has it now: its row, or for an
+/// occurrence without one, the series moved there while it still has it.
+fn stored_now(conn: &Connection, draft: &EventDraft, base: &EventData) -> Result<Option<EventData>> {
+    if let Some(row) = ops::stored(conn, draft.calendar, &base.uid, base.recurrence_id.as_ref())? {
+        return Ok(Some(row.event));
+    }
+    let (Some(rid), Some(series)) = (base.recurrence_id, series_of(conn, draft)?) else { return Ok(None) };
+    let here = tz::here();
+    Ok(ops::is_occurrence(&series, &rid, here).then(|| series::occurrence(std::slice::from_ref(&series), &rid, here)).flatten())
 }
 
 /// A new event without alerts carries none to Google and Microsoft 365,

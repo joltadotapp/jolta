@@ -1835,6 +1835,56 @@ mod tests {
         assert!(claim(&s).is_empty());
     }
 
+    /// A Google series `g1` of three from Tue 24 Nov, synced.
+    fn synced_series(name: &str) -> (Store, CalendarId, Server, EventData) {
+        let (s, _) = setup(name);
+        let cal = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let server = Server::default();
+        let series = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=3".into()], ..Default::default() }), ..event("u1", "Standup", "2026-11-24 09:00") };
+        server.put("g1", series.clone());
+        sync(&s, cal, &server);
+        (s, cal, server, series)
+    }
+
+    /// Check 2: an unchanged occurrence is written as an instance of its
+    /// series, guarded by the series' version, and lands under the id the
+    /// server gave the instance; the series row stays as it was.
+    #[test]
+    fn an_unchanged_occurrence_is_written_as_an_instance_of_its_series() {
+        let (s, cal, server, series) = synced_series("instance");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let moved = EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup", "2026-12-01 11:00") };
+        let op = q(&s, cal, Change::Update(moved.clone())).unwrap();
+        assert!(matches!(s.read(|c| store::calendar_op(c, op)).unwrap().write, Write::Update { fresh: true, .. }));
+        run(&s, &server);
+        assert_eq!(server.log(), ["occurrence of g1 at 1"]);
+        assert_eq!(state(&s, op).0, OpState::Done);
+        let rows: Vec<(String, String)> = s.read(|c| Ok(c.prepare("SELECT remote_id, recurrence_id FROM event ORDER BY id")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)).unwrap();
+        assert_eq!(rows.len(), 2, "the series and one changed occurrence: {rows:?}");
+        assert!(rows.iter().any(|(id, rid)| id == "g1_instance" && !rid.is_empty()), "under the instance's own id: {rows:?}");
+        assert_eq!(s.read(|c| stored(c, cal, "u1", None)).unwrap().unwrap().event, series);
+    }
+
+    /// An instance the server can't find while its series is still there
+    /// takes back only the op's change, never the series.
+    #[test]
+    fn a_missing_instance_never_takes_its_series_out_of_the_store() {
+        let (s, cal, server, series) = synced_series("instance-gone");
+        let moved = EventData { recurrence_id: Some(Moment::Time(at("2026-12-01 09:00"))), recurrence: None, ..event("u1", "Standup", "2026-12-01 11:00") };
+        let op = q(&s, cal, Change::Update(moved)).unwrap();
+        // The series moved elsewhere, so the occurrence Jolta wrote to is gone.
+        server.put("g1", EventData { span: event("u1", "Standup", "2026-11-25 09:00").span, ..series.clone() });
+        let settled = run(&s, &server);
+        assert_eq!(state(&s, op).0, OpState::Gone);
+        assert!(settled[0].failure.is_some());
+        assert!(s.read(|c| stored(c, cal, "u1", None)).unwrap().is_some(), "the series stays");
+        assert_eq!(s.read(|c| series_rows(c, cal)).unwrap(), 1, "and the change is taken back");
+    }
+
+    fn series_rows(c: &Connection, cal: CalendarId) -> Result<i64> {
+        Ok(c.query_row("SELECT count(*) FROM event WHERE calendar_id = ?1 AND uid = 'u1'", [cal], |r| r.get(0))?)
+    }
+
     /// Check 4: a create whose first try reached the server but lost its
     /// answer is sent again to the same object, which keeps one event.
     #[test]
