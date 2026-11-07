@@ -315,6 +315,10 @@ pub struct DraftArgs {
     location: Option<String>,
     #[command(flatten)]
     when: When,
+    /// No reminder, as the editor's Reminder menu "None"; a new event
+    /// otherwise takes its calendar's default.
+    #[arg(long)]
+    no_reminder: bool,
     /// Save the draft as the editor's Save does.
     #[arg(long, conflicts_with = "delete")]
     save: bool,
@@ -339,6 +343,9 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     }
     if let Some(location) = a.location {
         d.location = location;
+    }
+    if a.no_reminder {
+        d.reminder = draft::Reminder::Off;
     }
     if let Some(span) = a.when.span(Some(&d.span))? {
         d.span = span;
