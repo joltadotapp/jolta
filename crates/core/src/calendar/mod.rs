@@ -8,6 +8,7 @@ pub mod card;
 pub mod change;
 pub mod description;
 pub mod detail;
+pub mod draft;
 pub mod filing;
 pub mod freebusy;
 pub mod ical;

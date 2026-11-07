@@ -144,6 +144,31 @@ pub fn set_working_hours(conn: &Connection, hours: Option<&crate::calendar::avai
     Ok(())
 }
 
+/// Minutes a new event lasts, as Settings › Calendar sets it: 30 unless
+/// changed, Outlook's default.
+pub fn default_event_minutes(conn: &Connection) -> Result<i64> {
+    let text: Option<String> = conn.query_row("SELECT value FROM setting WHERE key = 'calendar_default_length'", [], |r| r.get(0)).optional()?;
+    Ok(text.and_then(|t| t.parse().ok()).filter(|m: &i64| *m > 0).unwrap_or(30))
+}
+
+pub fn set_default_event_minutes(conn: &Connection, minutes: i64) -> Result<()> {
+    if !(5..=24 * 60).contains(&minutes) {
+        return Err(Error::Other(format!("{minutes} minutes isn't a length for a new event")));
+    }
+    conn.execute(
+        "INSERT INTO setting (key, value) VALUES ('calendar_default_length', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [minutes.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Makes `id` the calendar new events go to, and no other.
+pub fn set_default_calendar(conn: &Connection, id: CalendarId) -> Result<()> {
+    calendar(conn, id)?;
+    conn.execute("UPDATE calendar SET is_default = (id = ?1)", [id])?;
+    Ok(())
+}
+
 pub fn set_calendar_busy(conn: &Connection, id: CalendarId, busy: bool) -> Result<()> {
     conn.execute("UPDATE calendar SET counts_as_busy = ?2 WHERE id = ?1", params![id, busy])?;
     Ok(())
