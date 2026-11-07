@@ -35,6 +35,14 @@ mirror!(CalendarAccess <- cal::Access { Owner, Write, Read, FreeBusy });
 mirror!(EventStatus <- cal::EventStatus { Confirmed, Tentative, Cancelled });
 mirror!(ShowAs <- cal::ShowAs { Free, Tentative, Busy, OutOfOffice, Elsewhere });
 mirror!(EventResponse <- cal::Response { NeedsAction, Accepted, Tentative, Declined, Delegated });
+mirror!(
+    /// Whether "Don't send" exists for a change to a meeting's own fields.
+    HoldUpdate <- cal::caps::Hold { Always, NeverForMeetingFields }
+);
+mirror!(
+    /// How an event moves to another calendar of the same account.
+    MoveRule <- cal::caps::MoveRule { Native, CopyDelete, None }
+);
 
 /// What a list row shows for its conversation's invitation, beside the
 /// calendar mark: the answer to a request, or a cancellation.
@@ -143,6 +151,8 @@ pub struct OccurrenceRecord {
     pub busy: bool,
     /// How many shown calendars hold this meeting; it is listed once.
     pub copies: u32,
+    /// An edit of it waits to reach the server: the "not synced yet" mark.
+    pub not_synced: bool,
 }
 
 #[derive(uniffi::Enum, Debug)]
@@ -228,6 +238,8 @@ pub struct EventDetail {
     pub responses: String,
     pub meeting: Option<MeetingInfo>,
     pub alarms: Vec<AlarmInfo>,
+    /// An edit of it waits to reach the server.
+    pub not_synced: bool,
 }
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -647,6 +659,7 @@ impl Core {
                 has_attendees: o.has_attendees,
                 busy: o.busy,
                 copies: o.copies,
+                not_synced: o.not_synced,
             })
             .collect())
     }
@@ -656,11 +669,11 @@ impl Core {
     /// description document, as for `open_thread`.
     pub fn calendar_event(&self, event_id: i64, time: Option<OccurrenceTime>, app_css: String) -> Result<EventDetail> {
         let at = time.map(Bounds::try_from).transpose()?;
-        let (d, account, added) = self.jolta.store.read(|c| {
+        let (d, account, added, not_synced) = self.jolta.store.read(|c| {
             let d = detail::open(c, EventId(event_id), at, tz::here(), &app_css)?;
             let account = d.calendar.account_id.map(|a| store::account(c, a)).transpose()?.map(|a| a.address).unwrap_or_default();
             let added = store::is_added_copy(c, d.calendar.id, &d.event.uid)?;
-            Ok((d, account, added))
+            Ok((d, account, added, store::event_not_synced(c, EventId(event_id))?))
         })?;
         // A copy added for another account is answered from its mail, which
         // tells the organizer; answering the copy would tell nobody.
@@ -721,6 +734,7 @@ impl Core {
                     cal::AlarmTrigger::At(at) => AlarmInfo::At { unix: at.timestamp(), email: a.email },
                 })
                 .collect(),
+            not_synced,
         })
     }
 
@@ -765,6 +779,104 @@ impl Core {
             end: m.end.timestamp(),
             meeting: meeting_info(m.meeting, m.app_url),
         }))
+    }
+}
+
+/// What Jolta can do with a calendar's events; the editor reads it and never guesses.
+#[derive(uniffi::Record)]
+pub struct CapabilitiesInfo {
+    pub writable: bool,
+    /// Can add people.
+    pub invite: bool,
+    pub hold_update: HoldUpdate,
+    /// "Only guests who don't use Google Calendar".
+    pub outside_only: bool,
+    /// "Send to new people only".
+    pub new_people_only: bool,
+    /// A cancellation can carry a message.
+    pub cancel_message: bool,
+    pub repeat_hourly: bool,
+    pub repeat_set_pos: bool,
+    pub repeat_several_months: bool,
+    /// "This and following events".
+    pub split_series: bool,
+    pub move_within: MoveRule,
+    pub video: Vec<MeetingProvider>,
+    pub remove_video: bool,
+    pub request_responses: bool,
+    pub allow_new_time_proposals: bool,
+    pub hide_guest_list: bool,
+    pub guests_can_invite: bool,
+    pub guests_can_modify: bool,
+    pub show_as: Vec<ShowAs>,
+    pub max_people: Option<u32>,
+    /// The server mails the guests; otherwise Jolta sends invitations as mail.
+    pub sends_itself: bool,
+}
+
+impl From<cal::caps::Capabilities> for CapabilitiesInfo {
+    fn from(c: cal::caps::Capabilities) -> Self {
+        CapabilitiesInfo {
+            writable: c.writable,
+            invite: c.invite,
+            hold_update: c.hold_update.into(),
+            outside_only: c.outside_only,
+            new_people_only: c.new_people_only,
+            cancel_message: c.cancel_message,
+            repeat_hourly: c.repeat.hourly,
+            repeat_set_pos: c.repeat.set_pos,
+            repeat_several_months: c.repeat.several_months,
+            split_series: c.split_series,
+            move_within: c.move_within.into(),
+            video: c.video.into_iter().map(Into::into).collect(),
+            remove_video: c.remove_video,
+            request_responses: c.options.request_responses,
+            allow_new_time_proposals: c.options.allow_new_time_proposals,
+            hide_guest_list: c.options.hide_guest_list,
+            guests_can_invite: c.options.guests_can_invite,
+            guests_can_modify: c.options.guests_can_modify,
+            show_as: c.show_as.into_iter().map(Into::into).collect(),
+            max_people: c.max_people.map(|n| n as u32),
+            sends_itself: c.sends_itself,
+        }
+    }
+}
+
+#[uniffi::export]
+impl Core {
+    /// What Jolta can do with the calendar's events.
+    pub fn capabilities(&self, calendar_id: i64) -> Result<CapabilitiesInfo> {
+        let calendar = self.jolta.store.read(|c| store::calendar(c, CalendarId(calendar_id)))?;
+        Ok(cal::caps::of(&calendar).into())
+    }
+
+    /// Makes a calendar on this Mac only, shown, with a "#rrggbb" color or
+    /// none. Its events never reach a server.
+    pub fn new_calendar_here(&self, name: String, color: Option<String>) -> Result<CalendarInfo> {
+        let calendar = self.jolta.store.write(|tx| cal::ops::new_local_calendar(tx, &name, color.as_deref()))?;
+        self.calendar_changed([calendar.id]);
+        self.calendars()?
+            .other_calendars
+            .into_iter()
+            .find(|c| c.id == calendar.id.0)
+            .ok_or_else(|| CoreError::NotFound { message: format!("calendar {}", calendar.id) })
+    }
+
+    /// Takes back a calendar edit by its token. One not sent yet is dropped;
+    /// one that may have reached the server gets the opposite edit.
+    pub fn undo_calendar(&self, token: i64) -> Result<()> {
+        let id = cal::ops::CalendarOpId(token);
+        let horizon = jolta_core::calendar::series::Horizon::around(chrono::Utc::now(), tz::here());
+        let calendar = self.jolta.store.write(|tx| {
+            let calendar = store::calendar_op(tx, id)?.calendar;
+            cal::ops::undo(tx, id, chrono::Utc::now().timestamp(), &horizon)?;
+            Ok(calendar)
+        })?;
+        if let Some(scheduler) = self.scheduler() {
+            scheduler.ops_queued();
+        }
+        self.calendar_changed([calendar]);
+        Ok(())
     }
 }
 

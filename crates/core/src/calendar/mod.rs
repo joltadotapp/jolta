@@ -3,7 +3,9 @@
 
 pub mod add;
 pub mod availability;
+pub mod caps;
 pub mod card;
+pub mod change;
 pub mod detail;
 pub mod filing;
 pub mod freebusy;
@@ -11,7 +13,9 @@ pub mod ical;
 pub mod ical_edit;
 pub mod invitation;
 pub mod meeting;
+pub mod merge;
 mod model;
+pub mod ops;
 pub mod proposal;
 pub mod recur;
 pub mod remind;

@@ -494,3 +494,54 @@ fn week_query_through_the_bridge() {
     println!("calendar_occurrences p50 {:.2} ms, p95 {:.2} ms", pct(&mut query, 0.5), pct(&mut query, 0.95));
     println!("with UniFFI lowering p50 {:.2} ms, p95 {:.2} ms (budget 5 ms)", pct(&mut total, 0.5), pct(&mut total, 0.95));
 }
+
+/// A calendar on this Mac: made from Settings, edits shown at once with the
+/// "not synced yet" mark, the worker settling them, and Undo.
+#[test]
+fn a_local_calendar_takes_edits_through_the_queue() {
+    use jolta_core::calendar::ops::{self, Change, Edit, OpState};
+    use jolta_core::calendar::series::Horizon;
+    use jolta_core::calendar::{CalendarId, EventData, Local, Span, Zone};
+
+    let app = App::new();
+    let here = tz::here();
+    let info = app.core.new_calendar_here("Test".into(), Some("#3366ff".into())).unwrap();
+    assert_eq!((info.kind, info.shown, info.events), (CalendarKind::Local, true, 0));
+    let caps = app.core.capabilities(info.id).unwrap();
+    assert!(caps.writable && !caps.sends_itself, "a local calendar is written here and mails its guests itself");
+
+    let monday = next_monday(here);
+    let event = |uid: &str, title: &str, time: &str| {
+        let wall = NaiveDateTime::new(monday, chrono::NaiveTime::parse_from_str(time, "%H:%M").unwrap());
+        let start = Local { wall, zone: Zone::Tz(here) };
+        EventData { title: title.into(), ..EventData::new(uid, Span::Timed { start, end: Local { wall: wall + chrono::Duration::minutes(30), ..start } }) }
+    };
+    let queue = |change: Change, hold: bool| {
+        let now = Utc::now().timestamp();
+        app.jolta
+            .store
+            .write(|tx| {
+                let id = ops::queue(tx, &Edit::quiet(CalendarId(info.id), change), now, &Horizon::around(Utc::now(), here))?.unwrap();
+                if hold {
+                    jolta_core::store::hold_calendar_op(tx, id, now + 3600)?;
+                }
+                Ok(id)
+            })
+            .unwrap()
+    };
+    let held = queue(Change::Create(vec![event("held@test", "Held", "09:00")]), true);
+    let due = queue(Change::Create(vec![event("due@test", "Due", "11:00")]), false);
+    let marks = |app: &App| week(app, monday, here).into_iter().map(|o| (o.title, o.not_synced)).collect::<Vec<_>>();
+    assert_eq!(marks(&app), [("Held".to_string(), true), ("Due".to_string(), true)], "both show at once, marked");
+
+    app.core.undo_calendar(held.0).unwrap();
+    assert_eq!(titles(&week(&app, monday, here)), ["Due"], "the held op was never sent: undo drops it");
+    eventually("the worker settles the due op", || {
+        app.jolta.store.read(|c| jolta_core::store::calendar_op(c, due)).unwrap().state == OpState::Done
+    });
+    assert_eq!(marks(&app), [("Due".to_string(), false)], "settled: the mark goes");
+
+    app.core.undo_calendar(due.0).unwrap();
+    eventually("the opposite op removes it", || week(&app, monday, here).is_empty());
+    assert!(app.core.undo_calendar(due.0).is_err(), "undoing twice changes nothing more");
+}

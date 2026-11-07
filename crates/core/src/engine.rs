@@ -33,7 +33,8 @@ enum Link {
     Imap(Session, Caps),
     Graph(Graph),
 }
-const MAX_ATTEMPTS: u32 = 5;
+/// Failed attempts before a queued op fails for good.
+pub const MAX_ATTEMPTS: u32 = 5;
 /// How long a sent message waits in the outbox so it can be taken back.
 pub const UNDO_SEND_SECONDS: i64 = 10;
 /// Mail that arrived longer ago than this is not announced as new.
@@ -62,6 +63,9 @@ pub enum Event {
     CalendarsChanged(Vec<crate::calendar::CalendarId>),
     /// A calendar sync ended; `error` says why it failed.
     CalendarSynced { calendar: crate::calendar::CalendarId, error: Option<String> },
+    /// A calendar edit failed for good and was taken back; `event` is the
+    /// event as it is again, if it is still there.
+    CalendarOpFailed { calendar: crate::calendar::CalendarId, event: Option<crate::calendar::EventId>, message: String },
     /// File responses automatically archived replies with this op, which
     /// `undo` takes back; `text` is the toast's.
     ResponsesFiled { op: OpId, text: String },

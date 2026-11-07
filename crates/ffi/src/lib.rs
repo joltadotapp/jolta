@@ -251,6 +251,9 @@ pub enum CoreEvent {
     CalendarSynced { calendar_id: i64, error: Option<String> },
     /// File responses automatically archived replies; `tokens` undo it.
     ResponsesFiled { text: String, tokens: Vec<i64> },
+    /// A calendar edit failed for good and was taken back. `event_id` is the
+    /// event as it is again, if it is still there.
+    CalendarOpFailed { message: String, event_id: Option<i64> },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -906,6 +909,7 @@ impl Core {
                 }
                 Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
                 Event::ResponsesFiled { op, text } => CoreEvent::ResponsesFiled { text, tokens: vec![op.0] },
+                Event::CalendarOpFailed { event, message, .. } => CoreEvent::CalendarOpFailed { message, event_id: event.map(|e| e.0) },
             };
             listener.on_event(event);
         });
