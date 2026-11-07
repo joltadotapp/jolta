@@ -264,6 +264,10 @@ enum DevCommand {
     /// Add an account with no server and the usual folders, for test data
     /// filled with `jolta import`. The UI tests use it.
     LocalAccount { address: String },
+    /// Make the calendar of this name look like the account's own Google
+    /// calendar, with no server: its edits wait in the queue and fail to
+    /// sign in. The UI tests use it for meetings that ask Send an update?.
+    CalendarAsGoogle { name: String, account: String },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -637,6 +641,21 @@ async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
         }
         return Ok(());
     }
+    if let DevCommand::CalendarAsGoogle { name, account } = &cmd {
+        let a = jolta.store.read(|c| store::find_account(c, account))?;
+        let changed = jolta.store.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE calendar SET source = 'google', account_id = ?1, remote_id = ?2, access = 'owner' WHERE name = ?3 AND account_id IS NULL",
+                (a.id.0, &a.address, name),
+            )?)
+        })?;
+        if changed == 0 {
+            bail!("no calendar of no account named {name}");
+        }
+        jolta.store.write(|tx| Ok(tx.execute("UPDATE account SET calendar = 1 WHERE id = ?1", [a.id.0])?))?;
+        println!("{name} is {}'s Google calendar now, with no server.", a.address);
+        return Ok(());
+    }
     if let DevCommand::LocalAccount { address } = &cmd {
         let folders = [
             ("INBOX", Some(MailboxRole::Inbox)),
@@ -680,7 +699,7 @@ async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
         | DevCommand::Search { account, mailbox, .. }
         | DevCommand::Store { account, mailbox, .. }
         | DevCommand::Expunge { account, mailbox, .. } => (account.clone(), mailbox.clone()),
-        DevCommand::Graph { .. } | DevCommand::Http { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
+        DevCommand::Graph { .. } | DevCommand::Http { .. } | DevCommand::LocalAccount { .. } | DevCommand::CalendarAsGoogle { .. } => unreachable!("handled above"),
     };
     let a = jolta.store.read(|c| store::find_account(c, &account))?;
     let mut session = imap::connect_account(&a).await?;
@@ -703,7 +722,7 @@ async fn dev(jolta: &Jolta, cmd: DevCommand) -> Result<()> {
             let n = session.uid_store(&uids, &change).await?.try_collect::<Vec<_>>().await?.len();
             println!("changed {n} message(s)");
         }
-        DevCommand::Graph { .. } | DevCommand::Http { .. } | DevCommand::LocalAccount { .. } => unreachable!("handled above"),
+        DevCommand::Graph { .. } | DevCommand::Http { .. } | DevCommand::LocalAccount { .. } | DevCommand::CalendarAsGoogle { .. } => unreachable!("handled above"),
         DevCommand::Expunge { uids, .. } => {
             session.select(&mailbox).await?;
             session.uid_store(&uids, "+FLAGS.SILENT (\\Deleted)").await?.try_collect::<Vec<_>>().await?;

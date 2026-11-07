@@ -235,6 +235,7 @@ fn event(
         .collect();
     let request_responses = !(rsvp.contains(&Some(false)) && !rsvp.contains(&Some(true)));
     let options = MeetingOptions { request_responses, allow_new_times: proposals, ..MeetingOptions::default() };
+    let organizer_is_me = organizer.as_ref().is_some_and(|o| me.iter().any(|m| m.eq_ignore_ascii_case(&o.address)));
 
     let event = EventData {
         uid,
@@ -258,6 +259,7 @@ fn event(
         categories,
         color,
         master_id: None,
+        organizer_is_me,
         options,
     };
     let stamp = comp.property(&Prop::Dtstamp).and_then(|e| match e.values.first() {

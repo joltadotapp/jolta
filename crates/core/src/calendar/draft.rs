@@ -394,13 +394,15 @@ const MEETING_FIELDS: [DraftField; 10] = [
 ];
 
 /// The user's addresses on `event`: the account's, and in a calendar the
-/// account owns (`Calendar::is_own`) the attendees it marks as the user.
+/// account owns (`Calendar::is_own`) the attendees and organizer it marks
+/// as the user.
 /// Google marks the owner of a calendar shared with the account the same
 /// way, and that owner isn't the user.
 pub fn mine(calendar: &Calendar, account: &str, event: &EventData) -> Vec<String> {
     let own = calendar.is_own(account);
     let marked = event.attendees.iter().filter(|a| own && a.is_me).map(|a| a.person.address.clone());
-    (!account.is_empty()).then(|| account.to_string()).into_iter().chain(marked).collect()
+    let organizer = event.organizer.as_ref().filter(|_| own && event.organizer_is_me).map(|o| o.address.clone());
+    (!account.is_empty()).then(|| account.to_string()).into_iter().chain(marked).chain(organizer).collect()
 }
 
 /// The organizer of `event` when it is a meeting with guests that someone
@@ -1259,6 +1261,21 @@ mod tests {
         let graph = calendar(CalendarSource::Graph, Access::Owner, ME);
         let hourly = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=HOURLY;COUNT=3".into()], ..Default::default() }), ..alone.clone() };
         assert_eq!(open(&graph, ME, &hourly), (vec![DraftField::Repeat], Some("Microsoft 365 can't change this repeat rule.".into())), "a rule Graph can't hold");
+    }
+
+    /// iCloud rewrites the ORGANIZER of a meeting Jolta made to the Apple
+    /// ID's preferred address, which isn't the account's (iCloud test
+    /// account, 2026-11-08): the source's word that it is the user's makes
+    /// the meeting the user's, only in the account's own calendar.
+    #[test]
+    fn an_organizer_the_source_marks_as_the_user_organizes_as_the_user() {
+        let mut theirs = meeting("preferred@example.net", vec![attendee("els@example.com", false, Role::Required)]);
+        let icloud = calendar(CalendarSource::CalDav, Access::Owner, "https://dav.example.com/calendars/home/");
+        assert!(open(&icloud, ME, &theirs).1.is_some(), "an address of someone else");
+        theirs.organizer_is_me = true;
+        assert_eq!(open(&icloud, ME, &theirs), (Vec::new(), None), "the principal's own address");
+        let shared = calendar(CalendarSource::CalDav, Access::Write, "https://dav.example.com/calendars/team/");
+        assert!(open(&shared, ME, &theirs).1.is_some(), "a calendar shared with the user marks its owner");
     }
 
     /// Google gives its owner role to a calendar shared with "Make changes

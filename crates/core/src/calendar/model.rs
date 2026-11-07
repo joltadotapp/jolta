@@ -235,6 +235,11 @@ pub struct EventData {
     pub master_id: Option<String>,
     #[serde(default, skip_serializing_if = "MeetingOptions::is_default")]
     pub options: MeetingOptions,
+    /// The source says the organizer is the user: Google's `organizer.self`,
+    /// Graph's `isOrganizer`, a CalDAV ORGANIZER among the principal's
+    /// addresses, which iCloud rewrites to the Apple ID's preferred one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub organizer_is_me: bool,
 }
 
 impl EventData {
@@ -263,6 +268,7 @@ impl EventData {
             color: None,
             master_id: None,
             options: MeetingOptions::default(),
+            organizer_is_me: false,
         }
     }
 

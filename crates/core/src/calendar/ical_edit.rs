@@ -1180,6 +1180,7 @@ mod tests {
             color: None,
             master_id: None,
             options: Default::default(),
+            organizer_is_me: false,
         }
     }
 
@@ -1187,7 +1188,8 @@ mod tests {
         let text = write_event(e, "-//Jolta//Jolta 0.3//EN");
         assert!(text.split("\r\n").all(|l| l.len() <= 75), "{text}");
         assert_eq!(Object::parse(&text).to_string(), text);
-        assert_eq!(read_events(&text), std::slice::from_ref(e), "{text}");
+        let read = EventData { organizer_is_me: e.organizer.as_ref().is_some_and(|o| o.address == ME), ..e.clone() };
+        assert_eq!(read_events(&text), [read], "{text}");
     }
 
     #[test]

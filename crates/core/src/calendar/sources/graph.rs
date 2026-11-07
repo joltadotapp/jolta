@@ -829,6 +829,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         categories: g.categories.clone(),
         color: None,
         master_id: g.series_master_id.clone(),
+        organizer_is_me: g.is_organizer,
         options: MeetingOptions {
             request_responses: g.response_requested != Some(false),
             allow_new_times: g.allow_new_time_proposals != Some(false),

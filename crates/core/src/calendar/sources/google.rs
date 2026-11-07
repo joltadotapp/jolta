@@ -117,6 +117,8 @@ struct When {
 struct Who {
     email: String,
     display_name: String,
+    #[serde(rename = "self")]
+    is_self: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -633,6 +635,7 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
         categories: Vec::new(),
         color: g.color_id.as_deref().and_then(event_color).map(str::to_string),
         master_id: g.recurring_event_id.clone(),
+        organizer_is_me: g.organizer.as_ref().is_some_and(|o| o.is_self),
         options: MeetingOptions {
             hide_guests: g.guests_can_see_other_guests == Some(false),
             guests_invite: g.guests_can_invite_others != Some(false),
