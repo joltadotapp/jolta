@@ -246,12 +246,14 @@ fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Optio
 }
 
 /// Marks the ops whose rows of `remote_id` a server version just passed
-/// over: the rows still there after its delete.
+/// over: the rows still there after its delete, and a queued delete of the
+/// object, whose rows are gone already.
 fn passed_over(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result<()> {
     conn.prepare_cached(
         "UPDATE calendar_op SET target = json_set(target, '$.passed_over', json('true'))
          WHERE calendar_id = ?1 AND state IN ('pending', 'sending')
-           AND uid IN (SELECT uid FROM event WHERE calendar_id = ?1 AND remote_id = ?2)",
+           AND (uid IN (SELECT uid FROM event WHERE calendar_id = ?1 AND remote_id = ?2)
+                OR json_extract(target, '$.held.remote_id') = ?2)",
     )?
     .execute(params![calendar, remote_id])?;
     Ok(())

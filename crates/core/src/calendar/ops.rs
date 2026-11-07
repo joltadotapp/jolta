@@ -1412,6 +1412,13 @@ mod tests {
         assert_eq!(shown(&s), pairs(&[("24 09:00", "Daily")]), "the edit stays while it waits");
         assert_eq!(s.write(|tx| undo(tx, edit, NOW, &horizon())).unwrap(), Undone::Dropped);
         assert_eq!(s.read(|c| store::calendar(c, cal)).unwrap().cursor, None, "the next sync lists everything and finds it gone");
+
+        let (s, cal, _) = synced("passed-over-delete");
+        s.write(|tx| store::set_calendar_cursor(tx, cal, Some("token-1"), None)).unwrap();
+        let delete = q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
+        s.write(|tx| store::remove_item(tx, cal, "g1", store::Removal::Deleted, &horizon())).unwrap();
+        assert_eq!(s.write(|tx| undo(tx, delete, NOW, &horizon())).unwrap(), Undone::Dropped);
+        assert_eq!(s.read(|c| store::calendar(c, cal)).unwrap().cursor, None, "a queued delete has no rows left, yet the removal it passed over counts");
     }
 
     #[test]
