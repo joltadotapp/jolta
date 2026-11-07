@@ -299,6 +299,26 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// Settings › Calendar makes a calendar on this Mac, which the calendar
+    /// sidebar then lists with the others.
+    func testNewCalendarOnThisMac() throws {
+        let app = try launch()
+        app.typeKey(",", modifierFlags: .command)
+        let page = app.buttons.matching(NSPredicate(format: "label == 'Calendar' AND identifier != 'mode-calendar'")).firstMatch
+        XCTAssertTrue(page.waitForExistence(timeout: 5), "settings lists the Calendar page")
+        page.click()
+        let name = app.textFields.matching(identifier: "new-calendar-name").firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 5), "the page offers a new calendar on this Mac")
+        name.click()
+        name.typeText("Family")
+        app.buttons["Create"].firstMatch.click()
+        XCTAssertTrue(app.staticTexts["Made Family."].firstMatch.waitForExistence(timeout: 5), "Create makes it")
+        app.typeKey("w", modifierFlags: .command)
+        app.typeKey("2", modifierFlags: .command)
+        let family = app.descendants(matching: .any).matching(identifier: "calendar-Family").firstMatch
+        XCTAssertTrue(family.waitForExistence(timeout: 5), "the calendar sidebar lists it")
+    }
+
     /// Return in a new section's query field saves it. The page used to read
     /// the sections before they reloaded, drop the new row under the focused
     /// field, and crash (2026-11-04, a "Starred" section with is:starred).

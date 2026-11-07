@@ -122,8 +122,63 @@ struct SubscribeField: View {
     }
 }
 
+/// A calendar kept only in Jolta's store, with a name and a color.
+struct NewLocalCalendarField: View {
+    let model: AppModel
+    @State private var name = ""
+    @State private var color = CalendarSettingsRow.swatches[0]
+    @State private var message: (text: String, failed: Bool)?
+
+    var body: some View {
+        SettingsRow(title: "New calendar on this Mac",
+                    detail: message?.text ?? "For private plans, or when you have no calendar account.",
+                    detailColor: message?.failed == true ? .red : Color(Theme.text3)) {
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(CalendarSettingsRow.swatches, id: \.self) { hex in
+                        Button { color = hex } label: {
+                            Label { Text(hex) } icon: { Image(nsImage: CalendarSettingsRow.swatch(hex)) }
+                        }
+                    }
+                } label: {
+                    RoundedRectangle(cornerRadius: 3).fill(Color(CalendarColor.color(color, .bar))).frame(width: 12, height: 12)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Color")
+                .accessibilityLabel("Color")
+                TextField("", text: $name, prompt: Text("Name"))
+                    .settingsField(width: 150)
+                    .onSubmit(add)
+                    .accessibilityLabel("Calendar name")
+                    .accessibilityIdentifier("new-calendar-name")
+                Button("Create", action: add)
+                    .fixedSize()
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+
+    private func add() {
+        let title = name.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return }
+        do {
+            let info = try model.core.newCalendarHere(name: title, color: color)
+            message = ("Made \(info.name).", false)
+            name = ""
+        } catch {
+            message = ("\(error)", true)
+        }
+        model.calendar.reloadCalendars()
+        model.calendar.refresh()
+    }
+}
+
 /// Settings › Calendar: accounts' switches, each calendar's settings, subscriptions.
 struct CalendarSettings: View {
+    static let localFooter = "Events in a calendar on this Mac stay here: they don't reach your phone or any server."
     let model: AppModel
     @State private var switches: CalendarSwitches?
     @State private var removal: Confirmation?
@@ -137,9 +192,13 @@ struct CalendarSettings: View {
                 }
             }
             ForEach(cal.groups) { group in
-                SettingsSection(group.title, footer: group.id == "feeds" ? "Subscriptions are read-only." : nil) {
+                SettingsSection(group.title, footer: group.id == "feeds" ? "Subscriptions are read-only." : group.id == "local" ? Self.localFooter : nil) {
                     ForEach(group.calendars) { entry in CalendarSettingsRow(model: model, info: entry.info, removal: $removal) }
+                    if group.id == "local" { NewLocalCalendarField(model: model) }
                 }
+            }
+            if !cal.groups.contains(where: { $0.id == "local" }) {
+                SettingsSection("On this Mac only", footer: Self.localFooter) { NewLocalCalendarField(model: model) }
             }
             SettingsSection("Invitations") {
                 FileResponsesRow(core: model.core)
@@ -284,7 +343,7 @@ struct CalendarSettingsRow: View {
     let info: CalendarInfo
     @Binding var removal: Confirmation?
 
-    private static let swatches = ["#4f6fae", "#3f8a5e", "#8a7a5a", "#9a5a8a", "#c0504d", "#d08a2e", "#2e9aa8", "#7a6fd0"]
+    static let swatches = ["#4f6fae", "#3f8a5e", "#8a7a5a", "#9a5a8a", "#c0504d", "#d08a2e", "#2e9aa8", "#7a6fd0"]
 
     var body: some View {
         let cal = model.calendar
@@ -319,7 +378,10 @@ struct CalendarSettingsRow: View {
                 .help("Notifications for this calendar's reminders")
             if info.accountId == nil {
                 Button {
-                    removal = Confirmation(title: "Remove \(info.name)?", message: "Its events leave Jolta. You can subscribe again later.", action: "Remove") {
+                    let message = info.kind == .local
+                        ? "Its events are deleted. They exist only on this Mac, so this can't be undone."
+                        : "Its events leave Jolta. You can subscribe again later."
+                    removal = Confirmation(title: "Remove \(info.name)?", message: message, action: "Remove") {
                         try? core.removeCalendar(calendarId: id)
                         cal.reloadCalendars()
                         cal.refresh()

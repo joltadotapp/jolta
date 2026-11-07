@@ -201,7 +201,7 @@ pub fn known_items(conn: &Connection, calendar: CalendarId) -> Result<BTreeMap<S
 }
 
 /// How a recurrence id is stored: the same moment always gives the same text.
-pub(super) fn moment_text(m: &Moment) -> String {
+pub fn moment_text(m: &Moment) -> String {
     match m {
         Moment::Date(d) => d.format("%Y%m%d").to_string(),
         Moment::Time(t) => match t.zone {
@@ -460,6 +460,8 @@ pub struct OccurrenceRow {
     /// How many shown calendars hold this meeting (same UID and time); the
     /// views show it once.
     pub copies: u32,
+    /// An edit of it waits to reach the server.
+    pub not_synced: bool,
 }
 
 impl OccurrenceRow {
@@ -470,7 +472,7 @@ impl OccurrenceRow {
 
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
-     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default";
+     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default, e.changed_locally";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -496,6 +498,7 @@ fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
         has_attendees: r.get(14)?,
         busy: r.get(15)?,
         copies: 1,
+        not_synced: r.get(19)?,
     })
 }
 
@@ -571,6 +574,11 @@ pub fn occurrences(conn: &Connection, from: NaiveDate, to: NaiveDate, here: Tz) 
         }
     });
     Ok(out)
+}
+
+/// Whether an edit of the event waits to reach the server.
+pub fn event_not_synced(conn: &Connection, id: EventId) -> Result<bool> {
+    Ok(conn.query_row("SELECT changed_locally FROM event WHERE id = ?1", [id], |r| r.get(0)).optional()?.unwrap_or(false))
 }
 
 /// How many events each calendar holds, for listings.

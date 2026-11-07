@@ -125,6 +125,7 @@ struct CalEvent: Identifiable, Equatable {
         if let response = record.myResponse, response != .needsAction { parts.append(response.word) }
         else if isTentative { parts.append("tentative") }
         if isFree { parts.append("free") }
+        if record.notSynced { parts.append("not synced yet") }
         return parts.joined(separator: ", ")
     }
 }

@@ -19,7 +19,7 @@ use futures::StreamExt;
 use tokio::sync::Notify;
 
 use super::series::Horizon;
-use super::{Calendar, CalendarId, CalendarSource, sync, tz};
+use super::{Calendar, CalendarId, CalendarSource, ops, sync, tz};
 use crate::engine::{Event, Sink};
 use crate::{Jolta, Result, store};
 
@@ -70,6 +70,11 @@ impl Scheduler {
         self.wake.notify_one();
     }
 
+    /// Sends calendar ops that are due now, such as an edit just queued.
+    pub fn ops_queued(&self) {
+        self.wake.notify_one();
+    }
+
     /// Why the calendar's last sync failed, until one succeeds.
     pub fn error(&self, id: CalendarId) -> Option<String> {
         self.state().failures.get(&id).map(|(_, e)| e.clone())
@@ -80,16 +85,26 @@ impl Scheduler {
     }
 
     async fn run(self: Arc<Self>) {
+        if self.jolta.store.read_async(store::has_calendar_claims).await.unwrap_or(false) {
+            if let Err(e) = self.jolta.store.write_async(|tx| store::release_calendar_claims(tx)).await {
+                tracing::warn!("calendar ops left mid-send stay claimed: {e}");
+            }
+        }
         loop {
             match refresh_occurrences(&self.jolta, Utc::now(), tz::here()).await {
                 Ok(rebuilt) if !rebuilt.is_empty() => (self.sink)(Event::CalendarsChanged(rebuilt)),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("rebuilding calendar occurrences stopped: {e}"),
             }
+            let ops_due = self.send_ops().await.unwrap_or_else(|e| {
+                tracing::warn!("sending calendar ops stopped: {e}");
+                Some(ROUND_MAX)
+            });
             let wait = self.round().await.unwrap_or_else(|e| {
                 tracing::warn!("calendar sync round stopped: {e}");
                 ROUND_MAX
             });
+            let wait = ops_due.map_or(wait, |due| due.min(wait));
             tokio::select! {
                 _ = self.wake.notified() => {}
                 _ = tokio::time::sleep(wait) => {}
@@ -124,6 +139,26 @@ impl Scheduler {
         futures::stream::iter(due).for_each_concurrent(AT_ONCE, |c| self.sync_one(c)).await;
         let next = self.state().next.values().min().map(|t| t.saturating_duration_since(Instant::now()));
         Ok(next.map_or(ROUND_MAX, |n| n.min(ROUND_MAX)))
+    }
+
+    /// Sends the due calendar ops and reports what changed. Returns how
+    /// long until the next waiting op is due.
+    async fn send_ops(&self) -> Result<Option<Duration>> {
+        let settled = ops::run_due(&self.jolta, Horizon::around(Utc::now(), tz::here())).await?;
+        let mut changed: Vec<CalendarId> = Vec::new();
+        for s in settled {
+            if let Some(f) = s.failure {
+                (self.sink)(Event::CalendarOpFailed { calendar: s.calendar, event: f.event, message: f.message });
+            }
+            if !changed.contains(&s.calendar) {
+                changed.push(s.calendar);
+            }
+        }
+        if !changed.is_empty() {
+            (self.sink)(Event::CalendarsChanged(changed));
+        }
+        let next = self.jolta.store.read_async(store::next_calendar_op_due).await?;
+        Ok(next.map(|at| Duration::from_secs((at - Utc::now().timestamp()).max(0) as u64)))
     }
 
     async fn sync_one(&self, calendar: Calendar) {
@@ -168,7 +203,7 @@ fn interval(c: &Calendar) -> Duration {
 
 /// One minute after the first failure, doubling, never longer than the
 /// calendar's own interval.
-fn backoff(attempts: u32, every: Duration) -> Duration {
+pub(crate) fn backoff(attempts: u32, every: Duration) -> Duration {
     Duration::from_secs(60 << attempts.saturating_sub(1).min(10)).min(every)
 }
 

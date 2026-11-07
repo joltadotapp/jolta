@@ -203,6 +203,25 @@ pub enum CalCommand {
         /// The account (id or address); the Google fact needs none.
         account: Option<String>,
     },
+    /// Make a calendar on this Mac only.
+    NewLocal {
+        name: String,
+        /// "#rrggbb".
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// Create an event through the op queue, telling nobody.
+    Create(crate::cal_edit::CreateArgs),
+    /// Change an event's title, place or time through the op queue.
+    Edit(crate::cal_edit::EditArgs),
+    /// Delete an event, or a series with its changed occurrences, through the op queue.
+    Delete(crate::cal_edit::DeleteArgs),
+    /// The calendar op queue, oldest first, with each op's state.
+    Ops,
+    /// Take back a calendar op: drop it if it was never sent, else queue its opposite.
+    Undo { op: i64 },
+    /// What Jolta can do with a calendar's events.
+    Caps { calendar: i64 },
     /// Time one-week occurrence queries over the store.
     Bench {
         #[arg(long, default_value_t = 200)]
@@ -218,6 +237,13 @@ pub enum OnOff {
 
 pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
     match cmd {
+        CalCommand::NewLocal { name, color } => crate::cal_edit::new_local(jolta, &name, color.as_deref()),
+        CalCommand::Create(a) => crate::cal_edit::create(jolta, a).await,
+        CalCommand::Edit(a) => crate::cal_edit::edit(jolta, a).await,
+        CalCommand::Delete(a) => crate::cal_edit::delete(jolta, a).await,
+        CalCommand::Ops => crate::cal_edit::list_ops(jolta),
+        CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,
+        CalCommand::Caps { calendar } => crate::cal_edit::print_caps(jolta, calendar),
         CalCommand::Enable { account, port } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
             if sync::needs_consent(&a) {
@@ -376,7 +402,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 days.entry(day).or_default().push(format!(
                     "  {when:<19} {:<40} {:>6} {:<18} {response:<12} {meeting}",
                     truncate(&title_of(o), 40),
-                    format!("#{}", o.event_id),
+                    crate::cal_edit::event_label(o.event_id, o.not_synced),
                     truncate(calendar, 18)
                 ));
             }
