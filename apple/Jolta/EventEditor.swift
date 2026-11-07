@@ -15,6 +15,8 @@ final class EventEditorModel {
     /// What the typed time fields show until they are read.
     var startText = ""
     var endText = ""
+    /// The end as it was when the user began typing a new one.
+    @ObservationIgnored private var endBeforeTyping: Date?
     /// Why the last save or delete didn't go through.
     var failure: String?
     /// The occurrence being edited, hidden in the grid while the draft shows.
@@ -81,6 +83,7 @@ final class EventEditorModel {
     }
 
     func refreshTexts() {
+        endBeforeTyping = nil
         if let (start, end) = interval {
             startText = CalendarModel.clockTime(start)
             endText = CalendarModel.clockTime(end)
@@ -122,15 +125,25 @@ final class EventEditorModel {
         let newEnd = new + Int64(end.timeIntervalSince(start))
         draft.time = .timed(start: new, end: newEnd)
         endText = CalendarModel.clockTime(Date(timeIntervalSince1970: TimeInterval(newEnd)))
+        endBeforeTyping = nil
     }
 
     /// The typed end, on the end's own day, so an event over midnight or
     /// several days keeps its last day. An end typed before the start on
     /// the start's day moves to the next day: "22:00 to 1:00".
     func followEnd() {
-        guard let (start, end) = interval, endText != CalendarModel.clockTime(end), let m = core.parseTimeInput(text: endText) else { return }
-        var new = at(end, minutes: Int(m))
-        if new <= Int64(start.timeIntervalSince1970), Calendar.current.isDate(start, inSameDayAs: end) {
+        guard let (start, end) = interval else { return }
+        // The day comes from the end before typing began: a partial "1" on
+        // the way to "16:00" must not move the end to tomorrow for good.
+        let from = endBeforeTyping ?? end
+        if endText == CalendarModel.clockTime(from) {
+            if end != from { draft.time = .timed(start: Int64(start.timeIntervalSince1970), end: Int64(from.timeIntervalSince1970)) }
+            return
+        }
+        guard let m = core.parseTimeInput(text: endText) else { return }
+        endBeforeTyping = from
+        var new = at(from, minutes: Int(m))
+        if new <= Int64(start.timeIntervalSince1970), Calendar.current.isDate(start, inSameDayAs: from) {
             new = at(Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start, minutes: Int(m))
         }
         draft.time = .timed(start: Int64(start.timeIntervalSince1970), end: new)
@@ -364,6 +377,7 @@ struct EventEditorPanel: View {
                                 .menuIndicator(.hidden)
                                 .fixedSize()
                                 .help("Length")
+                                .accessibilityIdentifier("editor-length")
                         } else {
                             Text(editor.lengthText).foregroundStyle(Color(Theme.text3))
                         }

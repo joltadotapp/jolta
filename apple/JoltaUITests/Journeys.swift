@@ -300,8 +300,9 @@ final class Journeys: XCTestCase {
     }
 
     /// The event editor: C opens it on the next half hour, a title and ⌘↩
-    /// put the event in the week, selected; E opens it again and a typed
-    /// start moves it; ⌘⌫ deletes it and Z brings it back.
+    /// put the event in the week, selected; E opens it again, a typed start
+    /// moves it and a typed end, digit by digit, stays on its day; ⌘⌫
+    /// deletes it and Z brings it back.
     func testEventEditor() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
@@ -322,13 +323,22 @@ final class Journeys: XCTestCase {
         XCTAssertEqual(app.textFields["editor-title"].value as? String, "Journey review")
         start.click()
         app.typeKey("a", modifierFlags: .command)
-        start.typeText("1015")
+        start.typeText("1400")
+        let end = app.textFields["editor-end"]
+        end.click()
+        XCTAssertEqual(end.value as? String, "14:30", "the typed start moves it, keeping its 30 minutes")
+        app.typeKey("a", modifierFlags: .command)
+        // "1" alone reads as 13:00, before the start; the end must still land today.
+        end.typeText("1600")
         app.typeKey(.return, modifierFlags: .command)
-        let moved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Journey review, 10:15 to 10:45")).firstMatch
-        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the typed start moves it, keeping its 30 minutes")
+        let moved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Journey review, 14:00 to 16:00")).firstMatch
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the typed times are saved")
 
         app.typeKey("e", modifierFlags: [])
         XCTAssertTrue(start.waitForExistence(timeout: 5))
+        let length = app.descendants(matching: .any).matching(identifier: "editor-length").firstMatch
+        XCTAssertTrue(length.waitForExistence(timeout: 5))
+        XCTAssertEqual(length.title, "2 h", "a typed end lands on the start's day")
         app.typeKey(.delete, modifierFlags: .command)
         XCTAssertTrue(moved.waitForNonExistence(timeout: 5), "⌘⌫ deletes it")
         app.typeKey("z", modifierFlags: [])
