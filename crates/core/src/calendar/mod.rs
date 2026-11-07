@@ -28,6 +28,7 @@ pub mod respond;
 pub mod rsvp;
 pub mod scheduler;
 pub mod series;
+pub mod split;
 pub mod sources;
 pub mod sync;
 pub mod synth;

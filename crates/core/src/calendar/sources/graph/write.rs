@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::super::{OpWrite, Version, Written, cannot, changed_fields, created_fields, encode, merge_json};
 use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
-use super::{Api, FIELDS, GraphCalendar, GraphEvent, event, get_ok};
+use super::{Api, FIELDS, GraphCalendar, GraphEvent, event, get_ok, instance};
 use crate::calendar::change::Field;
 use crate::calendar::ops::Extra;
 use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, ShowAs, Span, Visibility, tz};
@@ -29,23 +29,126 @@ impl GraphCalendar {
 
 pub(crate) fn writable(write: &OpWrite<'_>, here: Tz) -> Result<()> {
     match write {
-        OpWrite::Create { events, key, extra } => create_body(events, key, *extra, here).map(drop),
-        OpWrite::Update { base, event, extra, .. } => patch_body(base, event, *extra, here).map(drop),
-        OpWrite::Delete { .. } => Ok(()),
+        OpWrite::Create { events, key, extra } => {
+            let (master, changed) = split_series(events)?;
+            create_body(std::slice::from_ref(master), key, *extra, here)?;
+            changed.iter().try_for_each(|e| occurrence_body(master, e, here).map(drop))
+        }
+        OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => patch_body(base, event, *extra, here).map(drop),
+        OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
+    }
+}
+
+/// A series and its changed occurrences, as a create takes them.
+fn split_series(events: &[EventData]) -> Result<(&EventData, Vec<&EventData>)> {
+    let master = events.iter().find(|e| e.recurrence_id.is_none()).ok_or_else(|| cannot(MICROSOFT, "take a changed occurrence without its series"))?;
+    Ok((master, events.iter().filter(|e| e.recurrence_id.is_some()).collect()))
+}
+
+/// The PATCH that makes the occurrence `changed` of a new series `master`
+/// what it is; None when it was taken out instead.
+fn occurrence_body(master: &EventData, changed: &EventData, here: Tz) -> Result<Option<Value>> {
+    if changed.status == EventStatus::Cancelled {
+        return Ok(None);
+    }
+    let rid = changed.recurrence_id.as_ref().ok_or_else(|| cannot(MICROSOFT, "change an occurrence without its start"))?;
+    let base = crate::calendar::series::occurrence(std::slice::from_ref(master), rid, here).ok_or_else(|| cannot(MICROSOFT, "move an all-day occurrence to a time"))?;
+    patch_body(&base, changed, None, here).map(Some)
+}
+
+/// The id of the instance of `series` at `rid`, None when the series has none there.
+async fn instance_at(api: &impl Api, series: &crate::calendar::rsvp::Stored, rid: &crate::calendar::Moment) -> Result<Option<String>> {
+    match instance(api, series, rid).await {
+        Ok(i) => Ok(Some(i.id)),
+        Err(Error::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
 async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str, here: Tz) -> Result<Written> {
     match *write {
         OpWrite::Create { events, key, extra } => {
-            let body = create_body(events, key, extra, here)?;
+            let (master, changed) = split_series(events)?;
+            let body = create_body(std::slice::from_ref(master), key, extra, here)?;
             let (status, reply) = api.request("POST", &format!("/me/calendars/{}/events", encode(&calendar.remote_id)), Some(&body), &[]).await?;
+            if !(200..300).contains(&status) {
+                return Err(api.failure(status, &reply));
+            }
+            // Graph's pattern holds no EXDATE, and the series' changed
+            // occurrences are writes of their own; a retry gets the series
+            // the first try made back for its transactionId and writes them
+            // again, which changes nothing more.
+            let series = crate::calendar::rsvp::Stored {
+                id: crate::calendar::EventId(0),
+                remote_id: reply["id"].as_str().unwrap_or_default().to_string(),
+                etag: None,
+                raw: serde_json::to_vec(&reply).ok(),
+                data: master.clone(),
+            };
+            let taken_out = master.recurrence.iter().flat_map(|r| &r.exdates);
+            for rid in taken_out.chain(changed.iter().filter(|e| e.status == EventStatus::Cancelled).filter_map(|e| e.recurrence_id.as_ref())) {
+                if let Some(id) = instance_at(api, &series, rid).await? {
+                    let (status, reply) = api.request("DELETE", &format!("/me/events/{}", encode(&id)), None, &[]).await?;
+                    if !matches!(status, 200..300 | 404 | 410) {
+                        return Err(api.failure(status, &reply));
+                    }
+                }
+            }
+            for e in changed {
+                let (Some(body), Some(rid)) = (occurrence_body(master, e, here)?, e.recurrence_id.as_ref()) else { continue };
+                if let Some(id) = instance_at(api, &series, rid).await? {
+                    let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[]).await?;
+                    if !(200..300).contains(&status) {
+                        return Err(api.failure(status, &reply));
+                    }
+                }
+            }
+            Ok(Written::Saved(Some(version(api, reply, &master.uid, me, here).await?)))
+        }
+        OpWrite::Occurrence { series, base, event, extra } => {
+            let Some(etag) = series.etag.as_deref() else { return Ok(Written::Stale) };
+            let rid = event.recurrence_id.as_ref().ok_or_else(|| cannot(MICROSOFT, "change an occurrence without its start"))?;
+            let Some(id) = instance_at(api, series, rid).await? else { return Ok(Written::Gone) };
+            let body = patch_body(base, event, extra, here)?;
+            let guard = if_match(etag);
+            let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[("If-Match", &guard)]).await?;
             match status {
-                200..300 => Ok(Written::Saved(Some(version(api, reply, &events[0].uid, me, here).await?))),
+                200..300 => Ok(Written::Saved(Some(version(api, reply, &event.uid, me, here).await?))),
+                412 => Ok(Written::Stale),
+                404 | 410 => Ok(Written::Gone),
                 _ => Err(api.failure(status, &reply)),
             }
         }
-        OpWrite::Update { held, base, event, extra } => {
+        OpWrite::Cancel { held, occurrence, changed } => {
+            let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
+            // Exchange deletes an instance whatever change key If-Match
+            // names (Microsoft 365 test account, 2026-11-07), so the key is
+            // compared first.
+            let (status, now) = api.request("GET", &format!("/me/events/{}?$select=changeKey", encode(&held.remote_id)), None, &[]).await?;
+            match status {
+                200..300 if now["changeKey"].as_str() == Some(etag) => {}
+                200..300 => return Ok(Written::Stale),
+                404 | 410 => return Ok(Written::Gone),
+                _ => return Err(api.failure(status, &now)),
+            }
+            let rid = occurrence.recurrence_id.as_ref().ok_or_else(|| cannot(MICROSOFT, "delete an occurrence without its start"))?;
+            let id = match changed {
+                true => held.remote_id.clone(),
+                false => match instance_at(api, held, rid).await? {
+                    Some(id) => id,
+                    None => return Ok(Written::Gone),
+                },
+            };
+            let guard = if_match(etag);
+            let (status, reply) = api.request("DELETE", &format!("/me/events/{}", encode(&id)), None, &[("If-Match", &guard)]).await?;
+            match status {
+                200..300 => Ok(Written::Saved(None)),
+                412 => Ok(Written::Stale),
+                404 | 410 => Ok(Written::Gone),
+                _ => Err(api.failure(status, &reply)),
+            }
+        }
+        OpWrite::Update { held, base, event, extra, .. } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
             let body = patch_body(base, event, extra, here)?;
             let guard = if_match(etag);
@@ -118,7 +221,7 @@ async fn version(api: &impl Api, reply: Value, uid: &str, me: &str, here: Tz) ->
 
 /// The POST's body: every field the event sets, the `transactionId`
 /// `key`, and the UID as its Global Object ID. A series' changed
-/// occurrences need their own writes, which come with the repeat editor.
+/// occurrences are writes of their own.
 pub(crate) fn create_body(events: &[EventData], key: &str, extra: Option<&Extra>, here: Tz) -> Result<Value> {
     let [e] = events else { return Err(cannot(MICROSOFT, "take a repeating event with changed occurrences from Jolta yet")) };
     let mut v = json!({ "transactionId": key });
@@ -358,7 +461,7 @@ mod tests {
             m["cancelledOccurrences"] = cancelled;
             m
         };
-        let (done, seen) = sent(OpWrite::Update { held: &held, base: &base, event: &mine, extra: None }, vec![(200, master(json!([]))), (200, master(json!(["OID.AAMk1.2026-11-25"])))]).await;
+        let (done, seen) = sent(OpWrite::Update { held: &held, base: &base, event: &mine, extra: None, dropped: &[] }, vec![(200, master(json!([]))), (200, master(json!(["OID.AAMk1.2026-11-25"])))]).await;
         let Written::Saved(Some(v)) = done.unwrap() else { panic!("saved") };
         assert_eq!(seen.last().unwrap(), "GET /me/events/AAMk1");
         assert_eq!(v.events[0].recurrence.as_ref().unwrap().exdates.len(), 1, "the cancelled 25th stays cancelled");
@@ -369,7 +472,7 @@ mod tests {
         let base = standup();
         let held = Stored { id: EventId(1), remote_id: "AAMk1".into(), etag: Some("ck1".into()), raw: None, data: base.clone() };
         let mine = EventData { title: "Daily".into(), ..base.clone() };
-        let update = OpWrite::Update { held: &held, base: &base, event: &mine, extra: None };
+        let update = OpWrite::Update { held: &held, base: &base, event: &mine, extra: None, dropped: &[] };
         for (status, expected) in [(412, Written::Stale), (404, Written::Gone)] {
             let (done, seen) = sent(update, vec![(status, json!({}))]).await;
             assert_eq!((done.unwrap(), seen), (expected, vec!["PATCH /me/events/AAMk1 If-Match W/\"ck1\"".to_string()]));

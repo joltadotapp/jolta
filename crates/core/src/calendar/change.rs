@@ -108,6 +108,20 @@ pub const FIELDS: [Field; 13] = [
     Field::Visibility,
 ];
 
+/// A changed occurrence after its series went from `base` to `event`: each
+/// field the series changed that the occurrence still had the series' old
+/// value for takes the new one. Its own time stays, as does every field it
+/// changed itself.
+pub fn carried(base: &EventData, event: &EventData, occurrence: &EventData) -> EventData {
+    let mut out = occurrence.clone();
+    for f in FIELDS.into_iter().filter(|f| !matches!(f, Field::Time | Field::Repeat)) {
+        if f.differs(base, event) && !f.differs(base, occurrence) {
+            f.copy(&mut out, event);
+        }
+    }
+    out
+}
+
 fn roles(people: &[Attendee]) -> std::collections::BTreeMap<String, super::Role> {
     people.iter().map(|a| (a.person.address.to_lowercase(), a.role)).collect()
 }

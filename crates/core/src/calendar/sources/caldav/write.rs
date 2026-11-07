@@ -36,29 +36,20 @@ impl CalDav {
                     status => Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
                 }
             }
-            OpWrite::Update { held, base, event, extra } => {
+            OpWrite::Update { held, base, event, extra, dropped } => {
                 let (Some(etag), Some(raw)) = (held.etag.as_deref(), held.raw.as_deref()) else { return Ok(Written::Stale) };
-                let url = join(&collection, &path_escape(&held.remote_id))?;
-                let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, tz::here())?;
-                // iCloud takes a PUT with the ETag of a resource deleted
-                // since and makes it again (iCloud test account,
-                // 2026-11-07), so the resource is read first: gone, or at
-                // another version, nothing is written.
-                let now = self.exchange("GET", &url, &[], "").await?;
-                match now.status {
-                    404 | 410 => return Ok(Written::Gone),
-                    200..300 if now.etag.as_deref() == Some(etag) => {}
-                    200..300 => return Ok(Written::Stale),
-                    status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
-                }
-                let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag)];
-                let reply = self.exchange("PUT", &url, &headers, &text).await?;
-                match reply.status {
-                    200..300 => Ok(Written::Saved(Some(self.version(&held.remote_id, reply.etag, text).await?))),
-                    412 => Ok(Written::Stale),
-                    404 | 410 => Ok(Written::Gone),
-                    status => Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
-                }
+                let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, dropped, tz::here())?;
+                self.put_over(&collection, held, etag, text).await
+            }
+            OpWrite::Occurrence { series, base, event, extra } => {
+                let (Some(etag), Some(raw)) = (series.etag.as_deref(), series.raw.as_deref()) else { return Ok(Written::Stale) };
+                let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, &[], tz::here())?;
+                self.put_over(&collection, series, etag, text).await
+            }
+            OpWrite::Cancel { held, occurrence, .. } => {
+                let (Some(etag), Some(raw)) = (held.etag.as_deref(), held.raw.as_deref()) else { return Ok(Written::Stale) };
+                let text = cancelled_text(&String::from_utf8_lossy(raw), occurrence, tz::here())?;
+                self.put_over(&collection, held, etag, text).await
             }
             OpWrite::Delete { held } => {
                 let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
@@ -71,6 +62,30 @@ impl CalDav {
                     status => Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
                 }
             }
+        }
+    }
+
+    /// Writes `text` over the resource `held` while it is still at `etag`.
+    async fn put_over(&self, collection: &Url, held: &rsvp::Stored, etag: &str, text: String) -> Result<Written> {
+        let url = join(collection, &path_escape(&held.remote_id))?;
+        // iCloud takes a PUT with the ETag of a resource deleted
+        // since and makes it again (iCloud test account,
+        // 2026-11-07), so the resource is read first: gone, or at
+        // another version, nothing is written.
+        let now = self.exchange("GET", &url, &[], "").await?;
+        match now.status {
+            404 | 410 => return Ok(Written::Gone),
+            200..300 if now.etag.as_deref() == Some(etag) => {}
+            200..300 => return Ok(Written::Stale),
+            status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
+        }
+        let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag)];
+        let reply = self.exchange("PUT", &url, &headers, &text).await?;
+        match reply.status {
+            200..300 => Ok(Written::Saved(Some(self.version(&held.remote_id, reply.etag, text).await?))),
+            412 => Ok(Written::Stale),
+            404 | 410 => Ok(Written::Gone),
+            status => Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
         }
     }
 
@@ -102,12 +117,39 @@ pub(crate) fn resource_path(calendar: &Calendar, key: &str) -> Result<String> {
 pub(crate) fn writable(write: &OpWrite<'_>) -> Result<()> {
     match write {
         OpWrite::Create { events, extra, .. } => created_text(events, *extra).map(drop),
-        OpWrite::Update { base, event, extra, .. } => {
+        OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => {
             lines(*extra)?;
             changed_fields(base, event).into_iter().try_for_each(|f| editable(f))
         }
-        OpWrite::Delete { .. } => Ok(()),
+        OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
     }
+}
+
+/// The RECURRENCE-ID value of the VEVENT of `uid` in `obj` that names `rid`.
+fn rid_value(obj: &Object, uid: &str, rid: &crate::calendar::Moment, here: Tz) -> Option<String> {
+    obj.calendar()
+        .into_iter()
+        .flat_map(Component::components)
+        .filter(|c| c.name() == "VEVENT" && c.prop("UID").is_some_and(|u| u.text() == uid))
+        .find_map(|c| c.prop("RECURRENCE-ID").filter(|p| rsvp::prop_moment(p).is_some_and(|m| m.names(rid, here))))
+        .map(|p| p.value().to_string())
+}
+
+/// `text` with the occurrence taken out of its series: an EXDATE on the
+/// master and its changed VEVENT, if any, gone. The master's SEQUENCE
+/// goes up, as for any change to its rule.
+pub(crate) fn cancelled_text(text: &str, occurrence: &EventData, here: Tz) -> Result<String> {
+    let mut obj = Object::parse(text);
+    let rid = occurrence.recurrence_id.as_ref().ok_or_else(|| Error::Other("An occurrence without its start.".into()))?;
+    if let Some(value) = rid_value(&obj, &occurrence.uid, rid, here) {
+        obj.remove_event(&occurrence.uid, Some(&value));
+    }
+    let master = obj.event_mut(&occurrence.uid, None).ok_or_else(|| Error::Other("The calendar's copy no longer has this series.".into()))?;
+    master.add(Prop::moment("EXDATE", rid));
+    let sequence = master.prop("SEQUENCE").and_then(|p| p.value().trim().parse::<i64>().ok()).unwrap_or(0);
+    master.set("SEQUENCE", &(sequence + 1).to_string());
+    master.set("DTSTAMP", &utc_stamp());
+    Ok(obj.to_string())
 }
 
 /// The fields Jolta writes into a resource. Guests and video calls wait
@@ -159,22 +201,46 @@ pub(crate) fn created_text(events: &[EventData], extra: Option<&Extra>) -> Resul
 /// changed from `base` written into the VEVENT it names. Every other line
 /// stays as it was. A new time, repeat rule or status raises SEQUENCE, as
 /// RFC 5546 section 2.1.4 asks of an organizer's change.
-pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra: Option<&Extra>, here: Tz) -> Result<String> {
+pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra: Option<&Extra>, dropped: &[EventData], here: Tz) -> Result<String> {
     let mut obj = Object::parse(text);
+    for gone in dropped {
+        if let Some(value) = gone.recurrence_id.as_ref().and_then(|rid| rid_value(&obj, &gone.uid, rid, here)) {
+            obj.remove_event(&gone.uid, Some(&value));
+        }
+    }
     let rid = match &event.recurrence_id {
         None => None,
-        Some(rid) => Some(
-            obj.calendar()
-                .into_iter()
-                .flat_map(Component::components)
-                .filter(|c| c.name() == "VEVENT" && c.prop("UID").is_some_and(|u| u.text() == event.uid))
-                .find_map(|c| c.prop("RECURRENCE-ID").filter(|p| rsvp::prop_moment(p).is_some_and(|m| m.names(rid, here))))
-                .map(|p| p.value().to_string())
-                .ok_or_else(|| Error::Other("The calendar's copy no longer has this occurrence.".into()))?,
-        ),
+        Some(rid) => match rid_value(&obj, &event.uid, rid, here) {
+            Some(value) => Some(value),
+            // An occurrence changed for the first time gets a VEVENT of
+            // its own after the series'.
+            None => {
+                if obj.event(&event.uid, None).is_none() {
+                    return Err(Error::Other("The calendar's copy no longer has this series.".into()));
+                }
+                let mut changed = vevent(event);
+                add_lines(&mut changed, extra)?;
+                obj.add_after_master(changed);
+                return Ok(obj.to_string());
+            }
+        },
     };
-    let component = obj.event_mut(&event.uid, rid.as_deref()).ok_or_else(|| Error::Other("The calendar's copy no longer has this event.".into()))?;
     let fields = changed_fields(base, event);
+    // A change to the whole series reaches each changed occurrence that
+    // kept the series' value for that field.
+    if rid.is_none() {
+        let overrides: Vec<EventData> = ical::read(&obj.to_string(), &[])?.into_iter().filter(|e| e.uid == event.uid && e.recurrence_id.is_some()).collect();
+        for o in overrides {
+            let carried = crate::calendar::change::carried(base, event, &o);
+            let Some(value) = o.recurrence_id.as_ref().and_then(|r| rid_value(&obj, &o.uid, r, here)) else { continue };
+            let Some(component) = obj.event_mut(&o.uid, Some(&value)) else { continue };
+            for f in changed_fields(&o, &carried) {
+                editable(f)?;
+                write_field(component, f, &carried);
+            }
+        }
+    }
+    let component = obj.event_mut(&event.uid, rid.as_deref()).ok_or_else(|| Error::Other("The calendar's copy no longer has this event.".into()))?;
     for &field in &fields {
         editable(field)?;
         write_field(component, field, event);
@@ -216,6 +282,11 @@ mod tests {
         BEGIN:VEVENT\r\nUID:standup@example.com\r\nRECURRENCE-ID;TZID=Europe/Brussels:20261201T090000\r\nDTSTART;TZID=Europe/Brussels:20261201T110000\r\n\
         DTEND;TZID=Europe/Brussels:20261201T113000\r\nSUMMARY:Standup moved\r\nX-CUSTOM;A=1:keep me\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
+    /// `APPLE` as a weekly series of four.
+    fn weekly_apple() -> String {
+        APPLE.replacen("SEQUENCE:2\r\n", "RRULE:FREQ=WEEKLY;COUNT=4\r\nSEQUENCE:2\r\n", 1)
+    }
+
     fn read(text: &str) -> Vec<EventData> {
         ical::read(text, &[]).unwrap()
     }
@@ -225,13 +296,13 @@ mod tests {
         let events = read(APPLE);
         let base = events.iter().find(|e| e.recurrence_id.is_none()).unwrap().clone();
         let mine = EventData { title: "Daily".into(), ..base.clone() };
-        let text = edited_text(APPLE, &base, &mine, None, Brussels).unwrap();
+        let text = edited_text(APPLE, &base, &mine, None, &[], Brussels).unwrap();
         let untouched = |t: &str| t.lines().filter(|l| !l.starts_with("SUMMARY") && !l.starts_with("DTSTAMP")).map(str::to_string).collect::<Vec<_>>();
         assert_eq!(untouched(&text), untouched(APPLE), "every other line byte for byte, folds and the override included");
         assert!(text.contains("SUMMARY:Daily\r\n") && text.contains("SEQUENCE:2\r\n"), "a new title raises no SEQUENCE: {text}");
 
         let moved = EventData { span: Span::Timed { start: at("2026-11-24 10:00"), end: at("2026-11-24 10:30") }, ..base.clone() };
-        let text = edited_text(APPLE, &base, &moved, None, Brussels).unwrap();
+        let text = edited_text(APPLE, &base, &moved, None, &[], Brussels).unwrap();
         assert!(text.contains("DTSTART;TZID=Europe/Brussels:20261124T100000\r\n") && text.contains("SEQUENCE:3\r\n"), "{text}");
         assert!(text.contains("X-APPLE-STRUCTURED-LOCATION;VALUE=URI;X-APPLE-RADIUS=70;X-TITLE=\"Room 1\":geo:50.85,4.35\r\n"));
         assert_eq!(read(&text).iter().find(|e| e.recurrence_id.is_none()).unwrap().span, moved.span);
@@ -243,13 +314,54 @@ mod tests {
         let events = read(APPLE);
         let base = events.iter().find(|e| e.recurrence_id.is_some()).unwrap().clone();
         let mine = EventData { title: "Standup, later".into(), ..base.clone() };
-        let text = edited_text(APPLE, &base, &mine, None, Brussels).unwrap();
+        let text = edited_text(APPLE, &base, &mine, None, &[], Brussels).unwrap();
         let after = read(&text);
         assert_eq!(after.iter().find(|e| e.recurrence_id.is_none()).unwrap().title, "Standup", "the series is the same");
         assert_eq!(after.iter().find(|e| e.recurrence_id.is_some()).unwrap().title, "Standup, later");
         assert!(text.contains("X-CUSTOM;A=1:keep me\r\n"));
-        let elsewhere = EventData { recurrence_id: Some(Moment::Time(at("2026-12-08 09:00"))), ..mine };
-        assert!(edited_text(APPLE, &base, &elsewhere, None, Brussels).is_err(), "an occurrence the copy doesn't hold");
+        let first_time = EventData { recurrence_id: Some(Moment::Time(at("2026-12-08 09:00"))), span: Span::Timed { start: at("2026-12-08 11:00"), end: at("2026-12-08 11:30") }, ..mine.clone() };
+        let text = edited_text(APPLE, &base, &first_time, None, &[], Brussels).unwrap();
+        let after = read(&text);
+        assert_eq!(after.iter().filter(|e| e.recurrence_id.is_some()).count(), 2, "an occurrence changed for the first time gets a VEVENT: {text}");
+        assert!(after.iter().any(|e| e.recurrence_id == first_time.recurrence_id && e.span == first_time.span));
+        assert!(text.contains("X-CUSTOM;A=1:keep me\r\n"), "the other lines stay");
+        let stranger = EventData { uid: "someone-else".into(), ..first_time };
+        assert!(edited_text(APPLE, &base, &stranger, None, &[], Brussels).is_err(), "a copy without that series");
+    }
+
+    /// Check 2: taking one occurrence out writes an EXDATE and drops its
+    /// changed VEVENT; the series and every other line stay.
+    #[test]
+    fn a_cancelled_occurrence_leaves_as_an_exdate() {
+        let weekly = weekly_apple();
+        let events = read(&weekly);
+        let changed = events.iter().find(|e| e.recurrence_id.is_some()).unwrap().clone();
+        let text = cancelled_text(&weekly, &changed, Brussels).unwrap();
+        let after = read(&text);
+        assert!(after.iter().all(|e| e.recurrence_id.is_none()), "the changed VEVENT is gone: {text}");
+        let master = after.iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        let rid = changed.recurrence_id.unwrap();
+        assert!(master.recurrence.as_ref().unwrap().exdates.iter().any(|x| x.names(&rid, Brussels)));
+        assert!(text.contains("X-APPLE-STRUCTURED-LOCATION"), "the series' own lines stay");
+
+        let master = events.iter().find(|e| e.recurrence_id.is_none()).unwrap().clone();
+        let fourth = crate::calendar::series::occurrence(std::slice::from_ref(&master), &Moment::Time(at("2026-12-15 09:00")), Brussels).unwrap();
+        let text = cancelled_text(&weekly, &fourth, Brussels).unwrap();
+        assert_eq!(read(&text).iter().filter(|e| e.recurrence_id.is_some()).count(), 1, "an unchanged occurrence leaves the changed one alone");
+    }
+
+    /// A series whose new rule no longer holds a changed occurrence loses its VEVENT.
+    #[test]
+    fn a_dropped_occurrence_leaves_the_resource() {
+        let weekly = weekly_apple();
+        let events = read(&weekly);
+        let master = events.iter().find(|e| e.recurrence_id.is_none()).unwrap().clone();
+        let changed = events.iter().find(|e| e.recurrence_id.is_some()).unwrap().clone();
+        let mine = EventData { title: "Standup, renamed".into(), ..master.clone() };
+        let text = edited_text(&weekly, &master, &mine, None, std::slice::from_ref(&changed), Brussels).unwrap();
+        let after = read(&text);
+        assert_eq!(after.len(), 1, "{text}");
+        assert_eq!(after[0].title, "Standup, renamed");
     }
 
     #[test]
@@ -271,7 +383,7 @@ mod tests {
     async fn an_edit_puts_over_the_held_etag_and_reads_412_and_404() {
         let (stored, base) = held(Some("\"1\""));
         let mine = EventData { title: "Daily".into(), ..base.clone() };
-        let update = OpWrite::Update { held: &stored, base: &base, event: &mine, extra: None };
+        let update = OpWrite::Update { held: &stored, base: &base, event: &mine, extra: None, dropped: &[] };
         for (status, expected) in [("412 Precondition Failed", Written::Stale), ("404 Not Found", Written::Gone)] {
             let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(APPLE.into())), (status, None, None)]).await;
             assert_eq!(dav.write(&calendar, &update).await.unwrap(), expected);
@@ -290,7 +402,7 @@ mod tests {
 
         let (unread, _) = held(None);
         let (dav, calendar, server) = caldav_server(vec![]).await;
-        assert_eq!(dav.write(&calendar, &OpWrite::Update { held: &unread, base: &base, event: &mine, extra: None }).await.unwrap(), Written::Stale, "nothing without an ETag");
+        assert_eq!(dav.write(&calendar, &OpWrite::Update { held: &unread, base: &base, event: &mine, extra: None, dropped: &[] }).await.unwrap(), Written::Stale, "nothing without an ETag");
         assert!(server.await.unwrap().is_empty());
     }
 

@@ -260,7 +260,8 @@ pub(super) fn moment_from_text(text: &str) -> Option<Moment> {
 /// by that version and a change made elsewhere meanwhile goes through the
 /// op's merge instead of being lost or overwriting the edit.
 const HELD: &str = "EXISTS (SELECT 1 FROM calendar_op o WHERE o.calendar_id = event.calendar_id AND o.uid = event.uid
-       AND o.state IN ('pending', 'sending') AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete')))";
+       AND o.state IN ('pending', 'sending') AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete', 'cancel')
+                                   OR json_array_length(o.target, '$.rows') > 0))";
 
 /// Whether a calendar op still has to send the row with this UID and
 /// recurrence id (`HELD`).
@@ -268,7 +269,7 @@ fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Optio
     Ok(conn
         .prepare_cached(
             "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND state IN ('pending', 'sending')
-               AND (recurrence_id = ?3 OR kind IN ('create', 'delete')))",
+               AND (recurrence_id = ?3 OR kind IN ('create', 'delete', 'cancel') OR json_array_length(target, '$.rows') > 0))",
         )?
         .query_row(params![calendar, uid, recurrence_id.map(moment_text).unwrap_or_default()], |r| r.get(0))?)
 }

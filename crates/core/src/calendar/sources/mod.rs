@@ -230,10 +230,20 @@ pub enum OpWrite<'a> {
     /// `event` over `held`, the version Jolta holds, only while the server
     /// still has that version. `base` is the event the user started from:
     /// Google and Graph get only the fields that changed from it, CalDAV
-    /// gets them written into the held resource.
-    Update { held: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra> },
+    /// gets them written into the held resource. `dropped` are the series'
+    /// changed occurrences its new time or rule no longer holds: Google and
+    /// Microsoft 365 drop them themselves, a CalDAV resource loses them.
+    Update { held: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra>, dropped: &'a [EventData] },
+    /// One occurrence of the series `series` that has no object of its own
+    /// yet: Google and Microsoft 365 change it as an instance of the series,
+    /// CalDAV adds its VEVENT to the series' resource. Guarded by the
+    /// series' version, which its instances share.
+    Occurrence { series: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra> },
     /// The whole object `held`, only while the server still has that version.
     Delete { held: &'a Stored },
+    /// One occurrence taken out of its series: `held` is its own object
+    /// when it was `changed`, else the series'.
+    Cancel { held: &'a Stored, occurrence: &'a EventData, changed: bool },
 }
 
 /// An object as the server holds it, to store as a sync would.

@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::change::Field;
-use crate::calendar::ops::{CalendarOp, CalendarOpId, Extra, Held, OpState, Write};
+use crate::calendar::ops::{CalendarOp, CalendarOpId, Extra, Held, OpState, Row as KeptRow, Write};
 use crate::calendar::{CalendarId, EventData};
 use crate::{Error, Result};
 
@@ -21,6 +21,16 @@ struct Target {
     /// A sync passed over a server version of the op's rows (`apply_item`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     passed_over: bool,
+    /// An update's changed occurrences that leave with it, or a cancelled
+    /// occurrence's own row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rows: Vec<KeptRow>,
+    /// An update of an occurrence that had no row of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fresh: bool,
+    /// The op this one waits for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after: Option<i64>,
 }
 
 const COLS: &str = "id, calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key,
@@ -41,9 +51,13 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
             let (Some(base), Some(event)) = (base.and_then(|b| b.into_iter().next()), target.events.into_iter().next()) else {
                 return Err(broken());
             };
-            Write::Update { base, event }
+            Write::Update { base, event, dropped: target.rows, fresh: target.fresh }
         }
         "delete" => Write::Delete(base.ok_or_else(broken)?),
+        "cancel" => {
+            let Some([series, occurrence]) = base.and_then(|b| <[EventData; 2]>::try_from(b).ok()) else { return Err(broken()) };
+            Write::Cancel { series, occurrence, row: target.rows.into_iter().next() }
+        }
         _ => return Err(broken()),
     };
     let lost = r.get::<_, Option<String>>(16)?.map(|t| serde_json::from_str(&t)).transpose().map_err(json_error)?.unwrap_or_default();
@@ -67,6 +81,7 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
         error: r.get(15)?,
         lost,
         created: r.get(17)?,
+        after: target.after.map(CalendarOpId),
     })
 }
 
@@ -97,18 +112,14 @@ pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<Calendar
 
 /// An op's `base` and `target` columns.
 fn written(op: &CalendarOp) -> Result<(Option<String>, String)> {
-    let (base, events) = columns(&op.write);
-    let target = Target { events: events.to_vec(), extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over };
-    Ok((base.map(to_json).transpose()?, to_json(&target)?))
-}
-
-/// The events a write keeps in its `base` and `target` columns.
-fn columns(write: &Write) -> (Option<&[EventData]>, &[EventData]) {
-    match write {
-        Write::Create(events) => (None, events),
-        Write::Update { base, event } => (Some(std::slice::from_ref(base)), std::slice::from_ref(event)),
-        Write::Delete(events) => (Some(events), &[]),
-    }
+    let (base, events, rows, fresh) = match &op.write {
+        Write::Create(events) => (None, events.clone(), Vec::new(), false),
+        Write::Update { base, event, dropped, fresh } => (Some(vec![base.clone()]), vec![event.clone()], dropped.clone(), *fresh),
+        Write::Delete(events) => (Some(events.clone()), Vec::new(), Vec::new(), false),
+        Write::Cancel { series, occurrence, row } => (Some(vec![series.clone(), occurrence.clone()]), Vec::new(), row.iter().cloned().collect(), false),
+    };
+    let target = Target { events, extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over, rows, fresh, after: op.after.map(|a| a.0) };
+    Ok((base.as_deref().map(to_json).transpose()?, to_json(&target)?))
 }
 
 fn to_json<T: serde::Serialize + ?Sized>(v: &T) -> Result<String> {
@@ -128,6 +139,12 @@ pub fn calendar_ops(conn: &Connection, limit: usize) -> Result<Vec<CalendarOp>> 
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// An op `o` that nothing holds back: no older op of its event still to
+/// settle, and the op it waits for, if any, done.
+const READY: &str = "NOT EXISTS (SELECT 1 FROM calendar_op p WHERE p.calendar_id = o.calendar_id AND p.uid = o.uid
+                                 AND p.id < o.id AND p.state IN ('pending', 'sending'))
+     AND NOT EXISTS (SELECT 1 FROM calendar_op a WHERE a.id = json_extract(o.target, '$.after') AND a.state <> 'done')";
+
 /// Claims up to `limit` ops that are due, oldest first, for sending. An op
 /// waits while an older op for the same event hasn't settled, so one
 /// event's ops reach the server one at a time and in order. A claimed op
@@ -137,9 +154,7 @@ pub fn claim_calendar_ops(conn: &Connection, now: i64, limit: usize) -> Result<V
         "UPDATE calendar_op SET state = 'sending', tried = 1
          WHERE id IN (
            SELECT o.id FROM calendar_op o
-           WHERE o.state = 'pending' AND o.send_after <= ?1
-             AND NOT EXISTS (SELECT 1 FROM calendar_op p WHERE p.calendar_id = o.calendar_id AND p.uid = o.uid
-                               AND p.id < o.id AND p.state IN ('pending', 'sending'))
+           WHERE o.state = 'pending' AND o.send_after <= ?1 AND {READY}
            ORDER BY o.id LIMIT ?2)
          RETURNING {COLS}"
     ))?;
@@ -165,10 +180,7 @@ pub fn has_calendar_claims(conn: &Connection) -> Result<bool> {
 /// waiting behind an older op of its event counts from that op.
 pub fn next_calendar_op_due(conn: &Connection) -> Result<Option<i64>> {
     Ok(conn.query_row(
-        "SELECT min(o.send_after) FROM calendar_op o
-         WHERE o.state = 'pending'
-           AND NOT EXISTS (SELECT 1 FROM calendar_op p WHERE p.calendar_id = o.calendar_id AND p.uid = o.uid
-                             AND p.id < o.id AND p.state IN ('pending', 'sending'))",
+        &format!("SELECT min(o.send_after) FROM calendar_op o WHERE o.state = 'pending' AND {READY}"),
         [],
         |r| r.get(0),
     )?)
@@ -202,6 +214,13 @@ pub fn end_later_calendar_ops(conn: &Connection, op: &CalendarOp, state: OpState
         params![op.calendar, op.uid, op.id.0, state, error],
     )?;
     Ok(())
+}
+
+/// The ops that wait for `id` and haven't been sent.
+pub fn calendar_ops_after(conn: &Connection, id: CalendarOpId) -> Result<Vec<CalendarOp>> {
+    let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM calendar_op WHERE json_extract(target, '$.after') = ?1 AND state = 'pending' ORDER BY id"))?;
+    let rows = stmt.query_map([id.0], op_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// The newer ops of the same event that wait, oldest first.
@@ -286,6 +305,16 @@ pub fn refile_event_rows(conn: &Connection, calendar: CalendarId, uid: &str, fro
     if from != to {
         conn.execute("UPDATE event SET remote_id = ?4 WHERE calendar_id = ?1 AND uid = ?2 AND remote_id = ?3", params![calendar, uid, from, to])?;
     }
+    Ok(())
+}
+
+/// Files the row of one occurrence kept under `from` under `to`, the id the
+/// server gave it as an instance of its series.
+pub fn refile_occurrence(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Option<&crate::calendar::Moment>, from: &str, to: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE OR REPLACE event SET remote_id = ?5 WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id = ?3 AND remote_id = ?4",
+        params![calendar, uid, recurrence_id.map(moment_text).unwrap_or_default(), from, to],
+    )?;
     Ok(())
 }
 
