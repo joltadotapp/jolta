@@ -41,6 +41,11 @@ impl Google {
     pub async fn fetch(&self, calendar: &Calendar, remote_id: &str, alarms: &[Alarm]) -> Result<Option<Version>> {
         fetch(self, calendar, remote_id, alarms).await
     }
+
+    /// The instance of the series `series` at `rid`, changed or not.
+    pub async fn fetch_occurrence(&self, calendar: &Calendar, series: &str, rid: &Moment, alarms: &[Alarm]) -> Result<Option<Version>> {
+        fetch(self, calendar, &instance_id(series, rid, tz::here()), alarms).await
+    }
 }
 
 /// The id Google gives an event inserted with this UID and no id of its
@@ -97,11 +102,11 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
     match *write {
         OpWrite::Create { events, extra, .. } => {
             let (master, changed) = split_series(events)?;
-            let written = create(google, calendar, master, extra, &events_url, here).await?;
+            let mut written = create(google, calendar, master, extra, &events_url, here).await?;
             // The series' changed occurrences follow as writes of their
             // instances. A retry finds the series made and writes them
             // again, which changes nothing more.
-            if let Written::Saved(Some(series)) = &written {
+            if let Written::Saved(Some(series)) = &mut written {
                 for e in changed {
                     let id = instance_id(&series.remote_id, e.recurrence_id.as_ref().expect("a changed occurrence"), here);
                     let url = format!("{events_url}/{}?sendUpdates=none", encode(&id));
@@ -109,9 +114,12 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
                         Some(body) => (reqwest::Method::PATCH, Some(body)),
                         None => (reqwest::Method::DELETE, None),
                     };
-                    let (status, reply) = google.request(method, &url, body.as_ref(), None).await?;
+                    let (status, reply) = google.request(method.clone(), &url, body.as_ref(), None).await?;
                     if !matches!(status, 200..300 | 404 | 410) {
                         return Err(failure(status, &reply));
+                    }
+                    if method == reqwest::Method::PATCH && (200..300).contains(&status) {
+                        series.instances.push(version(google, calendar, &reply, &e.alarms)?);
                     }
                 }
             }
@@ -242,7 +250,7 @@ fn version(google: &impl Http, calendar: &Calendar, reply: &[u8], alarms: &[Alar
     let zone = calendar.zone.as_deref().and_then(tz::zone);
     let me = [google.me().to_string()];
     let data = event(&g, uid, &defaults, zone, &me).ok_or_else(|| Error::Other("Google Calendar returned an event without a start.".into()))?;
-    Ok(Version { remote_id: g.id, etag: g.etag, events: vec![data], raw: Some(reply.to_vec()) })
+    Ok(Version { remote_id: g.id, etag: g.etag, events: vec![data], raw: Some(reply.to_vec()), instances: Vec::new() })
 }
 
 /// `events.insert`'s body: the UID and every field the event sets. Google

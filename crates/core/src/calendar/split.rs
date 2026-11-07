@@ -55,6 +55,10 @@ pub fn queue_following(conn: &Connection, calendar: CalendarId, edited: &EventDa
         let rid = theirs.recurrence_id.expect("a changed occurrence");
         let Some(was) = series::occurrence(std::slice::from_ref(&master), &rid, here) else { continue };
         let Some(new_rid) = shift.moment(&rid, here) else { continue };
+        // A new rule may have no occurrence there any more.
+        if !ops::is_occurrence(&new_master, &new_rid, here) {
+            continue;
+        }
         let Some(now_there) = series::occurrence(std::slice::from_ref(&new_master), &new_rid, here) else { continue };
         let mine = EventData { uid: edited.uid.clone(), recurrence_id: Some(rid), ..now_there };
         let merged = merge::three_way(&was, &mine, theirs).event;
@@ -128,28 +132,31 @@ fn remaining(rule: &str, master: &EventData, at: &Moment, here: Tz) -> Result<St
 /// How the new series' clock stands to the old one's: the occurrence at
 /// the split moved from `from` to `to`, and every later one with it.
 enum Shift {
-    Wall(chrono::TimeDelta, super::Zone),
+    /// The shift on the old series' clock, and the old and new clocks.
+    Wall(chrono::TimeDelta, super::Zone, super::Zone),
     Days(chrono::TimeDelta),
 }
 
 impl Shift {
     fn between(from: &Span, to: &Span) -> Shift {
         match (from, to) {
-            (Span::Timed { start: a, .. }, Span::Timed { start: b, .. }) => Shift::Wall(b.wall - a.wall, b.zone),
+            (Span::Timed { start: a, .. }, Span::Timed { start: b, .. }) => Shift::Wall(b.wall - a.wall, a.zone, b.zone),
             (Span::AllDay { start: a, .. }, Span::AllDay { start: b, .. }) => Shift::Days(*b - *a),
             (Span::Timed { start: a, .. }, Span::AllDay { start: b, .. }) => Shift::Days(*b - a.wall.date()),
-            (Span::AllDay { start: a, .. }, Span::Timed { start: b, .. }) => Shift::Wall(b.wall - a.and_time(chrono::NaiveTime::MIN), b.zone),
+            (Span::AllDay { start: a, .. }, Span::Timed { start: b, .. }) => Shift::Wall(b.wall - a.and_time(chrono::NaiveTime::MIN), b.zone, b.zone),
         }
     }
 
     /// The old series' moment `m` as the new series has it.
     fn moment(&self, m: &Moment, here: Tz) -> Option<Moment> {
         Some(match (self, m) {
-            (Shift::Wall(by, zone), Moment::Time(t)) => {
-                let wall = tz::wall(t.instant(here), t.zone, here) + *by;
-                Moment::Time(Local { wall, zone: *zone })
+            // Read on the old series' clock, as its rule placed it, whatever
+            // zone the id is written in.
+            (Shift::Wall(by, old, new), Moment::Time(t)) => {
+                let wall = tz::wall(t.instant(here), *old, here) + *by;
+                Moment::Time(Local { wall, zone: *new })
             }
-            (Shift::Wall(by, zone), Moment::Date(d)) => Moment::Time(Local { wall: d.and_time(chrono::NaiveTime::MIN) + *by, zone: *zone }),
+            (Shift::Wall(by, _, new), Moment::Date(d)) => Moment::Time(Local { wall: d.and_time(chrono::NaiveTime::MIN) + *by, zone: *new }),
             (Shift::Days(by), Moment::Date(d)) => Moment::Date(*d + *by),
             (Shift::Days(by), Moment::Time(t)) => Moment::Date(t.wall.date() + *by),
         })
@@ -434,4 +441,92 @@ mod tests {
         title.title = "Renamed".into();
         assert_eq!(scopes(&s, &title).last().unwrap().1, None, "a new title keeps them on Microsoft 365");
     }
+
+    #[test]
+    fn a_new_rule_for_the_following_events_keeps_no_changed_occurrence_it_doesnt_have() {
+        let (s, cal) = store("following-rule", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-10-27 09:00");
+        d.rule = Some(Recurrence { rules: vec!["FREQ=WEEKLY;BYDAY=TH;COUNT=3".into()], ..Recurrence::default() });
+        save(&s, &d, Scope::Following).unwrap();
+        assert_eq!(
+            shown(&s),
+            rows(&[("20 Oct 09:00", "Standup", true), ("27 Oct 09:00", "Standup", false), ("29 Oct 09:00", "Standup", false), ("05 Nov 09:00", "Standup", false), ("12 Nov 09:00", "Standup", false)]),
+            "the moved Tuesday the Thursday rule has no occurrence for stays out"
+        );
+    }
+
+    #[test]
+    fn a_changed_occurrence_named_in_utc_moves_with_its_series() {
+        let (s, cal) = store("following-utc", CalendarSource::Local);
+        let utc = Moment::Time(Local { wall: NaiveDateTime::parse_from_str("2026-11-03 08:00", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(chrono_tz::UTC) });
+        let moved = EventData { recurrence_id: Some(utc), recurrence: None, span: timed("2026-11-03 14:00", 30), title: "Standup".into(), ..EventData::new("s1", timed("2026-11-03 14:00", 30)) };
+        let master = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
+        s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &[master.clone(), moved.clone()], None, &horizon())).unwrap();
+        assert_eq!(shown(&s), rows(&BEFORE));
+        let mut d = opened(&s, cal, "2026-10-27 09:00");
+        d.span = timed("2026-10-27 10:00", 30);
+        save(&s, &d, Scope::Following).unwrap();
+        assert_eq!(shown(&s).len(), 6, "none twice: {:?}", shown(&s));
+        assert!(shown(&s).iter().any(|(t, _, old)| t == "03 Nov 14:00" && !old));
+    }
+
+    #[test]
+    fn the_queue_refuses_a_rule_the_provider_cant_hold() {
+        let (s, cal) = store("refuse", CalendarSource::Google);
+        let series = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=DAILY;BYHOUR=9,15".into()], ..Recurrence::default() }), ..EventData::new("b1", timed("2026-11-24 09:00", 30)) };
+        let err = s.write(|tx| ops::queue(tx, &Edit::quiet(cal, Change::Create(vec![series])), NOW, &horizon())).unwrap_err().to_string();
+        assert!(err.contains("can't repeat more often than daily"), "{err}");
+    }
+
+    fn settle_all(s: &Store, sent: std::result::Result<ops::Sent, String>) {
+        for op in s.write(|tx| store::claim_calendar_ops(tx, NOW + 100_000, 4)).unwrap() {
+            s.write(|tx| ops::settle(tx, &op, sent.clone(), NOW, &horizon())).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_sent_split_cant_be_undone() {
+        let (s, cal) = store("split-sent", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-11-10 09:00");
+        d.title = "Planning".into();
+        let op = save(&s, &d, Scope::Following).unwrap();
+        settle_all(&s, Ok(ops::Sent::Done { version: None, merged: false }));
+        settle_all(&s, Ok(ops::Sent::Done { version: None, merged: false }));
+        let before = shown(&s);
+        assert!(s.write(|tx| ops::undo(tx, op, NOW, &horizon())).unwrap_err().to_string().contains("can't be taken back"));
+        assert_eq!(shown(&s), before, "nothing doubled");
+    }
+
+    #[test]
+    fn a_split_whose_old_series_cant_be_ended_takes_the_new_one_back() {
+        let (s, cal) = store("split-stuck", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-11-10 09:00");
+        d.title = "Planning".into();
+        let op = save(&s, &d, Scope::Following).unwrap();
+        settle_all(&s, Ok(ops::Sent::Done { version: None, merged: false }));
+        for _ in 0..ops::MAX_ATTEMPTS {
+            settle_all(&s, Err("offline".into()));
+        }
+        assert_eq!(s.read(|c| store::calendar_op(c, op)).unwrap().state, ops::OpState::Failed);
+        assert_eq!(shown(&s), rows(&BEFORE), "the old series whole and the new one deleted again, not eleven occurrences");
+        let newest = s.read(|c| store::calendar_ops(c, 1)).unwrap().remove(0);
+        assert_eq!(newest.write.kind(), "delete", "the new series' delete is queued like any other");
+    }
+
+    #[test]
+    fn all_events_keeps_a_title_changed_elsewhere_meanwhile() {
+        let (s, cal) = store("all-merge", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-11-17 09:00");
+        d.title = "Mine".into();
+        d.location = "Room 1".into();
+        let master = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
+        let moved = s.read(|c| ops::stored(c, cal, "s1", Some(&Moment::Time(at("2026-11-03 09:00"))))).unwrap().unwrap().event;
+        let theirs = |e: &EventData| EventData { title: "Theirs".into(), ..e.clone() };
+        s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &[theirs(&master), theirs(&moved)], None, &horizon())).unwrap();
+        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), NOW, &horizon(), Brussels)).unwrap();
+        assert!(saved.message.contains("your new title wasn't saved"), "{}", saved.message);
+        let now = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
+        assert_eq!((now.title.as_str(), now.location.as_str()), ("Theirs", "Room 1"), "their title, my location");
+    }
 }
+

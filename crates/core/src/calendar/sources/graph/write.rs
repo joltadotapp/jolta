@@ -25,6 +25,14 @@ impl GraphCalendar {
     pub async fn fetch(&self, remote_id: &str, uid: &str) -> Result<Option<Version>> {
         fetch(self, remote_id, uid, &self.account.address, tz::here()).await
     }
+
+    /// The instance of the series `series` at `rid`, changed or not.
+    pub async fn fetch_occurrence(&self, series: &crate::calendar::rsvp::Stored, uid: &str, rid: &crate::calendar::Moment) -> Result<Option<Version>> {
+        match instance_at(self, series, rid).await? {
+            Some(id) => fetch(self, &id, uid, &self.account.address, tz::here()).await,
+            None => Ok(None),
+        }
+    }
 }
 
 pub(crate) fn writable(write: &OpWrite<'_>, here: Tz) -> Result<()> {
@@ -94,6 +102,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
                     }
                 }
             }
+            let mut instances = Vec::new();
             for e in changed {
                 let (Some(body), Some(rid)) = (occurrence_body(master, e, here)?, e.recurrence_id.as_ref()) else { continue };
                 if let Some(id) = instance_at(api, &series, rid).await? {
@@ -101,9 +110,10 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
                     if !(200..300).contains(&status) {
                         return Err(api.failure(status, &reply));
                     }
+                    instances.push(version(api, reply, &master.uid, me, here).await?);
                 }
             }
-            Ok(Written::Saved(Some(version(api, reply, &master.uid, me, here).await?)))
+            Ok(Written::Saved(Some(Version { instances, ..version(api, reply, &master.uid, me, here).await? })))
         }
         OpWrite::Occurrence { series, base, event, extra } => {
             let Some(etag) = series.etag.as_deref() else { return Ok(Written::Stale) };
@@ -220,7 +230,7 @@ async fn version(api: &impl Api, reply: Value, uid: &str, me: &str, here: Tz) ->
     };
     let data = event(&g, uid.to_string(), master.as_ref(), &[me.to_string()], here)
         .ok_or_else(|| Error::Other("Microsoft 365 returned an event without a start.".into()))?;
-    Ok(Version { remote_id: g.id, etag: g.change_key, events: vec![data], raw })
+    Ok(Version { remote_id: g.id, etag: g.change_key, events: vec![data], raw, instances: Vec::new() })
 }
 
 /// The POST's body: every field the event sets, the `transactionId`

@@ -103,7 +103,7 @@ impl CalDav {
 
     async fn version(&self, remote_id: &str, etag: Option<String>, text: String) -> Result<Version> {
         let events = ical::read(&text, &self.me().await)?;
-        Ok(Version { remote_id: remote_id.to_string(), etag, events, raw: Some(text.into_bytes()) })
+        Ok(Version { remote_id: remote_id.to_string(), etag, events, raw: Some(text.into_bytes()), instances: Vec::new() })
     }
 }
 

@@ -616,8 +616,15 @@ pub(crate) fn provider(calendar: &Calendar) -> &'static str {
 fn edit(conn: &Connection, draft: &EventDraft, calendar: &Calendar, scope: Scope) -> Result<(Edit, Vec<Field>)> {
     let mine = match scope {
         Scope::All if draft.base.as_ref().is_some_and(|b| b.recurrence_id.is_some()) => {
-            let series = series_of(conn, draft)?.ok_or_else(|| Error::Other(format!("{} was deleted while you edited it.", draft.title)))?;
-            return Ok((Edit::quiet(draft.calendar, Change::Update(whole_series(draft, &series, tz::here())?)), Vec::new()));
+            let gone = || Error::Other(format!("{} was deleted while you edited it.", draft.title));
+            let base = draft.base.as_ref().ok_or_else(gone)?;
+            let series = series_of(conn, draft)?.ok_or_else(gone)?;
+            // A field changed elsewhere since the editor opened keeps the
+            // server's value, as for one event.
+            let now = stored_now(conn, draft, base)?.ok_or_else(gone)?;
+            let lost = if now == *base { Vec::new() } else { merge::three_way(base, &event_of(draft), &now).lost };
+            let kept = reset(draft, base, &lost);
+            return Ok((Edit::quiet(draft.calendar, Change::Update(whole_series(&kept, &series, tz::here())?)), lost));
         }
         _ => event_of(draft),
     };
@@ -698,6 +705,30 @@ pub fn plan_save(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Save
         _ => format!("You changed {title}."),
     };
     Ok(SavePlan { unchanged, scopes, prompt: Some(prompt) })
+}
+
+/// `draft` with the fields in `lost` back as `base` had them.
+fn reset(draft: &EventDraft, base: &EventData, lost: &[Field]) -> EventDraft {
+    let was = opened(base, draft.calendar);
+    let mut out = draft.clone();
+    for field in lost {
+        match field {
+            Field::Title => out.title.clone_from(&was.title),
+            Field::Time => out.span = was.span,
+            Field::Repeat => out.rule.clone_from(&draft.rule_was),
+            Field::Location => out.location.clone_from(&was.location),
+            Field::Description => out.description.clone_from(&was.description),
+            Field::People => {
+                out.people.clone_from(&was.people);
+                out.room.clone_from(&was.room);
+            }
+            Field::Alarms => out.reminder = was.reminder,
+            Field::ShowAs => out.show_as = was.show_as,
+            Field::Visibility => out.visibility = was.visibility,
+            Field::MeetingLink | Field::Status | Field::Color | Field::Categories => {}
+        }
+    }
+    out
 }
 
 /// The stored series the draft's occurrence belongs to.
