@@ -255,6 +255,10 @@ pub struct EventDraft {
     /// The series' repeat as the editor opened it, for the core: pass it back.
     pub rule_was: Option<String>,
     pub description_note: Option<String>,
+    /// "4 accepted, 1 maybe, 2 no answer"; empty without guests.
+    pub responses: String,
+    /// Under Show as: "Your guests see this with the next update."
+    pub show_as_note: Option<String>,
 }
 
 /// What another feature fills in when it opens the editor.
@@ -473,6 +477,8 @@ impl From<draft::EventDraft> for EventDraft {
             rule: d.rule.as_ref().map(|r| r.rules.join("\n")),
             rule_was: d.rule_was.as_ref().and_then(|r| serde_json::to_string(r).ok()),
             description_note: d.description_note,
+            responses: d.responses,
+            show_as_note: d.show_as_note,
         }
     }
 }
@@ -537,6 +543,8 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
             rule,
             rule_was,
             description_note: None,
+            responses: String::new(),
+            show_as_note: None,
         })
     }
 }

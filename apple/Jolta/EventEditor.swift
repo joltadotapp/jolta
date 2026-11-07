@@ -27,6 +27,12 @@ final class EventEditorModel {
     /// The stored occurrence being edited, hidden in the grid while the draft shows.
     let event: CalEvent?
     @ObservationIgnored var onChange: (() -> Void)?
+    /// What the draft's calendar can do: which organizer options it has.
+    private(set) var caps: CapabilitiesInfo?
+    /// Saving shows Send an update?, so the button reads "Save and send…".
+    private(set) var willSend = false
+    /// The organizer options are open.
+    var showsOptions = false
 
     init(core: Core, draft: EventDraft, event: CalEvent?) {
         self.core = core
@@ -55,7 +61,14 @@ final class EventEditorModel {
 
     private func check() {
         problems = (try? core.checkDraft(draft: draft)) ?? []
+        willSend = (try? core.planSave(draft: draft))?.dialog != nil
+        if caps == nil || calendarOfCaps != draft.calendarId {
+            caps = try? core.capabilities(calendarId: draft.calendarId)
+            calendarOfCaps = draft.calendarId
+        }
     }
+
+    @ObservationIgnored private var calendarOfCaps: Int64?
 
     // MARK: Times
 
@@ -223,7 +236,7 @@ struct EventEditorPanel: View {
     @FocusState private var focus: Focus?
     @State private var showsZone = false
 
-    enum Focus: Hashable { case title, start, end, room, location, description }
+    enum Focus: Hashable { case title, start, end, people, room, location, description }
 
     private var cal: CalendarModel { model.calendar }
 
@@ -248,7 +261,7 @@ struct EventEditorPanel: View {
                     }
                     title
                     whenSection
-                    if !editor.draft.people.isEmpty { peopleSection }
+                    if editor.locked(.people) ? !editor.draft.people.isEmpty : editor.caps?.invite == true { peopleSection }
                     placeSection
                     descriptionSection
                     calendarSection
@@ -313,7 +326,8 @@ struct EventEditorPanel: View {
         HStack(spacing: 8) {
             if !editor.isNew && !editor.isReadOnly {
                 Button { cal.deleteFromEditor() } label: {
-                    HStack(spacing: 7) { Text("Delete"); KeyHint(key: "⌘⌫") }
+                    // A guest removes someone else's meeting, after declining it.
+                    HStack(spacing: 7) { Text(editor.locked(.title) ? "Remove from calendar…" : "Delete"); KeyHint(key: "⌘⌫") }
                         .foregroundStyle(Color(NSColor(hex: 0xC9302C)))
                         .padding(.horizontal, 6)
                         .frame(height: 28)
@@ -332,7 +346,7 @@ struct EventEditorPanel: View {
                 // The repeat popover takes Esc and Return while it is open.
                 EditorButton(title: "Cancel", key: "Esc") { cal.closeEditor() }
                     .keyboardShortcut(editor.repeatPicker == nil ? .cancelAction : nil)
-                EditorButton(title: "Save", key: "⌘↩", primary: true) {
+                EditorButton(title: editor.willSend ? "Save and send…" : "Save", key: "⌘↩", primary: true) {
                     commitTimes()
                     cal.saveEditor()
                 }
@@ -509,17 +523,46 @@ struct EventEditorPanel: View {
     private var peopleSection: some View {
         EditorSection {
             EditorRow(icon: "person.2", top: true) {
-                VStack(alignment: .leading, spacing: 3) {
-                    if let o = editor.draft.organizer, !editor.draft.people.contains(where: { $0.address.caseInsensitiveCompare(o.address) == .orderedSame }) {
-                        PersonLine(name: o.name.isEmpty ? o.address : o.name, detail: "Organizer")
+                if editor.locked(.people) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let o = editor.draft.organizer, !editor.draft.people.contains(where: { $0.address.caseInsensitiveCompare(o.address) == .orderedSame }) {
+                            PersonLine(name: o.name.isEmpty ? o.address : o.name, detail: "Organizer")
+                        }
+                        ForEach(editor.draft.people, id: \.address) { p in
+                            PersonLine(name: p.isMe ? "You" : p.name.isEmpty ? p.address : p.name, detail: Self.personDetail(p, organizer: editor.draft.organizer))
+                        }
                     }
-                    ForEach(editor.draft.people, id: \.address) { p in
-                        PersonLine(name: p.isMe ? "You" : p.name.isEmpty ? p.address : p.name, detail: Self.personDetail(p, organizer: editor.draft.organizer))
-                    }
+                } else {
+                    PeopleField(editor: editor, account: cal.calendarInfo(editor.draft.calendarId)?.accountId, focus: $focus)
+                }
+            }
+            if !editor.draft.responses.isEmpty {
+                EditorRow(icon: nil) {
+                    Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
                 }
             }
             ForEach(editor.problems(.people), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+            if !editor.locked(.options) && editor.draft.people.contains(where: { !$0.isMe }) {
+                EditorRow(icon: nil) {
+                    Button { editor.showsOptions.toggle() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: editor.showsOptions ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .semibold))
+                            Text("Organizer options")
+                        }
+                        .foregroundStyle(Color(Theme.text2))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("editor-options")
+                }
+                if editor.showsOptions {
+                    EditorRow(icon: nil) {
+                        OrganizerOptions(editor: editor, caps: editor.caps, google: cal.calendarInfo(editor.draft.calendarId)?.kind == .google)
+                    }
+                }
+            }
         }
+        .zIndex(1)
     }
 
     static func personDetail(_ p: DraftPerson, organizer: PersonRecord?) -> String {
@@ -662,6 +705,9 @@ struct EventEditorPanel: View {
                 ForEach(cal.showAsChoices(editor.draft.calendarId), id: \.self) { choice in
                     Button(choice.word) { editor.draft.showAs = choice }
                 }
+            }
+            if let note = editor.draft.showAsNote {
+                Text(note).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).padding(.leading, 104)
             }
             SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word) {
                 ForEach(DraftReminder.menu(isNew: editor.isNew), id: \.self) { choice in

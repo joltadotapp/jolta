@@ -108,6 +108,12 @@ pub struct EventDraft {
     pub rule_was: Option<Recurrence>,
     /// "Formatting from Outlook is removed when you change this text."
     pub description_note: Option<String>,
+    /// "4 accepted, 1 maybe, 2 no answer"; empty without guests.
+    pub responses: String,
+    /// Under Show as on a meeting the user organizes on Microsoft 365, which
+    /// sends the organizer's show as with the next update (C3 spec,
+    /// section 3): "Your guests see this with the next update."
+    pub show_as_note: Option<String>,
 }
 
 /// What another feature fills in when it opens the editor: C4's Invite
@@ -254,6 +260,8 @@ pub fn draft_for_new(conn: &Connection, calendar: Option<CalendarId>, span: Opti
         rule: None,
         rule_was: None,
         description_note: None,
+        responses: String::new(),
+        show_as_note: None,
     })
 }
 
@@ -291,6 +299,9 @@ pub fn draft_for_event(conn: &Connection, event: EventId, at: Option<Bounds>, he
         None => d.event,
     };
     let mut draft = opened(&base, d.calendar.id);
+    let organizes = other_organizer(&d.calendar, &account, &base).is_none() && !guests(&d.calendar, &account, &base).is_empty();
+    draft.show_as_note = (organizes && d.calendar.source == CalendarSource::Graph).then(|| "Your guests see this with the next update.".into());
+    draft.responses = d.responses;
     draft.locks = locks;
     draft.notice = notice.or(conflict);
     draft.repeat = d.repeat;
@@ -328,6 +339,8 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         rule: e.recurrence.clone(),
         rule_was: e.recurrence.clone(),
         description_note: parts.loses_formatting().then(|| "Formatting from Outlook is removed when you change this text.".into()),
+        responses: String::new(),
+        show_as_note: None,
     }
 }
 

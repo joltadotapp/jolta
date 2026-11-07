@@ -600,6 +600,8 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         rule_was: d.rule_was.clone(),
         people: d.people.clone(),
         options: d.options,
+        responses: d.responses.clone(),
+        show_as_note: d.show_as_note.clone(),
         room: d.room.clone(),
         location: d.location.clone(),
         description: d.description.clone(),
