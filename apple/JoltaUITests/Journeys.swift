@@ -345,6 +345,87 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(moved.waitForExistence(timeout: 5), "Z brings it back")
     }
 
+    /// A repeating event: ⌘R in the editor opens the repeat popover, ↓ picks
+    /// the weekly preset and Return takes it. A new time for the second
+    /// occurrence asks which events it is for, and 1 moves only that one;
+    /// ⌘⌫ on the third asks again, and 1 deletes only that one.
+    func testRepeatingEvent() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        let calendarTitle = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(calendarTitle.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Weekly sync")
+        let original = try XCTUnwrap(app.textFields["editor-start"].value as? String)
+
+        app.typeKey("r", modifierFlags: .command)
+        let popover = app.descendants(matching: .any).matching(identifier: "repeat-popover").firstMatch
+        XCTAssertTrue(popover.waitForExistence(timeout: 5), "⌘R opens the repeat popover")
+        let rows = app.buttons.matching(identifier: "repeat-row")
+        let weekly = rows.matching(NSPredicate(format: "label BEGINSWITH %@", "Every week on")).firstMatch
+        XCTAssertTrue(weekly.waitForExistence(timeout: 5), "the presets offer every week on the event's weekday")
+        for _ in 0..<4 where !weekly.isSelected { app.typeKey(.downArrow, modifierFlags: []) }
+        XCTAssertTrue(weekly.isSelected, "↓ moves to the weekly preset")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Return takes it and closes the popover")
+        let row = app.buttons["editor-repeat"]
+        XCTAssertNotEqual(row.label, "Does not repeat", "the Repeat row shows the rule")
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5), "⌘↩ saves the series")
+
+        let atOriginal = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly sync, \(original) to"))
+        XCTAssertTrue(atOriginal.firstMatch.waitForExistence(timeout: 5), "the first occurrence is in its week")
+        let firstWeek = calendarTitle.label
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(waitUntil { calendarTitle.label != firstWeek }, "J moves to the next week")
+        XCTAssertTrue(atOriginal.firstMatch.waitForExistence(timeout: 5), "the second occurrence is a week later")
+
+        atOriginal.firstMatch.click()
+        app.typeKey("e", modifierFlags: [])
+        let start = app.textFields["editor-start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5), "E opens the second occurrence")
+        // Two hours away, inside the hours the week shows.
+        let hour = Int(original.prefix(2)) ?? 12
+        let new = String(format: "%02d:%@", hour >= 12 ? hour - 2 : hour + 2, String(original.suffix(2)))
+        start.click()
+        app.typeKey("a", modifierFlags: .command)
+        start.typeText(new.replacingOccurrences(of: ":", with: ""))
+        app.typeKey(.return, modifierFlags: .command)
+        let prompt = app.descendants(matching: .any).matching(identifier: "scope-prompt").firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "saving one occurrence asks which events")
+        XCTAssertTrue(text(app, "Change a repeating event").exists)
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(prompt.waitForNonExistence(timeout: 5), "1 picks This event")
+        let moved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Weekly sync, \(new) to")).firstMatch
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the second occurrence moved")
+        XCTAssertFalse(atOriginal.firstMatch.exists, "and nothing else in its week")
+
+        app.typeKey("k", modifierFlags: [])
+        XCTAssertTrue(waitUntil { calendarTitle.label == firstWeek })
+        XCTAssertTrue(atOriginal.firstMatch.waitForExistence(timeout: 5), "the first occurrence stays where it was")
+        XCTAssertFalse(moved.exists)
+        app.typeKey("j", modifierFlags: [])
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(waitUntil { calendarTitle.label != firstWeek })
+        XCTAssertTrue(atOriginal.firstMatch.waitForExistence(timeout: 5), "the third occurrence stays where it was")
+        XCTAssertFalse(moved.exists)
+
+        atOriginal.firstMatch.click()
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(start.waitForExistence(timeout: 5), "E opens the third occurrence")
+        app.typeKey(.delete, modifierFlags: .command)
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "deleting one occurrence asks which events")
+        XCTAssertTrue(text(app, "Delete a repeating event").exists)
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(prompt.waitForNonExistence(timeout: 5), "1 picks This event")
+        XCTAssertTrue(atOriginal.firstMatch.waitForNonExistence(timeout: 5), "the third occurrence is gone")
+        app.typeKey("k", modifierFlags: [])
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the moved occurrence stays")
+    }
+
     /// Settings › Calendar makes a calendar on this Mac, which the calendar
     /// sidebar then lists with the others.
     func testNewCalendarOnThisMac() throws {
