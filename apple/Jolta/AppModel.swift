@@ -580,6 +580,8 @@ final class AppModel {
             listChanged()
         case .calendarSynced:
             calendar.reloadCalendars()
+        case .calendarOpFailed(let message, _):
+            show(Toast(text: message, undo: nil))
         }
     }
 

@@ -70,11 +70,29 @@ enum EventStyle {
         return CTLineCreateTruncatedLine(line, width, .end, dots) ?? line
     }
 
+    private static let unsynced = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Not synced yet")?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8.5, weight: .bold).applying(NSImage.SymbolConfiguration(paletteColors: [Theme.text2])))
+
+    /// The room the "not synced yet" mark takes at the box's right edge.
+    static func markWidth(_ e: CalEvent) -> CGFloat {
+        e.record.notSynced && unsynced != nil ? 13 : 0
+    }
+
+    /// The "not synced yet" mark in the box's top right corner, while an
+    /// edit of the event waits to reach the server.
+    static func drawMark(_ e: CalEvent, in r: CGRect) {
+        guard e.record.notSynced, let image = unsynced, r.width >= 30 else { return }
+        let size = image.size
+        let frame = CGRect(x: r.maxX - size.width - 4, y: r.minY + max(3, min(4, (r.height - size.height) / 2)), width: size.width, height: size.height)
+        image.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    }
+
     /// Title, times and place, top down, as many lines as the box holds. A
     /// box under 30 points tall gets the title and start on one line; one too
     /// narrow to read gets none.
     static func drawText(_ e: CalEvent, in r: CGRect, cg: CGContext) {
-        let width = r.width - 10
+        drawMark(e, in: r)
+        let width = r.width - 10 - markWidth(e)
         guard width >= 14 else { return }
         let x = r.minX + 7
         let struck = e.isDeclined || e.isCancelled
@@ -326,8 +344,9 @@ final class DayStrip: CanvasView {
             if alpha < 1 { cg.setAlpha(alpha) }
             CalendarColor.color(e.record.color, .allDay).setFill()
             NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            EventStyle.drawMark(e, in: r)
             var title = line(e.title, Self.laneFont)
-            let width = r.width - 14
+            let width = r.width - 14 - EventStyle.markWidth(e)
             if CTLineGetTypographicBounds(title, nil, nil, nil) > width {
                 title = CTLineCreateTruncatedLine(title, max(0, width), .end, line("…", Self.laneFont)) ?? title
             }

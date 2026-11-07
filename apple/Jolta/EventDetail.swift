@@ -66,6 +66,13 @@ struct EventDetailCard: View {
             if let status {
                 Text(status).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.text2)).padding(.top, 2)
             }
+            if detail.notSynced {
+                Label("Not synced yet", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(Theme.text3))
+                    .padding(.top, 2)
+                    .help("Jolta saved your change here and sends it as soon as it can.")
+            }
             VStack(alignment: .leading, spacing: 0) {
                 if let m = detail.meeting {
                     row("Meeting", [m.provider.name, m.meetingId.map { "ID \($0)" }].compactMap { $0 }.joined(separator: " · "))
