@@ -766,11 +766,13 @@ mod tests {
         let (s, test) = setup("default");
         let family = s.write(|tx| ops::new_local_calendar(tx, "Family", None)).unwrap().id;
         assert_eq!(s.read(|c| default_calendar(c)).unwrap().map(|c| c.id), Some(family), "without a choice, the first in the sidebar's order");
-        s.write(|tx| store::set_default_calendar(tx, test)).unwrap();
+        s.write(|tx| store::set_default_calendar(tx, Some(test))).unwrap();
         assert_eq!(s.read(|c| default_calendar(c)).unwrap().map(|c| c.id), Some(test));
-        s.write(|tx| store::set_default_calendar(tx, family)).unwrap();
+        s.write(|tx| store::set_default_calendar(tx, Some(family))).unwrap();
         let defaults: i64 = s.read(|c| Ok(c.query_row("SELECT count(*) FROM calendar WHERE is_default", [], |r| r.get(0))?)).unwrap();
         assert_eq!(defaults, 1, "one default at a time");
+        s.write(|tx| store::set_default_calendar(tx, None)).unwrap();
+        assert_eq!(s.read(|c| default_calendar(c)).unwrap().map(|c| c.id), Some(family), "cleared: the first in the sidebar's order again");
     }
 
     fn event_id(s: &Store, cal: CalendarId, uid: &str) -> EventId {

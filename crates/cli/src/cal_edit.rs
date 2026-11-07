@@ -300,13 +300,74 @@ pub fn print_caps(jolta: &Jolta, calendar: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn print_draft(jolta: &Jolta, event: i64) -> Result<()> {
+#[derive(Args)]
+pub struct DraftArgs {
+    /// The event's id, as `jolta cal list` shows it after the title; none for a new event.
+    event: Option<i64>,
+    /// The calendar of a new event; the default calendar without it.
+    #[arg(long)]
+    calendar: Option<i64>,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long)]
+    room: Option<String>,
+    #[arg(long)]
+    location: Option<String>,
+    #[command(flatten)]
+    when: When,
+    /// Save the draft as the editor's Save does.
+    #[arg(long, conflicts_with = "delete")]
+    save: bool,
+    /// Delete the event as the editor's Delete does.
+    #[arg(long, requires = "event")]
+    delete: bool,
+    #[command(flatten)]
+    send: Send,
+}
+
+pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     let here = tz::here();
-    let (d, problems) = jolta.store.read(|c| {
-        let d = draft::draft_for_event(c, EventId(event), None, here)?;
-        let problems = draft::check_draft(c, &d, here)?;
-        Ok((d, problems))
+    let mut d = jolta.store.read(|c| match a.event {
+        Some(id) => draft::draft_for_event(c, EventId(id), None, here),
+        None => draft::draft_for_new(c, a.calendar.map(CalendarId), None, Utc::now(), here),
     })?;
+    if let Some(title) = a.title {
+        d.title = title;
+    }
+    if let Some(room) = a.room {
+        d.room = room;
+    }
+    if let Some(location) = a.location {
+        d.location = location;
+    }
+    if let Some(span) = a.when.span(Some(&d.span))? {
+        d.span = span;
+    }
+    let problems = jolta.store.read(|c| draft::check_draft(c, &d, here))?;
+    print_draft(&d, &problems);
+    let h = horizon();
+    let now = Utc::now().timestamp();
+    let saved = match (a.save, a.delete, a.event) {
+        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, now, &h, here))?,
+        (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), now, &h, here))?,
+        _ => return Ok(()),
+    };
+    println!("{}", saved.message);
+    if let Some(id) = saved.op {
+        if let Some(hold) = a.send.hold {
+            jolta.store.write(|tx| store::hold_calendar_op(tx, id, now + hold))?;
+        }
+        settle_op(jolta, id, a.send.wait).await?;
+    }
+    if !a.delete
+        && let Some(stored) = jolta.store.read(|c| ops::stored(c, d.calendar, &d.uid, None))?
+    {
+        println!("event #{}", stored.id.0);
+    }
+    Ok(())
+}
+
+fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
     let when = match d.span {
         Span::Timed { start, end } => format!("{} to {} ({:?})", start.wall.format("%a %-d %b %H:%M"), end.wall.format("%H:%M"), start.zone),
         Span::AllDay { start, end } => format!("all day {} to {}", start.format("%a %-d %b"), (end - Duration::days(1)).format("%a %-d %b")),
@@ -331,6 +392,16 @@ pub fn print_draft(jolta: &Jolta, event: i64) -> Result<()> {
     }
     for p in problems {
         println!("  {}: {}{}", p.field.map_or("event".into(), |f| format!("{f:?}")), p.text, if p.blocking { "" } else { " (warning)" });
+    }
+}
+
+pub fn default_calendar(jolta: &Jolta, calendar: Option<i64>, clear: bool) -> Result<()> {
+    if calendar.is_some() || clear {
+        jolta.store.write(|tx| store::set_default_calendar(tx, calendar.map(CalendarId)))?;
+    }
+    match jolta.store.read(draft::default_calendar)? {
+        Some(c) => println!("New events go to {} ({}){}.", c.name, c.id, if c.is_default { "" } else { ", the first writable calendar" }),
+        None => println!("No calendar takes new events."),
     }
     Ok(())
 }

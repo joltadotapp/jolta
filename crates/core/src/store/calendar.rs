@@ -162,10 +162,13 @@ pub fn set_default_event_minutes(conn: &Connection, minutes: i64) -> Result<()> 
     Ok(())
 }
 
-/// Makes `id` the calendar new events go to, and no other.
-pub fn set_default_calendar(conn: &Connection, id: CalendarId) -> Result<()> {
-    calendar(conn, id)?;
-    conn.execute("UPDATE calendar SET is_default = (id = ?1)", [id])?;
+/// Makes `id` the calendar new events go to, and no other; None goes back
+/// to the first shown calendar Jolta can write to.
+pub fn set_default_calendar(conn: &Connection, id: Option<CalendarId>) -> Result<()> {
+    if let Some(id) = id {
+        calendar(conn, id)?;
+    }
+    conn.execute("UPDATE calendar SET is_default = (id IS ?1)", [id])?;
     Ok(())
 }
 

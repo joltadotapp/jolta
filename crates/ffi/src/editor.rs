@@ -387,7 +387,7 @@ impl Core {
 
     /// Makes the calendar the one new events go to.
     pub fn set_default_calendar(&self, calendar_id: i64) -> Result<()> {
-        self.jolta.store.write(|tx| store::set_default_calendar(tx, CalendarId(calendar_id)))?;
+        self.jolta.store.write(|tx| store::set_default_calendar(tx, Some(CalendarId(calendar_id))))?;
         self.calendar_changed([CalendarId(calendar_id)]);
         Ok(())
     }
