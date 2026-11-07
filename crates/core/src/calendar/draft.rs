@@ -160,6 +160,8 @@ pub struct Saved {
     /// The Undo token; None when nothing changed.
     pub op: Option<CalendarOpId>,
     pub calendar: CalendarId,
+    /// The UID the saved event has now: a new one for This and following.
+    pub uid: String,
     /// The toast's words: "Saved Standup".
     pub message: String,
 }
@@ -849,7 +851,11 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
         let edited = event_of(draft);
         let rule = draft.rule.clone().ok_or_else(|| Error::Other(format!("{title} doesn't repeat")))?;
         let op = split::queue_following(conn, draft.calendar, &edited, &rule, now, horizon)?;
-        return Ok(Saved { op, calendar: draft.calendar, message: format!("Saved {title} from this event on") });
+        let uid = match op {
+            Some(id) => store::calendar_op(conn, id)?.after.map(|a| store::calendar_op(conn, a)).transpose()?.map_or_else(|| draft.uid.clone(), |a| a.uid),
+            None => draft.uid.clone(),
+        };
+        return Ok(Saved { op, calendar: draft.calendar, uid, message: format!("Saved {title} from this event on") });
     }
     let (edit, lost) = edit(conn, draft, &calendar, scope)?;
     let creating = matches!(edit.change, Change::Create(_));
@@ -860,7 +866,7 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
         (false, [], _, _) => format!("Saved {title}"),
         (false, lost, _, _) => format!("Saved {title}. It changed elsewhere while you edited; your new {} wasn't saved.", nouns(lost)),
     };
-    Ok(Saved { op, calendar: draft.calendar, message })
+    Ok(Saved { op, calendar: draft.calendar, uid: draft.uid.clone(), message })
 }
 
 fn nouns(fields: &[Field]) -> String {
@@ -876,8 +882,21 @@ fn nouns(fields: &[Field]) -> String {
 /// one occurrence of a series, for which of the series.
 pub fn plan_delete(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -> Result<DeletePlan> {
     let draft = draft_for_event(conn, event, at, here)?;
+    delete_plan(conn, &draft, here)
+}
+
+/// `plan_delete` for the stored event a draft opened, found again by its
+/// UID and occurrence: a sync may have replaced its row meanwhile. The
+/// locks are the store's.
+pub fn plan_delete_drafted(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<DeletePlan> {
+    let calendar = store::calendar(conn, draft.calendar)?;
+    let (locks, notice) = locks_now(conn, draft, &calendar)?;
+    delete_plan(conn, &EventDraft { locks, notice, ..draft.clone() }, here)
+}
+
+fn delete_plan(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<DeletePlan> {
     let refusal = (!draft.locks.is_empty()).then(|| draft.notice.clone().unwrap_or_else(|| "This event can't be deleted here.".into()));
-    let scopes = delete_scopes(conn, &draft, here)?;
+    let scopes = delete_scopes(conn, draft, here)?;
     let prompt = (!scopes.is_empty()).then(|| {
         let day = match draft.span.start() {
             Moment::Date(d) => d,
@@ -906,9 +925,9 @@ pub fn delete_event(conn: &Connection, event: EventId, now: i64, horizon: &Horiz
         return Err(Error::Other(refusal));
     }
     let (calendar, uid): (CalendarId, String) = conn.query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let op = ops::queue(conn, &Edit::quiet(calendar, Change::Delete { uid }), now, horizon)?;
+    let op = ops::queue(conn, &Edit::quiet(calendar, Change::Delete { uid: uid.clone() }), now, horizon)?;
     let title = if plan.title.is_empty() { "(no title)".into() } else { plan.title };
-    Ok(Saved { op, calendar, message: format!("Deleted {title}") })
+    Ok(Saved { op, calendar, uid, message: format!("Deleted {title}") })
 }
 
 /// Deletes the stored event a draft opened, found again by its UID: the
@@ -948,7 +967,7 @@ pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope
         Some(Scope::Following) => format!("Deleted {title} from this event on"),
         _ => format!("Deleted all events of {title}"),
     };
-    Ok(Saved { op, calendar: draft.calendar, message })
+    Ok(Saved { op, calendar: draft.calendar, uid: base.uid.clone(), message })
 }
 
 /// The calendar new events go to: the one the user chose in Settings ›

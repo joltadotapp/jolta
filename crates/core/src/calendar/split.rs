@@ -563,5 +563,35 @@ mod tests {
         let now = s.read(|c| ops::stored(c, cal, "s1", None)).unwrap().unwrap().event;
         assert_eq!((now.title.as_str(), now.location.as_str()), ("Theirs", "Room 1"), "their title, my location");
     }
+
+    #[test]
+    fn this_and_following_names_the_new_series_to_select() {
+        let (s, cal) = store("split-uid", CalendarSource::Local);
+        let mut d = opened(&s, cal, "2026-11-10 09:00");
+        d.title = "Planning".into();
+        let saved = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::Following), NOW, &horizon(), Brussels)).unwrap();
+        assert_ne!(saved.uid, "s1");
+        let rows = s.read(|c| ops::series(c, cal, &saved.uid)).unwrap();
+        assert_eq!(rows[0].title, "Planning", "the UID the view selects is the new series'");
+        let this = s.write(|tx| draft::save_draft(tx, &opened(&s, cal, "2026-10-27 09:00"), None, NOW, &horizon(), Brussels)).unwrap();
+        assert_eq!(this.uid, "s1", "nothing changed, the same event");
+    }
+
+    /// The editor's Delete plans from the draft, found again by its UID
+    /// and occurrence after a sync replaced its row.
+    #[test]
+    fn deleting_from_the_editor_plans_after_a_sync_replaced_the_row() {
+        let (s, cal) = store("delete-plan", CalendarSource::Local);
+        let d = opened(&s, cal, "2026-11-10 09:00");
+        let rows = s.read(|c| ops::series(c, cal, "s1")).unwrap();
+        s.write(|tx| {
+            store::remove_item(tx, cal, "s1.ics", store::Removal::Deleted, &horizon())?;
+            store::apply_item(tx, cal, "s1.ics", Some("3"), &rows, None, &horizon())
+        })
+        .unwrap();
+        let plan = s.read(|c| draft::plan_delete_drafted(c, &d, Brussels)).unwrap();
+        assert_eq!((plan.refusal, plan.scopes.len()), (None, 3));
+        assert_eq!(plan.prompt.as_deref(), Some("You're deleting Standup on Tue 10 Nov."));
+    }
 }
 

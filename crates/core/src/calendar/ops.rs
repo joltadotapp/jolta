@@ -662,10 +662,15 @@ fn revert(conn: &Connection, op: &CalendarOp, horizon: &Horizon) -> Result<()> {
             None
         }
         Write::Delete(events) => Some(Write::Create(events.clone())),
-        Write::Cancel { series, .. } => {
-            let master = stored(conn, op.calendar, &series.uid, None)?.ok_or_else(|| Error::NotFound(format!("event {} in its calendar", series.uid)))?;
-            Some(Write::Update { base: master.event, event: series.clone(), dropped: Vec::new(), fresh: false })
-        }
+        // A later delete of the whole series took it out already: there is
+        // nothing to put back.
+        Write::Cancel { series, .. } => match stored(conn, op.calendar, &series.uid, None)? {
+            Some(master) => Some(Write::Update { base: master.event, event: series.clone(), dropped: Vec::new(), fresh: false }),
+            None => {
+                store::rebuild_series(conn, op.calendar, &op.uid, horizon)?;
+                return Ok(());
+            }
+        },
     };
     let key = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
     if let Some(back) = back {
@@ -2034,6 +2039,25 @@ mod tests {
         assert_eq!(s.read(|c| stored(c, cal, "u1", Some(&rid))).unwrap().unwrap().event.title, "Standup, theirs");
         assert_eq!(s.read(|c| conflict(c, cal, "u1")).unwrap().unwrap().action, "Delete anyway");
         assert!(s.write(|tx| apply_mine(tx, op, NOW, &horizon())).unwrap().is_some(), "and Delete anyway queues the delete again");
+    }
+
+    /// A delete of the whole series queued behind a delete of one of its
+    /// occurrences: the first's conflict has no series to put back and
+    /// settles, so the second goes.
+    #[test]
+    fn a_series_delete_behind_a_conflicting_occurrence_delete_still_goes() {
+        let (s, cal, server, series) = synced_series("cancel-then-delete");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let one = q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: rid }).unwrap();
+        let all = q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
+        server.put("g1_instance", EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup, theirs", "2026-12-01 09:00") });
+        server.put("g1", series);
+        let claimed = s.write(|tx| store::claim_calendar_ops(tx, NOW + 3600, AT_ONCE)).unwrap();
+        assert_eq!(claimed.iter().map(|o| o.id).collect::<Vec<_>>(), [one]);
+        let version = server.version("g1_instance").map(|v| (v, None));
+        s.write(|tx| settle(tx, &claimed[0], Ok(Sent::Conflict { version, lost: vec![Field::Title] }), NOW, &horizon())).unwrap();
+        assert_eq!(state(&s, one).0, OpState::Conflict);
+        assert_eq!(claim(&s).iter().map(|o| o.id).collect::<Vec<_>>(), [all], "the series delete is next");
     }
 
     fn series_rows(c: &Connection, cal: CalendarId) -> Result<i64> {

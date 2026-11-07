@@ -777,7 +777,7 @@ final class CalendarModel {
         guard self.editor === editor else { return }
         do {
             let saved = try core.saveEvent(draft: editor.draft, scope: scope)
-            let (uid, calendarID, time) = (editor.draft.uid, editor.draft.calendarId, editor.draft.time)
+            let (uid, calendarID, time) = (saved.uid, editor.draft.calendarId, editor.draft.time)
             dropEditor()
             refresh()
             // The event just saved is the selected one, so E and Delete act on
@@ -795,8 +795,9 @@ final class CalendarModel {
     func deleteFromEditor() {
         guard let editor, !editor.isNew else { return }
         do {
-            let plan = try editor.event.map { try core.planDelete(eventId: $0.record.eventId, time: $0.record.time) }
             let draft = editor.draft
+            let plan = try core.planDeleteDraft(draft: draft)
+            if let refusal = plan.refusal { return editor.failure = refusal }
             let remove = { [weak self] (scope: EditScope?) in
                 guard let self, self.editor === editor else { return }
                 do {
@@ -805,7 +806,7 @@ final class CalendarModel {
                     editor.failure = "\(error)"
                 }
             }
-            guard let plan, !plan.scopes.isEmpty else { return remove(nil) }
+            guard !plan.scopes.isEmpty else { return remove(nil) }
             scopePrompt = deletePrompt(plan) { remove($0) }
         } catch {
             editor.failure = "\(error)"

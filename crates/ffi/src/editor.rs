@@ -190,6 +190,9 @@ fn choices(list: Vec<draft::ScopeChoice>) -> Vec<ScopeChoice> {
 pub struct SavedEdit {
     /// For `undo_calendar`; None when nothing changed.
     pub token: Option<i64>,
+    /// The UID the saved event has now, to select it: a new one after This
+    /// and following.
+    pub uid: String,
     /// "Saved Standup".
     pub message: String,
 }
@@ -434,7 +437,7 @@ impl Core {
         let h = horizon();
         let saved = self.jolta.store.write(|tx| draft::save_draft(tx, &d, scope.map(Into::into), Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
-        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
     /// Whether the event can be deleted, and at the occurrence `time` of a
@@ -445,12 +448,20 @@ impl Core {
         Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
     }
 
+    /// `plan_delete` for the stored event a draft opened, found again by its
+    /// UID and occurrence, as `delete_draft` deletes it.
+    pub fn plan_delete_draft(&self, draft: EventDraft) -> Result<DeletePlan> {
+        let d = draft::EventDraft::try_from(&draft)?;
+        let plan = self.jolta.store.read(|c| draft::plan_delete_drafted(c, &d, tz::here()))?;
+        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
+    }
+
     /// Deletes an event without guests, telling nobody. The returned token undoes it.
     pub fn delete_event(&self, event_id: i64) -> Result<SavedEdit> {
         let h = horizon();
         let saved = self.jolta.store.write(|tx| draft::delete_event(tx, EventId(event_id), Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
-        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
     /// Deletes the stored event a draft opened, found again by its UID, as
@@ -461,7 +472,7 @@ impl Core {
         let h = horizon();
         let saved = self.jolta.store.write(|tx| draft::delete_drafted(tx, &d, scope.map(Into::into), Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
-        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
     /// A time typed in a time field, as minutes after midnight: "930",
