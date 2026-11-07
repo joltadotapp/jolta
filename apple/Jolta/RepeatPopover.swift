@@ -15,6 +15,9 @@ final class RepeatPicker: Identifiable {
     private let core: Core
     private let draft: EventDraft
     let presets: [RepeatPreset]
+    /// "On day 24" and "On the fourth Tuesday", the core's words.
+    let monthDayLabel: String
+    let monthWeekdayLabel: String
     var row: Row { didSet { update() } }
     var custom: CustomRepeat {
         didSet {
@@ -36,6 +39,8 @@ final class RepeatPicker: Identifiable {
         self.core = core
         self.draft = draft
         presets = editor.presets
+        monthDayLabel = editor.monthDayLabel
+        monthWeekdayLabel = editor.monthWeekdayLabel
         custom = editor.custom
         kept = editor.customFits ? nil : draft.rule
         row = editor.selected.map(Row.preset) ?? .custom
@@ -81,22 +86,17 @@ final class RepeatPicker: Identifiable {
 
     // MARK: Custom
 
-    var weekdays: Set<UInt8> { Set(custom.weekdays) }
+    var weekdays: Set<UInt32> { Set(custom.weekdays) }
 
     /// A weekly rule keeps at least one day.
-    func toggle(weekday: UInt8) {
+    func toggle(weekday: UInt32) {
         var days = weekdays
         if days.contains(weekday) { guard days.count > 1 else { return }; days.remove(weekday) } else { days.insert(weekday) }
-        custom.weekdays = Data(days.sorted())
+        custom.weekdays = days.sorted()
     }
 
-    /// "On day 24" and "On the fourth Tuesday", from the month presets' own words.
     func monthChoice(byWeekday: Bool) -> String {
-        let kind: RepeatPresetKind = byWeekday ? .monthNth : .monthDay
-        guard let label = presets.first(where: { $0.kind == kind })?.label, label.hasPrefix("Every month on ") else {
-            return byWeekday ? "On the same weekday" : "On the same day"
-        }
-        return "On " + label.dropFirst("Every month on ".count)
+        byWeekday ? monthWeekdayLabel : monthDayLabel
     }
 }
 
@@ -198,7 +198,7 @@ struct RepeatPopover: View {
             }
             if picker.custom.unit == .week {
                 HStack(spacing: 5) {
-                    ForEach(Array(zip(UInt8(1)...7, ["M", "T", "W", "T", "F", "S", "S"])), id: \.0) { weekday, letter in
+                    ForEach(Array(zip(UInt32(1)...7, ["M", "T", "W", "T", "F", "S", "S"])), id: \.0) { weekday, letter in
                         WeekdayToggle(letter: letter, on: picker.weekdays.contains(weekday), name: Self.weekdayNames[Int(weekday) - 1]) {
                             picker.toggle(weekday: weekday)
                         }

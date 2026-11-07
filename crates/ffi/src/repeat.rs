@@ -75,7 +75,7 @@ pub enum RepeatEnds {
 pub struct CustomRepeat {
     pub every: u32,
     pub unit: RepeatUnit,
-    pub weekdays: Vec<u8>,
+    pub weekdays: Vec<u32>,
     pub by_weekday: bool,
     pub ends: RepeatEnds,
 }
@@ -92,6 +92,9 @@ pub struct RepeatEditor {
     pub custom: CustomRepeat,
     /// False when the rule is one Custom can't say.
     pub custom_fits: bool,
+    /// The Custom part's monthly choices: "On day 24", "On the fourth Tuesday".
+    pub month_day_label: String,
+    pub month_weekday_label: String,
     pub summary: RuleSummary,
 }
 
@@ -111,8 +114,8 @@ fn failed(e: impl std::fmt::Display) -> CoreError {
     CoreError::Failed { message: e.to_string() }
 }
 
-fn weekday(n: u8) -> Option<Weekday> {
-    Weekday::try_from(n.checked_sub(1)?).ok()
+fn weekday(n: u32) -> Option<Weekday> {
+    Weekday::try_from(u8::try_from(n.checked_sub(1)?).ok()?).ok()
 }
 
 fn custom_into(c: &CustomRepeat) -> Result<repeat::Custom> {
@@ -143,7 +146,7 @@ fn custom_from(c: repeat::Custom) -> CustomRepeat {
             repeat::Unit::Month => RepeatUnit::Month,
             repeat::Unit::Year => RepeatUnit::Year,
         },
-        weekdays: c.days.iter().map(|d| d.number_from_monday() as u8).collect(),
+        weekdays: c.days.iter().map(|d| d.number_from_monday()).collect(),
         by_weekday: c.month_by == repeat::MonthBy::Weekday,
         ends: match c.ends {
             repeat::Ends::Never => RepeatEnds::Never,
@@ -212,7 +215,8 @@ impl Core {
             month_by: repeat::MonthBy::Day,
             ends: repeat::Ends::Never,
         }));
-        Ok(RepeatEditor { presets, selected, custom, custom_fits, summary: self.summary_of(rule.as_ref(), &span, &calendar) })
+        let (month_day_label, month_weekday_label) = repeat::month_labels(&span);
+        Ok(RepeatEditor { presets, selected, custom, custom_fits, month_day_label, month_weekday_label, summary: self.summary_of(rule.as_ref(), &span, &calendar) })
     }
 
     /// The RRULE the Custom part makes for the draft's start.

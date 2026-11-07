@@ -203,6 +203,16 @@ pub fn until(last: NaiveDate, start: &Span) -> String {
     }
 }
 
+/// The Custom part's two monthly choices for a start: "On day 24" and
+/// "On the fourth Tuesday", or "On the last Thursday" for a fifth one, as
+/// `build` writes it.
+pub fn month_labels(start: &Span) -> (String, String) {
+    let day = first_day(start);
+    let nth = nth_in_month(day);
+    let place = if nth == 5 { "last" } else { ordinal(nth) };
+    (format!("On day {}", day.day()), format!("On the {place} {}", day_name(day.weekday())))
+}
+
 /// The Custom part showing `rule`, for a rule it can say: None for one only
 /// "Custom repeat" names, which stays as it is unless the user picks a preset.
 pub fn custom_of(rule: &str, start: &Span) -> Option<Custom> {
@@ -279,13 +289,17 @@ fn code_weekday(code: &str) -> Option<Weekday> {
     })
 }
 
-/// The next `n` occurrences of a series starting `span` with `rec`, from
-/// `after` on: the editor's "Next: Thu 26 Nov, Tue 1 Dec, Thu 3 Dec".
+/// The next `n` occurrences of a series starting `span` with `rec` that
+/// start at or after `after`: the editor's "Next: Thu 26 Nov, Tue 1 Dec".
 pub fn next(rec: &Recurrence, span: &Span, after: DateTime<Utc>, n: usize, here: Tz) -> Vec<Span> {
     let master = EventData { recurrence: Some(rec.clone()), ..EventData::new("", *span) };
+    let starts_after = |s: &Span| match s.bounds(here) {
+        super::Bounds::Utc { start, .. } => start >= after,
+        super::Bounds::Days { start, .. } => tz::instant(NaiveDate::default().and_hms_opt(0, 0, 0).unwrap_or_default() + Duration::days(start.into()), here) >= after,
+    };
     for days in [62, 800, 11_000] {
         let window = Window { start: after, end: after + Duration::days(days) };
-        let found = recur::expand(&master, &[], window, here);
+        let found: Vec<recur::Occurrence> = recur::expand(&master, &[], window, here).into_iter().filter(|o| starts_after(&o.span)).collect();
         if found.len() >= n || days == 11_000 {
             return found.into_iter().take(n).map(|o| o.span).collect();
         }
@@ -428,6 +442,10 @@ mod tests {
             crate::calendar::Moment::Date(d) => d.to_string(),
         }).collect();
         assert_eq!(next3, ["Thu 26 Nov", "Tue 1 Dec", "Thu 3 Dec"]);
+        let just_after_the_start = Brussels.with_ymd_and_hms(2026, 11, 24, 14, 0, 1).unwrap().with_timezone(&Utc);
+        assert_eq!(next(&rec, &tuesday, just_after_the_start, 1, Brussels)[0].start(), timed("2026-11-26 14:00").start(), "the start itself isn't next, though it still runs");
+        assert_eq!(month_labels(&tuesday), ("On day 24".to_string(), "On the fourth Tuesday".to_string()));
+        assert_eq!(month_labels(&timed("2026-10-29 09:00")).1, "On the last Thursday");
         let last = next(&rec, &tuesday, after, 100, Brussels).last().map(|s| s.start());
         assert_eq!(last, Some(timed("2026-12-22 14:00").start()), "the end day itself is kept");
         assert_eq!(custom_of(&rule, &tuesday), Some(Custom { days: vec![Weekday::Tue, Weekday::Thu], ..custom }));

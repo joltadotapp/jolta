@@ -838,7 +838,7 @@ final class CalendarModel {
 
     private func deletePrompt(_ plan: DeletePlan, perform: @escaping (EditScope) -> Void) -> ScopePrompt {
         let title = plan.title.isEmpty ? "(no title)" : plan.title
-        return ScopePrompt(title: "Delete a repeating event", line: "You're deleting \(title).", choices: plan.scopes, perform: perform)
+        return ScopePrompt(title: "Delete a repeating event", line: plan.prompt ?? "You're deleting \(title).", choices: plan.scopes, perform: perform)
     }
 
     private func deleted(_ saved: SavedEdit) {

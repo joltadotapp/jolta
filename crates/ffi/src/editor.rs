@@ -201,6 +201,8 @@ pub struct DeletePlan {
     pub title: String,
     /// For one occurrence of a series, the scope prompt's choices.
     pub scopes: Vec<ScopeChoice>,
+    /// The prompt's line: "You're deleting Standup on Tue 24 Nov."
+    pub prompt: Option<String>,
 }
 
 fn failed(e: impl std::fmt::Display) -> CoreError {
@@ -440,7 +442,7 @@ impl Core {
     pub fn plan_delete(&self, event_id: i64, time: Option<OccurrenceTime>) -> Result<DeletePlan> {
         let at = time.map(cal::Bounds::try_from).transpose()?;
         let plan = self.jolta.store.read(|c| draft::plan_delete(c, EventId(event_id), at, tz::here()))?;
-        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes) })
+        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
     }
 
     /// Deletes an event without guests, telling nobody. The returned token undoes it.
