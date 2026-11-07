@@ -359,7 +359,15 @@ final class Journeys: XCTestCase {
         let title = app.textFields["editor-title"]
         XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
         title.typeText("Weekly sync")
-        let original = try XCTUnwrap(app.textFields["editor-start"].value as? String)
+        // A start of its own, inside the hours the week shows whatever the
+        // time of day: the next half hour falls off the grid late at night.
+        let firstStart = app.textFields["editor-start"]
+        firstStart.click()
+        app.typeKey("a", modifierFlags: .command)
+        firstStart.typeText("1000\t")
+        XCTAssertTrue(waitUntil { (firstStart.value as? String) == "10:00" }, "the start reads 10:00")
+        let original = "10:00"
+        title.click()
 
         app.typeKey("r", modifierFlags: .command)
         let popover = app.descendants(matching: .any).matching(identifier: "repeat-popover").firstMatch
