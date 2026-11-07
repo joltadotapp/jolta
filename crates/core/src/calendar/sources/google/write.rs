@@ -11,7 +11,7 @@ use super::add::when;
 use super::{BASE, Google, GoogleEvent, Reminder, event, failure};
 use crate::calendar::change::Field;
 use crate::calendar::ical_edit::Prop;
-use crate::calendar::{Alarm, AlarmTrigger, Calendar, EventData, EventStatus, ShowAs, Visibility, tz};
+use crate::calendar::{Alarm, AlarmTrigger, Calendar, EventData, EventStatus, Moment, ShowAs, Visibility, tz};
 use crate::{Error, Result};
 
 const GOOGLE: &str = "Google Calendar";
@@ -41,6 +41,11 @@ impl Google {
     pub async fn fetch(&self, calendar: &Calendar, remote_id: &str, alarms: &[Alarm]) -> Result<Option<Version>> {
         fetch(self, calendar, remote_id, alarms).await
     }
+
+    /// The instance of the series `series` at `rid`, changed or not.
+    pub async fn fetch_occurrence(&self, calendar: &Calendar, series: &str, rid: &Moment, alarms: &[Alarm]) -> Result<Option<Version>> {
+        fetch(self, calendar, &instance_id(series, rid, tz::here()), alarms).await
+    }
 }
 
 /// The id Google gives an event inserted with this UID and no id of its
@@ -55,41 +60,98 @@ pub(crate) fn event_id(uid: &str) -> String {
 
 pub(crate) fn writable(write: &OpWrite<'_>, here: Tz) -> Result<()> {
     match write {
-        OpWrite::Create { events, extra, .. } => insert_body(events, *extra, here).map(drop),
-        OpWrite::Update { base, event, extra, .. } => patch_body(base, event, *extra, here).map(drop),
-        OpWrite::Delete { .. } => Ok(()),
+        OpWrite::Create { events, extra, .. } => {
+            let (master, changed) = split_series(events)?;
+            insert_body(std::slice::from_ref(master), *extra, here)?;
+            changed.iter().try_for_each(|e| occurrence_body(master, e, here).map(drop))
+        }
+        OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => patch_body(base, event, *extra, here).map(drop),
+        OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
     }
+}
+
+/// The id Google gives the instance of the series `series` that starts at
+/// `rid`: the series' id, an underscore and the start in UTC, or the day
+/// for an all-day series (seen on the Google test account, 2026-11-07).
+pub(crate) fn instance_id(series: &str, rid: &Moment, here: Tz) -> String {
+    match rid {
+        Moment::Date(day) => format!("{series}_{}", day.format("%Y%m%d")),
+        Moment::Time(t) => format!("{series}_{}", t.instant(here).format("%Y%m%dT%H%M%SZ")),
+    }
+}
+
+/// A series and its changed occurrences, as a create takes them.
+fn split_series(events: &[EventData]) -> Result<(&EventData, Vec<&EventData>)> {
+    let master = events.iter().find(|e| e.recurrence_id.is_none()).ok_or_else(|| cannot(GOOGLE, "take a changed occurrence without its series"))?;
+    Ok((master, events.iter().filter(|e| e.recurrence_id.is_some()).collect()))
+}
+
+/// The patch that makes the occurrence `changed` of a new series `master`
+/// what it is; None when it was taken out instead.
+fn occurrence_body(master: &EventData, changed: &EventData, here: Tz) -> Result<Option<Value>> {
+    if changed.status == EventStatus::Cancelled {
+        return Ok(None);
+    }
+    let rid = changed.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "change an occurrence without its start"))?;
+    let base = crate::calendar::series::occurrence(std::slice::from_ref(master), rid, here).ok_or_else(|| cannot(GOOGLE, "move an all-day occurrence to a time"))?;
+    patch_body(&base, changed, None, here).map(Some)
 }
 
 async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here: Tz) -> Result<Written> {
     let events_url = format!("{BASE}/calendars/{}/events", encode(&calendar.remote_id));
     match *write {
         OpWrite::Create { events, extra, .. } => {
-            let body = insert_body(events, extra, here)?;
-            let (uid, alarms) = (&events[0].uid, &events[0].alarms);
-            let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates=none"), Some(&body), None).await?;
-            match status {
-                200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
-                // Google holds the UID already: a retry whose first try
-                // reached it keeps that event as it is now; one deleted
-                // before, as for Undo of a delete, comes back through
-                // `events.import`, which a second insert can't do and which
-                // emails nobody.
-                409 => match by_uid(google, calendar, uid, alarms).await? {
-                    Some((v, false)) => Ok(Written::Saved(Some(v))),
-                    Some((_, true)) => {
-                        let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}/import"), Some(&body), None).await?;
-                        match status {
-                            200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
-                            _ => Err(failure(status, &reply)),
-                        }
+            let (master, changed) = split_series(events)?;
+            let mut written = create(google, calendar, master, extra, &events_url, here).await?;
+            // The series' changed occurrences follow as writes of their
+            // instances. A retry finds the series made and writes them
+            // again, which changes nothing more.
+            if let Written::Saved(Some(series)) = &mut written {
+                for e in changed {
+                    let id = instance_id(&series.remote_id, e.recurrence_id.as_ref().expect("a changed occurrence"), here);
+                    let url = format!("{events_url}/{}?sendUpdates=none", encode(&id));
+                    let (method, body) = match occurrence_body(master, e, here)? {
+                        Some(body) => (reqwest::Method::PATCH, Some(body)),
+                        None => (reqwest::Method::DELETE, None),
+                    };
+                    let (status, reply) = google.request(method.clone(), &url, body.as_ref(), None).await?;
+                    if !matches!(status, 200..300 | 404 | 410) {
+                        return Err(failure(status, &reply));
                     }
-                    None => Err(Error::Other("Google Calendar already has another event where Jolta would put this one.".into())),
-                },
+                    if method == reqwest::Method::PATCH && (200..300).contains(&status) {
+                        series.instances.push(version(google, calendar, &reply, &e.alarms)?);
+                    }
+                }
+            }
+            Ok(written)
+        }
+        OpWrite::Occurrence { series, base, event, extra } => {
+            let Some(etag) = series.etag.as_deref() else { return Ok(Written::Stale) };
+            let rid = event.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "change an occurrence without its start"))?;
+            let body = patch_body(base, event, extra, here)?;
+            let url = format!("{events_url}/{}?sendUpdates=none", encode(&instance_id(&series.remote_id, rid, here)));
+            let (status, reply) = google.request(reqwest::Method::PATCH, &url, Some(&body), Some(etag)).await?;
+            match status {
+                200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, &event.alarms)?))),
+                412 => Ok(Written::Stale),
+                404 | 410 => Ok(Written::Gone),
                 _ => Err(failure(status, &reply)),
             }
         }
-        OpWrite::Update { held, base, event, extra } => {
+        OpWrite::Cancel { held, occurrence, changed } => {
+            let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
+            let rid = occurrence.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "delete an occurrence without its start"))?;
+            let id = if changed { held.remote_id.clone() } else { instance_id(&held.remote_id, rid, here) };
+            let url = format!("{events_url}/{}?sendUpdates=none", encode(&id));
+            let (status, reply) = google.request(reqwest::Method::DELETE, &url, None, Some(etag)).await?;
+            match status {
+                200..300 => Ok(Written::Saved(None)),
+                412 => Ok(Written::Stale),
+                404 | 410 => Ok(Written::Gone),
+                _ => Err(failure(status, &reply)),
+            }
+        }
+        OpWrite::Update { held, base, event, extra, .. } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
             let body = patch_body(base, event, extra, here)?;
             let url = format!("{events_url}/{}?sendUpdates=none", encode(&held.remote_id));
@@ -112,6 +174,33 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, here
                 _ => Err(failure(status, &reply)),
             }
         }
+    }
+}
+
+/// `events.insert` of a series or single event, with the UID Google keeps.
+async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, extra: Option<&crate::calendar::ops::Extra>, events_url: &str, here: Tz) -> Result<Written> {
+    let body = insert_body(std::slice::from_ref(master), extra, here)?;
+    let (uid, alarms) = (&master.uid, &master.alarms);
+    let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates=none"), Some(&body), None).await?;
+    match status {
+        200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
+        // Google holds the UID already: a retry whose first try
+        // reached it keeps that event as it is now; one deleted
+        // before, as for Undo of a delete, comes back through
+        // `events.import`, which a second insert can't do and which
+        // emails nobody.
+        409 => match by_uid(google, calendar, uid, alarms).await? {
+            Some((v, false)) => Ok(Written::Saved(Some(v))),
+            Some((_, true)) => {
+                let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}/import"), Some(&body), None).await?;
+                match status {
+                    200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
+                    _ => Err(failure(status, &reply)),
+                }
+            }
+            None => Err(Error::Other("Google Calendar already has another event where Jolta would put this one.".into())),
+        },
+        _ => Err(failure(status, &reply)),
     }
 }
 
@@ -161,14 +250,13 @@ fn version(google: &impl Http, calendar: &Calendar, reply: &[u8], alarms: &[Alar
     let zone = calendar.zone.as_deref().and_then(tz::zone);
     let me = [google.me().to_string()];
     let data = event(&g, uid, &defaults, zone, &me).ok_or_else(|| Error::Other("Google Calendar returned an event without a start.".into()))?;
-    Ok(Version { remote_id: g.id, etag: g.etag, events: vec![data], raw: Some(reply.to_vec()) })
+    Ok(Version { remote_id: g.id, etag: g.etag, events: vec![data], raw: Some(reply.to_vec()), instances: Vec::new() })
 }
 
 /// `events.insert`'s body: the UID and every field the event sets. Google
 /// refuses an id of Jolta's next to the UID ("Invalid resource id value",
 /// seen on the Google test account, 2026-11-07), so it picks the id. A
-/// series' changed occurrences need their own writes, which come with the
-/// repeat editor.
+/// series' changed occurrences are writes of their own.
 pub(crate) fn insert_body(events: &[EventData], extra: Option<&crate::calendar::ops::Extra>, here: Tz) -> Result<Value> {
     let [e] = events else { return Err(cannot(GOOGLE, "take a repeating event with changed occurrences from Jolta yet")) };
     let mut v = json!({ "iCalUID": e.uid });
@@ -431,7 +519,7 @@ mod tests {
         let base = standup();
         let held = Stored { id: EventId(1), remote_id: "abc".into(), etag: Some("\"3\"".into()), raw: None, data: base.clone() };
         let mine = EventData { title: "Daily".into(), ..base.clone() };
-        let update = OpWrite::Update { held: &held, base: &base, event: &mine, extra: None };
+        let update = OpWrite::Update { held: &held, base: &base, event: &mine, extra: None, dropped: &[] };
         for (status, expected) in [(412, Written::Stale), (404, Written::Gone), (410, Written::Gone)] {
             let (done, seen) = sent(update, vec![(status, json!({}))]).await;
             assert_eq!(done.unwrap(), expected, "{status}");

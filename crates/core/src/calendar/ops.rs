@@ -19,6 +19,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::change::{FIELDS, Field};
 use super::series::Horizon;
 use super::sources::{self, OpWrite, Source, Version, Written};
-use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, Moment, caps, merge, rsvp};
+use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, merge, rsvp, series as occurrences};
 use crate::model::text_enum;
 use crate::{Error, Jolta, Result, store};
 
@@ -89,11 +90,35 @@ pub struct Held {
 pub enum Write {
     /// A new event, or a series with its changed occurrences.
     Create(Vec<EventData>),
-    /// One event, series or changed occurrence: `base` as it was, `event`
-    /// as the user saved it.
-    Update { base: EventData, event: EventData },
+    /// One event, series or occurrence: `base` as it was, `event` as the
+    /// user saved it. A series' changed occurrences that its new time or
+    /// repeat rule no longer holds leave with it, as they were (`dropped`).
+    /// `fresh` when `event` is an occurrence that had no row of its own:
+    /// `held` is then its series' object, which Google and Microsoft 365
+    /// reach as an instance and CalDAV gets a new VEVENT in.
+    Update { base: EventData, event: EventData, dropped: Vec<Row>, fresh: bool },
     /// A whole event or series with its changed occurrences, as it was.
     Delete(Vec<EventData>),
+    /// One occurrence of a series taken out: the series and the occurrence
+    /// as they were, with the occurrence's own row when it had one.
+    Cancel { series: EventData, occurrence: EventData, row: Option<Row> },
+}
+
+/// A stored row as an op takes it out, so putting it back keeps the object
+/// and version it was filed under.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Row {
+    pub remote_id: String,
+    pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+    pub event: EventData,
+}
+
+impl From<Stored> for Row {
+    fn from(s: Stored) -> Row {
+        Row { remote_id: s.remote_id, etag: s.etag, blob: s.blob, event: s.event }
+    }
 }
 
 impl Write {
@@ -102,6 +127,7 @@ impl Write {
             Write::Create(_) => "create",
             Write::Update { .. } => "update",
             Write::Delete(_) => "delete",
+            Write::Cancel { .. } => "cancel",
         }
     }
 
@@ -109,7 +135,7 @@ impl Write {
     pub fn event(&self) -> Option<&EventData> {
         match self {
             Write::Create(events) | Write::Delete(events) => events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()),
-            Write::Update { event, .. } => Some(event),
+            Write::Update { event, .. } | Write::Cancel { occurrence: event, .. } => Some(event),
         }
     }
 
@@ -117,7 +143,7 @@ impl Write {
     fn events(&self) -> impl Iterator<Item = &EventData> {
         let (a, b): (&[EventData], &[EventData]) = match self {
             Write::Create(events) | Write::Delete(events) => (events, &[]),
-            Write::Update { base, event } => (std::slice::from_ref(base), std::slice::from_ref(event)),
+            Write::Update { base, event, .. } | Write::Cancel { series: base, occurrence: event, .. } => (std::slice::from_ref(base), std::slice::from_ref(event)),
         };
         a.iter().chain(b)
     }
@@ -131,17 +157,28 @@ impl Write {
                     *e = base.clone();
                 }
             }
-            Write::Create(_) => {}
+            Write::Cancel { series, .. } if series.recurrence_id == base.recurrence_id => *series = base.clone(),
+            Write::Create(_) | Write::Cancel { .. } => {}
         }
     }
 
-    /// The change that takes this one back.
-    fn undo(&self) -> Change {
+    /// The change that takes this one back once it may have reached the
+    /// server. None for one occurrence taken out: Microsoft 365 can't bring
+    /// one back, so that waits the undo window instead.
+    fn undo(&self) -> Option<Change> {
         match self {
-            Write::Create(events) => Change::Delete { uid: events.first().map(|e| e.uid.clone()).unwrap_or_default() },
-            Write::Update { base, .. } => Change::Update(base.clone()),
-            Write::Delete(events) => Change::Create(events.clone()),
+            Write::Create(events) => Some(Change::Delete { uid: events.first().map(|e| e.uid.clone()).unwrap_or_default() }),
+            Write::Update { base, dropped, .. } if dropped.is_empty() => Some(Change::Update(base.clone())),
+            Write::Update { .. } => None,
+            Write::Delete(events) => Some(Change::Create(events.clone())),
+            Write::Cancel { .. } => None,
         }
+    }
+
+    /// Whether the write takes out occurrences or their changes, which
+    /// can't be put back once sent: it waits the undo window.
+    fn removes_occurrences(&self) -> bool {
+        matches!(self, Write::Cancel { .. }) || matches!(self, Write::Update { dropped, .. } if !dropped.is_empty())
     }
 }
 
@@ -176,6 +213,9 @@ pub struct CalendarOp {
     /// Fields the server kept on a 412 merge.
     pub lost: Vec<Field>,
     pub created: i64,
+    /// The op this one waits for: This and following shortens the old
+    /// series only once the new one exists, so a failure loses nothing.
+    pub after: Option<CalendarOpId>,
 }
 
 /// What the user changed.
@@ -188,6 +228,8 @@ pub enum Change {
     Update(EventData),
     /// The event with this UID, with its changed occurrences.
     Delete { uid: String },
+    /// One occurrence of the series with this UID, named by its recurrence id.
+    DeleteOccurrence { uid: String, recurrence_id: Moment },
 }
 
 /// An edit to queue.
@@ -212,16 +254,32 @@ impl Edit {
 /// Nothing here waits on the network. An edit the calendar's provider
 /// can't hold is refused before anything changes.
 pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
+    queue_op(conn, edit, Link::default(), now, horizon)
+}
+
+/// How an op of This and following belongs to its pair.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Link {
+    pub(super) after: Option<CalendarOpId>,
+    pub(super) following: bool,
+}
+
+pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
     let calendar = store::calendar(conn, edit.calendar)?;
     if !caps::of(&calendar).writable {
         return Err(Error::Other(format!("{} is read-only", calendar.name)));
     }
-    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change)? else { return Ok(None) };
+    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change, horizon.here)? else { return Ok(None) };
     check(&calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref())?;
     let first = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;
-    let (uid, recurrence_id) = (first.uid.clone(), if matches!(write, Write::Update { .. }) { first.recurrence_id } else { None });
-    let scope = if recurrence_id.is_some() { Scope::This } else { Scope::All };
-    let delay = if edit.notify == Notify::Nobody { 0 } else { UNDO_SEND_SECONDS };
+    let (uid, recurrence_id) = (first.uid.clone(), if matches!(write, Write::Update { .. } | Write::Cancel { .. }) { first.recurrence_id } else { None });
+    let scope = match (link.following, recurrence_id) {
+        (true, _) => Scope::Following,
+        (false, Some(_)) => Scope::This,
+        (false, None) => Scope::All,
+    };
+    let waits = edit.notify != Notify::Nobody || write.removes_occurrences() || link.following;
+    let delay = if waits { UNDO_SEND_SECONDS } else { 0 };
     apply(conn, calendar.id, &write, &remote_key, horizon)?;
     let id = store::insert_calendar_op(
         conn,
@@ -245,6 +303,7 @@ pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Res
             error: None,
             lost: Vec::new(),
             created: now,
+            after: link.after,
         },
     )?;
     store::refresh_changed_locally(conn, calendar.id, &uid)?;
@@ -258,7 +317,7 @@ pub fn refusal(conn: &Connection, edit: &Edit) -> Result<Option<String>> {
     if !caps::of(&calendar).writable {
         return Ok(Some(format!("{} is read-only", calendar.name)));
     }
-    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change)? else { return Ok(None) };
+    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change, super::tz::here())? else { return Ok(None) };
     Ok(check(&calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref()).err().map(|e| e.to_string()))
 }
 
@@ -272,6 +331,19 @@ fn check(calendar: &Calendar, write: &Write, key: &str, held: Option<&Held>, ext
     if write.events().any(|e| e.attendees.iter().any(|a| !a.is_me)) {
         return Err(Error::Other(format!("Jolta can't change meetings with guests in {} yet", calendar.name)));
     }
+    // A repeat rule the provider can't hold, set here, is refused here, as
+    // the repeat editor greys it.
+    let new_rule = match write {
+        Write::Create(events) => events.iter().find(|e| e.recurrence_id.is_none()),
+        Write::Update { base, event, .. } if base.recurrence != event.recurrence || base.span != event.span => Some(event),
+        _ => None,
+    };
+    if let Some(e) = new_rule
+        && let Some(rule) = &e.recurrence
+        && let Some(text) = super::repeat::refusal(rule, &e.span, calendar, super::tz::here())
+    {
+        return Err(Error::Other(format!("{text}, so Jolta didn't change {}", calendar.name)));
+    }
     let held = rsvp::Stored {
         id: EventId(0),
         remote_id: held.map(|h| h.remote_id.clone()).unwrap_or_default(),
@@ -279,10 +351,16 @@ fn check(calendar: &Calendar, write: &Write, key: &str, held: Option<&Held>, ext
         raw: None,
         data: write.event().cloned().ok_or_else(|| Error::Other("an edit without an event".into()))?,
     };
+    let dropped: Vec<EventData> = match write {
+        Write::Update { dropped, .. } => dropped.iter().map(|r| r.event.clone()).collect(),
+        _ => Vec::new(),
+    };
     let request = match write {
         Write::Create(events) => OpWrite::Create { events, key, extra },
-        Write::Update { base, event } => OpWrite::Update { held: &held, base, event, extra },
+        Write::Update { base, event, fresh: true, .. } => OpWrite::Occurrence { series: &held, base, event, extra },
+        Write::Update { base, event, .. } => OpWrite::Update { held: &held, base, event, extra, dropped: &dropped },
         Write::Delete(_) => OpWrite::Delete { held: &held },
+        Write::Cancel { occurrence, row, .. } => OpWrite::Cancel { held: &held, occurrence, changed: row.is_some() },
     };
     sources::writable(calendar.source, &request).map_err(|e| Error::Other(format!("{e}, so Jolta didn't change {}", calendar.name)))
 }
@@ -297,7 +375,7 @@ struct Planned {
 /// The write a change makes against what the store holds, with the key a
 /// retried create reuses and the version an update or delete writes over.
 /// None when the store already shows the change.
-fn plan(conn: &Connection, calendar: &Calendar, change: &Change) -> Result<Option<Planned>> {
+fn plan(conn: &Connection, calendar: &Calendar, change: &Change, here: Tz) -> Result<Option<Planned>> {
     let on_server = calendar.source != CalendarSource::Local;
     match change {
         Change::Create(events) => {
@@ -313,13 +391,50 @@ fn plan(conn: &Connection, calendar: &Calendar, change: &Change) -> Result<Optio
             Ok(Some(Planned { write: Write::Create(events.clone()), remote_key: key, held: None }))
         }
         Change::Update(event) => {
-            let base = stored(conn, calendar.id, &event.uid, event.recurrence_id.as_ref())?
-                .ok_or_else(|| Error::NotFound(format!("event {} in {}", event.uid, calendar.name)))?;
+            let not_found = || Error::NotFound(format!("event {} in {}", event.uid, calendar.name));
+            let Some(base) = stored(conn, calendar.id, &event.uid, event.recurrence_id.as_ref())? else {
+                // An occurrence without a row of its own: the series moved
+                // there is what the user changed, written as the series'.
+                let rid = event.recurrence_id.ok_or_else(not_found)?;
+                let master = stored(conn, calendar.id, &event.uid, None)?.ok_or_else(not_found)?;
+                if !is_occurrence(&master.event, &rid, here) {
+                    return Err(Error::NotFound(format!("that occurrence of {}", master.event.title)));
+                }
+                let base = occurrences::occurrence(std::slice::from_ref(&master.event), &rid, here).ok_or_else(not_found)?;
+                if base == *event {
+                    return Ok(None);
+                }
+                let held = on_server.then(|| Held { remote_id: master.remote_id.clone(), etag: master.etag.clone() });
+                return Ok(Some(Planned { write: Write::Update { base, event: event.clone(), dropped: Vec::new(), fresh: true }, remote_key: master.remote_id, held }));
+            };
             if base.event == *event {
                 return Ok(None);
             }
+            let dropped = dropped(conn, calendar, &base.event, event, here)?;
             let held = on_server.then(|| Held { remote_id: base.remote_id.clone(), etag: base.etag.clone() });
-            Ok(Some(Planned { write: Write::Update { base: base.event, event: event.clone() }, remote_key: base.remote_id, held }))
+            Ok(Some(Planned { write: Write::Update { base: base.event, event: event.clone(), dropped, fresh: false }, remote_key: base.remote_id, held }))
+        }
+        Change::DeleteOccurrence { uid, recurrence_id } => {
+            let master = stored(conn, calendar.id, uid, None)?.ok_or_else(|| Error::NotFound(format!("event {uid} in {}", calendar.name)))?;
+            if master.event.recurrence.is_none() {
+                return Err(Error::Other(format!("{} doesn't repeat", master.event.title)));
+            }
+            let own = stored(conn, calendar.id, uid, Some(recurrence_id))?;
+            let occurrence = match &own {
+                Some(row) => row.event.clone(),
+                None if is_occurrence(&master.event, recurrence_id, here) => occurrences::occurrence(std::slice::from_ref(&master.event), recurrence_id, here)
+                    .ok_or_else(|| Error::NotFound(format!("that occurrence of {}", master.event.title)))?,
+                None => return Ok(None),
+            };
+            if occurrence.status == EventStatus::Cancelled {
+                return Ok(None);
+            }
+            let held = on_server.then(|| match &own {
+                Some(row) => Held { remote_id: row.remote_id.clone(), etag: row.etag.clone() },
+                None => Held { remote_id: master.remote_id.clone(), etag: master.etag.clone() },
+            });
+            let write = Write::Cancel { series: master.event.clone(), occurrence, row: own.map(Row::from) };
+            Ok(Some(Planned { write, remote_key: master.remote_id, held }))
         }
         Change::Delete { uid } => {
             let events = series(conn, calendar.id, uid)?;
@@ -328,6 +443,61 @@ fn plan(conn: &Connection, calendar: &Calendar, change: &Change) -> Result<Optio
             Ok(Some(Planned { write: Write::Delete(events), remote_key: first.remote_id, held }))
         }
     }
+}
+
+/// Whether the series `master` has an occurrence at `rid`, by its rule.
+pub fn is_occurrence(master: &EventData, rid: &Moment, here: Tz) -> bool {
+    let Some(span) = occurrences::occurrence_span(&master.span, rid, here) else { return false };
+    let (start, end) = match span.bounds(here) {
+        super::Bounds::Utc { start, .. } => (start - chrono::Duration::seconds(1), start + chrono::Duration::seconds(1)),
+        super::Bounds::Days { start, .. } => {
+            let day = super::tz::instant(chrono::NaiveDate::default().and_time(chrono::NaiveTime::MIN) + chrono::Duration::days(start.into()), here);
+            (day - chrono::Duration::days(1), day + chrono::Duration::days(2))
+        }
+    };
+    let rule_only = EventData { recurrence: master.recurrence.clone().map(|r| super::Recurrence { exdates: Vec::new(), ..r }), ..master.clone() };
+    super::recur::expand(&rule_only, &[], super::recur::Window { start, end }, here).iter().any(|o| o.span.start().names(rid, here))
+}
+
+/// The changed occurrences of a series that leave with an edit of the
+/// series: those the new rule no longer has an occurrence for, and on
+/// Microsoft 365 every one once the time or the pattern changes, as
+/// Exchange deletes them then; a new end alone keeps those before it
+/// (Microsoft 365 test account, 2026-11-07). A series made single loses
+/// them all.
+fn dropped(conn: &Connection, calendar: &Calendar, base: &EventData, event: &EventData, here: Tz) -> Result<Vec<Row>> {
+    if event.recurrence_id.is_some() || base.recurrence.is_none() {
+        return Ok(Vec::new());
+    }
+    let pattern_changed = base.span != event.span || base.recurrence != event.recurrence;
+    if !pattern_changed {
+        return Ok(Vec::new());
+    }
+    let pattern = |r: Option<&super::Recurrence>| {
+        r.map(|r| r.rules.iter().map(|rule| rule.split(';').filter(|p| !p.starts_with("UNTIL=") && !p.starts_with("COUNT=")).collect::<Vec<_>>().join(";")).collect::<Vec<_>>())
+    };
+    let exchange_resets = calendar.source == CalendarSource::Graph && (base.span != event.span || pattern(base.recurrence.as_ref()) != pattern(event.recurrence.as_ref()));
+    Ok(changed_rows(conn, calendar.id, &event.uid)?
+        .into_iter()
+        .filter(|r| {
+            let Some(rid) = &r.event.recurrence_id else { return false };
+            event.recurrence.is_none() || exchange_resets || !is_occurrence(event, rid, here)
+        })
+        .map(Row::from)
+        .collect())
+}
+
+/// How many changed occurrences, not counting those taken out, leave when
+/// the series `base` becomes `event`: the scope prompt's warning.
+pub fn dropped_count(conn: &Connection, calendar: &Calendar, base: &EventData, event: &EventData, here: Tz) -> Result<usize> {
+    Ok(dropped(conn, calendar, base, event, here)?.iter().filter(|r| r.event.status != EventStatus::Cancelled).count())
+}
+
+/// The rows of a series' changed occurrences.
+fn changed_rows(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Vec<Stored>> {
+    let mut stmt = conn.prepare_cached(&format!("SELECT {STORED_COLS} FROM event WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id <> '' ORDER BY id"))?;
+    let rows = stmt.query_map(params![calendar, uid], stored_row)?;
+    rows.map(|r| to_stored(r?)).collect()
 }
 
 fn same_events(a: &[EventData], b: &[EventData]) -> bool {
@@ -399,7 +569,7 @@ fn stored_any(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Opti
 }
 
 /// Every stored event with this UID: a series with its changed occurrences.
-fn series(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Vec<EventData>> {
+pub(crate) fn series(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Vec<EventData>> {
     let mut stmt = conn.prepare_cached("SELECT data FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY recurrence_id <> '', id")?;
     let rows = stmt.query_map(params![calendar, uid], |r| r.get::<_, String>(0))?;
     rows.map(|data| serde_json::from_str(&data?).map_err(|e| Error::Other(format!("stored event {uid}: {e}")))).collect()
@@ -416,12 +586,28 @@ fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &st
             }
             events.first().map(|e| e.uid.clone())
         }
-        Write::Update { event, .. } => {
+        Write::Update { event, dropped, .. } => {
+            // A new changed occurrence is filed with its series, at the
+            // version the series is: in CalDAV they share one resource.
             let (remote_id, etag, blob) = match stored(conn, calendar, &event.uid, event.recurrence_id.as_ref())? {
                 Some(s) => (s.remote_id, s.etag, s.blob),
-                None => (stored(conn, calendar, &event.uid, None)?.map_or_else(|| remote_key.to_string(), |s| s.remote_id), None, None),
+                None => stored(conn, calendar, &event.uid, None)?.map_or_else(|| (remote_key.to_string(), None, None), |s| (s.remote_id, s.etag, s.blob)),
             };
+            let before = stored(conn, calendar, &event.uid, event.recurrence_id.as_ref())?.map(|s| s.event);
             store::insert_event(conn, calendar, &remote_id, etag.as_deref(), event, blob.as_deref())?;
+            for row in dropped {
+                remove_row(conn, calendar, &row.event)?;
+            }
+            // A change to the whole series shows on its changed occurrences
+            // where they kept the series' value, as the server does it.
+            if let (None, Some(before)) = (event.recurrence_id, before) {
+                for row in changed_rows(conn, calendar, &event.uid)? {
+                    let now = super::change::carried(&before, event, &row.event);
+                    if now != row.event {
+                        store::insert_event(conn, calendar, &row.remote_id, row.etag.as_deref(), &now, row.blob.as_deref())?;
+                    }
+                }
+            }
             Some(event.uid.clone())
         }
         Write::Delete(events) => {
@@ -429,11 +615,34 @@ fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &st
             conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND uid = ?2", params![calendar, uid])?;
             uid
         }
+        Write::Cancel { series, occurrence, row } => {
+            let master = stored(conn, calendar, &series.uid, None)?.ok_or_else(|| Error::NotFound(format!("event {} in its calendar", series.uid)))?;
+            let mut cut = series.clone();
+            if let (Some(rec), Some(rid)) = (cut.recurrence.as_mut(), occurrence.recurrence_id) {
+                rec.exdates.push(rid);
+            }
+            store::insert_event(conn, calendar, &master.remote_id, master.etag.as_deref(), &cut, master.blob.as_deref())?;
+            if let Some(row) = row {
+                remove_row(conn, calendar, &row.event)?;
+            }
+            Some(series.uid.clone())
+        }
     };
     if let Some(uid) = uid {
         store::rebuild_series(conn, calendar, &uid, horizon)?;
     }
     Ok(())
+}
+
+/// Takes the row of one event of a series out of the store.
+fn remove_row(conn: &Connection, calendar: CalendarId, e: &EventData) -> Result<()> {
+    let rid = e.recurrence_id.as_ref().map(store::moment_text).unwrap_or_default();
+    conn.execute("DELETE FROM event WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id = ?3", params![calendar, e.uid, rid])?;
+    Ok(())
+}
+
+fn restore_row(conn: &Connection, calendar: CalendarId, row: &Row) -> Result<()> {
+    store::insert_event(conn, calendar, &row.remote_id, row.etag.as_deref(), &row.event, row.blob.as_deref())
 }
 
 /// Puts the store back as it was before `op`. Events a delete took come
@@ -445,12 +654,34 @@ fn revert(conn: &Connection, op: &CalendarOp, horizon: &Horizon) -> Result<()> {
         store::forget_calendar_cursor(conn, op.calendar)?;
     }
     let back = match &op.write {
-        Write::Create(events) => Write::Delete(events.clone()),
-        Write::Update { base, event } => Write::Update { base: event.clone(), event: base.clone() },
-        Write::Delete(events) => Write::Create(events.clone()),
+        Write::Create(events) => Some(Write::Delete(events.clone())),
+        Write::Update { base, event, fresh: false, .. } => Some(Write::Update { base: event.clone(), event: base.clone(), dropped: Vec::new(), fresh: false }),
+        // A changed occurrence the op made goes again: the series' alone shows it.
+        Write::Update { base, fresh: true, .. } => {
+            remove_row(conn, op.calendar, base)?;
+            None
+        }
+        Write::Delete(events) => Some(Write::Create(events.clone())),
+        // A later delete of the whole series took it out already: there is
+        // nothing to put back.
+        Write::Cancel { series, .. } => match stored(conn, op.calendar, &series.uid, None)? {
+            Some(master) => Some(Write::Update { base: master.event, event: series.clone(), dropped: Vec::new(), fresh: false }),
+            None => {
+                store::rebuild_series(conn, op.calendar, &op.uid, horizon)?;
+                return Ok(());
+            }
+        },
     };
     let key = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
-    apply(conn, op.calendar, &back, key, horizon)?;
+    if let Some(back) = back {
+        apply(conn, op.calendar, &back, key, horizon)?;
+    }
+    match &op.write {
+        Write::Update { dropped, .. } => dropped.iter().try_for_each(|r| restore_row(conn, op.calendar, r))?,
+        Write::Cancel { row: Some(row), .. } => restore_row(conn, op.calendar, row)?,
+        _ => {}
+    }
+    store::rebuild_series(conn, op.calendar, &op.uid, horizon)?;
     if let (Write::Delete(_), Some(held)) = (&op.write, &op.held) {
         store::set_item_version(conn, op.calendar, &held.remote_id, held.etag.as_deref(), None)?;
     }
@@ -476,20 +707,31 @@ pub fn undo(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horizon) ->
     if store::newest_calendar_op(conn, op.calendar, &op.uid)? != Some(id) {
         return Err(Error::Other(format!("{title} changed again since; undo that change first")));
     }
+    // This and following: the old series' op waits for the new series'
+    // create, and Undo takes back both.
+    let first = op.after.map(|a| store::calendar_op(conn, a)).transpose()?;
     match op.state {
         OpState::Pending if !op.tried => {
             revert(conn, &op, horizon)?;
             store::delete_calendar_op(conn, id)?;
             store::refresh_changed_locally(conn, op.calendar, &op.uid)?;
+            if let Some(first) = first {
+                undo(conn, first.id, now, horizon)?;
+            }
             Ok(Undone::Dropped)
         }
-        OpState::Pending | OpState::Sending | OpState::Done if op.notify == Notify::Nobody => {
-            let edit = Edit::quiet(op.calendar, op.write.undo());
-            match queue(conn, &edit, now, horizon)? {
+        // The old series' shortening may have reached the server, after the
+        // new series did: putting the old one back would show both.
+        OpState::Pending | OpState::Sending | OpState::Done if op.after.is_some() => {
+            Err(Error::Other(format!("The change to {title} already reached the server and can't be taken back")))
+        }
+        OpState::Pending | OpState::Sending | OpState::Done if op.notify == Notify::Nobody => match op.write.undo() {
+            Some(change) => match queue(conn, &Edit::quiet(op.calendar, change), now, horizon)? {
                 Some(inverse) => Ok(Undone::Queued(inverse)),
                 None => Err(Error::Other(format!("{title} is already as it was"))),
-            }
-        }
+            },
+            None => Err(Error::Other(format!("The change to {title} already reached the server and can't be taken back"))),
+        },
         OpState::Pending | OpState::Sending | OpState::Done => Err(Error::Other(format!("The update to {title} already went out"))),
         OpState::Failed | OpState::Conflict | OpState::Gone => Err(Error::Other(format!("The change to {title} wasn't saved; there is nothing to undo"))),
     }
@@ -513,7 +755,7 @@ pub fn conflict(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<Op
         return Ok(None);
     }
     Ok(Some(match op.write {
-        Write::Delete(_) => Conflict { op: id, message: "Changed elsewhere after you deleted it, so it wasn't deleted.".into(), action: "Delete anyway".into() },
+        Write::Delete(_) | Write::Cancel { .. } => Conflict { op: id, message: "Changed elsewhere after you deleted it, so it wasn't deleted.".into(), action: "Delete anyway".into() },
         _ => Conflict { op: id, message: format!("Changed elsewhere while you edited. {}", unsaved(&op.lost)), action: "Apply mine".into() },
     }))
 }
@@ -538,6 +780,10 @@ pub fn apply_mine(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horiz
     }
     let change = match &op.write {
         Write::Delete(_) => Change::Delete { uid: op.uid.clone() },
+        Write::Cancel { occurrence, .. } => match occurrence.recurrence_id {
+            Some(recurrence_id) => Change::DeleteOccurrence { uid: op.uid.clone(), recurrence_id },
+            None => return Err(Error::Other("That occurrence is no longer named".into())),
+        },
         Write::Update { event: mine, .. } => {
             let mut event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?
                 .ok_or_else(|| Error::NotFound(format!("event {} in its calendar", op.uid)))?
@@ -602,19 +848,56 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
             land(conn, op, version.as_ref(), !merged, horizon)?;
         }
         Ok(Sent::Conflict { version, lost }) => {
-            store::settle_calendar_op(conn, op.id, OpState::Conflict)?;
+            // The server kept the occurrence a delete took out: the series
+            // comes back as it was, then the occurrence as the server has it.
+            if let Write::Cancel { occurrence, .. } = &op.write {
+                revert(conn, op, horizon)?;
+                // A delete of the whole series behind this one put aside
+                // the series with this occurrence taken out; its Undo brings
+                // back the series whole, with the occurrence the server kept.
+                let kept: Vec<EventData> = version.iter().flat_map(|(v, _)| &v.events).filter(|e| e.uid == op.uid && e.recurrence_id.is_some()).cloned().collect();
+                for mut later in store::later_calendar_ops(conn, op)? {
+                    let Write::Delete(events) = &mut later.write else { continue };
+                    // Only this occurrence's EXDATE goes: later edits and
+                    // other occurrences taken out stay put aside.
+                    if let (Some(rec), Some(rid)) = (events.iter_mut().find(|e| e.recurrence_id.is_none()).and_then(|m| m.recurrence.as_mut()), occurrence.recurrence_id) {
+                        rec.exdates.retain(|x| !x.names(&rid, horizon.here));
+                    }
+                    for k in &kept {
+                        events.retain(|e| !same_row(e, k));
+                        events.push(k.clone());
+                    }
+                    store::rewrite_calendar_op(conn, &later)?;
+                }
+            }
+            // A split whose old series kept its rule elsewhere: the new
+            // series goes again, and nothing is left to apply.
+            let compensated = op.after.is_some() && lost.contains(&Field::Repeat);
+            store::settle_calendar_op(conn, op.id, if compensated { OpState::Failed } else { OpState::Conflict })?;
             store::set_calendar_op_lost(conn, op.id, &lost)?;
             land(conn, op, version.as_ref(), false, horizon)?;
+            if compensated {
+                take_back_new_series(conn, op, now, horizon)?;
+            }
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
             let message = match op.write {
-                Write::Delete(_) => format!("{title} changed in {} after you deleted it, so it wasn't deleted.", place(&calendar)),
+                Write::Delete(_) | Write::Cancel { .. } => format!("{title} changed in {} after you deleted it, so it wasn't deleted.", place(&calendar)),
                 _ => format!("{title} changed in {} while you edited it. {}", place(&calendar), unsaved(&lost)),
             };
             failure = Some(Failure { message, event });
         }
+        // One occurrence gone says nothing of its series: the op's change
+        // goes and the calendar is listed again.
+        Ok(Sent::Gone) if op.recurrence_id.is_some() => {
+            store::settle_calendar_op(conn, op.id, OpState::Gone)?;
+            revert(conn, op, horizon)?;
+            store::forget_calendar_cursor(conn, op.calendar)?;
+            failure = Some(Failure { message: format!("{title} was deleted in {} while you edited it. Your change wasn't saved.", place(&calendar)), event: None });
+        }
         Ok(Sent::Gone) => {
             store::settle_calendar_op(conn, op.id, OpState::Gone)?;
             store::end_later_calendar_ops(conn, op, OpState::Gone, "the event was deleted on the server")?;
+            end_waiting(conn, op, "the series it continues was deleted on the server", horizon)?;
             let remote_id = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
             store::remove_item(conn, op.calendar, remote_id, store::Removal::Deleted, horizon)?;
             failure = Some(Failure { message: format!("{title} was deleted in {} while you edited it. Your change wasn't saved.", place(&calendar)), event: None });
@@ -632,6 +915,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
             let over = match &op.write {
                 Write::Create(_) => {
                     store::end_later_calendar_ops(conn, op, OpState::Failed, &format!("the event was never saved: {reason}"))?;
+                    end_waiting(conn, op, &format!("the new series was never saved: {reason}"), horizon)?;
                     None
                 }
                 _ => store::next_calendar_op_over(conn, op)?,
@@ -646,12 +930,43 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
                 }
                 None => revert(conn, op, horizon)?,
             }
+            // The old series' shortening may have reached the server before
+            // its answer was lost: the calendar is listed again, which shows
+            // what the server has. Deleting the new series here could lose
+            // the events after the split.
+            if op.after.is_some() {
+                store::forget_calendar_cursor(conn, op.calendar)?;
+            }
             let event = stored(conn, op.calendar, &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
             failure = Some(Failure { message: format!("Jolta couldn't save the change to {title}: {reason}"), event });
         }
     }
     store::refresh_changed_locally(conn, op.calendar, &op.uid)?;
     Ok(Settled { op: op.id, calendar: op.calendar, failure })
+}
+
+/// This and following whose old series the server kept whole: the new
+/// series, made already, is deleted again, guarded by its version as any
+/// delete, so the old series alone shows the events.
+fn take_back_new_series(conn: &Connection, op: &CalendarOp, now: i64, horizon: &Horizon) -> Result<()> {
+    let Some(first) = op.after else { return Ok(()) };
+    let first = store::calendar_op(conn, first)?;
+    if first.state == OpState::Done {
+        queue(conn, &Edit::quiet(first.calendar, Change::Delete { uid: first.uid.clone() }), now, horizon)?;
+    }
+    Ok(())
+}
+
+/// Ends the ops waiting for `op`, which never will be sent, and puts the
+/// store back from them: This and following keeps the old series whole
+/// when its new series couldn't be made.
+fn end_waiting(conn: &Connection, op: &CalendarOp, error: &str, horizon: &Horizon) -> Result<()> {
+    for waiting in store::calendar_ops_after(conn, op.id)? {
+        store::fail_calendar_attempt(conn, waiting.id, error, None)?;
+        revert(conn, &waiting, horizon)?;
+        store::refresh_changed_locally(conn, waiting.calendar, &waiting.uid)?;
+    }
+    Ok(())
 }
 
 /// Stores the version an op left on the server as a sync would. The
@@ -663,8 +978,44 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
 fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: bool, horizon: &Horizon) -> Result<()> {
     let Some((v, blob)) = version else { return Ok(()) };
     let from = op.held.as_ref().map_or(op.remote_key.as_str(), |h| h.remote_id.as_str());
+    // A version that doesn't name the occurrence the op wrote would stand
+    // in for its series; the calendar is listed again instead.
+    if let Some(rid) = &op.recurrence_id
+        && v.remote_id != from
+        && !v.events.iter().any(|e| e.recurrence_id.is_some_and(|r| r.names(rid, horizon.here)))
+    {
+        return store::forget_calendar_cursor(conn, op.calendar);
+    }
+    // An occurrence the server holds as an instance with an id of its own,
+    // written by the op or kept against its delete: only its row moves
+    // there, and only ops on that occurrence follow it.
+    if op.recurrence_id.is_some() && v.remote_id != from {
+        store::refile_occurrence(conn, op.calendar, &op.uid, op.recurrence_id.as_ref(), from, &v.remote_id)?;
+        store::apply_item(conn, op.calendar, &v.remote_id, v.etag.as_deref(), &v.events, blob.as_deref(), horizon)?;
+        for mut later in store::later_calendar_ops(conn, op)? {
+            if later.recurrence_id != op.recurrence_id || later.held.as_ref().is_none_or(|h| h.remote_id != from) {
+                continue;
+            }
+            later.held = Some(Held { remote_id: v.remote_id.clone(), etag: if clean { v.etag.clone() } else { later.held.and_then(|h| h.etag) } });
+            if let Write::Update { fresh, .. } = &mut later.write {
+                *fresh = false;
+            }
+            store::rewrite_calendar_op(conn, &later)?;
+        }
+        return Ok(());
+    }
     store::refile_event_rows(conn, op.calendar, &op.uid, from, &v.remote_id)?;
+    // A series' changed occurrences written as instances go under their
+    // own ids before the series' object replaces the rows under its id.
+    for i in &v.instances {
+        for e in &i.events {
+            store::refile_occurrence(conn, op.calendar, &op.uid, e.recurrence_id.as_ref(), &v.remote_id, &i.remote_id)?;
+        }
+    }
     store::apply_item(conn, op.calendar, &v.remote_id, v.etag.as_deref(), &v.events, blob.as_deref(), horizon)?;
+    for i in &v.instances {
+        store::apply_item(conn, op.calendar, &i.remote_id, i.etag.as_deref(), &i.events, None, horizon)?;
+    }
     if clean {
         store::set_item_version(conn, op.calendar, &v.remote_id, v.etag.as_deref(), blob.as_deref())?;
     }
@@ -728,9 +1079,16 @@ async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
         return Ok(Sent::Done { version: None, merged: false });
     }
     let source = super::sync::calendar_source(jolta, &calendar).await?;
-    let raw = match (&op.held, &op.write) {
-        (Some(held), Write::Update { event, .. }) => {
-            let (cal, uid, rid, remote) = (op.calendar, op.uid.clone(), event.recurrence_id, held.remote_id.clone());
+    // A CalDAV write goes onto the resource's text, which the row it
+    // changes keeps; one occurrence taken out goes onto its series'.
+    let rid = match &op.write {
+        Write::Update { event, .. } => Some(event.recurrence_id),
+        Write::Cancel { .. } => Some(None),
+        _ => None,
+    };
+    let raw = match (&op.held, rid) {
+        (Some(held), Some(rid)) => {
+            let (cal, uid, remote) = (op.calendar, op.uid.clone(), held.remote_id.clone());
             let blob = jolta.store.read_async(move |c| Ok(stored(c, cal, &uid, rid.as_ref())?.filter(|s| s.remote_id == remote).and_then(|s| s.blob))).await?;
             blob.map(|hash| jolta.blobs.get(&hash)).transpose()?
         }
@@ -764,6 +1122,8 @@ enum Delivered {
 pub(crate) trait Remote {
     async fn write(&self, write: &OpWrite<'_>) -> Result<Written>;
     async fn fetch(&self, remote_id: &str, uid: &str, alarms: &[Alarm]) -> Result<Option<Version>>;
+    /// The occurrence `rid` of the series held as `series`, changed or not.
+    async fn fetch_occurrence(&self, series: &rsvp::Stored, rid: &Moment, alarms: &[Alarm]) -> Result<Option<Version>>;
 }
 
 struct Bound<'a> {
@@ -778,6 +1138,10 @@ impl Remote for Bound<'_> {
 
     async fn fetch(&self, remote_id: &str, uid: &str, alarms: &[Alarm]) -> Result<Option<Version>> {
         self.source.fetch(self.calendar, remote_id, uid, alarms).await
+    }
+
+    async fn fetch_occurrence(&self, series: &rsvp::Stored, rid: &Moment, alarms: &[Alarm]) -> Result<Option<Version>> {
+        self.source.fetch_occurrence(self.calendar, series, rid, alarms).await
     }
 }
 
@@ -799,21 +1163,37 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             Written::Saved(version) => Ok(Delivered::Done { version, merged: false }),
             Written::Stale | Written::Gone => Err(Error::Other("the server refused the new event".into())),
         },
-        Write::Update { base, event } => {
+        Write::Update { base, event, dropped, fresh } => {
             let Some(held) = &op.held else { return Err(Error::Other("an edit without the version it changes".into())) };
-            let (mut base, mut mine) = (base.clone(), event.clone());
+            let dropped: Vec<EventData> = dropped.iter().map(|r| r.event.clone()).collect();
+            let (mut base, mut mine, mut fresh) = (base.clone(), event.clone(), *fresh);
             let mut held = held_as(held, &base, raw);
             let mut lost: Vec<Field> = Vec::new();
             for round in 0..MERGE_ROUNDS {
-                match remote.write(&OpWrite::Update { held: &held, base: &base, event: &mine, extra }).await? {
+                let request = match fresh {
+                    true => OpWrite::Occurrence { series: &held, base: &base, event: &mine, extra },
+                    false => OpWrite::Update { held: &held, base: &base, event: &mine, extra, dropped: &dropped },
+                };
+                let written = match remote.write(&request).await? {
+                    // An instance not found may only have moved: its series says.
+                    Written::Gone if mine.recurrence_id.is_some() => Written::Stale,
+                    written => written,
+                };
+                match written {
                     Written::Saved(version) if lost.is_empty() => return Ok(Delivered::Done { version, merged: round > 0 }),
                     Written::Saved(version) => return Ok(Delivered::Conflict { version, lost }),
                     Written::Gone => return Ok(Delivered::Gone),
                     Written::Stale => {
                         // Google gives no reminders for an event on the
                         // calendar's defaults; the held version's stand in.
-                        let Some(now) = remote.fetch(&held.remote_id, &mine.uid, &base.alarms).await? else { return Ok(Delivered::Gone) };
-                        let Some(theirs) = now.events.iter().find(|e| same_row(e, &mine)).cloned() else { return Ok(Delivered::Gone) };
+                        // An occurrence without an object of its own is read
+                        // as its instance, which may have changed meanwhile.
+                        let now = match (fresh, &mine.recurrence_id) {
+                            (true, Some(rid)) => remote.fetch_occurrence(&held, rid, &base.alarms).await?,
+                            _ => remote.fetch(&held.remote_id, &mine.uid, &base.alarms).await?,
+                        };
+                        let Some(now) = now else { return Ok(Delivered::Gone) };
+                        let Some(theirs) = their_row(&now.events, &mine) else { return Ok(Delivered::Gone) };
                         let merged = merge::three_way(&base, &mine, &theirs);
                         for field in merged.lost {
                             if !lost.contains(&field) {
@@ -824,8 +1204,40 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
                         if merged.event == theirs {
                             return Ok(if lost.is_empty() { Delivered::Done { version: Some(now), merged: true } } else { Delivered::Conflict { version: Some(now), lost } });
                         }
+                        fresh = fresh && !now.events.iter().any(|e| same_row(e, &mine));
                         held = held_as(&Held { remote_id: now.remote_id.clone(), etag: now.etag.clone() }, &theirs, now.raw.clone());
                         (base, mine) = (theirs, merged.event);
+                    }
+                }
+            }
+            Err(Error::Other("it kept changing on the server".into()))
+        }
+        Write::Cancel { occurrence, row, .. } => {
+            let Some(held) = &op.held else { return Err(Error::Other("a delete without the version it removes".into())) };
+            let mut held = held_as(held, occurrence, raw);
+            let mut changed = row.is_some();
+            for _ in 0..MERGE_ROUNDS {
+                match remote.write(&OpWrite::Cancel { held: &held, occurrence, changed }).await? {
+                    Written::Saved(version) => return Ok(Delivered::Done { version, merged: false }),
+                    Written::Gone => return Ok(Delivered::Done { version: None, merged: false }),
+                    Written::Stale => {
+                        // An occurrence without an object of its own is read
+                        // as its instance: a change made to it meanwhile
+                        // keeps it.
+                        let now = match (changed, &occurrence.recurrence_id) {
+                            (false, Some(rid)) => remote.fetch_occurrence(&held, rid, &occurrence.alarms).await?,
+                            _ => remote.fetch(&held.remote_id, &occurrence.uid, &occurrence.alarms).await?,
+                        };
+                        let Some(now) = now else { return Ok(Delivered::Done { version: None, merged: false }) };
+                        changed = changed || now.remote_id != held.remote_id;
+                        let Some(theirs) = their_row(&now.events, occurrence).filter(|t| t.status != EventStatus::Cancelled) else {
+                            return Ok(Delivered::Done { version: Some(now), merged: false });
+                        };
+                        let changed: Vec<Field> = FIELDS.into_iter().filter(|f| f.differs(occurrence, &theirs)).collect();
+                        if !changed.is_empty() {
+                            return Ok(Delivered::Conflict { version: Some(now), lost: changed });
+                        }
+                        held = held_as(&Held { remote_id: now.remote_id.clone(), etag: now.etag.clone() }, occurrence, now.raw.clone());
                     }
                 }
             }
@@ -852,6 +1264,19 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             Err(Error::Other("it kept changing on the server".into()))
         }
     }
+}
+
+/// The row of `events`, one server object, that `mine` is: the same row,
+/// else for an occurrence without one the series moved there, while the
+/// series still has that occurrence.
+fn their_row(events: &[EventData], mine: &EventData) -> Option<EventData> {
+    if let Some(row) = events.iter().find(|e| same_row(e, mine)) {
+        return Some(row.clone());
+    }
+    let rid = mine.recurrence_id.as_ref()?;
+    let here = super::tz::here();
+    let master = events.iter().find(|e| e.uid == mine.uid && e.recurrence_id.is_none())?;
+    is_occurrence(master, rid, here).then(|| occurrences::occurrence(std::slice::from_ref(master), rid, here)).flatten()
 }
 
 /// Whether two events are the same row of a series: the same UID and the
@@ -1047,7 +1472,7 @@ mod tests {
         let Undone::Queued(inverse) = s.write(|tx| undo(tx, edit, NOW, &h)).unwrap() else { panic!("a sent op gets its opposite") };
         assert_eq!(shown(&s), pairs(&[("24 09:00", "Standup")]));
         let op = s.read(|c| store::calendar_op(c, inverse)).unwrap();
-        assert_eq!(op.write, Write::Update { base: event("u1", "Daily", "2026-11-24 10:00"), event: event("u1", "Standup", "2026-11-24 09:00") });
+        assert_eq!(op.write, Write::Update { base: event("u1", "Daily", "2026-11-24 10:00"), event: event("u1", "Standup", "2026-11-24 09:00"), dropped: Vec::new(), fresh: false });
         assert!(s.write(|tx| undo(tx, edit, NOW, &h)).is_err(), "undoing twice queues nothing more");
         send_all(&s, Ok(()));
 
@@ -1274,7 +1699,7 @@ mod tests {
         }
 
         fn version(&self, id: &str) -> Option<Version> {
-            self.objects.lock().unwrap().get(id).map(|(v, e)| Version { remote_id: id.into(), etag: Some(v.to_string()), events: vec![e.clone()], raw: None })
+            self.objects.lock().unwrap().get(id).map(|(v, e)| Version { remote_id: id.into(), etag: Some(v.to_string()), events: vec![e.clone()], raw: None, instances: Vec::new() })
         }
 
         fn log(&self) -> Vec<String> {
@@ -1317,6 +1742,24 @@ mod tests {
                     });
                     self.answer(self.version(&held.remote_id))
                 }
+                OpWrite::Occurrence { series, event, .. } => {
+                    self.log.lock().unwrap().push(format!("occurrence of {} at {}", series.remote_id, series.etag.as_deref().unwrap_or("-")));
+                    let Some(now) = self.version(&series.remote_id) else { return Ok(Written::Gone) };
+                    if now.etag != series.etag {
+                        return Ok(Written::Stale);
+                    }
+                    let id = format!("{}_instance", series.remote_id);
+                    self.put(&id, event.clone());
+                    self.answer(self.version(&id))
+                }
+                OpWrite::Cancel { held, .. } => {
+                    self.log.lock().unwrap().push(format!("cancel in {} at {}", held.remote_id, held.etag.as_deref().unwrap_or("-")));
+                    let Some(now) = self.version(&held.remote_id) else { return Ok(Written::Gone) };
+                    if now.etag != held.etag {
+                        return Ok(Written::Stale);
+                    }
+                    self.answer(None)
+                }
                 OpWrite::Delete { held } => {
                     self.log.lock().unwrap().push(format!("delete {} at {}", held.remote_id, held.etag.as_deref().unwrap_or("-")));
                     let Some(now) = self.version(&held.remote_id) else { return Ok(Written::Gone) };
@@ -1332,6 +1775,12 @@ mod tests {
         async fn fetch(&self, remote_id: &str, _: &str, _: &[Alarm]) -> Result<Option<Version>> {
             self.log.lock().unwrap().push(format!("fetch {remote_id}"));
             Ok(self.version(remote_id))
+        }
+
+        async fn fetch_occurrence(&self, series: &rsvp::Stored, _: &Moment, _: &[Alarm]) -> Result<Option<Version>> {
+            let id = format!("{}_instance", series.remote_id);
+            self.log.lock().unwrap().push(format!("fetch {id}"));
+            Ok(self.version(&id).or_else(|| self.version(&series.remote_id)))
         }
     }
 
@@ -1498,6 +1947,144 @@ mod tests {
         assert!(shown(&s).is_empty(), "gone from the store");
         assert!(server.objects.lock().unwrap().is_empty(), "and not made again");
         assert!(claim(&s).is_empty());
+    }
+
+    /// A Google series `g1` of three from Tue 24 Nov, synced.
+    fn synced_series(name: &str) -> (Store, CalendarId, Server, EventData) {
+        let (s, _) = setup(name);
+        let cal = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let server = Server::default();
+        let series = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=3".into()], ..Default::default() }), ..event("u1", "Standup", "2026-11-24 09:00") };
+        server.put("g1", series.clone());
+        sync(&s, cal, &server);
+        (s, cal, server, series)
+    }
+
+    /// Check 2: an unchanged occurrence is written as an instance of its
+    /// series, guarded by the series' version, and lands under the id the
+    /// server gave the instance; the series row stays as it was.
+    #[test]
+    fn an_unchanged_occurrence_is_written_as_an_instance_of_its_series() {
+        let (s, cal, server, series) = synced_series("instance");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let moved = EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup", "2026-12-01 11:00") };
+        let op = q(&s, cal, Change::Update(moved.clone())).unwrap();
+        assert!(matches!(s.read(|c| store::calendar_op(c, op)).unwrap().write, Write::Update { fresh: true, .. }));
+        run(&s, &server);
+        assert_eq!(server.log(), ["occurrence of g1 at 1"]);
+        assert_eq!(state(&s, op).0, OpState::Done);
+        let rows: Vec<(String, String)> = s.read(|c| Ok(c.prepare("SELECT remote_id, recurrence_id FROM event ORDER BY id")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)).unwrap();
+        assert_eq!(rows.len(), 2, "the series and one changed occurrence: {rows:?}");
+        assert!(rows.iter().any(|(id, rid)| id == "g1_instance" && !rid.is_empty()), "under the instance's own id: {rows:?}");
+        assert_eq!(s.read(|c| stored(c, cal, "u1", None)).unwrap().unwrap().event, series);
+    }
+
+    /// An instance the server can't find while its series is still there
+    /// takes back only the op's change, never the series.
+    #[test]
+    fn a_missing_instance_never_takes_its_series_out_of_the_store() {
+        let (s, cal, server, series) = synced_series("instance-gone");
+        let moved = EventData { recurrence_id: Some(Moment::Time(at("2026-12-01 09:00"))), recurrence: None, ..event("u1", "Standup", "2026-12-01 11:00") };
+        let op = q(&s, cal, Change::Update(moved)).unwrap();
+        // The series moved elsewhere, so the occurrence Jolta wrote to is gone.
+        server.put("g1", EventData { span: event("u1", "Standup", "2026-11-25 09:00").span, ..series.clone() });
+        let settled = run(&s, &server);
+        assert_eq!(state(&s, op).0, OpState::Gone);
+        assert!(settled[0].failure.is_some());
+        assert!(s.read(|c| stored(c, cal, "u1", None)).unwrap().is_some(), "the series stays");
+        assert_eq!(s.read(|c| series_rows(c, cal)).unwrap(), 1, "and the change is taken back");
+    }
+
+    /// Check 4: an occurrence changed elsewhere while Jolta's change of it
+    /// waited is read as that instance, so its change stays.
+    #[test]
+    fn an_occurrence_changed_elsewhere_keeps_that_change() {
+        let (s, cal, server, series) = synced_series("instance-stale");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let mine = EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup", "2026-12-01 11:00") };
+        let op = q(&s, cal, Change::Update(mine)).unwrap();
+        let theirs = EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup, theirs", "2026-12-01 09:00") };
+        server.put("g1_instance", theirs);
+        server.put("g1", series);
+        run(&s, &server);
+        assert_eq!(state(&s, op).0, OpState::Done);
+        let now = server.get("g1_instance").unwrap();
+        assert_eq!((now.title.as_str(), now.span), ("Standup, theirs", event("u1", "x", "2026-12-01 11:00").span), "their title and my time: {:?}", server.log());
+    }
+
+    /// A series created with a changed occurrence keeps it once settled:
+    /// the instance the writer made lands under its own id.
+    #[test]
+    fn a_created_series_keeps_its_changed_occurrence_when_it_lands() {
+        let (s, _) = setup("create-instances");
+        let cal = remote_calendar(&s, CalendarSource::Google, Access::Owner);
+        let series = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=3".into()], ..Default::default() }), ..event("u9", "Review", "2026-11-10 09:00") };
+        let moved = EventData { recurrence_id: Some(Moment::Time(at("2026-11-17 09:00"))), recurrence: None, ..event("u9", "Review", "2026-11-17 15:00") };
+        let op = q(&s, cal, Change::Create(vec![series.clone(), moved.clone()])).unwrap();
+        let shown_before = shown(&s);
+        let claimed = claim(&s);
+        let instance = Version { remote_id: "g9_20261117T080000Z".into(), etag: Some("2".into()), events: vec![moved], raw: None, instances: Vec::new() };
+        let version = Version { remote_id: "g9".into(), etag: Some("2".into()), events: vec![series], raw: None, instances: vec![instance] };
+        s.write(|tx| settle(tx, &claimed[0], Ok(Sent::Done { version: Some((version, None)), merged: false }), NOW, &horizon())).unwrap();
+        assert_eq!(state(&s, op).0, OpState::Done);
+        assert_eq!(shown(&s), shown_before, "the moved occurrence stays at 15:00");
+        assert_eq!(s.read(|c| series_rows(c, cal)).unwrap(), 2);
+    }
+
+    /// An occurrence changed elsewhere after the user deleted it stays, as
+    /// the server has it, and its series with it.
+    #[test]
+    fn deleting_an_occurrence_changed_elsewhere_keeps_it_and_its_series() {
+        let (s, cal, server, series) = synced_series("cancel-stale");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let op = q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: rid }).unwrap();
+        let theirs = EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup, theirs", "2026-12-01 09:00") };
+        server.put("g1_instance", theirs);
+        server.put("g1", series.clone());
+        let settled = s.write(|tx| store::claim_calendar_ops(tx, NOW + 3600, AT_ONCE)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let sent = rt.block_on(deliver(&server, &settled[0], None)).map_err(|e| e.to_string()).map(|d| match d {
+            Delivered::Done { version, merged } => Sent::Done { version: version.map(|v| (v, None)), merged },
+            Delivered::Conflict { version, lost } => Sent::Conflict { version: version.map(|v| (v, None)), lost },
+            Delivered::Gone => Sent::Gone,
+        });
+        assert!(matches!(sent, Ok(Sent::Conflict { .. })), "{sent:?}");
+        s.write(|tx| settle(tx, &settled[0], sent, NOW, &horizon())).unwrap();
+        assert_eq!(state(&s, op).0, OpState::Conflict);
+        let master = s.read(|c| stored(c, cal, "u1", None)).unwrap().unwrap().event;
+        assert!(master.recurrence.as_ref().unwrap().exdates.is_empty(), "the series is whole again");
+        assert_eq!(s.read(|c| stored(c, cal, "u1", Some(&rid))).unwrap().unwrap().event.title, "Standup, theirs");
+        assert_eq!(s.read(|c| conflict(c, cal, "u1")).unwrap().unwrap().action, "Delete anyway");
+        assert!(s.write(|tx| apply_mine(tx, op, NOW, &horizon())).unwrap().is_some(), "and Delete anyway queues the delete again");
+    }
+
+    /// A delete of the whole series queued behind a delete of one of its
+    /// occurrences: the first's conflict has no series to put back and
+    /// settles, so the second goes.
+    #[test]
+    fn a_series_delete_behind_a_conflicting_occurrence_delete_still_goes() {
+        let (s, cal, server, series) = synced_series("cancel-then-delete");
+        let rid = Moment::Time(at("2026-12-01 09:00"));
+        let one = q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: rid }).unwrap();
+        let other = Moment::Time(at("2026-12-08 09:00"));
+        q(&s, cal, Change::DeleteOccurrence { uid: "u1".into(), recurrence_id: other }).unwrap();
+        let all = q(&s, cal, Change::Delete { uid: "u1".into() }).unwrap();
+        server.put("g1_instance", EventData { recurrence_id: Some(rid), recurrence: None, ..event("u1", "Standup, theirs", "2026-12-01 09:00") });
+        server.put("g1", series);
+        let claimed = s.write(|tx| store::claim_calendar_ops(tx, NOW + 3600, AT_ONCE)).unwrap();
+        assert_eq!(claimed.iter().map(|o| o.id).collect::<Vec<_>>(), [one]);
+        let version = server.version("g1_instance").map(|v| (v, None));
+        s.write(|tx| settle(tx, &claimed[0], Ok(Sent::Conflict { version, lost: vec![Field::Title] }), NOW, &horizon())).unwrap();
+        assert_eq!(state(&s, one).0, OpState::Conflict);
+        assert_eq!(claim(&s).iter().map(|o| o.recurrence_id).collect::<Vec<_>>(), [Some(other)], "the next op of the series goes");
+        let Write::Delete(kept) = s.read(|c| store::calendar_op(c, all)).unwrap().write else { panic!("a delete") };
+        let master = kept.iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        assert_eq!(master.recurrence.as_ref().unwrap().exdates, [other], "its Undo brings back the rejected occurrence and keeps the other taken out");
+        assert!(kept.iter().any(|e| e.recurrence_id == Some(rid) && e.title == "Standup, theirs"), "with the occurrence the server kept");
+    }
+
+    fn series_rows(c: &Connection, cal: CalendarId) -> Result<i64> {
+        Ok(c.query_row("SELECT count(*) FROM event WHERE calendar_id = ?1 AND uid IN ('u1', 'u9')", [cal], |r| r.get(0))?)
     }
 
     /// Check 4: a create whose first try reached the server but lost its

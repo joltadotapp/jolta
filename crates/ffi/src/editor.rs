@@ -100,6 +100,12 @@ pub struct EventDraft {
     pub meeting: Option<MeetingInfo>,
     /// The repeat rule in words, None for a single event.
     pub repeat: Option<String>,
+    /// The RRULE the series repeats by, as the user set it: for an
+    /// occurrence, its series'. None for a single event. Set it from a
+    /// preset's or the custom part's rule (`repeat_presets`, `custom_rule`).
+    pub rule: Option<String>,
+    /// The series' repeat as the editor opened it, for the core: pass it back.
+    pub rule_was: Option<String>,
     pub description_note: Option<String>,
 }
 
@@ -131,12 +137,62 @@ pub struct DraftProblem {
 pub struct SavePlan {
     /// Nothing differs from the stored event: saving only closes.
     pub unchanged: bool,
+    /// For a change to one occurrence of a series, the scope prompt's
+    /// choices in order, the first the default (Return); keys 1, 2, 3.
+    pub scopes: Vec<ScopeChoice>,
+    /// The prompt's line: "You moved Standup to 10:00."
+    pub prompt: Option<String>,
+}
+
+/// Which events of a series a change or delete is for.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditScope {
+    This,
+    Following,
+    All,
+}
+
+impl From<cal::ops::Scope> for EditScope {
+    fn from(s: cal::ops::Scope) -> Self {
+        match s {
+            cal::ops::Scope::This => EditScope::This,
+            cal::ops::Scope::Following => EditScope::Following,
+            cal::ops::Scope::All => EditScope::All,
+        }
+    }
+}
+
+impl From<EditScope> for cal::ops::Scope {
+    fn from(s: EditScope) -> Self {
+        match s {
+            EditScope::This => cal::ops::Scope::This,
+            EditScope::Following => cal::ops::Scope::Following,
+            EditScope::All => cal::ops::Scope::All,
+        }
+    }
+}
+
+/// One row of the scope prompt.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct ScopeChoice {
+    pub scope: EditScope,
+    /// "This and following events".
+    pub label: String,
+    /// What it costs here: "Starts a new series from Tue 24 Nov."
+    pub detail: Option<String>,
+}
+
+fn choices(list: Vec<draft::ScopeChoice>) -> Vec<ScopeChoice> {
+    list.into_iter().map(|c| ScopeChoice { scope: c.scope.into(), label: c.label, detail: c.detail }).collect()
 }
 
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct SavedEdit {
     /// For `undo_calendar`; None when nothing changed.
     pub token: Option<i64>,
+    /// The UID the saved event has now, to select it: a new one after This
+    /// and following.
+    pub uid: String,
     /// "Saved Standup".
     pub message: String,
 }
@@ -146,6 +202,10 @@ pub struct DeletePlan {
     /// Why the event can't be deleted, if it can't.
     pub refusal: Option<String>,
     pub title: String,
+    /// For one occurrence of a series, the scope prompt's choices.
+    pub scopes: Vec<ScopeChoice>,
+    /// The prompt's line: "You're deleting Standup on Tue 24 Nov."
+    pub prompt: Option<String>,
 }
 
 fn failed(e: impl std::fmt::Display) -> CoreError {
@@ -237,9 +297,26 @@ impl From<draft::EventDraft> for EventDraft {
                 meeting_info(m, app)
             }),
             repeat: d.repeat,
+            rule: d.rule.as_ref().map(|r| r.rules.join("\n")),
+            rule_was: d.rule_was.as_ref().and_then(|r| serde_json::to_string(r).ok()),
             description_note: d.description_note,
         }
     }
+}
+
+/// The draft's repeat: its rule text over the series' EXDATEs and RDATEs
+/// as opened, or exactly what it opened with when the rule is the same.
+pub(crate) fn rule_of(rule: Option<&str>, was: Option<&str>) -> Result<(Option<cal::Recurrence>, Option<cal::Recurrence>)> {
+    let was: Option<cal::Recurrence> = was.map(serde_json::from_str).transpose().map_err(failed)?;
+    let rules: Option<Vec<String>> = rule.map(|r| r.lines().map(|l| l.trim().trim_start_matches("RRULE:").to_string()).filter(|l| !l.is_empty()).collect());
+    let rule = match (rules, &was) {
+        (None, _) => None,
+        (Some(rules), _) if rules.is_empty() => None,
+        (Some(rules), Some(w)) if rules == w.rules => Some(w.clone()),
+        (Some(rules), Some(w)) => Some(cal::Recurrence { rules, ..w.clone() }),
+        (Some(rules), None) => Some(cal::Recurrence { rules, ..Default::default() }),
+    };
+    Ok((rule, was))
 }
 
 impl TryFrom<&EventDraft> for draft::EventDraft {
@@ -249,6 +326,7 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
     /// from the store again.
     fn try_from(d: &EventDraft) -> Result<Self> {
         let base = d.base.as_deref().map(serde_json::from_str::<cal::EventData>).transpose().map_err(failed)?;
+        let (rule, rule_was) = rule_of(d.rule.as_deref(), d.rule_was.as_deref())?;
         Ok(draft::EventDraft {
             calendar: CalendarId(d.calendar_id),
             base,
@@ -282,6 +360,8 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
             organizer: None,
             meeting: None,
             repeat: None,
+            rule,
+            rule_was,
             description_note: None,
         })
     }
@@ -343,23 +423,37 @@ impl Core {
         Ok(problems.into_iter().map(|p| DraftProblem { field: p.field.map(Into::into), text: p.text, blocking: p.blocking }).collect())
     }
 
+    /// What saving needs first: for one occurrence of a series, the scope prompt.
     pub fn plan_save(&self, draft: EventDraft) -> Result<SavePlan> {
         let d = draft::EventDraft::try_from(&draft)?;
-        Ok(SavePlan { unchanged: draft::plan_save(&d).unchanged })
+        let plan = self.jolta.store.read(|c| draft::plan_save(c, &d, tz::here()))?;
+        Ok(SavePlan { unchanged: plan.unchanged, scopes: choices(plan.scopes), prompt: plan.prompt })
     }
 
-    /// Saves the draft, telling nobody. The returned token undoes it.
-    pub fn save_event(&self, draft: EventDraft) -> Result<SavedEdit> {
+    /// Saves the draft, telling nobody, for `scope` when `plan_save` asked
+    /// for one. The returned token undoes it.
+    pub fn save_event(&self, draft: EventDraft, scope: Option<EditScope>) -> Result<SavedEdit> {
         let d = draft::EventDraft::try_from(&draft)?;
         let h = horizon();
-        let saved = self.jolta.store.write(|tx| draft::save_draft(tx, &d, Utc::now().timestamp(), &h, tz::here()))?;
+        let saved = self.jolta.store.write(|tx| draft::save_draft(tx, &d, scope.map(Into::into), Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
-        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
-    pub fn plan_delete(&self, event_id: i64) -> Result<DeletePlan> {
-        let plan = self.jolta.store.read(|c| draft::plan_delete(c, EventId(event_id), tz::here()))?;
-        Ok(DeletePlan { refusal: plan.refusal, title: plan.title })
+    /// Whether the event can be deleted, and at the occurrence `time` of a
+    /// series, the scope prompt's choices.
+    pub fn plan_delete(&self, event_id: i64, time: Option<OccurrenceTime>) -> Result<DeletePlan> {
+        let at = time.map(cal::Bounds::try_from).transpose()?;
+        let plan = self.jolta.store.read(|c| draft::plan_delete(c, EventId(event_id), at, tz::here()))?;
+        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
+    }
+
+    /// `plan_delete` for the stored event a draft opened, found again by its
+    /// UID and occurrence, as `delete_draft` deletes it.
+    pub fn plan_delete_draft(&self, draft: EventDraft) -> Result<DeletePlan> {
+        let d = draft::EventDraft::try_from(&draft)?;
+        let plan = self.jolta.store.read(|c| draft::plan_delete_drafted(c, &d, tz::here()))?;
+        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
     }
 
     /// Deletes an event without guests, telling nobody. The returned token undoes it.
@@ -367,17 +461,18 @@ impl Core {
         let h = horizon();
         let saved = self.jolta.store.write(|tx| draft::delete_event(tx, EventId(event_id), Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
-        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
     /// Deletes the stored event a draft opened, found again by its UID, as
-    /// the editor's Delete does. The returned token undoes it.
-    pub fn delete_draft(&self, draft: EventDraft) -> Result<SavedEdit> {
+    /// the editor's Delete does; one occurrence of a series for `scope`.
+    /// The returned token undoes it.
+    pub fn delete_draft(&self, draft: EventDraft, scope: Option<EditScope>) -> Result<SavedEdit> {
         let d = draft::EventDraft::try_from(&draft)?;
         let h = horizon();
-        let saved = self.jolta.store.write(|tx| draft::delete_drafted(tx, &d, Utc::now().timestamp(), &h, tz::here()))?;
+        let saved = self.jolta.store.write(|tx| draft::delete_drafted(tx, &d, scope.map(Into::into), Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
-        Ok(SavedEdit { token: saved.op.map(|o| o.0), message: saved.message })
+        Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
     /// A time typed in a time field, as minutes after midnight: "930",

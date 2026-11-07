@@ -260,7 +260,8 @@ pub(super) fn moment_from_text(text: &str) -> Option<Moment> {
 /// by that version and a change made elsewhere meanwhile goes through the
 /// op's merge instead of being lost or overwriting the edit.
 const HELD: &str = "EXISTS (SELECT 1 FROM calendar_op o WHERE o.calendar_id = event.calendar_id AND o.uid = event.uid
-       AND o.state IN ('pending', 'sending') AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete')))";
+       AND o.state IN ('pending', 'sending') AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete', 'cancel')
+                                   OR json_array_length(o.target, '$.rows') > 0))";
 
 /// Whether a calendar op still has to send the row with this UID and
 /// recurrence id (`HELD`).
@@ -268,7 +269,7 @@ fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Optio
     Ok(conn
         .prepare_cached(
             "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND state IN ('pending', 'sending')
-               AND (recurrence_id = ?3 OR kind IN ('create', 'delete')))",
+               AND (recurrence_id = ?3 OR kind IN ('create', 'delete', 'cancel') OR json_array_length(target, '$.rows') > 0))",
         )?
         .query_row(params![calendar, uid, recurrence_id.map(moment_text).unwrap_or_default()], |r| r.get(0))?)
 }
@@ -671,9 +672,11 @@ pub fn event_not_synced(conn: &Connection, id: EventId) -> Result<bool> {
     Ok(conn.query_row("SELECT changed_locally FROM event WHERE id = ?1", [id], |r| r.get(0)).optional()?.unwrap_or(false))
 }
 
-/// How many events each calendar holds, for listings.
+/// How many events each calendar holds, for listings. Cancelled rows don't
+/// count: Google keeps reporting the cancelled occurrences of a deleted
+/// series, which leaves a calendar of nothing but those to show.
 pub fn event_counts(conn: &Connection) -> Result<BTreeMap<CalendarId, i64>> {
-    let mut stmt = conn.prepare("SELECT calendar_id, count(*) FROM event GROUP BY calendar_id")?;
+    let mut stmt = conn.prepare("SELECT calendar_id, count(*) FROM event WHERE status <> 'cancelled' GROUP BY calendar_id")?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -686,6 +689,17 @@ mod tests {
     use super::*;
     use crate::calendar::{Attendee, Local, Person, Recurrence, Role, Span};
     use crate::store::Store;
+
+    #[test]
+    fn a_calendar_counts_only_the_events_it_shows() {
+        let s = store("counts");
+        let cal = work_calendar(&s);
+        apply(&s, cal, "/cal/work/coffee.ics", None, &[EventData::new("coffee", timed("2026-11-10 10:00", 30))]);
+        let gone = EventData { status: crate::calendar::EventStatus::Cancelled, ..moved("deleted-series", "2026-11-16 09:00", "2026-11-16 09:00") };
+        apply(&s, cal, "deleted-series_20261116T080000Z", None, &[gone]);
+        assert_eq!(november(&s).len(), 1);
+        assert_eq!(s.read(event_counts).unwrap().get(&cal), Some(&1), "a cancelled occurrence is no event of the calendar");
+    }
 
     #[test]
     fn a_stored_recurrence_id_reads_back_as_its_moment() {

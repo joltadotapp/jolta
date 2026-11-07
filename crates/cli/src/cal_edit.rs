@@ -6,9 +6,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
 use clap::Args;
 use jolta_core::Jolta;
-use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Undone};
+use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Scope, Undone};
 use jolta_core::calendar::series::Horizon;
-use jolta_core::calendar::{CalendarId, EventData, EventId, Local, Span, Zone, caps, draft, tz};
+use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Local, Recurrence, Span, Zone, caps, draft, tz};
 use jolta_core::store;
 
 use crate::truncate;
@@ -44,8 +44,41 @@ pub struct CreateArgs {
     /// An iCalendar line added to a CalDAV event, such as X-JOLTA-HOLD:1.
     #[arg(long)]
     line: Vec<String>,
+    /// Repeat by this RRULE, such as "FREQ=WEEKLY;BYDAY=TU;COUNT=6".
+    #[arg(long)]
+    repeat: Option<String>,
     #[command(flatten)]
     send: Send,
+}
+
+/// Which events of a series, as the editor's scope prompt asks.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ScopeArg {
+    This,
+    Following,
+    All,
+}
+
+impl From<ScopeArg> for Scope {
+    fn from(s: ScopeArg) -> Scope {
+        match s {
+            ScopeArg::This => Scope::This,
+            ScopeArg::Following => Scope::Following,
+            ScopeArg::All => Scope::All,
+        }
+    }
+}
+
+/// One occurrence of a series and which events of it, for edit and delete.
+#[derive(Args)]
+pub struct Occurrence {
+    /// The day of the occurrence to change, "2026-11-24": the editor opens
+    /// that occurrence as the app does from the grid.
+    #[arg(long)]
+    occurrence: Option<String>,
+    /// For an occurrence: this event, this and following events, or all.
+    #[arg(long, value_enum, requires = "occurrence")]
+    scope: Option<ScopeArg>,
 }
 
 #[derive(Args)]
@@ -68,6 +101,11 @@ pub struct EditArgs {
     location: Option<String>,
     #[command(flatten)]
     when: When,
+    /// Repeat by this RRULE, or "none" for no repeat.
+    #[arg(long)]
+    repeat: Option<String>,
+    #[command(flatten)]
+    occurrence: Occurrence,
     #[command(flatten)]
     send: Send,
 }
@@ -75,6 +113,8 @@ pub struct EditArgs {
 #[derive(Args)]
 pub struct DeleteArgs {
     event: i64,
+    #[command(flatten)]
+    occurrence: Occurrence,
     #[command(flatten)]
     send: Send,
 }
@@ -194,7 +234,8 @@ fn stored_event(jolta: &Jolta, id: i64) -> Result<(CalendarId, String, EventData
 
 pub async fn create(jolta: &Jolta, a: CreateArgs) -> Result<()> {
     let span = a.when.span(None)?.context("--start is needed")?;
-    let event = EventData { title: a.title, location: a.location.unwrap_or_default(), ..EventData::new(ops::new_uid()?, span) };
+    let recurrence = a.repeat.map(|r| Recurrence { rules: vec![r.trim_start_matches("RRULE:").to_string()], ..Recurrence::default() });
+    let event = EventData { title: a.title, location: a.location.unwrap_or_default(), recurrence, ..EventData::new(ops::new_uid()?, span) };
     let extra = match (a.extra, a.line) {
         (Some(json), _) => match serde_json::from_str(&json).context("--extra is not JSON")? {
             serde_json::Value::Object(fields) => Some(Extra::Json(fields)),
@@ -207,7 +248,80 @@ pub async fn create(jolta: &Jolta, a: CreateArgs) -> Result<()> {
     submit(jolta, edit, &a.send).await
 }
 
+/// The bounds of the occurrence of event `id`'s series that starts on `day`.
+fn occurrence_on(jolta: &Jolta, id: i64, day: &str) -> Result<Bounds> {
+    let (calendar, _, event) = stored_event(jolta, id)?;
+    let day = self::day(day)?;
+    let rows = jolta.store.read(|c| store::occurrences(c, day, day + Duration::days(1), tz::here()))?;
+    let found = rows.into_iter().find(|o| o.calendar_id == calendar && o.uid == event.uid && match o.bounds {
+        Bounds::Utc { start, .. } => start.with_timezone(&tz::here()).date_naive() == day,
+        Bounds::Days { start, .. } => NaiveDate::default() + Duration::days(start.into()) == day,
+    });
+    found.map(|o| o.bounds).with_context(|| format!("#{id} has no occurrence on {day}"))
+}
+
+/// The editor's draft of the event, at the occurrence asked for.
+fn drafted(jolta: &Jolta, id: i64, occurrence: Option<&str>) -> Result<draft::EventDraft> {
+    let at = occurrence.map(|d| occurrence_on(jolta, id, d)).transpose()?;
+    Ok(jolta.store.read(|c| draft::draft_for_event(c, EventId(id), at, tz::here()))?)
+}
+
+/// Queues the editor's save or delete and settles it as `submit` does.
+async fn finish(jolta: &Jolta, saved: draft::Saved, send: &Send) -> Result<()> {
+    println!("{}", saved.message);
+    match saved.op {
+        None => println!("Nothing changed; no op queued."),
+        Some(id) => {
+            if let Some(hold) = send.hold {
+                jolta.store.write(|tx| store::hold_calendar_op(tx, id, Utc::now().timestamp() + hold))?;
+            }
+            settle_op(jolta, id, send.wait).await?;
+            // This and following waits for the new series' create first.
+            let op = jolta.store.read(|c| store::calendar_op(c, id))?;
+            if let Some(first) = op.after {
+                print_op(&jolta.store.read(|c| store::calendar_op(c, first))?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_scopes(plan: &[draft::ScopeChoice]) {
+    for (i, c) in plan.iter().enumerate() {
+        println!("  {} {:<26} {}", i + 1, c.label, c.detail.as_deref().unwrap_or(""));
+    }
+}
+
 pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
+    if a.occurrence.occurrence.is_some() || a.repeat.is_some() {
+        let here = tz::here();
+        let mut d = drafted(jolta, a.event, a.occurrence.occurrence.as_deref())?;
+        if let Some(title) = a.title {
+            d.title = title;
+        }
+        if let Some(location) = a.location {
+            d.location = location;
+        }
+        if let Some(span) = a.when.span(Some(&d.span))? {
+            d.span = span;
+        }
+        if let Some(rule) = a.repeat {
+            d.rule = match rule.trim() {
+                "none" => None,
+                r => Some(Recurrence { rules: vec![r.trim_start_matches("RRULE:").to_string()], ..d.rule_was.clone().unwrap_or_default() }),
+            };
+        }
+        let problems = jolta.store.read(|c| draft::check_draft(c, &d, here))?;
+        print_draft(&d, &problems);
+        let plan = jolta.store.read(|c| draft::plan_save(c, &d, here))?;
+        if let Some(prompt) = &plan.prompt {
+            println!("{prompt}");
+            print_scopes(&plan.scopes);
+        }
+        let h = horizon();
+        let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, a.occurrence.scope.map(Into::into), Utc::now().timestamp(), &h, here))?;
+        return finish(jolta, saved, &a.send).await;
+    }
     let (calendar, _, mut event) = stored_event(jolta, a.event)?;
     if let Some(title) = a.title {
         event.title = title;
@@ -222,9 +336,19 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
 }
 
 pub async fn delete(jolta: &Jolta, a: DeleteArgs) -> Result<()> {
+    if let Some(day) = a.occurrence.occurrence.as_deref() {
+        let here = tz::here();
+        let d = drafted(jolta, a.event, Some(day))?;
+        let at = occurrence_on(jolta, a.event, day)?;
+        let plan = jolta.store.read(|c| draft::plan_delete(c, EventId(a.event), Some(at), here))?;
+        print_scopes(&plan.scopes);
+        let h = horizon();
+        let saved = jolta.store.write(|tx| draft::delete_drafted(tx, &d, a.occurrence.scope.map(Into::into), Utc::now().timestamp(), &h, here))?;
+        return finish(jolta, saved, &a.send).await;
+    }
     let (calendar, rid, event) = stored_event(jolta, a.event)?;
     if !rid.is_empty() {
-        bail!("#{} is one changed occurrence; deleting one occurrence isn't possible yet, delete the series", a.event);
+        bail!("#{} is one changed occurrence; delete it with --occurrence and --scope", a.event);
     }
     submit(jolta, Edit::quiet(calendar, Change::Delete { uid: event.uid }), &a.send).await
 }
@@ -355,7 +479,7 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     let h = horizon();
     let now = Utc::now().timestamp();
     let saved = match (a.save, a.delete, a.event) {
-        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, now, &h, here))?,
+        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, now, &h, here))?,
         (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), now, &h, here))?,
         _ => return Ok(()),
     };
@@ -381,6 +505,9 @@ fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
     };
     println!("{} in calendar {}", if d.title.is_empty() { "(no title)" } else { &d.title }, d.calendar);
     println!("  when: {when}{}", d.repeat.as_deref().map(|r| format!(", {r}")).unwrap_or_default());
+    if let Some(rule) = &d.rule {
+        println!("  repeat: {}", rule.rules.join(" / "));
+    }
     if let Some(o) = &d.organizer {
         println!("  organizer: {}", if o.name.is_empty() { &o.address } else { &o.name });
     }

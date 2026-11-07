@@ -197,6 +197,19 @@ impl Source {
     /// The object `remote_id` as the server holds it now, None when it is
     /// gone. `uid` and `alarms` are the stored event's, for what the
     /// server's answer leaves out.
+    /// The occurrence `rid` of the series `series` as the server holds it
+    /// now: Google's and Microsoft 365's instance, changed or not, or the
+    /// CalDAV resource the series and its changed occurrences share. None
+    /// when it is gone.
+    pub async fn fetch_occurrence(&self, calendar: &Calendar, series: &Stored, rid: &super::Moment, alarms: &[super::Alarm]) -> Result<Option<Version>> {
+        match self {
+            Source::CalDav(s) => s.fetch(calendar, &series.remote_id).await,
+            Source::Google(s) => s.fetch_occurrence(calendar, &series.remote_id, rid, alarms).await,
+            Source::Graph(s) => s.fetch_occurrence(series, &series.data.uid, rid).await,
+            Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
+        }
+    }
+
     pub async fn fetch(&self, calendar: &Calendar, remote_id: &str, uid: &str, alarms: &[super::Alarm]) -> Result<Option<Version>> {
         match self {
             Source::CalDav(s) => s.fetch(calendar, remote_id).await,
@@ -230,10 +243,20 @@ pub enum OpWrite<'a> {
     /// `event` over `held`, the version Jolta holds, only while the server
     /// still has that version. `base` is the event the user started from:
     /// Google and Graph get only the fields that changed from it, CalDAV
-    /// gets them written into the held resource.
-    Update { held: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra> },
+    /// gets them written into the held resource. `dropped` are the series'
+    /// changed occurrences its new time or rule no longer holds: Google and
+    /// Microsoft 365 drop them themselves, a CalDAV resource loses them.
+    Update { held: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra>, dropped: &'a [EventData] },
+    /// One occurrence of the series `series` that has no object of its own
+    /// yet: Google and Microsoft 365 change it as an instance of the series,
+    /// CalDAV adds its VEVENT to the series' resource. Guarded by the
+    /// series' version, which its instances share.
+    Occurrence { series: &'a Stored, base: &'a EventData, event: &'a EventData, extra: Option<&'a Extra> },
     /// The whole object `held`, only while the server still has that version.
     Delete { held: &'a Stored },
+    /// One occurrence taken out of its series: `held` is its own object
+    /// when it was `changed`, else the series'.
+    Cancel { held: &'a Stored, occurrence: &'a EventData, changed: bool },
 }
 
 /// An object as the server holds it, to store as a sync would.
@@ -243,6 +266,10 @@ pub struct Version {
     pub etag: Option<String>,
     pub events: Vec<EventData>,
     pub raw: Option<Vec<u8>>,
+    /// After a series was created with its changed occurrences, the
+    /// instances written for them, each an object of its own on Google and
+    /// Microsoft 365.
+    pub instances: Vec<Version>,
 }
 
 impl From<Version> for Change {
