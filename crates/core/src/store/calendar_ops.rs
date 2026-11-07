@@ -177,6 +177,17 @@ pub fn next_calendar_op_over(conn: &Connection, op: &CalendarOp) -> Result<Optio
         .optional()?)
 }
 
+/// Fails every newer op of the same event that waits, for an event whose
+/// create failed for good: none of them can reach the server.
+pub fn fail_later_calendar_ops(conn: &Connection, op: &CalendarOp, error: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE calendar_op SET state = 'failed', error = ?4
+         WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state = 'pending'",
+        params![op.calendar, op.uid, op.id.0, error],
+    )?;
+    Ok(())
+}
+
 /// Rewrites an op's `base` column from its write.
 pub fn set_calendar_op_base(conn: &Connection, op: &CalendarOp) -> Result<()> {
     let base = columns(&op.write).0.map(to_json).transpose()?;

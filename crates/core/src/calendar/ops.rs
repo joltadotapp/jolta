@@ -399,7 +399,14 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<(), 
             // one's change with it; putting the old version back would hide
             // it. That edit now starts from the version before this one,
             // which is what the server still has and what its Undo restores.
-            match store::next_calendar_op_over(conn, op)? {
+            let over = match &op.write {
+                Write::Create(_) => {
+                    store::fail_later_calendar_ops(conn, op, &format!("the event was never saved: {reason}"))?;
+                    None
+                }
+                _ => store::next_calendar_op_over(conn, op)?,
+            };
+            match over {
                 Some(mut next) => {
                     if let Write::Update { base, .. } = &op.write {
                         next.write.rebase(base);
@@ -738,6 +745,23 @@ mod tests {
         send_all(&s, Ok(()));
         assert_eq!(state(&s, occurrence).0, OpState::Done);
         assert_eq!(shown(&s), pairs(&[("10 09:00", "Standup"), ("17 14:00", "Moved later"), ("24 09:00", "Standup")]), "the series is back, the occurrence edit stays");
+    }
+
+    /// A create that never reached the server takes the edits queued
+    /// behind it down with it, instead of leaving them to finish on nothing.
+    #[test]
+    fn a_failed_create_fails_the_edits_behind_it() {
+        let (s, cal) = setup("fail-create");
+        let series = EventData { recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=3".into()], ..Default::default() }), ..event("u1", "Standup", "2026-11-10 09:00") };
+        let moved = EventData { recurrence_id: Some(Moment::Time(at("2026-11-17 09:00"))), ..event("u1", "Moved", "2026-11-17 14:00") };
+        let create = q(&s, cal, Change::Create(vec![series, moved.clone()])).unwrap();
+        let edit = q(&s, cal, Change::Update(EventData { title: "Moved later".into(), ..moved })).unwrap();
+        for _ in 0..MAX_ATTEMPTS {
+            send_all(&s, Err("timed out".into()));
+        }
+        assert_eq!((state(&s, create).0, state(&s, edit).0), (OpState::Failed, OpState::Failed));
+        assert!(shown(&s).is_empty(), "the event that was never saved is gone");
+        assert!(claim(&s).is_empty(), "nothing is left to send");
     }
 
     #[test]
