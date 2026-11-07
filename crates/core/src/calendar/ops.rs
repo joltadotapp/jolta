@@ -850,8 +850,23 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
         Ok(Sent::Conflict { version, lost }) => {
             // The server kept the occurrence a delete took out: the series
             // comes back as it was, then the occurrence as the server has it.
-            if let Write::Cancel { .. } = op.write {
+            if let Write::Cancel { series, .. } = &op.write {
                 revert(conn, op, horizon)?;
+                // A delete of the whole series behind this one put aside
+                // the series with this occurrence taken out; its Undo brings
+                // back the series whole, with the occurrence the server kept.
+                let kept: Vec<EventData> = version.iter().flat_map(|(v, _)| &v.events).filter(|e| e.uid == op.uid && e.recurrence_id.is_some()).cloned().collect();
+                for mut later in store::later_calendar_ops(conn, op)? {
+                    let Write::Delete(events) = &mut later.write else { continue };
+                    if let Some(master) = events.iter_mut().find(|e| e.recurrence_id.is_none()) {
+                        *master = series.clone();
+                    }
+                    for k in &kept {
+                        events.retain(|e| !same_row(e, k));
+                        events.push(k.clone());
+                    }
+                    store::rewrite_calendar_op(conn, &later)?;
+                }
             }
             // A split whose old series kept its rule elsewhere: the new
             // series goes again, and nothing is left to apply.
@@ -2058,6 +2073,10 @@ mod tests {
         s.write(|tx| settle(tx, &claimed[0], Ok(Sent::Conflict { version, lost: vec![Field::Title] }), NOW, &horizon())).unwrap();
         assert_eq!(state(&s, one).0, OpState::Conflict);
         assert_eq!(claim(&s).iter().map(|o| o.id).collect::<Vec<_>>(), [all], "the series delete is next");
+        let Write::Delete(kept) = s.read(|c| store::calendar_op(c, all)).unwrap().write else { panic!("a delete") };
+        let master = kept.iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        assert!(master.recurrence.as_ref().unwrap().exdates.is_empty(), "its Undo brings the series back whole");
+        assert!(kept.iter().any(|e| e.recurrence_id == Some(rid) && e.title == "Standup, theirs"), "with the occurrence the server kept");
     }
 
     fn series_rows(c: &Connection, cal: CalendarId) -> Result<i64> {

@@ -592,6 +592,9 @@ mod tests {
         let plan = s.read(|c| draft::plan_delete_drafted(c, &d, Brussels)).unwrap();
         assert_eq!((plan.refusal, plan.scopes.len()), (None, 3));
         assert_eq!(plan.prompt.as_deref(), Some("You're deleting Standup on Tue 10 Nov."));
+        let moved_unsaved = EventDraft { span: timed("2026-11-17 09:00", 30), title: "Unsaved".into(), ..d };
+        let plan = s.read(|c| draft::plan_delete_drafted(c, &moved_unsaved, Brussels)).unwrap();
+        assert_eq!(plan.prompt.as_deref(), Some("You're deleting Standup on Tue 10 Nov."), "the stored occurrence, which the delete takes");
     }
 }
 

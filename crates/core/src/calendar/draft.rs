@@ -891,7 +891,11 @@ pub fn plan_delete(conn: &Connection, event: EventId, at: Option<Bounds>, here: 
 pub fn plan_delete_drafted(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<DeletePlan> {
     let calendar = store::calendar(conn, draft.calendar)?;
     let (locks, notice) = locks_now(conn, draft, &calendar)?;
-    delete_plan(conn, &EventDraft { locks, notice, ..draft.clone() }, here)
+    // The occurrence as it is stored, which the delete takes, not the
+    // draft's unsaved fields.
+    let base = draft.base.as_ref().ok_or_else(|| Error::Other("A new event has nothing to delete".into()))?;
+    let stored = EventDraft { locks, notice, rule: draft.rule_was.clone(), rule_was: draft.rule_was.clone(), ..opened(base, draft.calendar) };
+    delete_plan(conn, &stored, here)
 }
 
 fn delete_plan(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<DeletePlan> {
