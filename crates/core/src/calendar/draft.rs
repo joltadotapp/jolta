@@ -14,7 +14,7 @@ use rusqlite::Connection;
 
 use super::change::Field;
 use super::ops::{self, CalendarOpId, Change, Edit};
-use super::series::Horizon;
+use super::series::{self, Horizon};
 use super::{
     Alarm, AlarmTrigger, Attendee, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Local, Meeting, MeetingProvider,
     Person, Response, Role, ShowAs, Span, Visibility, Zone, caps, description, detail, merge, tz,
@@ -224,10 +224,13 @@ pub fn draft_for_event(conn: &Connection, event: EventId, at: Option<Bounds>, he
     let series = d.repeat.is_some() || d.event.recurrence_id.is_some();
     let (locks, notice) = access(&d.calendar, &account, &d.event, series);
     let conflict = ops::conflict(conn, d.calendar.id, &d.event.uid)?.map(|c| c.message);
-    let mut draft = opened(&d.event, d.calendar.id);
-    if let (Some(at), true) = (at, series) {
-        draft.span = occurrence_span(&d.event.span, at, here);
-    }
+    // An unchanged occurrence of a series is the master moved to its time:
+    // the version the user starts from, as the occurrence the view shows.
+    let base = match at.filter(|_| d.event.recurrence.is_some() && d.event.recurrence_id.is_none()) {
+        Some(at) => series::occurrence(std::slice::from_ref(&d.event), &occurrence_span(&d.event.span, at, here).start(), here).unwrap_or(d.event),
+        None => d.event,
+    };
+    let mut draft = opened(&base, d.calendar.id);
     draft.locks = locks;
     draft.notice = notice.or(conflict);
     draft.repeat = d.repeat;
@@ -237,6 +240,7 @@ pub fn draft_for_event(conn: &Connection, event: EventId, at: Option<Bounds>, he
 /// The draft fields of a stored event, nothing locked.
 fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
     let parts = description::split(&e.description, e.description_html);
+    let room = room_of(e).map(|a| a.person.address.clone()).unwrap_or_default();
     EventDraft {
         calendar,
         base: Some(e.clone()),
@@ -244,8 +248,10 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         title: e.title.clone(),
         span: e.span,
         people: e.attendees.iter().filter(|a| !is_room(a)).cloned().collect(),
-        room: room_of(e).map(|a| a.person.address.clone()).unwrap_or_default(),
-        location: e.location.clone(),
+        // A location that only repeats the room, as saving a room puts it
+        // there, isn't one of its own.
+        location: if mirrors_room(&e.location, &room) { String::new() } else { e.location.clone() },
+        room,
         description: parts.editable.clone(),
         video: None,
         show_as: e.show_as,
@@ -305,6 +311,10 @@ pub fn access(calendar: &Calendar, account: &str, event: &EventData, series: boo
     (Vec::new(), None)
 }
 
+fn mirrors_room(location: &str, room: &str) -> bool {
+    !room.is_empty() && location.trim().eq_ignore_ascii_case(room)
+}
+
 fn is_room(a: &Attendee) -> bool {
     matches!(a.role, Role::Room | Role::Resource)
 }
@@ -351,7 +361,7 @@ fn event_of(draft: &EventDraft) -> EventData {
         Some(base) => (base.clone(), changed(draft, base)),
         None => (EventData::new(draft.uid.clone(), draft.span), EVERY_FIELD.to_vec()),
     };
-    for field in fields {
+    for &field in &fields {
         match field {
             DraftField::Title => e.title = draft.title.trim().to_string(),
             DraftField::Time => e.span = draft.span,
@@ -372,7 +382,7 @@ fn event_of(draft: &EventDraft) -> EventData {
                 }
                 e.attendees = attendees;
             }
-            DraftField::Location => e.location = draft.location.trim().to_string(),
+            DraftField::Location => {}
             DraftField::Description => {
                 let base = draft.base.as_ref().map(|b| description::split(&b.description, b.description_html));
                 let (text, html) = match base {
@@ -399,8 +409,11 @@ fn event_of(draft: &EventDraft) -> EventData {
             DraftField::Repeat | DraftField::Video | DraftField::Calendar => {}
         }
     }
-    if e.location.is_empty() && !draft.room.trim().is_empty() {
-        e.location = draft.room.trim().to_string();
+    // The location is the user's, or else the room's address (C4 spec,
+    // "C3-room-field"), which follows the room while the user has none.
+    if fields.contains(&DraftField::Location) || fields.contains(&DraftField::Room) {
+        let own = draft.location.trim();
+        e.location = if own.is_empty() { draft.room.trim().to_string() } else { own.to_string() };
     }
     e
 }
@@ -417,9 +430,10 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
     if !caps.writable {
         problem(Some(DraftField::Calendar), format!("{} is read-only.", calendar.name), true);
     }
+    let (locks, notice) = locks_now(conn, draft, &calendar)?;
     for f in &touched {
-        if draft.locks.contains(f) {
-            problem(Some(*f), draft.notice.clone().unwrap_or_else(|| "This can't change here.".into()), true);
+        if locks.contains(f) {
+            problem(Some(*f), notice.clone().unwrap_or_else(|| "This can't change here.".into()), true);
         }
     }
     match draft.span {
@@ -476,12 +490,32 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
     if !caps.show_as.is_empty() && !caps.show_as.contains(&draft.show_as) && touched.contains(&DraftField::ShowAs) {
         problem(Some(DraftField::ShowAs), format!("{} calendars can't show an event this way.", provider(&calendar)), true);
     }
-    if out.iter().all(|p| !p.blocking)
-        && let Some(text) = ops::refusal(conn, &edit(draft))?
-    {
-        out.push(Problem { field: None, text, blocking: true });
+    if out.iter().all(|p| !p.blocking) && !touched.is_empty() {
+        let refusal = match ops::refusal(conn, &edit(draft)) {
+            Ok(refusal) => refusal,
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(text) = refusal {
+            out.push(Problem { field: None, text, blocking: true });
+        }
     }
     Ok(out)
+}
+
+/// What the stored event the draft opened may not change now: the store's
+/// word, never the locks a caller hands back.
+fn locks_now(conn: &Connection, draft: &EventDraft, calendar: &Calendar) -> Result<(Vec<DraftField>, Option<String>)> {
+    let Some(base) = &draft.base else { return Ok((Vec::new(), None)) };
+    let stored = match ops::stored(conn, draft.calendar, &base.uid, base.recurrence_id.as_ref())? {
+        Some(s) => Some(s),
+        None => ops::stored(conn, draft.calendar, &base.uid, None)?,
+    };
+    let Some(stored) = stored else {
+        return Ok((EVERY_FIELD.to_vec(), Some("It was deleted while you edited it.".into())));
+    };
+    let account = account_of(conn, calendar)?.unwrap_or_default();
+    let series = stored.event.recurrence.is_some() || base.recurrence_id.is_some();
+    Ok(access(calendar, &account, &stored.event, series))
 }
 
 /// The account address of a calendar, if it has an account.
@@ -844,8 +878,20 @@ mod tests {
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!(stored.attendees.iter().map(|a| (a.person.address.as_str(), a.role)).collect::<Vec<_>>(), [("room-214@example.com", Role::Room)]);
         assert_eq!(stored.location, "room-214@example.com");
-        let reopened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
-        assert_eq!((reopened.room.as_str(), reopened.people.len()), ("room-214@example.com", 0));
+        let mut reopened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        assert_eq!((reopened.room.as_str(), reopened.location.as_str(), reopened.people.len()), ("room-214@example.com", "", 0), "the location only repeated the room");
+        assert!(plan_save(&reopened).unchanged);
+
+        reopened.room = "room-301@example.com".into();
+        s.write(|tx| save_draft(tx, &reopened, NOW, &horizon(), Brussels)).unwrap();
+        let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
+        assert_eq!(stored.location, "room-301@example.com", "the location follows the room while the user has none");
+
+        let mut reopened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        reopened.location = "Gent, Belfort".into();
+        s.write(|tx| save_draft(tx, &reopened, NOW, &horizon(), Brussels)).unwrap();
+        let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
+        assert_eq!((stored.location.as_str(), stored.attendees.len()), ("Gent, Belfort", 1), "a location of the user's own stays");
     }
 
     #[test]
@@ -890,10 +936,16 @@ mod tests {
         };
         s.write(|tx| ops::queue(tx, &Edit::quiet(cal, Change::Create(vec![series])), NOW, &horizon())).unwrap();
         let id = event_id(&s, cal, "s1");
+        let week3 = Bounds::Utc { start: at("2026-12-08 09:00").instant(Brussels), end: at("2026-12-08 09:30").instant(Brussels) };
+        let occurrence = s.read(|c| draft_for_event(c, id, Some(week3), Brussels)).unwrap();
+        assert_eq!(occurrence.span, span("2026-12-08 09:00", "2026-12-08 09:30"), "the occurrence the view shows");
+        assert!(s.read(|c| check_draft(c, &occurrence, Brussels)).unwrap().is_empty(), "opening an occurrence changes nothing");
         let mut d = s.read(|c| draft_for_event(c, id, None, Brussels)).unwrap();
         assert_eq!(d.notice.as_deref(), Some("Jolta can't change repeating events yet."));
         d.title = "Changed".into();
-        assert!(s.write(|tx| save_draft(tx, &d, NOW, &horizon(), Brussels)).is_err());
+        d.locks.clear();
+        d.notice = None;
+        assert!(s.write(|tx| save_draft(tx, &d, NOW, &horizon(), Brussels)).is_err(), "the store's locks count, not the draft's");
         assert!(s.read(|c| plan_delete(c, id, Brussels)).unwrap().refusal.is_some());
         assert!(s.write(|tx| delete_event(tx, id, NOW, &horizon(), Brussels)).is_err());
     }
