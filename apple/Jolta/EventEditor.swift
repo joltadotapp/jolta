@@ -221,7 +221,12 @@ struct EventEditorPanel: View {
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
         .font(.system(size: 12.5))
         .foregroundStyle(Color(Theme.text))
-        .onAppear { if !editor.isReadOnly { focus = .title } }
+        .defaultFocus($focus, .title)
+        .onAppear {
+            // The panel is in the window only after this pass; focus then.
+            guard !editor.isReadOnly else { return }
+            DispatchQueue.main.async { focus = .title }
+        }
         .onChange(of: focus) { old, _ in
             if old == .start || old == .end { editor.commit() }
         }

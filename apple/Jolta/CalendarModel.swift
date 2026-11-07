@@ -759,8 +759,11 @@ final class CalendarModel {
         do {
             if try core.planSave(draft: editor.draft).unchanged { return dropEditor() }
             let saved = try core.saveEvent(draft: editor.draft)
+            let (uid, calendarID) = (editor.draft.uid, editor.draft.calendarId)
             dropEditor()
             refresh()
+            // The event just saved is the selected one, so E and Delete act on it.
+            if let event = events.first(where: { $0.record.uid == uid && $0.record.calendarId == calendarID }) { selectedID = event.id }
             toast?(saved.message, saved.token)
         } catch {
             editor.failure = "\(error)"

@@ -299,6 +299,42 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// The event editor: C opens it on the next half hour, a title and ⌘↩
+    /// put the event in the week, selected; E opens it again and a typed
+    /// start moves it; ⌘⌫ deletes it and Z brings it back.
+    func testEventEditor() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Journey review")
+        app.typeKey(.return, modifierFlags: .command)
+        let created = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Journey review,")).firstMatch
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "⌘↩ saves it into the week")
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5), "and closes the editor")
+
+        app.typeKey("e", modifierFlags: [])
+        let start = app.textFields["editor-start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5), "E opens the event just saved")
+        XCTAssertEqual(app.textFields["editor-title"].value as? String, "Journey review")
+        start.click()
+        app.typeKey("a", modifierFlags: .command)
+        start.typeText("1015")
+        app.typeKey(.return, modifierFlags: .command)
+        let moved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Journey review, 10:15 to 10:45")).firstMatch
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the typed start moves it, keeping its 30 minutes")
+
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        app.typeKey(.delete, modifierFlags: .command)
+        XCTAssertTrue(moved.waitForNonExistence(timeout: 5), "⌘⌫ deletes it")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "Z brings it back")
+    }
+
     /// Settings › Calendar makes a calendar on this Mac, which the calendar
     /// sidebar then lists with the others.
     func testNewCalendarOnThisMac() throws {
