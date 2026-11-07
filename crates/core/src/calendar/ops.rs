@@ -982,12 +982,14 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
 
 /// This and following whose old series the server kept whole: the new
 /// series, made already, is deleted again, guarded by its version as any
-/// delete, so the old series alone shows the events.
+/// delete, so the old series alone shows the events. Guests invited to it
+/// hear of its cancellation as they heard of it.
 fn take_back_new_series(conn: &Connection, op: &CalendarOp, now: i64, horizon: &Horizon) -> Result<()> {
     let Some(first) = op.after else { return Ok(()) };
     let first = store::calendar_op(conn, first)?;
     if first.state == OpState::Done {
-        queue(conn, &Edit::quiet(first.calendar, Change::Delete { uid: first.uid.clone() }), now, horizon)?;
+        let delete = Edit { notify: first.notify, ..Edit::quiet(first.calendar, Change::Delete { uid: first.uid.clone() }) };
+        queue(conn, &delete, now, horizon)?;
     }
     Ok(())
 }

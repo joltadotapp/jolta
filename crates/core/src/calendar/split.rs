@@ -542,6 +542,31 @@ mod tests {
         assert_eq!(s.read(|c| store::calendar_ops(c, 1)).unwrap()[0].write.kind(), "delete", "the new series' delete is queued");
     }
 
+    /// The guests invited to the new series hear of its cancellation when
+    /// the split is taken back; Microsoft 365 can't delete it quietly.
+    #[test]
+    fn a_split_meeting_taken_back_tells_its_guests() {
+        let (s, cal) = store("split-meeting", CalendarSource::Graph);
+        let guest = crate::calendar::Attendee {
+            person: crate::calendar::Person { address: "ann@example.com".into(), name: String::new() },
+            role: crate::calendar::Role::Required,
+            response: crate::calendar::Response::Accepted,
+            comment: String::new(),
+            is_me: false,
+        };
+        let rows: Vec<EventData> = s.read(|c| ops::series(c, cal, "s1")).unwrap().into_iter().map(|e| EventData { attendees: vec![guest.clone()], ..e }).collect();
+        s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &rows, None, &horizon())).unwrap();
+        let mut d = opened(&s, cal, "2026-11-10 09:00");
+        d.title = "Planning".into();
+        assert!(s.read(|c| draft::plan_save(c, &d, Brussels)).unwrap().dialog.is_some(), "Microsoft 365 will email the guest");
+        let op = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::Following), Some(ops::Notify::All), None, NOW, &horizon(), Brussels)).unwrap().op.unwrap();
+        settle_all(&s, Ok(ops::Sent::Done { version: None, merged: false }));
+        settle_all(&s, Ok(ops::Sent::Conflict { version: None, lost: vec![crate::calendar::change::Field::Repeat] }));
+        assert_eq!(s.read(|c| store::calendar_op(c, op)).unwrap().state, ops::OpState::Failed);
+        let taken_back = s.read(|c| store::calendar_ops(c, 1)).unwrap().remove(0);
+        assert_eq!((taken_back.write.kind(), taken_back.notify), ("delete", ops::Notify::All), "the new series is cancelled for its guests");
+    }
+
     #[test]
     fn all_events_keeps_a_rule_changed_elsewhere_meanwhile() {
         let (s, cal) = store("all-rule", CalendarSource::Local);
