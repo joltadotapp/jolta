@@ -545,3 +545,70 @@ fn a_local_calendar_takes_edits_through_the_queue() {
     eventually("the opposite op removes it", || week(&app, monday, here).is_empty());
     assert!(app.core.undo_calendar(due.0).is_err(), "undoing twice changes nothing more");
 }
+
+/// The editor's draft goes to Swift and back whole: a new event saves, opens
+/// again with its stored version, takes a typed time and a reminder, and
+/// Undo of its delete brings it back.
+#[test]
+fn an_event_draft_round_trips_through_the_bridge() {
+    use jolta_ffi::editor::{DraftField, DraftReminder};
+
+    let app = App::new();
+    let here = tz::here();
+    let info = app.core.new_calendar_here("Test".into(), None).unwrap();
+    assert_eq!(app.core.default_calendar().unwrap(), Some(info.id));
+    let monday = next_monday(here);
+    let slot = OccurrenceTime::Timed { start: at(monday, "14:00", here).timestamp(), end: at(monday, "15:00", here).timestamp() };
+
+    let mut draft = app.core.new_draft(None, Some(slot.clone())).unwrap();
+    assert_eq!((draft.calendar_id, draft.time.clone(), draft.reminder, draft.zone.as_str()), (info.id, slot, DraftReminder::Default, here.name()));
+    draft.title = "Design review".into();
+    assert!(app.core.check_draft(draft_copy(&draft)).unwrap().is_empty());
+    let saved = app.core.save_event(draft).unwrap();
+    assert_eq!(saved.message, "Added Design review");
+    let row = week(&app, monday, here).into_iter().find(|o| o.title == "Design review").expect("shown at once");
+
+    let mut draft = app.core.draft_for_event(row.event_id, Some(row.time.clone())).unwrap();
+    assert!(draft.base.is_some() && draft.locks.is_empty());
+    assert!(app.core.plan_save(draft_copy(&draft)).unwrap().unchanged);
+    let minutes = app.core.parse_time_input("1530".into()).unwrap();
+    assert_eq!(minutes, 15 * 60 + 30);
+    draft.time = OccurrenceTime::Timed { start: at(monday, "15:30", here).timestamp(), end: at(monday, "16:30", here).timestamp() };
+    draft.reminder = DraftReminder::Before { minutes: 10 };
+    draft.locks = vec![DraftField::Title];
+    assert_eq!(app.core.save_event(draft).unwrap().message, "Saved Design review", "locks handed back are the core's to decide");
+    assert_eq!(start_of(&week(&app, monday, here), "Design review"), at(monday, "15:30", here).timestamp());
+
+    let row = week(&app, monday, here).into_iter().find(|o| o.title == "Design review").unwrap();
+    assert_eq!(app.core.plan_delete(row.event_id).unwrap().refusal, None);
+    let deleted = app.core.delete_event(row.event_id).unwrap();
+    assert!(week(&app, monday, here).is_empty());
+    app.core.undo_calendar(deleted.token.unwrap()).unwrap();
+    assert_eq!(titles(&week(&app, monday, here)), ["Design review"], "Undo brings it back");
+}
+
+fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraft {
+    jolta_ffi::editor::EventDraft {
+        calendar_id: d.calendar_id,
+        base: d.base.clone(),
+        uid: d.uid.clone(),
+        title: d.title.clone(),
+        time: d.time.clone(),
+        zone: d.zone.clone(),
+        zone_text: d.zone_text.clone(),
+        people: d.people.clone(),
+        room: d.room.clone(),
+        location: d.location.clone(),
+        description: d.description.clone(),
+        video: d.video,
+        show_as: d.show_as,
+        reminder: d.reminder,
+        visibility: d.visibility,
+        locks: d.locks.clone(),
+        notice: d.notice.clone(),
+        organizer: None,
+        meeting: None,
+        repeat: d.repeat.clone(),
+        description_note: d.description_note.clone(),
+    }
+}

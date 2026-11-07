@@ -14,10 +14,35 @@ struct HourGridContent {
     let gutter: CGFloat
     /// Bumped with every new set of occurrences.
     let revision: Int
+    /// The event the editor holds, drawn dashed where its fields put it.
+    var draft: DraftBlock?
 
     var days: Int { weekends.count }
 
     static let empty = HourGridContent(placed: [], weekends: [false], today: nil, todayStart: nil, selectedID: nil, now: .now, gutter: 64, revision: -1)
+}
+
+/// The editor's timed draft on one day of the period.
+struct DraftBlock: Hashable {
+    let day: Int
+    /// Minutes after the day's midnight.
+    let top: Double
+    let bottom: Double
+    let title: String
+    let range: String
+    let color: String?
+
+    /// The draft on the period's days, or nil when it is all-day or elsewhere.
+    @MainActor
+    init?(_ editor: EventEditorModel, days: [CalendarDay], color: String?) {
+        guard let (start, end) = editor.interval, let day = days.firstIndex(where: { $0.start <= start && start < $0.end }) else { return nil }
+        self.day = day
+        top = start.timeIntervalSince(days[day].start) / 60
+        bottom = min(max(end.timeIntervalSince(days[day].start) / 60, top + 15), 24 * 60)
+        title = editor.draft.title.isEmpty ? "New event" : editor.draft.title
+        range = "\(CalendarModel.clockTime(start)) – \(CalendarModel.clockTime(end))"
+        self.color = color
+    }
 }
 
 /// A flipped, transparent view that draws itself with `paint`.
@@ -157,6 +182,9 @@ struct WeekGrid: NSViewRepresentable {
         view.open = open ?? cal.openDetail
         view.swipe = { cal.shift($0) }
         view.selectedFrame = selectedFrame
+        view.hours.canvas.create = source == .period ? { day, minute in
+            if cal.days.indices.contains(day) { cal.newEvent(day: cal.days[day], minute: minute) }
+        } : nil
         view.update()
     }
 }
@@ -201,9 +229,17 @@ final class CalendarWeekView: NSView {
     func update() {
         guard let cal = model else { return }
         CalendarBench.shared?.mark("grid update")
-        let days: [CalendarDay], events: [CalEvent], revision: Int, selected: String?
+        var days: [CalendarDay], events: [CalEvent], revision: Int, selected: String?
+        var draft: DraftBlock?
         switch source {
-        case .period: (days, events, revision, selected) = (cal.days, cal.events, cal.revision, cal.selectedID)
+        case .period:
+            (days, events, revision, selected) = (cal.days, cal.events, cal.revision, cal.selectedID)
+            if let editor = cal.editor, !editor.isReadOnly {
+                // The event being edited shows only as the draft.
+                if let editing = editor.editing { events = events.filter { $0.id != editing } }
+                draft = DraftBlock(editor, days: days, color: cal.color(of: editor.draft.calendarId))
+                revision = revision &* 31 &+ (draft?.hashValue ?? 0) &+ (editor.editing?.hashValue ?? 0)
+            }
         case .today: (days, events, revision, selected) = (cal.today.map { [$0] } ?? [], cal.todayEvents, cal.todayRevision, nil)
         }
         guard !days.isEmpty else { return }
@@ -211,7 +247,7 @@ final class CalendarWeekView: NSView {
         strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days), selectedID: selected, now: cal.now, revision: revision)
         hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), weekends: days.map(\.isWeekend), today: today,
                                                todayStart: today.map { days[$0].start }, selectedID: selected, now: cal.now,
-                                               gutter: hours.canvas.gutter, revision: revision)
+                                               gutter: hours.canvas.gutter, revision: revision, draft: draft)
         if strip.frame.height != strip.height { needsLayout = true }
         // Draw now, inside the key's own pass, rather than at the next
         // display pass, which waited about 7 ms for the frame on a 120 Hz screen.
@@ -474,7 +510,7 @@ final class HourScrollView: NSScrollView {
 final class HourCanvas: CanvasView {
     var content = HourGridContent.empty {
         didSet {
-            guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID
+            guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID || content.draft != oldValue.draft
                     || content.weekends != oldValue.weekends || content.now != oldValue.now || content.today != oldValue.today else { return }
             elements = nil
             needsDisplay = true
@@ -483,6 +519,8 @@ final class HourCanvas: CanvasView {
     }
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
+    /// Double-click on empty time: the day's index and the minute clicked.
+    var create: ((Int, Int) -> Void)?
     var selectedFrame: (CGRect?) -> Void = { _ in }
     var gutter = CalendarLayout.gutter
     private var elements: [EventElement]?
@@ -509,6 +547,7 @@ final class HourCanvas: CanvasView {
                 guard r.intersects(visible) else { continue }
                 self.draw(p.event, in: r, cg: cg)
             }
+            if let draft = self.content.draft { self.drawDraft(draft, cg: cg) }
             self.drawNow(cg: cg)
         }
         if let bench = CalendarBench.shared { bench.time("draw (hour grid)", paint) } else { paint() }
@@ -613,6 +652,46 @@ final class HourCanvas: CanvasView {
         }
     }
 
+    /// The editor's draft: dashed in its calendar's color, ringed with the
+    /// accent, with its title and times.
+    private func drawDraft(_ d: DraftBlock, cg: CGContext) {
+        let hh = CalendarLayout.hourHeight
+        let r = CGRect(x: content.gutter + CGFloat(d.day) * columnWidth + 3, y: d.top / 60 * hh + 1,
+                       width: max(columnWidth - 7, 4), height: max(16, (d.bottom - d.top) / 60 * hh - 2))
+        let bar = CalendarColor.color(d.color, .bar)
+        let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
+        Theme.bg.setFill()
+        box.fill()
+        bar.withAlphaComponent(0.12).setFill()
+        box.fill()
+        let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.75, dy: 0.75), xRadius: 5.5, yRadius: 5.5)
+        edge.lineWidth = 1.5
+        edge.setLineDash([4, 3], count: 2, phase: 0)
+        bar.withAlphaComponent(0.85).setStroke()
+        edge.stroke()
+        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -3, dy: -3), xRadius: 8.5, yRadius: 8.5)
+        ring.lineWidth = 2
+        Theme.accent.setStroke()
+        ring.stroke()
+        cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        let width = r.width - 12
+        guard width > 14 else { return }
+        var top = r.minY + (r.height < 30 ? 1 : 3)
+        for (text, font, color) in [(d.title, EventStyle.titleFont, Theme.text), (d.range, EventStyle.timeFont, Theme.text2)] {
+            guard top + 12 <= r.maxY + 2 else { break }
+            let attributed = NSAttributedString(string: text, attributes: [.font: font, kCTForegroundColorFromContextAttributeName as NSAttributedString.Key: true])
+            var line = CTLineCreateWithAttributedString(attributed)
+            if CTLineGetTypographicBounds(line, nil, nil, nil) > width {
+                let dots = CTLineCreateWithAttributedString(NSAttributedString(string: "…", attributes: [.font: font, kCTForegroundColorFromContextAttributeName as NSAttributedString.Key: true]))
+                line = CTLineCreateTruncatedLine(line, width, .end, dots) ?? line
+            }
+            cg.setFillColor(color.cgColor)
+            cg.textPosition = CGPoint(x: r.minX + 7, y: top + ceil(EventStyle.titleFont.ascender))
+            CTLineDraw(line, cg)
+            top += 14
+        }
+    }
+
     /// Tells SwiftUI where the selected event is, for the detail card.
     func reportSelection() {
         let frame = content.placed.first { $0.event.id == content.selectedID }.map { box($0).offsetBy(dx: 0, dy: -self.frame.minY) }
@@ -630,7 +709,14 @@ final class HourCanvas: CanvasView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let hit = self.event(at: point) else { return super.mouseDown(with: event) }
+        guard let hit = self.event(at: point) else {
+            if event.clickCount == 2, let create, point.x > content.gutter {
+                let day = Int((point.x - content.gutter) / columnWidth)
+                let minute = Int((point.y + frame.minY) / CalendarLayout.hourHeight * 60)
+                if day < content.days, (0..<24 * 60).contains(minute) { return create(day, minute) }
+            }
+            return super.mouseDown(with: event)
+        }
         if event.clickCount == 2 { open(hit) } else { select(hit) }
     }
 

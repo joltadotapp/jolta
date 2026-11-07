@@ -688,6 +688,8 @@ final class AppModel {
         case .vips(let addresses, let vip):
             try? core.setVips(addresses: addresses, vip: vip)
             show(Toast(text: "Undone", undo: nil))
+        case .calendar(let token):
+            show(Toast(text: calendar.undo(token: token), undo: nil))
         case .send(let token):
             if let back = try? core.cancelSend(token: token) {
                 compose = back
@@ -854,6 +856,11 @@ final class AppModel {
         show(Toast(text: text, undo: nil))
     }
 
+    /// A calendar edit's message, which Undo takes back while it shows.
+    func notify(_ text: String, calendarUndo token: Int64?) {
+        show(Toast(text: text, undo: token.map { .calendar($0) }))
+    }
+
     private func show(_ toast: Toast) {
         self.toast = toast
         let id = toast.id
@@ -950,6 +957,8 @@ struct Toast: Equatable {
     enum Undo: Equatable {
         case action([Int64])
         case send(Int64)
+        /// A calendar edit's op.
+        case calendar(Int64)
         /// Set these senders' VIP mark back to this.
         case vips([String], Bool)
     }

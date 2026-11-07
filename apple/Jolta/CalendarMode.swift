@@ -41,7 +41,14 @@ struct CalendarModeView: View {
                     }
                 }
             }
+            if let editor = cal.editor {
+                EventEditorPanel(model: model, editor: editor)
+                    .id(ObjectIdentifier(editor))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
+        .animation(.snappy(duration: 0.2), value: cal.editor.map(ObjectIdentifier.init))
+        .confirmation(Binding(get: { cal.discard }, set: { cal.discard = $0 }))
         .overlay {
             if let message = cal.lastError {
                 Text(message).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).padding().allowsHitTesting(false)
@@ -230,6 +237,7 @@ struct CalendarFooter: View {
         HStack(spacing: 16) {
             hint(["J", "K"], span == .day ? "day" : span == .month ? "month" : "week")
             hint(["T"], "today")
+            hint(["C"], "new event")
             hint(["↵"], "open")
             hint(["1–9"], "calendars")
             hint(["D", "X", "W", "M", "A"], "views")

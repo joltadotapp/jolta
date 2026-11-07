@@ -208,6 +208,14 @@ final class CalendarModel {
     /// The event whose detail is open.
     private(set) var detail: EventDetail?
     private(set) var detailEvent: CalEvent?
+    /// Whether the open detail's event can be deleted from it.
+    private(set) var detailDeletable = false
+    /// The editor docked on the right, while it is open.
+    private(set) var editor: EventEditorModel?
+    /// "Discard changes?" before closing an editor with unsaved changes.
+    var discard: Confirmation?
+    /// Shows a toast, with the token Undo takes back.
+    @ObservationIgnored var toast: ((String, Int64?) -> Void)?
     private(set) var list = CalendarList(accounts: [], otherCalendars: [])
     /// Ticks every 30 seconds: the now line, past events and Join buttons follow it.
     private(set) var now: Date = .now
@@ -395,7 +403,7 @@ final class CalendarModel {
         grids.add(grid)
     }
 
-    private func updateGrids() {
+    func updateGrids() {
         for grid in grids.allObjects { grid.update() }
     }
 
@@ -586,9 +594,11 @@ final class CalendarModel {
 
     func openDetail(_ event: CalEvent) {
         selectedID = event.id
+        if editor != nil { return edit(event) }
         do {
             detail = try core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: Self.descriptionCSS)
             detailEvent = event
+            detailDeletable = (try? core.planDelete(eventId: event.record.eventId))?.refusal == nil
         } catch {
             lastError = "\(error)"
         }
@@ -631,6 +641,184 @@ final class CalendarModel {
     a { color: inherit; text-decoration-color: var(--tx3); }
     p { margin: 0 0 8px; }
     """
+
+    // MARK: Editing
+
+    /// Minutes a new event lasts, from Settings › Calendar.
+    var defaultLength: Int { Int((try? core.defaultEventLength()) ?? 30) }
+
+    func calendarInfo(_ id: Int64) -> CalendarInfo? {
+        (list.accounts.flatMap(\.calendars) + list.otherCalendars).first { $0.id == id }
+    }
+
+    /// The Show as choices the calendar holds.
+    func showAsChoices(_ calendarID: Int64) -> [ShowAs] {
+        let choices = (try? core.capabilities(calendarId: calendarID))?.showAs ?? []
+        return choices.isEmpty ? [.busy, .free] : choices
+    }
+
+    /// C: a new event at `time`, else the next half hour for the default length.
+    func newEvent(at time: OccurrenceTime? = nil) {
+        guard confirmLeaving({ self.newEvent(at: time) }) else { return }
+        do {
+            open(EventEditorModel(core: core, draft: try core.newDraft(calendarId: nil, time: time), editing: nil))
+        } catch {
+            toast?("\(error)", nil)
+        }
+    }
+
+    /// Double-click on empty time: a new event on that half hour.
+    func newEvent(day: CalendarDay, minute: Int) {
+        let s = Int64(Self.at(day.start, minutes: minute / 30 * 30).timeIntervalSince1970)
+        newEvent(at: .timed(start: s, end: s + Int64(defaultLength * 60)))
+    }
+
+    /// E or Edit: the selected event in the editor, locked where it can't change.
+    func edit(_ event: CalEvent) {
+        guard editor?.editing != event.id else { return }
+        guard confirmLeaving({ self.edit(event) }) else { return }
+        do {
+            selectedID = event.id
+            open(EventEditorModel(core: core, draft: try core.draftForEvent(eventId: event.record.eventId, time: event.record.time), editing: event.id))
+        } catch {
+            toast?("\(error)", nil)
+        }
+    }
+
+    func editSelected() {
+        if let event = selected { edit(event) }
+    }
+
+    /// ⌘D: a new event like the selected one, at the same time, without its
+    /// people or meeting link: a copy never carries the original's call.
+    func duplicateSelected() {
+        guard let event = selected, confirmLeaving({ self.duplicateSelected() }) else { return }
+        do {
+            let source = try core.draftForEvent(eventId: event.record.eventId, time: event.record.time)
+            let calendar = calendarInfo(source.calendarId)?.writable == true ? source.calendarId : nil
+            var copy = try core.newDraft(calendarId: calendar, time: source.time)
+            copy.title = source.title
+            copy.location = source.location
+            copy.room = source.room
+            copy.description = source.description
+            copy.showAs = source.showAs
+            copy.visibility = source.visibility
+            if case .before = source.reminder { copy.reminder = source.reminder }
+            open(EventEditorModel(core: core, draft: copy, editing: nil))
+        } catch {
+            toast?("\(error)", nil)
+        }
+    }
+
+    private func open(_ model: EventEditorModel) {
+        closeDetail()
+        model.onChange = { [weak self, weak model] in
+            guard let self, let model else { return }
+            if !self.days.contains(where: { $0.start <= model.day && model.day < $0.end }) { self.anchor = model.day; self.reload() }
+            self.updateGrids()
+        }
+        editor = model
+        if !days.contains(where: { $0.start <= model.day && model.day < $0.end }) { anchor = model.day; reload() }
+        updateGrids()
+    }
+
+    /// Whether the open editor may go: true when nothing would be lost, else
+    /// it asks "Discard changes?" and runs `then` on Discard.
+    private func confirmLeaving(_ then: @escaping () -> Void) -> Bool {
+        guard let editor, hasChanges(editor) else { return true }
+        discard = Confirmation(title: "Discard changes?", message: "Your changes to \(editor.draft.title.isEmpty ? "this event" : editor.draft.title) aren't saved.",
+                               action: "Discard") { [weak self] in
+            self?.dropEditor()
+            then()
+        }
+        return false
+    }
+
+    private func hasChanges(_ editor: EventEditorModel) -> Bool {
+        if editor.isReadOnly { return false }
+        if editor.isNew { return !editor.draft.title.isEmpty || !editor.draft.description.isEmpty || !editor.draft.location.isEmpty || !editor.draft.room.isEmpty }
+        return (try? core.planSave(draft: editor.draft))?.unchanged == false
+    }
+
+    /// Esc or Cancel: closes, asking first when changes would be lost.
+    func closeEditor() {
+        guard confirmLeaving({}) else { return }
+        dropEditor()
+    }
+
+    private func dropEditor() {
+        editor = nil
+        updateGrids()
+    }
+
+    /// ⌘↩: saves through the op queue and closes; Undo takes it back.
+    func saveEditor() {
+        guard let editor else { return }
+        if editor.isReadOnly { return dropEditor() }
+        do {
+            if try core.planSave(draft: editor.draft).unchanged { return dropEditor() }
+            let saved = try core.saveEvent(draft: editor.draft)
+            let (uid, calendarID) = (editor.draft.uid, editor.draft.calendarId)
+            dropEditor()
+            refresh()
+            // The event just saved is the selected one, so E and Delete act on it.
+            if let event = events.first(where: { $0.record.uid == uid && $0.record.calendarId == calendarID }) { selectedID = event.id }
+            toast?(saved.message, saved.token)
+        } catch {
+            editor.failure = "\(error)"
+        }
+    }
+
+    /// ⌘⌫ in the editor: deletes the event it edits, wherever the week is now.
+    func deleteFromEditor() {
+        guard let editor, !editor.isNew else { return }
+        do {
+            let saved = try core.deleteDraft(draft: editor.draft)
+            dropEditor()
+            selectedID = nil
+            refresh()
+            toast?(saved.message, saved.token)
+        } catch {
+            editor.failure = "\(error)"
+        }
+    }
+
+    /// Delete on the selected event, or the detail's Delete.
+    func deleteSelected() {
+        if let event = selected ?? detailEvent { delete(event) }
+    }
+
+    private func delete(_ event: CalEvent) {
+        do {
+            if let refusal = try core.planDelete(eventId: event.record.eventId).refusal { return toast?(refusal, nil) ?? () }
+            let saved = try core.deleteEvent(eventId: event.record.eventId)
+            closeDetail()
+            selectedID = nil
+            refresh()
+            toast?(saved.message, saved.token)
+        } catch {
+            toast?("\(error)", nil)
+        }
+    }
+
+    /// Undo of a calendar edit from the toast.
+    func undo(token: Int64) -> String {
+        do {
+            try core.undoCalendar(token: token)
+            refresh()
+            return "Undone"
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    static func date(key: String) -> Date? { keyFormat.date(from: key) }
+
+    /// `minutes` after midnight on the clock of `day`, not that many minutes
+    /// after it: on a day with a clock change the two differ by an hour.
+    static func at(_ day: Date, minutes: Int) -> Date {
+        calendar.date(bySettingHour: minutes / 60 % 24, minute: minutes % 60, second: 0, of: day) ?? day
+    }
 
     // MARK: Meetings
 

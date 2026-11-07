@@ -251,6 +251,17 @@ pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Res
     Ok(Some(id))
 }
 
+/// Why `queue` would refuse the edit, found without changing anything, so
+/// the editor can say it before the user saves.
+pub fn refusal(conn: &Connection, edit: &Edit) -> Result<Option<String>> {
+    let calendar = store::calendar(conn, edit.calendar)?;
+    if !caps::of(&calendar).writable {
+        return Ok(Some(format!("{} is read-only", calendar.name)));
+    }
+    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change)? else { return Ok(None) };
+    Ok(check(&calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref()).err().map(|e| e.to_string()))
+}
+
 /// Refuses what the calendar's provider can't take from Jolta yet:
 /// meetings with guests, whose changes email people (the Send an update?
 /// dialog comes first), and any change the provider's request can't carry.

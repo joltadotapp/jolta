@@ -234,6 +234,20 @@ pub enum CalCommand {
     },
     /// What Jolta can do with a calendar's events.
     Caps { calendar: i64 },
+    /// The event as the editor opens it: its fields, what is locked and
+    /// why, and what is wrong with it for its calendar.
+    ///
+    /// With --save or --delete it saves or deletes through the editor's own
+    /// path, telling nobody; without an event it is a new event in
+    /// --calendar, else the default calendar.
+    Draft(crate::cal_edit::DraftArgs),
+    /// The calendar new events go to, as Settings › Calendar sets it: print
+    /// it, set it, or with --clear go back to the first writable one.
+    Default {
+        calendar: Option<i64>,
+        #[arg(long, conflicts_with = "calendar")]
+        clear: bool,
+    },
     /// Time one-week occurrence queries over the store.
     Bench {
         #[arg(long, default_value_t = 200)]
@@ -257,6 +271,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,
         CalCommand::ApplyMine { op, wait } => crate::cal_edit::apply_mine(jolta, op, wait).await,
         CalCommand::Caps { calendar } => crate::cal_edit::print_caps(jolta, calendar),
+        CalCommand::Draft(a) => crate::cal_edit::draft(jolta, a).await,
+        CalCommand::Default { calendar, clear } => crate::cal_edit::default_calendar(jolta, calendar, clear),
         CalCommand::Enable { account, port } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
             if sync::needs_consent(&a) {

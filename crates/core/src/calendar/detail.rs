@@ -117,7 +117,7 @@ fn parse(id: EventId, data: &str) -> Result<EventData> {
 
 /// The occurrence's times. A timed event set in a zone whose clock differs
 /// from here says both.
-fn when(span: &Span, at: Bounds, here: Tz) -> When {
+pub fn when(span: &Span, at: Bounds, here: Tz) -> When {
     match at {
         Bounds::Days { start, end } => {
             let day = |n: i32| NaiveDate::default() + Duration::days(n.into());

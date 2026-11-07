@@ -8,7 +8,7 @@ use clap::Args;
 use jolta_core::Jolta;
 use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Undone};
 use jolta_core::calendar::series::Horizon;
-use jolta_core::calendar::{CalendarId, EventData, EventId, Local, Span, Zone, caps, tz};
+use jolta_core::calendar::{CalendarId, EventData, EventId, Local, Span, Zone, caps, draft, tz};
 use jolta_core::store;
 
 use crate::truncate;
@@ -297,6 +297,119 @@ pub fn print_caps(jolta: &Jolta, calendar: i64) -> Result<()> {
     println!("  move {:?}, video {:?}, remove video {}", k.move_within, k.video, k.remove_video);
     println!("  options {:?}", k.options);
     println!("  show as {:?}, max people {:?}", k.show_as, k.max_people);
+    Ok(())
+}
+
+#[derive(Args)]
+pub struct DraftArgs {
+    /// The event's id, as `jolta cal list` shows it after the title; none for a new event.
+    event: Option<i64>,
+    /// The calendar of a new event; the default calendar without it.
+    #[arg(long)]
+    calendar: Option<i64>,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long)]
+    room: Option<String>,
+    #[arg(long)]
+    location: Option<String>,
+    #[command(flatten)]
+    when: When,
+    /// No reminder, as the editor's Reminder menu "None"; a new event
+    /// otherwise takes its calendar's default.
+    #[arg(long)]
+    no_reminder: bool,
+    /// Save the draft as the editor's Save does.
+    #[arg(long, conflicts_with = "delete")]
+    save: bool,
+    /// Delete the event as the editor's Delete does.
+    #[arg(long, requires = "event")]
+    delete: bool,
+    #[command(flatten)]
+    send: Send,
+}
+
+pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
+    let here = tz::here();
+    let mut d = jolta.store.read(|c| match a.event {
+        Some(id) => draft::draft_for_event(c, EventId(id), None, here),
+        None => draft::draft_for_new(c, a.calendar.map(CalendarId), None, Utc::now(), here),
+    })?;
+    if let Some(title) = a.title {
+        d.title = title;
+    }
+    if let Some(room) = a.room {
+        d.room = room;
+    }
+    if let Some(location) = a.location {
+        d.location = location;
+    }
+    if a.no_reminder {
+        d.reminder = draft::Reminder::Off;
+    }
+    if let Some(span) = a.when.span(Some(&d.span))? {
+        d.span = span;
+    }
+    let problems = jolta.store.read(|c| draft::check_draft(c, &d, here))?;
+    print_draft(&d, &problems);
+    let h = horizon();
+    let now = Utc::now().timestamp();
+    let saved = match (a.save, a.delete, a.event) {
+        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, now, &h, here))?,
+        (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), now, &h, here))?,
+        _ => return Ok(()),
+    };
+    println!("{}", saved.message);
+    if let Some(id) = saved.op {
+        if let Some(hold) = a.send.hold {
+            jolta.store.write(|tx| store::hold_calendar_op(tx, id, now + hold))?;
+        }
+        settle_op(jolta, id, a.send.wait).await?;
+    }
+    if !a.delete
+        && let Some(stored) = jolta.store.read(|c| ops::stored(c, d.calendar, &d.uid, None))?
+    {
+        println!("event #{}", stored.id.0);
+    }
+    Ok(())
+}
+
+fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
+    let when = match d.span {
+        Span::Timed { start, end } => format!("{} to {} ({:?})", start.wall.format("%a %-d %b %H:%M"), end.wall.format("%H:%M"), start.zone),
+        Span::AllDay { start, end } => format!("all day {} to {}", start.format("%a %-d %b"), (end - Duration::days(1)).format("%a %-d %b")),
+    };
+    println!("{} in calendar {}", if d.title.is_empty() { "(no title)" } else { &d.title }, d.calendar);
+    println!("  when: {when}{}", d.repeat.as_deref().map(|r| format!(", {r}")).unwrap_or_default());
+    if let Some(o) = &d.organizer {
+        println!("  organizer: {}", if o.name.is_empty() { &o.address } else { &o.name });
+    }
+    for p in &d.people {
+        println!("  person: {} ({:?}, {:?}){}", p.person.address, p.role, p.response, if p.is_me { ", you" } else { "" });
+    }
+    for (label, value) in [("room", &d.room), ("location", &d.location), ("description", &d.description)] {
+        if !value.is_empty() {
+            println!("  {label}: {}", truncate(&value.replace('\n', " / "), 80));
+        }
+    }
+    println!("  show as {:?}, reminder {:?}, visibility {:?}", d.show_as, d.reminder, d.visibility);
+    match &d.notice {
+        Some(n) => println!("  locked ({} fields): {n}", d.locks.len()),
+        None => println!("  nothing locked"),
+    }
+    for p in problems {
+        println!("  {}: {}{}", p.field.map_or("event".into(), |f| format!("{f:?}")), p.text, if p.blocking { "" } else { " (warning)" });
+    }
+}
+
+pub fn default_calendar(jolta: &Jolta, calendar: Option<i64>, clear: bool) -> Result<()> {
+    if calendar.is_some() || clear {
+        jolta.store.write(|tx| store::set_default_calendar(tx, calendar.map(CalendarId)))?;
+    }
+    match jolta.store.read(draft::default_calendar)? {
+        Some(c) => println!("New events go to {} ({}){}.", c.name, c.id, if c.is_default { "" } else { ", the first writable calendar" }),
+        None => println!("No calendar takes new events."),
+    }
     Ok(())
 }
 

@@ -27,6 +27,13 @@ macro_rules! mirror {
                 match v { $(C::$variant => $name::$variant),+ }
             }
         }
+
+        impl From<$name> for $core {
+            fn from(v: $name) -> Self {
+                use $core as C;
+                match v { $($name::$variant => C::$variant),+ }
+            }
+        }
     };
 }
 
@@ -83,7 +90,10 @@ pub struct CalendarInfo {
     pub shown: bool,
     pub counts_as_busy: bool,
     pub notify: bool,
+    /// New events go here unless the user picks another.
     pub is_default: bool,
+    /// Jolta can create and change events in it.
+    pub writable: bool,
     pub events: u32,
     /// Unix seconds of the last sync that reached the server.
     pub synced: Option<i64>,
@@ -490,6 +500,7 @@ impl Core {
         let scheduler = self.scheduler();
         let mut by_account: BTreeMap<Option<AccountId>, Vec<CalendarInfo>> = BTreeMap::new();
         for c in calendars {
+            let writable = cal::caps::of(&c).writable;
             let info = CalendarInfo {
                 id: c.id.0,
                 account_id: c.account_id.map(|a| a.0),
@@ -500,6 +511,7 @@ impl Core {
                 counts_as_busy: c.counts_as_busy,
                 notify: c.notify,
                 is_default: c.is_default,
+                writable,
                 events: counts.get(&c.id).copied().unwrap_or(0) as u32,
                 synced: c.synced,
                 sync_error: scheduler.as_ref().and_then(|s| s.error(c.id)),
@@ -916,7 +928,7 @@ impl Core {
 }
 
 impl Core {
-    fn scheduler(&self) -> Option<Arc<Scheduler>> {
+    pub(crate) fn scheduler(&self) -> Option<Arc<Scheduler>> {
         self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.calendars().clone())
     }
 
@@ -928,7 +940,7 @@ impl Core {
     }
 }
 
-fn meeting_info(m: cal::Meeting, app_url: Option<String>) -> MeetingInfo {
+pub(crate) fn meeting_info(m: cal::Meeting, app_url: Option<String>) -> MeetingInfo {
     MeetingInfo {
         provider: m.provider.into(),
         join_url: m.join_url,
