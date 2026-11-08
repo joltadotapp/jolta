@@ -567,6 +567,28 @@ mod tests {
         assert_eq!((taken_back.write.kind(), taken_back.notify), ("delete", ops::Notify::All), "the new series is cancelled for its guests");
     }
 
+    /// A new rule saved from one occurrence of a meeting asks Send an
+    /// update? and tells the guests.
+    #[test]
+    fn a_new_rule_for_a_meeting_asks_to_send() {
+        let (s, cal) = store("rule-meeting", CalendarSource::Google);
+        let guest = crate::calendar::Attendee {
+            person: crate::calendar::Person { address: "ann@example.com".into(), name: String::new() },
+            role: crate::calendar::Role::Required,
+            response: crate::calendar::Response::Accepted,
+            comment: String::new(),
+            is_me: false,
+        };
+        let rows: Vec<EventData> = s.read(|c| ops::series(c, cal, "s1")).unwrap().into_iter().map(|e| EventData { attendees: vec![guest.clone()], ..e }).collect();
+        s.write(|tx| store::apply_item(tx, cal, "s1.ics", Some("2"), &rows, None, &horizon())).unwrap();
+        let mut d = opened(&s, cal, "2026-11-10 09:00");
+        d.rule = Some(Recurrence { rules: vec!["FREQ=WEEKLY;BYDAY=TU,TH;COUNT=6".into()], ..Recurrence::default() });
+        let dialog = s.read(|c| draft::plan_save(c, &d, Brussels)).unwrap().dialog.expect("the guest hears of the new rule");
+        assert!(dialog.choices.iter().any(|c| c.notify == Some(ops::Notify::All)));
+        let op = s.write(|tx| draft::save_draft(tx, &d, Some(Scope::All), Some(ops::Notify::All), None, NOW, &horizon(), Brussels)).unwrap().op.unwrap();
+        assert_eq!(s.read(|c| store::calendar_op(c, op)).unwrap().notify, ops::Notify::All);
+    }
+
     #[test]
     fn all_events_keeps_a_rule_changed_elsewhere_meanwhile() {
         let (s, cal) = store("all-rule", CalendarSource::Local);

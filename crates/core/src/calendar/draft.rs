@@ -411,10 +411,15 @@ pub fn mine(calendar: &Calendar, account: &str, event: &EventData) -> Vec<String
 pub fn other_organizer<'a>(calendar: &Calendar, account: &str, event: &'a EventData) -> Option<&'a Person> {
     let me = mine(calendar, account, event);
     let is_me = |address: &str| me.iter().any(|m| m.eq_ignore_ascii_case(address.trim()));
-    // The attendee a calendar marks as its owner is no guest: the user, or
-    // in a calendar shared with the user, its owner.
-    let guests = event.attendees.iter().any(|a| !is_room(a) && !a.is_me && !is_me(&a.person.address));
-    event.organizer.as_ref().filter(|o| guests && !is_me(&o.address))
+    // Anyone on it but the organizer makes it a meeting, the user alone
+    // too: Graph and iCloud list the organizer of an invitation among no
+    // attendees. An event without attendees keeps the organizer Google
+    // gives any event of a secondary calendar, and the owner of a shared
+    // calendar on their own event is its organizer.
+    event.organizer.as_ref().filter(|o| {
+        let meeting = event.attendees.iter().any(|a| !is_room(a) && !a.person.address.eq_ignore_ascii_case(&o.address));
+        meeting && !is_me(&o.address)
+    })
 }
 
 /// Everyone on `event` the server mails about a change: guests and rooms,
@@ -792,7 +797,12 @@ fn classified(conn: &Connection, draft: &EventDraft) -> Result<(Calendar, String
     let before = draft.base.clone().unwrap_or_else(|| EventData::new(draft.uid.clone(), draft.span));
     let mut me = mine(&calendar, &account, &before);
     me.extend(mine(&calendar, &account, &after));
-    let c = change::classify(&before, &after, &me);
+    let mut c = change::classify(&before, &after, &me);
+    // An occurrence's draft holds its series' rule beside it: a new rule
+    // is a change to the meeting too.
+    if draft.rule != draft.rule_was && !c.meeting.contains(&Field::Repeat) {
+        c.meeting.push(Field::Repeat);
+    }
     Ok((calendar, account, c))
 }
 
@@ -1276,6 +1286,17 @@ mod tests {
         assert_eq!(open(&icloud, ME, &theirs), (Vec::new(), None), "the principal's own address");
         let shared = calendar(CalendarSource::CalDav, Access::Write, "https://dav.example.com/calendars/team/");
         assert!(open(&shared, ME, &theirs).1.is_some(), "a calendar shared with the user marks its owner");
+    }
+
+    /// Check 1: Graph and iCloud list a guest's copy with the user as its
+    /// only attendee, the organizer among none; it is still someone else's.
+    #[test]
+    fn an_invitation_listing_only_the_user_is_someone_elses() {
+        let google = calendar(CalendarSource::Graph, Access::Owner, ME);
+        let only_me = meeting("jan@example.com", vec![attendee(ME, true, Role::Required)]);
+        assert_eq!(open(&google, ME, &only_me).0, MEETING_FIELDS.to_vec());
+        let own = EventData { attendees: Vec::new(), ..meeting("team@group.calendar.google.com", Vec::new()) };
+        assert_eq!(open(&google, ME, &own), (Vec::new(), None), "an event without attendees stays open whatever organizer the source names");
     }
 
     /// Google gives its owner role to a calendar shared with "Make changes
