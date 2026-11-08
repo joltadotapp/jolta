@@ -893,6 +893,57 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(title.label.contains("Week"), "⇧M doesn't switch to Month: \(title.label)")
     }
 
+    /// A guest's proposal for one occurrence of the user's meeting: A opens
+    /// the editor at the time proposed, with the proposal above the fields;
+    /// saving goes through the scope prompt and Send an update?, whose Email
+    /// guests box stands where Google takes no message. The card then reads
+    /// Accepted. The detail's Email guests opens compose to the guests, and a
+    /// guest's name a mail to that guest alone.
+    func testAcceptProposalAndEmailGuests() throws {
+        let app = try launch()
+        text(app, "New time proposed: Team sync").click()
+        app.typeKey(.return, modifierFlags: [])
+        let reader = app.webViews.firstMatch
+        let link = { (label: String) in reader.links.matching(NSPredicate(format: "title BEGINSWITH %@ OR label BEGINSWITH %@", label, label)).firstMatch }
+        XCTAssertTrue(link("Accept proposal").waitForExistence(timeout: 15), "the organizer's card offers Accept proposal")
+        XCTAssertTrue(link("Decline proposal").exists, "beside Decline proposal")
+
+        app.typeKey("a", modifierFlags: [])
+        let banner = app.descendants(matching: .any).matching(identifier: "editor-proposal").firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "A opens the editor in calendar mode")
+        XCTAssertTrue(text(app, "Bram De Smet proposed this time").exists, "the proposal named above the fields")
+        app.typeKey(.return, modifierFlags: .command)
+        let prompt = app.descendants(matching: .any).matching(identifier: "scope-prompt").firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "a proposal for one occurrence asks which events")
+        app.typeKey(.return, modifierFlags: [])
+        let dialog = app.descendants(matching: .any).matching(identifier: "send-dialog").firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5), "then Send an update?")
+        XCTAssertTrue(app.checkBoxes["send-email-guests"].exists, "Email guests where Google takes no message")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Return sends")
+
+        app.typeKey("1", modifierFlags: .command)
+        let accepted = reader.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", "Accepted", "Accepted")).firstMatch
+        XCTAssertTrue(accepted.waitForExistence(timeout: 10), "back in mail, the open card reads Accepted")
+        XCTAssertFalse(link("Accept proposal").exists, "and offers the proposal no more")
+
+        app.typeKey("2", modifierFlags: .command)
+        let moved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Team sync, 15:00")).firstMatch
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the occurrence at its new time")
+        moved.click()
+        app.typeKey(.return, modifierFlags: [])
+        let email = app.buttons["event-detail-email-guests"]
+        XCTAssertTrue(email.waitForExistence(timeout: 5), "the detail offers Email guests")
+        email.click()
+        let subject = app.textFields["compose-subject"]
+        XCTAssertTrue(subject.waitForExistence(timeout: 5), "compose opens in mail")
+        XCTAssertEqual(subject.value as? String, "Re: Team sync")
+        let to = app.textFields.matching(NSPredicate(format: "value CONTAINS %@", "bram@example.com")).firstMatch
+        XCTAssertTrue(to.exists, "to the guests")
+        XCTAssertTrue((to.value as? String)?.contains("sofie@example.com") == true, "both of them")
+        XCTAssertFalse((to.value as? String)?.contains("me@test.invalid") == true, "never the user")
+    }
+
     private func waitUntil(_ done: () -> Bool) -> Bool {
         let deadline = Date() + 5
         while Date() < deadline {

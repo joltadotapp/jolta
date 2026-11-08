@@ -413,7 +413,8 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
 
     // The answer picked as for the list. A message that isn't the
     // organizer's says nothing about it.
-    let answer = match current && trusted && method != Method::Cancel {
+    // A guest's proposal carries no answer of the user's, who organizes it.
+    let answer = match current && trusted && !matches!(method, Method::Cancel | Method::Counter) {
         true => store::shown_answer(answered.as_ref(), remembered.as_ref(), Some((message, at.as_ref())), cx.here),
         false => None,
     };

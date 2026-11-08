@@ -52,7 +52,7 @@ fn event(c: &EventCard) -> String {
     if let Some(other) = &c.elsewhere {
         let _ = write!(h, "<div class=\"jolta-invite-elsewhere\">{}</div>", escape(other));
     }
-    if let Some(now) = c.proposal.as_ref().and_then(|p| p.now.as_ref()) {
+    if let Some(now) = c.proposal.as_ref().filter(|p| !p.accepted).and_then(|p| p.now.as_ref()) {
         let _ = write!(h, "<div class=\"jolta-invite-was\">Currently {}</div>", escape(now));
     }
     let facts: Vec<String> = [(REPEAT, &c.repeat, &c.changes.repeat), (PLACE, &c.location, &c.changes.location), (VIDEO, &None, &c.changes.join)]
@@ -534,6 +534,7 @@ mod tests {
         assert!(declined.contains("<span class=\"jolta-invite-answer\">Declined</span>"));
         let accepted = with(Proposed { accepted: true, ..proposed(None, false) });
         assert!(!accepted.contains("x-rsvp:") && accepted.contains("<span class=\"jolta-invite-answer\">Accepted</span>"), "{accepted}");
+        assert!(!accepted.contains("jolta-invite-was"), "the meeting is at the time shown: no Currently line");
         let a_guest = with(proposed(None, false));
         assert!(!a_guest.contains("proposal\""), "not the organizer: neither button: {a_guest}");
     }

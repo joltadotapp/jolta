@@ -145,7 +145,13 @@ final class AppModel {
     private(set) var toast: Toast?
     /// The message being written, shown in place of the reader.
     /// Compose lives in mail mode; starting one from calendar mode goes there.
-    var compose: ComposeData? { didSet { if compose != nil, mode == .calendar { mode = .mail } } }
+    var compose: ComposeData? {
+        didSet {
+            if compose != nil, mode == .calendar { mode = .mail }
+            // The reader skipped calendar changes while compose covered it.
+            if compose == nil, oldValue != nil { refreshOpenThread() }
+        }
+    }
     /// The AI settings, and the models that can run on this Mac.
     private(set) var ai: AiSettingsInfo
     private(set) var localModels: [LocalModelInfo] = []
@@ -576,8 +582,10 @@ final class AppModel {
         case .calendarChanged:
             calendar.reloadCalendars()
             calendar.refresh()
-            // List rows show invitation answers, which an answer or a sync changes.
+            // List rows and invitation cards show the calendar: an answer, a
+            // sync or an accepted proposal changes them.
             listChanged()
+            refreshOpenThread()
         case .calendarSynced:
             calendar.reloadCalendars()
         case .calendarOpFailed(let message, _):

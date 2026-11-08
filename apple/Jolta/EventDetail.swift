@@ -108,7 +108,8 @@ struct EventDetailCard: View {
                     row("Where", detail.location)
                 }
                 if let organizer = detail.organizer {
-                    row("Organizer", organizer.name.isEmpty ? organizer.address : organizer.name)
+                    // Someone else organizes a meeting the user can answer; otherwise it is the user's own.
+                    rowView("Organizer") { personLink(name: organizer.name, address: organizer.address, isMe: false, linked: detail.canAnswer) }
                 }
                 if !detail.responses.isEmpty {
                     rowView("People") {
@@ -122,9 +123,12 @@ struct EventDetailCard: View {
                             .buttonStyle(.plain)
                             if showsPeople {
                                 ForEach(detail.attendees, id: \.response) { group in
-                                    Text("\(group.response.word.capitalized): " + group.people.map { $0.isMe ? "you" : $0.name.isEmpty ? $0.address : $0.name }.joined(separator: ", "))
-                                        .foregroundStyle(Color(Theme.text3))
-                                        .fixedSize(horizontal: false, vertical: true)
+                                    FlowLayout(spacing: 4) {
+                                        Text("\(group.response.word.capitalized):").foregroundStyle(Color(Theme.text3))
+                                        ForEach(Array(group.people.enumerated()), id: \.offset) { i, p in
+                                            personLink(name: p.name, address: p.address, isMe: p.isMe, comma: i < group.people.count - 1)
+                                        }
+                                    }
                                 }
                                 if !detail.rooms.isEmpty {
                                     Text("Rooms: " + detail.rooms.map { $0.name.isEmpty ? $0.address : $0.name }.joined(separator: ", "))
@@ -156,6 +160,11 @@ struct EventDetailCard: View {
                 if cal.detailDeletable {
                     Button { cal.deleteSelected() } label: { HStack(spacing: 5) { Text("Delete"); KeyCap(key: "⌫") } }
                         .accessibilityIdentifier("event-detail-delete")
+                }
+                if detail.emailGuests {
+                    Button { cal.emailGuests(event) } label: { Text("Email guests") }
+                        .help("Write to the people on this event, for what isn't a calendar update")
+                        .accessibilityIdentifier("event-detail-email-guests")
                 }
             }
             .buttonStyle(.plain)
@@ -192,6 +201,21 @@ struct EventDetailCard: View {
         .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Event detail")
+    }
+
+    /// A person's name, which opens a mail to just them; the user is "you".
+    @ViewBuilder private func personLink(name: String, address: String, isMe: Bool, linked: Bool = true, comma: Bool = false) -> some View {
+        let shown = isMe ? "you" : name.isEmpty ? address : name
+        let text = comma ? shown + "," : shown
+        if isMe || !linked || !detail.emailGuests {
+            Text(text).foregroundStyle(Color(Theme.text3)).textSelection(.enabled)
+        } else {
+            Button { cal.emailGuests(event, address: address) } label: { Text(text).underline(color: Color(Theme.text3).opacity(0.5)) }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color(Theme.text2))
+                .help("Write to \(address)")
+                .accessibilityIdentifier("event-detail-person")
+        }
     }
 
     private func render() {

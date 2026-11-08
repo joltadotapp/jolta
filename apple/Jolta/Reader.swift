@@ -568,6 +568,8 @@ struct ReaderView: View {
             model.answerChoices.quiet.toggle()
         case "decline-proposal":
             model.declineProposal(message: message)
+        case "accept-proposal":
+            model.acceptProposal(message: message)
         case "note", "scope", "propose":
             if case .note = model.rsvpPanel, action == "note" { model.rsvpPanel = nil; return }
             if case .scope = model.rsvpPanel, action == "scope" { model.rsvpPanel = nil; return }
@@ -834,11 +836,12 @@ enum ReaderStyle {
       font-weight: 500; text-decoration: none; cursor: default; transition: background-color .16s ease; }
     .jolta-add:hover, .jolta-update:hover { background: var(--fill); }
     .jolta-sending .jolta-add, .jolta-sending .jolta-update { animation: jolta-sending .7s ease-in-out infinite alternate; }
-    .jolta-decline-proposal { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box;
+    .jolta-decline-proposal, .jolta-accept-proposal { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box;
       padding: 0 5px 0 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
       text-decoration: none; cursor: default; transition: background-color .16s ease; }
-    .jolta-decline-proposal:hover { background: var(--fill); }
-    .jolta-decline-proposal kbd, .jolta-rsvp-propose kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px;
+    .jolta-decline-proposal:hover, .jolta-accept-proposal:hover { background: var(--fill); }
+    .jolta-accept-proposal { margin-right: 6px; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 55%, var(--line2)); }
+    .jolta-decline-proposal kbd, .jolta-accept-proposal kbd, .jolta-rsvp-propose kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px;
       border-radius: 4px; text-align: center; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3);
       font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
     .jolta-rsvp-propose kbd { min-width: 14px; height: 14px; padding: 0 3px; font-size: 9.5px; line-height: 14px; }

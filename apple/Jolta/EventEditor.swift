@@ -67,6 +67,8 @@ final class EventEditorModel {
     var showsOptions = false
     /// Quick create's model filled in a field: the header says "Read by AI".
     var readByAI = false
+    /// Accept proposal opened it: "Bo Nilsson proposed this time: …" above the fields.
+    var proposal: String?
     /// Quick create found no day or time: the focus starts on the start time.
     var focusTime = false
 
@@ -295,6 +297,20 @@ struct EventEditorPanel: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if let proposal = editor.proposal {
+                        HStack(alignment: .top, spacing: 9) {
+                            Image(systemName: "clock.arrow.2.circlepath").font(.system(size: 11)).foregroundStyle(Color(Theme.accent)).padding(.top, 2)
+                            Text(proposal).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
+                        .padding(.bottom, 10)
+                        .accessibilityIdentifier("editor-proposal")
+                    }
                     if let notice = editor.draft.notice {
                         HStack(alignment: .top, spacing: 9) {
                             Image(systemName: "lock").font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).padding(.top, 2)
@@ -598,9 +614,20 @@ struct EventEditorPanel: View {
                     PeopleField(editor: editor, account: cal.calendarInfo(editor.draft.calendarId)?.accountId, focus: $focus)
                 }
             }
-            if !editor.draft.responses.isEmpty {
+            if !editor.draft.responses.isEmpty || emailable != nil {
                 EditorRow(icon: nil) {
-                    Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
+                    HStack(spacing: 8) {
+                        Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
+                        Spacer(minLength: 0)
+                        if let event = emailable {
+                            Button("Email guests") { cal.emailGuests(event) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color(Theme.accent))
+                                .help("Write to the people on this event, for what isn't a calendar update")
+                                .accessibilityIdentifier("editor-email-guests")
+                        }
+                    }
                 }
             }
             ForEach(editor.problems(.people), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
@@ -625,6 +652,12 @@ struct EventEditorPanel: View {
             }
         }
         .zIndex(1)
+    }
+
+    /// The stored event Email guests writes about, when others are on it.
+    private var emailable: CalEvent? {
+        guard !editor.isNew, let event = editor.event, editor.draft.people.contains(where: { !$0.isMe }) else { return nil }
+        return event
     }
 
     static func personDetail(_ p: DraftPerson, organizer: PersonRecord?) -> String {

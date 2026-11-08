@@ -7,8 +7,9 @@ struct SendPrompt: Identifiable {
     let dialog: UpdateDialogInfo
     /// Keep editing or Esc: nothing is saved.
     var back: () -> Void = {}
-    /// The chosen button's notify, and the message where the dialog has a field.
-    let perform: (NotifyChoice, String?) -> Void
+    /// The chosen button's notify, the message where the dialog has a
+    /// field, and whether Email guests opens once it is saved.
+    let perform: (NotifyChoice, String?, Bool) -> Void
 
     var id: String { dialog.title }
 }
@@ -29,7 +30,9 @@ struct SenderPrompt: Identifiable {
 /// cancels it, with the message where the cancellation carries one.
 struct CancelPrompt: Identifiable {
     let dialog: CancelDialogInfo
-    let perform: (String?) -> Void
+    /// The message where the cancellation carries one, and whether Email
+    /// guests opens once the meeting is cancelled.
+    let perform: (String?, Bool) -> Void
 
     var id: String { dialog.title }
 }
@@ -70,6 +73,26 @@ private struct DialogText: View {
     }
 }
 
+/// Where a server's update or cancellation carries no words of the user's:
+/// a box that opens Email guests once it is done. ⌘E ticks it.
+private struct EmailGuestsBox: View {
+    let label: String
+    @Binding var on: Bool
+    let id: String
+
+    var body: some View {
+        Toggle(isOn: $on) {
+            HStack(spacing: 6) { Text(label); KeyHint(key: "⌘E") }
+        }
+        .toggleStyle(.checkbox)
+        .font(.system(size: 12.5))
+        .foregroundStyle(Color(Theme.text2))
+        .keyboardShortcut("e", modifiers: .command)
+        .padding(.top, 12)
+        .accessibilityIdentifier(id)
+    }
+}
+
 /// A red button with white text and its key.
 private struct DangerButton: View {
     let title: String
@@ -95,12 +118,13 @@ private struct SendPromptView: View {
     let prompt: SendPrompt
     let dismiss: () -> Void
     @State private var message = ""
+    @State private var emailGuests = false
 
     private func choice(_ style: ChoiceStyle) -> SendChoice? { prompt.dialog.choices.first { $0.style == style } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            DialogText(title: prompt.dialog.title, text: prompt.dialog.body, note: prompt.dialog.note)
+            DialogText(title: prompt.dialog.title, text: prompt.dialog.body, note: nil)
             if prompt.dialog.message {
                 TextField("Add a message (optional)", text: $message, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -109,6 +133,8 @@ private struct SendPromptView: View {
                     .fieldBox(height: nil)
                     .padding(.top, 12)
                     .accessibilityIdentifier("send-message")
+            } else if let label = prompt.dialog.emailGuests {
+                EmailGuestsBox(label: label, on: $emailGuests, id: "send-email-guests")
             }
             HStack(spacing: 8) {
                 if let apart = choice(.apart) {
@@ -157,7 +183,7 @@ private struct SendPromptView: View {
     private func pick(_ choice: SendChoice) {
         dismiss()
         let words = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let notify = choice.notify { prompt.perform(notify, words.isEmpty ? nil : words) } else { prompt.back() }
+        if let notify = choice.notify { prompt.perform(notify, words.isEmpty ? nil : words, emailGuests && notify != NotifyChoice.none) } else { prompt.back() }
     }
 }
 
@@ -214,10 +240,11 @@ private struct CancelPromptView: View {
     let prompt: CancelPrompt
     let dismiss: () -> Void
     @State private var message = ""
+    @State private var emailGuests = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            DialogText(title: prompt.dialog.title, text: prompt.dialog.body, note: prompt.dialog.note)
+            DialogText(title: prompt.dialog.title, text: prompt.dialog.body, note: nil)
             if prompt.dialog.message {
                 TextField("Add a message (optional)", text: $message, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -226,6 +253,8 @@ private struct CancelPromptView: View {
                     .fieldBox(height: nil)
                     .padding(.top, 12)
                     .accessibilityIdentifier("cancel-message")
+            } else if let label = prompt.dialog.emailGuests {
+                EmailGuestsBox(label: label, on: $emailGuests, id: "cancel-email-guests")
             }
             HStack(spacing: 8) {
                 Spacer()
@@ -236,7 +265,7 @@ private struct CancelPromptView: View {
                     .accessibilityIdentifier("cancel-keep")
                 DangerButton(title: "Cancel meeting") {
                     dismiss()
-                    prompt.perform(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : message)
+                    prompt.perform(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : message, emailGuests)
                 }
                 .accessibilityIdentifier("cancel-meeting")
             }

@@ -619,6 +619,10 @@ pub struct ProposalDraft {
     pub draft: EventDraft,
     /// Above the fields: "Bo Nilsson proposed this time: \"Thursday is full\"".
     pub header: String,
+    /// The occurrence it opened, as the views name it: hidden in the grid
+    /// while the draft shows, as for E.
+    pub event_id: i64,
+    pub time: OccurrenceTime,
 }
 
 #[uniffi::export]
@@ -635,7 +639,7 @@ impl Core {
             .spawn(async move { cal::proposal::accept_draft(&jolta, jolta_core::MessageId(message_id)).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        Ok(ProposalDraft { draft: a.draft.into(), header: a.header })
+        Ok(ProposalDraft { draft: a.draft.into(), header: a.header, event_id: a.event.0, time: a.at.into() })
     }
 }
 

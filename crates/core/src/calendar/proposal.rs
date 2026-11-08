@@ -65,6 +65,10 @@ pub struct Accepting {
     pub draft: EventDraft,
     /// Above the fields: "Bo Nilsson proposed this time: \"Thursday is full\"".
     pub header: String,
+    /// The stored event the draft opened and where its occurrence is now,
+    /// as the views name it, so the grid hides it while the draft shows.
+    pub event: super::EventId,
+    pub at: Bounds,
 }
 
 /// Accept proposal on a message's card: the organizer's own copy of the
@@ -98,13 +102,14 @@ fn accepted_draft(conn: &Connection, account: AccountId, proposal: &Proposed, he
     let own = |c: &super::Calendar| c.is_own(&receiver);
     let missing = || Error::Other("The meeting is no longer in your calendar.".into());
     let master = store::stored_event_in(conn, &proposal.uid, None, Some(account), here, own)?.ok_or_else(missing)?;
-    let (event, at) = match &proposal.recurrence_id {
-        None => (master.event_id, None),
+    let (event, at, shown) = match &proposal.recurrence_id {
+        None => (master.event_id, None, master.event.span.bounds(here)),
         Some(rid) => match store::stored_event_in(conn, &proposal.uid, Some(rid), Some(account), here, own)? {
-            Some(changed) => (changed.event_id, None),
+            Some(changed) => (changed.event_id, None, changed.event.span.bounds(here)),
             None => {
                 let occurrence = series::occurrence(std::slice::from_ref(&master.event), rid, here).ok_or_else(missing)?;
-                (master.event_id, Some(occurrence.span.bounds(here)))
+                let bounds = occurrence.span.bounds(here);
+                (master.event_id, Some(bounds), bounds)
             }
         },
     };
@@ -122,7 +127,7 @@ fn accepted_draft(conn: &Connection, account: AccountId, proposal: &Proposed, he
     };
     let said = format!("{} proposed this time", proposal.proposer);
     let header = if proposal.note.is_empty() { said } else { format!("{said}: \"{}\"", proposal.note) };
-    Ok(Accepting { draft: d, header })
+    Ok(Accepting { draft: d, header, event, at: shown })
 }
 
 fn first_name(p: &Proposed) -> String {
@@ -432,6 +437,7 @@ mod tests {
         let c = card_of(&j, message, &raw);
         let p = c.proposal.clone().expect("still shown");
         assert_eq!((p.accepting, p.declining, p.accepted), (None, None, true), "accepted: no buttons");
+        assert_eq!(c.answer, None, "the organizer's own answer isn't the proposal's");
         assert!(run(accept_draft(&j, message)).unwrap_err().to_string().contains("accepted already"));
         assert!(run(decline(&j, message)).unwrap_err().to_string().contains("accepted already"));
         assert!(outbox(&j).is_empty(), "no DECLINECOUNTER after accepting");
