@@ -478,7 +478,10 @@ async fn post_token(provider: Provider, params: &[(&str, &str)]) -> Result<Value
         .body(form(params))
         .send()
         .await
-        .map_err(|e| Error::Other(format!("token request failed: {e}")))?;
+        .map_err(|e| {
+            let text = format!("token request failed: {e}");
+            if e.is_connect() { Error::Offline(text) } else { Error::Other(text) }
+        })?;
     let status = response.status();
     let text = response.text().await.map_err(|e| Error::Other(format!("token response: {e}")))?;
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);

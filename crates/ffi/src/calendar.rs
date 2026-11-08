@@ -390,6 +390,9 @@ impl Core {
         if let Some(account) = outcome.mailed_from {
             self.running_engine()?.wake(account);
         }
+        if let (true, Some(scheduler)) = (outcome.queued, self.scheduler()) {
+            scheduler.ops_queued();
+        }
         self.calendar_changed(outcome.calendar);
         Ok(outcome.text)
     }

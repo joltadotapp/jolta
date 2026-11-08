@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::change::Field;
 use crate::calendar::moving::How;
-use crate::calendar::ops::{CalendarOp, CalendarOpId, Extra, Held, OpState, Row as KeptRow, Write};
+use crate::calendar::ops::{Answered, CalendarOp, CalendarOpId, Extra, Held, OpState, Row as KeptRow, Write};
 use crate::calendar::{CalendarId, EventData};
 use crate::{Error, Result};
 
@@ -37,6 +37,9 @@ struct Target {
     from: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     how: Option<How>,
+    /// An answer to send, with the copy answered in `events`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answered: Option<Answered>,
 }
 
 const COLS: &str = "id, calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key,
@@ -67,6 +70,10 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
         "move" => {
             let (Some(from), Some(how)) = (target.from, target.how) else { return Err(broken()) };
             Write::Move { from: CalendarId(from), how, rows: target.rows, events: target.events }
+        }
+        "rsvp" => {
+            let (Some(answered), Some(event)) = (target.answered, target.events.into_iter().next()) else { return Err(broken()) };
+            Write::Answer { event, answered }
         }
         _ => return Err(broken()),
     };
@@ -122,7 +129,7 @@ pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<Calendar
 
 /// An op's `base` and `target` columns.
 fn written(op: &CalendarOp) -> Result<(Option<String>, String)> {
-    let (mut from, mut how) = (None, None);
+    let (mut from, mut how, mut answer) = (None, None, None);
     let (base, events, rows, fresh) = match &op.write {
         Write::Create(events) => (None, events.clone(), Vec::new(), false),
         Write::Move { from: f, how: h, rows, events } => {
@@ -132,8 +139,12 @@ fn written(op: &CalendarOp) -> Result<(Option<String>, String)> {
         Write::Update { base, event, dropped, fresh } => (Some(vec![base.clone()]), vec![event.clone()], dropped.clone(), *fresh),
         Write::Delete(events) => (Some(events.clone()), Vec::new(), Vec::new(), false),
         Write::Cancel { series, occurrence, row } => (Some(vec![series.clone(), occurrence.clone()]), Vec::new(), row.iter().cloned().collect(), false),
+        Write::Answer { event, answered } => {
+            answer = Some(answered.clone());
+            (None, vec![event.clone()], Vec::new(), false)
+        }
     };
-    let target = Target { events, extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over, rows, fresh, after: op.after.map(|a| a.0), from, how };
+    let target = Target { events, extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over, rows, fresh, after: op.after.map(|a| a.0), from, how, answered: answer };
     Ok((base.as_deref().map(to_json).transpose()?, to_json(&target)?))
 }
 
@@ -318,6 +329,13 @@ pub fn fail_calendar_attempt(conn: &Connection, id: CalendarOpId, error: &str, r
          WHERE id = ?1",
         params![id.0, error, retry_at],
     )?;
+    Ok(())
+}
+
+/// Puts back an op whose try never reached the server, to go again at
+/// `retry_at`. The try doesn't count against its attempts.
+pub fn wait_offline_calendar_op(conn: &Connection, id: CalendarOpId, error: &str, retry_at: i64) -> Result<()> {
+    conn.execute("UPDATE calendar_op SET state = 'pending', error = ?2, send_after = ?3 WHERE id = ?1", params![id.0, error, retry_at])?;
     Ok(())
 }
 
