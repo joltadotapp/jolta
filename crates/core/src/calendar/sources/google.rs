@@ -160,6 +160,19 @@ struct Reminder {
 #[serde(rename_all = "camelCase", default)]
 struct ConferenceData {
     entry_points: Vec<EntryPoint>,
+    create_request: Option<CreateRequest>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CreateRequest {
+    status: Option<CreateStatus>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CreateStatus {
+    status_code: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -655,7 +668,9 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
             guests_modify: g.guests_can_modify,
             ..MeetingOptions::default()
         },
-        video: None,
+        // A Meet Google is still making counts as asked for, so a retry
+        // that meets it asks for no second one.
+        video: pending_meet(g).then_some(MeetingProvider::Meet),
     })
 }
 
@@ -668,6 +683,12 @@ fn moment(w: &When, fallback: Zone) -> Option<Moment> {
     let at = w.date_time?;
     let zone = w.time_zone.as_deref().and_then(tz::zone).map(Zone::Tz).unwrap_or(fallback);
     Some(Moment::Time(Local { wall: tz::wall(at.to_utc(), zone, chrono_tz::UTC), zone }))
+}
+
+/// Whether the event's Meet was asked for and isn't made yet.
+fn pending_meet(g: &GoogleEvent) -> bool {
+    g.conference_data.as_ref().and_then(|c| c.create_request.as_ref()).and_then(|r| r.status.as_ref()).is_some_and(|s| s.status_code == "pending")
+        && !entries(g).iter().any(|e| e.kind == EntryKind::Video)
 }
 
 fn entries(g: &GoogleEvent) -> Vec<Entry> {
@@ -832,6 +853,22 @@ mod tests {
             [Change::Upsert { events, .. }] => events[0].clone(),
             other => panic!("expected one upsert, got {other:?}"),
         }
+    }
+
+    /// A Meet Google is still making reads as asked for, so a retried
+    /// PATCH that meets it merges as done instead of asking again (Sol, U8 S1).
+    #[test]
+    fn a_pending_meet_reads_as_asked_for() {
+        let mut raw = json!({ "id": "abc", "iCalUID": "u1", "summary": "Standup",
+            "start": { "dateTime": "2026-11-24T09:00:00+01:00" }, "end": { "dateTime": "2026-11-24T09:30:00+01:00" },
+            "conferenceData": { "createRequest": { "requestId": "r", "status": { "statusCode": "pending" } } } });
+        let read = |raw: &Value| event(&serde_json::from_value(raw.clone()).unwrap(), "u1".into(), &[], Some(chrono_tz::Europe::Brussels), &[]).unwrap();
+        let e = read(&raw);
+        assert_eq!((e.video, e.meeting.is_none()), (Some(MeetingProvider::Meet), true));
+        raw["conferenceData"]["createRequest"]["status"]["statusCode"] = json!("success");
+        raw["conferenceData"]["entryPoints"] = json!([{ "entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij" }]);
+        let e = read(&raw);
+        assert_eq!((e.video, e.meeting.map(|m| m.join_url)), (None, Some("https://meet.google.com/abc-defg-hij".into())));
     }
 
     #[test]

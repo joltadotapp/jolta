@@ -242,7 +242,8 @@ pub struct EventData {
     pub organizer_is_me: bool,
     /// A video call the next write asks the server to make: Add video call
     /// sets it, and the server's answer, which carries the meeting in
-    /// `meeting`, replaces the event. No source reads it.
+    /// `meeting`, replaces the event. Google's reader sets it for a Meet
+    /// Google is still making.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<MeetingProvider>,
 }

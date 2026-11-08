@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::change::{FIELDS, Field};
 use super::series::Horizon;
 use super::sources::{self, OpWrite, Source, Tell, Version, Written};
-use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, merge, organizer, rsvp, series as occurrences};
+use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, description, merge, organizer, rsvp, series as occurrences};
 use crate::model::text_enum;
 use crate::{Error, Jolta, Result, store};
 
@@ -1106,10 +1106,33 @@ fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: boo
                     later.write.rebase(e);
                 }
             }
+            if let Write::Update { base, event, .. } = &mut later.write
+                && let Some(made) = v.events.iter().find(|e| e.recurrence_id == base.recurrence_id)
+            {
+                carry_call(base, event, made);
+            }
         }
         store::rewrite_calendar_op(conn, &later)?;
     }
     Ok(())
+}
+
+/// An edit queued while an earlier op still asked for a video call starts
+/// from the meeting the server made, so its write keeps the call and the
+/// block the server wrote into the description, with the user's own text
+/// before the block.
+fn carry_call(base: &mut EventData, event: &mut EventData, made: &EventData) {
+    if base.video.is_none() || made.meeting.is_none() {
+        return;
+    }
+    let typed = Field::Description.differs(base, event).then(|| description::split(&event.description, event.description_html).editable);
+    for e in [&mut *base, &mut *event] {
+        Field::MeetingLink.copy(e, made);
+        Field::Description.copy(e, made);
+    }
+    if let Some(text) = typed {
+        (event.description, event.description_html) = description::split(&made.description, made.description_html).join(&text);
+    }
 }
 
 /// Where a change made elsewhere was made, for the sentences about it.
@@ -1866,6 +1889,18 @@ mod tests {
         }
     }
 
+    const TEAMS_BLOCK: &str = "Microsoft Teams meeting\nJoin: https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0\nMeeting ID: 123 456 789\n________________";
+
+    /// The event as Exchange makes it when asked for a Teams meeting: the
+    /// meeting, and its block after the description.
+    fn made_call(mut e: EventData) -> EventData {
+        if e.video.take().is_some() {
+            e.description = if e.description.is_empty() { TEAMS_BLOCK.into() } else { format!("{}\n\n{TEAMS_BLOCK}", e.description) };
+            e.meeting = super::super::meeting::detect(&[], None, "", &e.description);
+        }
+        e
+    }
+
     impl Remote for Server {
         async fn write(&self, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
             let took = || self.told.lock().unwrap().push(tell.notify);
@@ -1876,7 +1911,7 @@ mod tests {
                     match self.get(&id) {
                         Some(e) if e.uid == events[0].uid => {}
                         Some(_) => return Err(Error::Other("taken".into())),
-                        None => self.put(&id, events[0].clone()),
+                        None => self.put(&id, made_call(events[0].clone())),
                     }
                     self.answer(self.version(&id))
                 }
@@ -2255,6 +2290,25 @@ mod tests {
         assert_eq!(server.objects.lock().unwrap().len(), 1);
         assert_eq!(shown_where(&s), triples(&[("Standup", "", "1")]), "stored under the server's version");
         assert_eq!(state(&s, create).0, OpState::Done);
+    }
+
+    /// An edit of the description saved while the create that asked for a
+    /// Teams meeting waits keeps the block Exchange writes (Sol, U8 S2).
+    #[test]
+    fn an_edit_behind_a_create_with_a_call_keeps_its_block() {
+        let (s, _) = setup("call-behind");
+        let cal = remote_calendar(&s, CalendarSource::Graph, Access::Owner);
+        let server = Server { names_itself: true, ..Server::default() };
+        let asked = EventData { video: Some(crate::calendar::MeetingProvider::Teams), ..event("u1", "Review", "2026-11-24 09:00") };
+        q(&s, cal, Change::Create(vec![asked.clone()])).unwrap();
+        let edit = q(&s, cal, Change::Update(EventData { description: "Agenda".into(), ..asked })).unwrap();
+        run(&s, &server);
+        run(&s, &server);
+        assert_eq!(state(&s, edit).0, OpState::Done);
+        let id = server.objects.lock().unwrap().keys().next().unwrap().clone();
+        let now = server.get(&id).unwrap();
+        assert_eq!(now.description, format!("Agenda\n\n{TEAMS_BLOCK}"), "the user's text, then the block as the server wrote it");
+        assert!(now.meeting.is_some_and(|m| m.join_url.contains("meetup-join")));
     }
 
     /// Graph names a new event itself: the stored rows move to its id, and

@@ -39,9 +39,10 @@ pub fn three_way(base: &EventData, mine: &EventData, theirs: &EventData) -> Merg
 /// Whether the user's value wins: only the user changed the field. When
 /// both changed it to different values, the field goes into `lost`.
 fn pick(field: Field, base: &EventData, mine: &EventData, theirs: &EventData, lost: &mut Vec<Field>) -> bool {
-    // A video call asked for is made once: a meeting on the server now,
-    // such as the one an earlier try of this edit made, is it.
-    if field == Field::MeetingLink && mine.video.is_some() && theirs.meeting.is_some() {
+    // A video call asked for is made once: a meeting on the server now, or
+    // one Google is still making, such as one an earlier try of this edit
+    // asked for, is it.
+    if field == Field::MeetingLink && mine.video.is_some() && (theirs.meeting.is_some() || theirs.video.is_some()) {
         return false;
     }
     let (i_changed, they_changed) = (field.differs(base, mine), field.differs(base, theirs));
@@ -241,6 +242,9 @@ mod tests {
         let made = Meeting { provider: MeetingProvider::Teams, join_url: "https://teams.microsoft.com/l/meetup-join/x".into(), meeting_id: None, passcode: None, phones: vec![], other_links: vec![] };
         let theirs = EventData { meeting: Some(made), ..base.clone() };
         assert_eq!(three_way(&base, &mine, &theirs), Merged { event: theirs, lost: Vec::new() });
+        let making = EventData { video: Some(MeetingProvider::Meet), ..base.clone() };
+        let mine_meet = EventData { video: Some(MeetingProvider::Meet), ..base.clone() };
+        assert_eq!(three_way(&base, &mine_meet, &making), Merged { event: making, lost: Vec::new() }, "a Meet Google is still making counts as made");
         let renamed = EventData { title: "Renamed".into(), ..base.clone() };
         let merged = three_way(&base, &mine, &renamed);
         assert_eq!((merged.event.video, merged.event.title.as_str(), merged.lost), (Some(MeetingProvider::Teams), "Renamed", Vec::new()));
