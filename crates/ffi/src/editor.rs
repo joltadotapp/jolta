@@ -606,7 +606,7 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
 
 impl Core {
     /// After a save or delete: the worker sends it, the views redraw.
-    fn edited(&self, calendar: CalendarId) {
+    pub(crate) fn edited(&self, calendar: CalendarId) {
         if let Some(scheduler) = self.scheduler() {
             scheduler.ops_queued();
         }

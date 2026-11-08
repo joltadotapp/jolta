@@ -20,6 +20,9 @@ struct ContentView: View {
         .sheet(item: Binding(get: { model.awaySheet }, set: { model.awaySheet = $0 })) { request in
             AwaySheet(model: model, request: request) { model.awaySheet = nil }
         }
+        .sheet(item: Binding(get: { model.focusSheet }, set: { model.focusSheet = $0 })) { _ in
+            FocusSheet(model: model) { model.focusSheet = nil }
+        }
         .overlay(alignment: .trailing) {
             // Over the list and reader; the list stays underneath for the keys.
             if model.isInboxZero, model.mode == .mail {

@@ -523,7 +523,7 @@ mod tests {
     use super::*;
     use crate::calendar::ops::Extra;
     use crate::calendar::rsvp::Stored;
-    use crate::calendar::{Access, CalendarId, CalendarSource, EventId, Local, Span, Zone};
+    use crate::calendar::{Access, AutoDecline, CalendarId, CalendarSource, EventId, EventKind, Local, Span, Zone};
 
     fn at(s: &str) -> Local {
         Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) }
@@ -648,6 +648,27 @@ mod tests {
         let other = Fake::new(vec![(400, json!({ "error": { "errors": [{ "reason": "invalid" }] } }))]);
         assert!(send(&other, &calendar(), &OpWrite::Create { events: std::slice::from_ref(&e), key: "k", extra: Some(&extra) }, Tell::NOBODY, Brussels).await.is_err());
         assert_eq!(other.bodies.lock().unwrap().len(), 1, "any other 400 is a failure");
+    }
+
+    /// Focus time as `focus::plan` makes it, refused with the answer the
+    /// Google Workspace test account gave (2026-11-07).
+    #[tokio::test]
+    async fn focus_time_an_account_lacks_becomes_a_busy_event() {
+        let refused = json!({ "error": { "code": 400, "message": "Organizer is not an enterprise account, or does not have the focus time feature enabled.",
+                                         "errors": [{ "domain": "calendar", "reason": "malformedFocusTimeEvent" }] } });
+        let made = json!({ "id": "e1", "etag": "\"1\"", "iCalUID": "u1@jolta.app", "status": "confirmed", "summary": "Focus time",
+                           "start": { "dateTime": "2026-11-18T14:00:00+01:00" }, "end": { "dateTime": "2026-11-18T16:00:00+01:00" } });
+        let fake = Fake::new(vec![(400, refused), (200, made)]);
+        let request = crate::calendar::focus::Request { from: chrono::Utc::now(), until: chrono::Utc::now() + chrono::Duration::hours(2), declines: AutoDecline::New, do_not_disturb: true };
+        let planned = crate::calendar::focus::plan(crate::calendar::focus::Holds::Status, &request, Brussels);
+        let e = EventData { uid: "u1@jolta.app".into(), ..planned.event };
+        let written = send(&fake, &calendar(), &OpWrite::Create { events: std::slice::from_ref(&e), key: "k", extra: planned.extra.as_ref() }, Tell::NOBODY, Brussels).await.unwrap();
+        let Written::Saved(Some(v)) = written else { panic!("saved") };
+        assert_eq!((v.events[0].show_as, &v.events[0].kind), (ShowAs::Busy, &EventKind::Default), "what focus::landed reads as refused");
+        let bodies = fake.bodies.lock().unwrap().clone();
+        assert_eq!((bodies[0]["eventType"].as_str(), bodies[0]["focusTimeProperties"]["chatStatus"].as_str()), (Some("focusTime"), Some("doNotDisturb")));
+        assert!(bodies[1].get("eventType").is_none() && bodies[1].get("focusTimeProperties").is_none(), "{}", bodies[1]);
+        assert_eq!((bodies[1]["summary"].as_str(), bodies[1]["transparency"].as_str()), (Some("Focus time"), Some("opaque")));
     }
 
     fn calendar() -> Calendar {

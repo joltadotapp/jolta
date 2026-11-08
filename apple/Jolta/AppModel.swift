@@ -127,6 +127,8 @@ final class AppModel {
     var findTime: FindTimeRequest?
     /// The Out of office sheet, while it is up over the main window.
     var awaySheet: AwaySheetRequest?
+    /// The Focus time sheet, while it is up over the main window.
+    var focusSheet: FocusSheetRequest?
     /// The note field, the scope menu, the calendar menu or the propose
     /// panel under the open card, when one is up.
     var rsvpPanel: RsvpPanel?
@@ -602,6 +604,8 @@ final class AppModel {
         case .calendarSynced:
             calendar.reloadCalendars()
         case .calendarOpFailed(let message, _):
+            show(Toast(text: message, undo: nil))
+        case .calendarNotice(let message):
             show(Toast(text: message, undo: nil))
         case .awayChanged:
             reloadAway()

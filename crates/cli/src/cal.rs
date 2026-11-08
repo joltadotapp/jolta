@@ -297,6 +297,23 @@ pub enum CalCommand {
         #[arg(long, requires = "account", conflicts_with = "from")]
         off: bool,
     },
+    /// Focus time in a calendar, as the app's sheet adds it: Google's own
+    /// focus time in a Google account's primary calendar where its edition
+    /// offers it, else a busy event titled Focus time. Sent at once.
+    Focus {
+        calendar: i64,
+        /// When it starts on this Mac's clock, as "2026-11-18 14:00".
+        #[arg(long)]
+        start: String,
+        #[arg(long, default_value_t = 120)]
+        minutes: i64,
+        /// What Google's focus time declines.
+        #[arg(long, value_enum, default_value_t = DeclineArg::New)]
+        decline: DeclineArg,
+        /// Google Chat's Do not disturb during it.
+        #[arg(long)]
+        dnd: bool,
+    },
     /// Times everyone known is free for a meeting, as Find a time suggests
     /// them. Reads only.
     FindTime {
@@ -451,6 +468,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             println!("Hidden calendars aren't synced. Show one with `jolta cal show <id> on`.");
             Ok(())
         }
+        CalCommand::Focus { calendar, start, minutes, decline, dnd } => add_focus(jolta, calendar, &start, minutes, decline, dnd).await,
         CalCommand::Away { account: Some(name), from: Some(from), until: Some(until), message, decline, outside, .. } => {
             set_away(jolta, &name, &from, &until, message, decline, outside).await
         }
@@ -1236,11 +1254,39 @@ async fn set_away(jolta: &Jolta, name: &str, from: &str, until: &str, message: S
     send_calendar_ops(jolta).await
 }
 
+/// Adds focus time as the sheet does, says what the calendar gets, and
+/// sends it at once.
+async fn add_focus(jolta: &Jolta, calendar: i64, start: &str, minutes: i64, decline: DeclineArg, dnd: bool) -> Result<()> {
+    use jolta_core::calendar::{AutoDecline, CalendarId, focus};
+    let here = tz::here();
+    let wall = chrono::NaiveDateTime::parse_from_str(start.trim(), "%Y-%m-%d %H:%M").with_context(|| format!("{start:?} is not a time like \"2026-11-18 14:00\""))?;
+    let from = tz::instant(wall, here);
+    let declines = match decline {
+        DeclineArg::New => AutoDecline::New,
+        DeclineArg::All => AutoDecline::All,
+        DeclineArg::None => AutoDecline::None,
+    };
+    let request = focus::Request { from, until: from + chrono::Duration::minutes(minutes), declines, do_not_disturb: dnd };
+    let now = Utc::now();
+    let horizon = Horizon::around(now, here);
+    let (c, holds) = jolta.store.read(|conn| {
+        let c = store::calendar(conn, CalendarId(calendar))?;
+        let holds = focus::holds_in(conn, &c, now)?;
+        Ok((c, holds))
+    })?;
+    println!("{}: {}", c.name, focus::line(holds, &request, &c));
+    jolta.store.write(|tx| focus::add(tx, &c, &request, now, &horizon))?;
+    send_calendar_ops(jolta).await
+}
+
 /// Sends the calendar ops due now, as the app's worker would.
 async fn send_calendar_ops(jolta: &Jolta) -> Result<()> {
     for settled in jolta_core::calendar::ops::run_due(jolta, Horizon::around(Utc::now(), tz::here())).await? {
         if let Some(f) = settled.failure {
             println!("{}", f.message);
+        }
+        if let Some(notice) = settled.notice {
+            println!("{notice}");
         }
     }
     Ok(())

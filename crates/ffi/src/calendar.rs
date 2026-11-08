@@ -836,7 +836,7 @@ impl Core {
             description_html: d.description_html,
             status: e.status.into(),
             show_as: e.show_as.into(),
-            kind_line: e.kind.shown(e.show_as).line(),
+            kind_line: e.kind.shown(e.show_as, &e.categories).line(),
             visibility: e.visibility.into(),
             my_response: e.attendees.iter().find(|a| a.is_me).map(|a| a.response.into()),
             can_answer,

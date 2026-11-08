@@ -20,6 +20,7 @@ mod away;
 pub mod calendar;
 pub mod editor;
 mod find_time;
+mod focus;
 mod rooms;
 pub mod quick;
 pub mod repeat;
@@ -259,6 +260,8 @@ pub enum CoreEvent {
     /// A calendar edit failed for good and was taken back. `event_id` is the
     /// event as it is again, if it is still there.
     CalendarOpFailed { message: String, event_id: Option<i64> },
+    /// A calendar edit was saved, and the user should hear how it was.
+    CalendarNotice { message: String },
     /// Which accounts' automatic replies are on now changed; reload `away_states`.
     AwayChanged,
 }
@@ -935,6 +938,7 @@ impl Core {
                 Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
                 Event::ResponsesFiled { op, text } => CoreEvent::ResponsesFiled { text, tokens: vec![op.0] },
                 Event::CalendarOpFailed { event, message, .. } => CoreEvent::CalendarOpFailed { message, event_id: event.map(|e| e.0) },
+                Event::CalendarNotice { message } => CoreEvent::CalendarNotice { message },
                 Event::AwayChanged => CoreEvent::AwayChanged,
             };
             listener.on_event(event);

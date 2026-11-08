@@ -222,3 +222,16 @@ pub fn set_mailbox_cursor(
     )?;
     Ok(())
 }
+
+/// When Google last refused a focus time event for the account (unix
+/// seconds), if it ever did.
+pub fn focus_refused(conn: &Connection, account: AccountId) -> Result<Option<i64>> {
+    Ok(conn.query_row("SELECT focus_refused FROM account WHERE id = ?1", [account], |r| r.get(0))?)
+}
+
+/// Records that Google refused focus time for the account at `at`, or
+/// forgets it with None once Google took one.
+pub fn set_focus_refused(conn: &Connection, account: AccountId, at: Option<i64>) -> Result<()> {
+    conn.execute("UPDATE account SET focus_refused = ?2 WHERE id = ?1", params![account, at])?;
+    Ok(())
+}

@@ -626,7 +626,7 @@ impl OccurrenceRow {
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
      e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default, e.changed_locally,
-     ifnull(json_extract(e.data, '$.organizer_is_me'), 0), e.data -> '$.kind'";
+     ifnull(json_extract(e.data, '$.organizer_is_me'), 0), e.data -> '$.kind', e.data -> '$.categories'";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -652,7 +652,7 @@ fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
             .get::<_, Option<String>>(21)?
             .and_then(|k| serde_json::from_str::<EventKind>(&k).ok())
             .unwrap_or_default()
-            .shown(show_as),
+            .shown(show_as, &r.get::<_, Option<String>>(22)?.and_then(|c| serde_json::from_str::<Vec<String>>(&c).ok()).unwrap_or_default()),
         my_response: r.get(11)?,
         meeting,
         has_attendees: r.get(14)?,
