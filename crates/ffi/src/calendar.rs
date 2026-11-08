@@ -651,6 +651,7 @@ impl Core {
                 engine.collect_blobs_later();
             }
             self.calendar_changed(ids.iter().map(|c| c.id));
+            self.check_away();
             return Ok(Vec::new());
         }
         let jolta = self.jolta.clone();
@@ -661,6 +662,7 @@ impl Core {
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         if let Some(scheduler) = self.scheduler() {
             list.iter().filter(|c| c.shown).for_each(|c| scheduler.sync(c.id));
+            scheduler.check_away();
         }
         Ok(self.calendars()?.accounts.into_iter().find(|a| a.account.id == account_id).map(|a| a.calendars).unwrap_or_default())
     }

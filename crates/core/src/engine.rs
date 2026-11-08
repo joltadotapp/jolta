@@ -66,6 +66,9 @@ pub enum Event {
     /// A calendar edit failed for good and was taken back; `event` is the
     /// event as it is again, if it is still there.
     CalendarOpFailed { calendar: crate::calendar::CalendarId, event: Option<crate::calendar::EventId>, message: String },
+    /// Which accounts' automatic replies are on now changed, or what a
+    /// provider says about them.
+    AwayChanged,
     /// File responses automatically archived replies with this op, which
     /// `undo` takes back; `text` is the toast's.
     ResponsesFiled { op: OpId, text: String },

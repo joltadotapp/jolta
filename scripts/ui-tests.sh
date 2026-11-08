@@ -50,6 +50,9 @@ for t in $TESTS; do
 	if [ "$t" = testAnswerInvitationInCalendar ]; then
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Work me@test.invalid >/dev/null
 	fi
+	if [ "$t" = testTurnOffAutomaticReplies ]; then
+		printf '{"me@test.invalid": {"automaticRepliesSetting": {"status": "alwaysEnabled", "externalAudience": "all"}}}' >"$dir/away.json"
+	fi
 	ONLY+=("-only-testing:JoltaUITests/Journeys/$t")
 done
 

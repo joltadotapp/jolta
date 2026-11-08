@@ -18,6 +18,7 @@ use chrono_tz::Tz;
 use futures::StreamExt;
 use tokio::sync::Notify;
 
+use super::away::Watcher;
 use super::series::Horizon;
 use super::{Calendar, CalendarId, CalendarSource, ops, sync, tz};
 use crate::engine::{Event, Sink};
@@ -54,11 +55,13 @@ pub struct Scheduler {
     wake: Notify,
     state: Mutex<State>,
     mail: std::sync::OnceLock<MailWaker>,
+    away: Arc<Watcher>,
 }
 
 impl Scheduler {
     pub fn start(jolta: Jolta, sink: Sink, runtime: &tokio::runtime::Handle) -> Arc<Scheduler> {
-        let scheduler = Arc::new(Scheduler { jolta, sink, wake: Notify::new(), state: Mutex::default(), mail: std::sync::OnceLock::new() });
+        let away = Watcher::start(jolta.clone(), sink.clone(), runtime);
+        let scheduler = Arc::new(Scheduler { jolta, sink, wake: Notify::new(), state: Mutex::default(), mail: std::sync::OnceLock::new(), away });
         runtime.spawn(scheduler.clone().run());
         scheduler
     }
@@ -66,6 +69,12 @@ impl Scheduler {
     pub fn sync_now(&self) {
         self.state().all = true;
         self.wake.notify_one();
+    }
+
+    /// Reads every account's automatic replies again, as when the app
+    /// becomes active or calendar access changed.
+    pub fn check_away(&self) {
+        self.away.check();
     }
 
     /// Syncs one calendar on the next round, such as one just shown.

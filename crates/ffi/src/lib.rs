@@ -16,6 +16,7 @@ use jolta_core::{AccountId, Jolta, MailboxId, MessageId, ThreadId, reader, searc
 uniffi::setup_scaffolding!();
 
 mod ai;
+mod away;
 pub mod calendar;
 pub mod editor;
 mod find_time;
@@ -257,6 +258,8 @@ pub enum CoreEvent {
     /// A calendar edit failed for good and was taken back. `event_id` is the
     /// event as it is again, if it is still there.
     CalendarOpFailed { message: String, event_id: Option<i64> },
+    /// Which accounts' automatic replies are on now changed; reload `away_states`.
+    AwayChanged,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -570,6 +573,7 @@ impl SignIn {
                     let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
                     if let Some(engine) = engine {
                         list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
+                        engine.calendars().check_away();
                     }
                     let account = jolta.store.read(|c| store::account(c, account.id))?;
                     return Ok(AccountInfo::from(account));
@@ -913,6 +917,7 @@ impl Core {
                 Event::CalendarSynced { calendar, error } => CoreEvent::CalendarSynced { calendar_id: calendar.0, error },
                 Event::ResponsesFiled { op, text } => CoreEvent::ResponsesFiled { text, tokens: vec![op.0] },
                 Event::CalendarOpFailed { event, message, .. } => CoreEvent::CalendarOpFailed { message, event_id: event.map(|e| e.0) },
+                Event::AwayChanged => CoreEvent::AwayChanged,
             };
             listener.on_event(event);
         });

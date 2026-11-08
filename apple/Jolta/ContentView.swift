@@ -508,6 +508,7 @@ struct ListColumn: View {
             if model.showsSections {
                 SectionBar(model: model)
             }
+            ForEach(model.away, id: \.accountId) { AwayStrip(info: $0, model: model) }
             MessageList(model: model)
                 .overlay {
                     if model.listCount == 0 { EmptyList(model: model) }
