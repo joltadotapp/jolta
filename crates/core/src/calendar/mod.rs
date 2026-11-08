@@ -3,6 +3,7 @@
 
 pub mod add;
 pub mod availability;
+pub mod away;
 pub mod caps;
 pub mod card;
 pub mod change;

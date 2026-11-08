@@ -446,7 +446,7 @@ pub async fn signed_request(
 
 /// `url` when it is HTTPS on `host` itself, the only place the account's
 /// OAuth token may go. Checked before the token is fetched.
-fn provider_url(url: &str, host: &str) -> Result<reqwest::Url> {
+pub(crate) fn provider_url(url: &str, host: &str) -> Result<reqwest::Url> {
     let parsed = reqwest::Url::parse(url).map_err(|e| Error::Other(format!("{url}: {e}")))?;
     if parsed.scheme() == "https" && parsed.host_str() == Some(host) && parsed.port().is_none() {
         return Ok(parsed);
@@ -481,7 +481,7 @@ fn vanished(known: &Known, present: &BTreeSet<String>) -> Vec<Change> {
         .collect()
 }
 
-fn http_client(follow_redirects: bool) -> Result<reqwest::Client> {
+pub(crate) fn http_client(follow_redirects: bool) -> Result<reqwest::Client> {
     crate::oauth::init_tls();
     let redirects = if follow_redirects { reqwest::redirect::Policy::limited(8) } else { reqwest::redirect::Policy::none() };
     reqwest::Client::builder()

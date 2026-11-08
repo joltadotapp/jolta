@@ -13,7 +13,7 @@ use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
 use jolta_core::calendar::card::{self, Card, Edit};
 use jolta_core::calendar::availability::{self, Availability, Busy};
-use jolta_core::calendar::{add, freebusy, invitation, proposal, remove, respond};
+use jolta_core::calendar::{add, away, freebusy, invitation, proposal, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, EventKind, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
@@ -203,6 +203,9 @@ pub enum CalCommand {
         #[arg(long, default_value_t = 5)]
         days: u32,
     },
+    /// Each Google and Microsoft 365 account's automatic replies as the
+    /// provider says now, or one account's. Reads only; stores what it read.
+    Away { account: Option<String> },
     /// Times everyone known is free for a meeting, as Find a time suggests
     /// them. Reads only.
     FindTime {
@@ -333,6 +336,38 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 println!("  {:>4}  [{}] {}", c.id, if c.shown { "x" } else { " " }, c.name);
             }
             println!("Hidden calendars aren't synced. Show one with `jolta cal show <id> on`.");
+            Ok(())
+        }
+        CalCommand::Away { account } => {
+            let accounts = match account {
+                Some(name) => vec![jolta.store.read(|c| store::find_account(c, &name))?],
+                None => jolta.store.read(store::accounts)?,
+            };
+            let here = tz::here();
+            let at = |t: chrono::DateTime<Utc>| t.with_timezone(&here).format("%a %-d %b %Y %H:%M %Z").to_string();
+            for a in accounts {
+                let fetched = Utc::now().timestamp_millis();
+                let line = match away::read(jolta, &a).await {
+                    Ok(None) if a.kind == jolta_core::AccountKind::Graph => "unknown: calendar is off, so Jolta has no mailbox settings grant".to_string(),
+                    Ok(None) => continue,
+                    Err(e) => format!("not read: {e}"),
+                    Ok(Some(w)) => {
+                        jolta.store.write(|tx| store::save_away(tx, &w, fetched))?;
+                        let state = match w.reply {
+                            away::AutoReply::Off => "off".to_string(),
+                            away::AutoReply::On { from, until } => {
+                                let now = if w.reply.on_at(Utc::now()) { "on" } else { "on, not now" };
+                                let from = from.map(|f| format!(" from {}", at(f))).unwrap_or_default();
+                                let until = until.map_or(" with no end".to_string(), |u| format!(" until {}", at(u)));
+                                format!("{now}{from}{until}")
+                            }
+                        };
+                        let change = if w.editable { "Jolta can turn them off" } else { "changed in the provider's settings" };
+                        format!("{state}; outside replies to {}; {change}", w.audience)
+                    }
+                };
+                println!("{}  {line}", a.address);
+            }
             Ok(())
         }
         CalCommand::Freebusy { account, addresses, days } => {

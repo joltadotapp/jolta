@@ -13,6 +13,7 @@
 
 mod add;
 pub(crate) use add::pattern;
+mod away;
 mod freebusy;
 mod write;
 
