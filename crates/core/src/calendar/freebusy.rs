@@ -120,6 +120,27 @@ pub async fn look_up(jolta: &Jolta, account: AccountId, people: &[String], from:
     Ok(Lookup::Found(Found { account, me: a.address, own, others: answers, hours, windows }))
 }
 
+/// When each room in `rooms` is busy from `start` to `end`, in that order,
+/// through `account`'s provider: Microsoft 365's `getSchedule` and Google's
+/// `freeBusy` take a room's address like a person's. A room's working hours
+/// say nothing about when it can be booked, so it has none. A recording
+/// answers in place of the provider, as for people.
+pub async fn room_schedules(jolta: &Jolta, account: AccountId, rooms: &[String], start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<Schedule>> {
+    if rooms.is_empty() || end <= start {
+        return Ok(Vec::new());
+    }
+    let a = jolta.store.read_async(move |c| store::account(c, account)).await?;
+    let unknown = |why: Unknown| rooms.iter().map(|r| Schedule::new(r.clone(), Availability::Unknown(why.clone()))).collect();
+    let mut out: Vec<Schedule> = match recorded(&jolta.data_dir)? {
+        Some(r) => rooms.iter().map(|room| recorded_answer(&r, room)).collect(),
+        None if !a.calendar => unknown(Unknown::Failed(format!("Turn calendar on for {} to see when rooms are free", a.address))),
+        None if matches!(a.kind, AccountKind::Gmail | AccountKind::Graph) => sync::account_source(jolta, &a).await?.free_busy(rooms, start, end).await?,
+        None => unknown(Unknown::NotSupported),
+    };
+    out.iter_mut().for_each(|s| s.hours = None);
+    Ok(out)
+}
+
 fn recorded(dir: &Path) -> Result<Option<Recorded>> {
     match std::fs::read(dir.join("free-busy.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| Error::Other(format!("free-busy.json: {e}"))),
@@ -334,6 +355,29 @@ mod tests {
         j.store.write(|tx| Ok(tx.execute("UPDATE account SET calendar = 0 WHERE id = ?1", [account])?)).unwrap();
         assert!(matches!(rt.block_on(look_up(&j, account, &people, from, 1)).unwrap(), Lookup::CalendarOff { .. }));
         assert!(matches!(rt.block_on(look_up(&j, account, &[], from, 1)).unwrap(), Lookup::Found(_)), "the user's own times need no calendar sign-in");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    #[test]
+    fn a_room_is_looked_up_like_a_person_without_working_hours() {
+        let (j, _) = jolta("find-time-rooms");
+        let file = serde_json::json!({
+            "people": { "bruegel@rooms.example": {"known": [{"start": "2026-11-10T13:00:00Z", "end": "2026-11-10T14:00:00Z", "kind": "busy"}]} },
+            "peopleHours": { "bruegel@rooms.example": WorkingHours::standard(Brussels) }
+        });
+        std::fs::write(j.data_dir.join("free-busy.json"), file.to_string()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (start, end) = (Utc.with_ymd_and_hms(2026, 11, 10, 11, 0, 0).unwrap(), Utc.with_ymd_and_hms(2026, 11, 10, 16, 0, 0).unwrap());
+        let rooms = ["bruegel@rooms.example".to_string(), "brel@rooms.example".to_string()];
+        let found = rt.block_on(room_schedules(&j, AccountId(1), &rooms, start, end)).unwrap();
+        assert_eq!(found.iter().map(|s| s.person.as_str()).collect::<Vec<_>>(), ["bruegel@rooms.example", "brel@rooms.example"]);
+        assert!(matches!(&found[0].availability, Availability::Known(b) if b.len() == 1));
+        assert_eq!(found[0].hours, None, "a room's hours don't limit when it is booked");
+        assert_eq!(found[1].availability, Availability::Unknown(Unknown::NotFound));
+        std::fs::remove_file(j.data_dir.join("free-busy.json")).unwrap();
+        j.store.write(|tx| Ok(tx.execute("UPDATE account SET calendar = 0 WHERE id = 1", [])?)).unwrap();
+        let off = rt.block_on(room_schedules(&j, AccountId(1), &rooms, start, end)).unwrap();
+        assert!(off.iter().all(|s| matches!(&s.availability, Availability::Unknown(Unknown::Failed(m)) if m.starts_with("Turn calendar on"))));
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

@@ -199,6 +199,15 @@ enum AccountCommand {
 /// Opens the browser on a sign-in and waits for its redirect, on the
 /// listener or pasted by hand when the browser runs on another machine.
 pub(crate) async fn browser_sign_in(pending: jolta_core::oauth::Pending, port: u16, label: &str) -> Result<jolta_core::oauth::SignedIn> {
+    match browser_consent(pending, port, label).await? {
+        jolta_core::oauth::Consent::Granted(signed) => Ok(signed),
+        jolta_core::oauth::Consent::Refused(reason) => Err(anyhow::anyhow!(jolta_core::graph::explain_sign_in_error(&reason))),
+    }
+}
+
+/// A browser sign-in that may be refused, such as a consent only an admin
+/// can give.
+pub(crate) async fn browser_consent(pending: jolta_core::oauth::Pending, port: u16, label: &str) -> Result<jolta_core::oauth::Consent> {
     println!("Opening your browser to sign in with {label}. If it does not open, visit:\n\n{}\n", pending.url);
     if port == 0 {
         println!("Browser on another machine? Connect with ssh -L 8765:127.0.0.1:8765 and run this again with --port 8765.");
@@ -218,11 +227,11 @@ pub(crate) async fn browser_sign_in(pending: jolta_core::oauth::Pending, port: u
         let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
         use tokio::io::AsyncBufReadExt;
         match stdin.read_line(&mut line).await {
-            Ok(n) if n > 0 && line.contains("code=") => Some(line),
+            Ok(n) if n > 0 && (line.contains("code=") || line.contains("error=")) => Some(line),
             _ => std::future::pending().await,
         }
     };
-    let signed = pending.finish_or_paste(pasted).await;
+    let signed = pending.finish_consent(pasted).await;
     if raw_tty {
         std::process::Command::new("stty").arg("icanon").stdin(std::process::Stdio::inherit()).status().ok();
     }

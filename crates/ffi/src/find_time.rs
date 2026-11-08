@@ -57,6 +57,8 @@ pub struct PersonRow {
     /// "Ann Berg", or the address.
     pub name: String,
     pub is_me: bool,
+    /// A room, as `room_availability` gives it, which the panel lists after the people.
+    pub is_room: bool,
     pub busy: Vec<BusyBlock>,
     /// Why the busy times aren't known; the row is hatched. None when known.
     pub unknown: Option<String>,
@@ -131,7 +133,7 @@ fn hours_of(info: &WorkingHoursInfo) -> Result<WorkingHours> {
     Ok(WorkingHours { days: Weekdays::of(days), start: time(info.start)?, end: time(info.end)?, zone })
 }
 
-fn blocks(busy: &[Busy]) -> Vec<BusyBlock> {
+pub(crate) fn blocks(busy: &[Busy]) -> Vec<BusyBlock> {
     busy.iter().map(|b| BusyBlock { start: b.start.timestamp(), end: b.end.timestamp(), kind: b.kind.into() }).collect()
 }
 
@@ -139,7 +141,7 @@ fn info(found: Found, people: &[Person]) -> FindTimeInfo {
     let name = |address: &str| {
         people.iter().find(|p| p.address.eq_ignore_ascii_case(address)).map(|p| p.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| address.to_string())
     };
-    let me = PersonRow { address: found.me.clone(), name: "You".into(), is_me: true, busy: blocks(&found.own), unknown: None, hours: None, outside_hours: Vec::new(), note: None };
+    let me = PersonRow { address: found.me.clone(), name: "You".into(), is_me: true, is_room: false, busy: blocks(&found.own), unknown: None, hours: None, outside_hours: Vec::new(), note: None };
     let mut rows = vec![me];
     rows.extend(found.others.iter().map(|s| {
         let (busy, unknown) = match &s.availability {
@@ -156,6 +158,7 @@ fn info(found: Found, people: &[Person]) -> FindTimeInfo {
             address: s.person.clone(),
             name: name(&s.person),
             is_me: false,
+            is_room: false,
             busy,
             unknown,
             hours: s.hours.as_ref().map(hours_info),

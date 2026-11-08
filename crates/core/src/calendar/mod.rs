@@ -29,6 +29,7 @@ pub mod remind;
 pub mod remove;
 pub mod repeat;
 pub mod respond;
+pub mod rooms;
 pub mod rsvp;
 pub mod scheduler;
 pub mod series;

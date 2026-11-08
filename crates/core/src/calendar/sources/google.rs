@@ -879,7 +879,7 @@ fn failure(status: u16, body: &[u8]) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::{TimeZone, Utc};
     use chrono_tz::{America, Europe};
     use serde_json::json;
@@ -917,7 +917,7 @@ mod tests {
     }
 
     /// The one event in a batch built from `item`.
-    fn mapped(item: Value) -> EventData {
+    pub(crate) fn mapped(item: Value) -> EventData {
         let b = batch(listing_of(vec![item], false), &Known::new(), &HashMap::new(), &["me@example.com".into()]);
         match b.changes.as_slice() {
             [Change::Upsert { events, .. }] => events[0].clone(),
