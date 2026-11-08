@@ -1102,6 +1102,14 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
 #[allow(clippy::too_many_arguments)]
 fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: CalendarId, scope: Option<Scope>, notify: Option<ops::Notify>, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
     let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
+    // A field changed elsewhere since the editor opened keeps the stored
+    // value, as a save without a move does.
+    let lost = match stored_now(conn, draft, base)? {
+        Some(now) if now != *base => merge::three_way(base, &event_of(draft), &now).lost,
+        _ => Vec::new(),
+    };
+    let kept = reset(draft, base, &lost);
+    let draft = &kept;
     let touched = changed(draft, base);
     let moved = ops::queue(conn, &Edit::quiet(draft.calendar, Change::Move { uid: base.uid.clone(), to }), now, horizon)?.ok_or_else(|| Error::Other(format!("{title} is there already")))?;
     let mut there = EventDraft { calendar: to, move_to: None, ..draft.clone() };
@@ -1114,7 +1122,17 @@ fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: Calen
             match field {
                 DraftField::Title => fresh.title.clone_from(&draft.title),
                 DraftField::Time => fresh.span = draft.span,
-                DraftField::People => fresh.people.clone_from(&draft.people),
+                // The attendees the move left behind, such as the old
+                // account's own entry, stay out.
+                DraftField::People => {
+                    let dropped: Vec<String> = base
+                        .attendees
+                        .iter()
+                        .filter(|a| !landed.attendees.iter().any(|l| l.person.address.eq_ignore_ascii_case(&a.person.address)))
+                        .map(|a| a.person.address.to_lowercase())
+                        .collect();
+                    fresh.people = draft.people.iter().filter(|p| !dropped.contains(&p.person.address.to_lowercase())).cloned().collect();
+                }
                 DraftField::Options => fresh.options = draft.options,
                 DraftField::Room => fresh.room.clone_from(&draft.room),
                 DraftField::Location => fresh.location.clone_from(&draft.location),
@@ -1132,10 +1150,13 @@ fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: Calen
     let saved = save_here(conn, &there, scope, notify, message, Some(moved), now, horizon, here)?;
     // The toast still says whom the edit mails, or what of it wasn't saved.
     let mails = saved.op.map(|id| store::calendar_op(conn, id)).transpose()?.is_some_and(|op| op.notify != ops::Notify::Nobody);
-    let message = match mails || saved.message.contains("wasn't saved") {
+    let mut message = match mails || saved.message.contains("wasn't saved") {
         true => format!("Moved {title} to {name}. {}", saved.message),
         false => format!("Moved {title} to {name}"),
     };
+    if !lost.is_empty() {
+        message.push_str(&format!(". It changed elsewhere while you edited; your new {} wasn't saved.", nouns(&lost)));
+    }
     Ok(Saved { op: saved.op.or(Some(moved)), calendar: to, left: Some(draft.calendar), uid: base.uid.clone(), message })
 }
 
@@ -1671,6 +1692,41 @@ mod tests {
         assert_eq!(saved.message, "Moved Design review to Test");
         let now = s.read(|c| ops::stored(c, here, "u9-teams", None)).unwrap().unwrap().event;
         assert_eq!((now.description.as_str(), now.meeting), ("Walk through the new event editor.", None));
+    }
+
+    /// Sol S4 and S5: a move keeps a field changed elsewhere while the
+    /// editor was open, and says so, and a guest added with a move off
+    /// Microsoft 365 joins the copy without the old account's own entry.
+    #[test]
+    fn a_move_merges_with_changes_made_meanwhile_and_leaves_the_old_account_out() {
+        let (s, here) = setup("move-merge");
+        let graph = provider_calendar(&s, CalendarSource::Graph, None);
+        let mut event = EventData { title: "Standup".into(), ..EventData::new("u9-merge", span("2026-11-24 09:00", "2026-11-24 09:30")) };
+        event.attendees.push(attendee(ME, true, Role::Required));
+        s.write(|tx| store::apply_item(tx, graph, "AAMk1", Some("ck1"), std::slice::from_ref(&event), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, graph, "u9-merge"), None, Brussels)).unwrap();
+        let elsewhere = EventData { title: "Daily standup".into(), ..event.clone() };
+        s.write(|tx| store::apply_item(tx, graph, "AAMk1", Some("ck2"), std::slice::from_ref(&elsewhere), None, &horizon())).unwrap();
+        d.title = "Morning standup".into();
+        d.location = "Room 9".into();
+        d.move_to = Some(here);
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        assert!(saved.message.ends_with("It changed elsewhere while you edited; your new title wasn't saved."), "{}", saved.message);
+        let now = s.read(|c| ops::stored(c, here, "u9-merge", None)).unwrap().unwrap().event;
+        assert_eq!((now.title.as_str(), now.location.as_str()), ("Daily standup", "Room 9"), "the title from elsewhere stays, the user's place lands");
+        assert!(now.attendees.is_empty(), "the old account's own entry stays behind");
+
+        let other = s
+            .write(|tx| store::add_calendar(tx, CalendarSource::Graph, &store::RemoteCalendar { remote_id: "other".into(), name: "Team".into(), color: None, zone: None, access: Access::Owner, primary: false, refresh: None, video: None }))
+            .unwrap()
+            .id;
+        s.write(|tx| store::apply_item(tx, graph, "AAMk2", Some("ck1"), &[EventData { uid: "u9-guest".into(), ..event.clone() }], None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, graph, "u9-guest"), None, Brussels)).unwrap();
+        d.people.push(attendee("ann@example.com", false, Role::Required));
+        d.move_to = Some(other);
+        s.write(|tx| save_draft(tx, &d, None, Some(ops::Notify::Changed), None, NOW, &horizon(), Brussels)).unwrap();
+        let now = s.read(|c| ops::stored(c, other, "u9-guest", None)).unwrap().unwrap().event;
+        assert_eq!(now.attendees.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), ["ann@example.com"], "the new guest, without the old account's entry");
     }
 
     #[test]
