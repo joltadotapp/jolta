@@ -239,10 +239,15 @@ async fn moved_before(google: &impl Http, to: &Calendar, held: &crate::calendar:
 /// `events.insert` of a series or single event, with the UID Google keeps.
 #[allow(clippy::too_many_arguments)]
 async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, extra: Option<&crate::calendar::ops::Extra>, key: &str, events_url: &str, updates: &str, here: Tz) -> Result<Written> {
-    let body = insert_body(std::slice::from_ref(master), extra, key, here)?;
+    let mut body = insert_body(std::slice::from_ref(master), extra, key, here)?;
     let (uid, alarms) = (&master.uid, &master.alarms);
     let meet = conference_version(&body);
-    let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates={updates}{meet}"), Some(&body), None).await?;
+    let insert = format!("{events_url}?sendUpdates={updates}{meet}");
+    let (mut status, mut reply) = google.request(reqwest::Method::POST, &insert, Some(&body), None).await?;
+    if let Some(plain) = refused_status_event(status, &reply, &body) {
+        body = plain;
+        (status, reply) = google.request(reqwest::Method::POST, &insert, Some(&body), None).await?;
+    }
     match status {
         200..300 => Ok(Written::Saved(Some(version(google, calendar, &settled(google, calendar, &body, reply).await?, alarms)?))),
         // Google holds the UID already: a retry whose first try
@@ -263,6 +268,26 @@ async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, ext
         },
         _ => Err(failure(status, &reply)),
     }
+}
+
+/// Google offers out of office and focus time only to some accounts, and
+/// refuses the others' with a 400 whose reason starts with `malformed`
+/// ("malformedFocusTimeEvent", Google Workspace test account, 2026-11-07).
+/// The same event as a plain busy one, when that is why `body` failed.
+fn refused_status_event(status: u16, reply: &[u8], body: &Value) -> Option<Value> {
+    let kind = body["eventType"].as_str().filter(|t| ["outOfOffice", "focusTime"].contains(t))?;
+    let v: Value = serde_json::from_slice(reply).ok()?;
+    let reasons = v["error"]["errors"].as_array().into_iter().flatten().filter_map(|e| e["reason"].as_str());
+    let refused = reasons.into_iter().any(|r| r.starts_with("malformed") && r.to_ascii_lowercase().contains(&kind.to_ascii_lowercase()));
+    if status != 400 || !refused {
+        return None;
+    }
+    let mut plain = body.clone();
+    let fields = plain.as_object_mut()?;
+    for k in ["eventType", "outOfOfficeProperties", "focusTimeProperties"] {
+        fields.remove(k);
+    }
+    Some(plain)
 }
 
 /// The event with this UID, deleted ones included, and whether it was
@@ -600,6 +625,29 @@ mod tests {
         async fn pause(&self, time: std::time::Duration) {
             self.seen.lock().unwrap().push(format!("WAIT {}s", time.as_secs()));
         }
+    }
+
+    #[tokio::test]
+    async fn an_account_without_status_events_gets_a_busy_event() {
+        let refused = json!({ "error": { "code": 400, "message": "Organizer is not an enterprise account.",
+                                         "errors": [{ "reason": "malformedOutOfOfficeEvent" }] } });
+        let made = json!({ "id": "e1", "etag": "\"1\"", "iCalUID": "u1@jolta.app", "status": "confirmed", "summary": "Out of office",
+                           "start": { "dateTime": "2026-11-24T09:00:00+01:00" }, "end": { "dateTime": "2026-11-24T09:30:00+01:00" } });
+        let fake = Fake::new(vec![(400, refused), (200, made)]);
+        let extra = Extra::Json(json!({ "eventType": "outOfOffice", "outOfOfficeProperties": { "autoDeclineMode": "declineNone" },
+                                        "extendedProperties": { "private": { "joltaHold": "away" } } }).as_object().unwrap().clone());
+        let e = EventData { title: "Out of office".into(), show_as: ShowAs::OutOfOffice, ..standup() };
+        let written = send(&fake, &calendar(), &OpWrite::Create { events: std::slice::from_ref(&e), key: "k", extra: Some(&extra) }, Tell::NOBODY, Brussels).await.unwrap();
+        let Written::Saved(Some(v)) = written else { panic!("saved") };
+        assert_eq!(v.events[0].show_as, ShowAs::Busy);
+        let bodies = fake.bodies.lock().unwrap().clone();
+        assert_eq!(bodies[0]["eventType"], "outOfOffice");
+        assert!(bodies[1].get("eventType").is_none() && bodies[1].get("outOfOfficeProperties").is_none(), "{}", bodies[1]);
+        assert_eq!((bodies[1]["transparency"].as_str(), bodies[1]["extendedProperties"]["private"]["joltaHold"].as_str()), (Some("opaque"), Some("away")));
+
+        let other = Fake::new(vec![(400, json!({ "error": { "errors": [{ "reason": "invalid" }] } }))]);
+        assert!(send(&other, &calendar(), &OpWrite::Create { events: std::slice::from_ref(&e), key: "k", extra: Some(&extra) }, Tell::NOBODY, Brussels).await.is_err());
+        assert_eq!(other.bodies.lock().unwrap().len(), 1, "any other 400 is a failure");
     }
 
     fn calendar() -> Calendar {

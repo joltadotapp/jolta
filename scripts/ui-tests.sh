@@ -47,7 +47,7 @@ for t in $TESTS; do
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Team me@test.invalid >/dev/null
 		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/09-counter.eml" >/dev/null
 	fi
-	if [ "$t" = testAnswerInvitationInCalendar ]; then
+	if [ "$t" = testAnswerInvitationInCalendar ] || [ "$t" = testSetOutOfOffice ]; then
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Work me@test.invalid >/dev/null
 	fi
 	if [ "$t" = testTurnOffAutomaticReplies ]; then

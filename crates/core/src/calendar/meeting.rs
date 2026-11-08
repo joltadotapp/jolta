@@ -423,7 +423,7 @@ fn from_location(location: &str) -> Option<Hit> {
 }
 
 /// Turns HTML into lines of text, enough to read labelled values.
-fn plain_text(s: &str) -> String {
+pub(crate) fn plain_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(open) = rest.find('<') {

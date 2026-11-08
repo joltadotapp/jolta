@@ -20,7 +20,9 @@ struct AwayStrip: View {
             .layoutPriority(1)
             .help("Automatic replies are on for \(info.address)" + (info.untilText.map { " until \($0)" } ?? ""))
             Spacer(minLength: 6)
-            StripButton(title: "Edit") { model.openAwaySettings(info) }
+            StripButton(title: "Edit") {
+                if info.editable { model.openAwaySheet(account: info.accountId) } else { model.openAwaySettings(info) }
+            }
             StripButton(title: "Turn off") { model.turnOffAway(info) }
                 .disabled(model.turningOffAway.contains(info.accountId))
         }
@@ -68,8 +70,17 @@ struct OutOfOfficeRows: View {
     let model: AppModel
     let switches: CalendarSwitches?
     @State private var rows: [AwayInfo] = []
+    /// The sheet opens in the settings window, over this page.
+    @State private var sheet: AwaySheetRequest?
 
     var body: some View {
+        SettingsRow(title: "Set out of office", detail: "Automatic replies on Microsoft 365 and an out-of-office event in each calendar, for the days you pick.") {
+            Button("Set…") { sheet = AwaySheetRequest() }
+                .accessibilityIdentifier("away-set")
+        }
+        .sheet(item: $sheet) { request in
+            AwaySheet(model: model, request: request) { sheet = nil }
+        }
         ForEach(rows, id: \.accountId) { row in
             SettingsRow(title: row.address, detail: row.detail) {
                 switch row.state {
@@ -81,7 +92,11 @@ struct OutOfOfficeRows: View {
                         Button("Turn on calendar") { switches.set(account, on: true) }
                     }
                 default:
-                    Button("Open settings") { model.openAwaySettings(row) }
+                    if row.editable {
+                        Button("Edit…") { sheet = AwaySheetRequest(accountId: row.accountId) }
+                    } else {
+                        Button("Open settings") { model.openAwaySettings(row) }
+                    }
                 }
             }
         }

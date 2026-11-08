@@ -22,13 +22,15 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::Notify;
 
 use super::sources::graph::GraphCalendar;
 use crate::engine::{Event, Sink};
 use crate::model::text_enum;
 use crate::{Account, AccountId, AccountKind, Error, Jolta, Result, gmail_settings, store};
+
+pub mod plan;
 
 const EVERY: chrono::Duration = chrono::Duration::minutes(30);
 /// Short, because tokio's clock stops while the Mac sleeps.
@@ -109,28 +111,25 @@ pub async fn read(jolta: &Jolta, account: &Account) -> Result<Option<Away>> {
     }
 }
 
-/// What Turn off did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TurnedOff {
-    Now,
-    /// The provider said they weren't on any more, so nothing was changed.
-    Already,
+/// Microsoft 365's replies as its provider says now, for an account whose
+/// replies Jolta can change; None for every other account.
+pub(crate) async fn read_editable(jolta: &Jolta, account: &Account) -> Result<Option<Away>> {
+    match recorded(&jolta.data_dir)? {
+        Some(file) => Ok(file.get(&account.address.to_lowercase()).filter(|v| v.get("automaticRepliesSetting").is_some()).map(|v| recorded_away(account.id, v))),
+        None if account.kind == AccountKind::Graph && account.calendar => GraphCalendar::new(account)?.automatic_replies(account.id).await.map(Some),
+        None => Ok(None),
+    }
 }
 
-/// Turns the account's automatic replies off, where Jolta can: Microsoft
-/// 365. It reads them first and changes nothing unless they are on now,
-/// so a stale strip never turns off a window set elsewhere since.
-pub async fn turn_off(jolta: &Jolta, account: AccountId) -> Result<TurnedOff> {
-    let a = jolta.store.read_async(move |c| store::account(c, account)).await?;
-    let (away, outcome) = match recorded(&jolta.data_dir)? {
-        Some(file) => turn_off_recorded(&jolta.data_dir, file, &a)?,
-        None if a.kind == AccountKind::Graph && a.calendar => GraphCalendar::new(&a)?.turn_off_automatic_replies(account, Utc::now()).await?,
-        None if a.kind == AccountKind::Gmail => return Err(Error::Other("Jolta can't change Gmail's vacation responder. Turn it off in Gmail's settings.".into())),
-        None => return Err(Error::Other(format!("Jolta can't change automatic replies for {}.", a.address))),
-    };
-    let fetched = Utc::now().timestamp_millis();
-    jolta.store.write_async(move |tx| store::save_away(tx, &away, fetched)).await?;
-    Ok(outcome)
+/// Sends `body` to Microsoft 365's mailbox settings and returns the
+/// replies as they are after.
+pub(crate) async fn write_replies(jolta: &Jolta, account: &Account, body: &Value) -> Result<Away> {
+    match recorded(&jolta.data_dir)? {
+        Some(file) => write_recorded(&jolta.data_dir, file, account, body),
+        None if account.kind == AccountKind::Graph && account.calendar => GraphCalendar::new(account)?.set_automatic_replies(account.id, body).await,
+        None if account.kind == AccountKind::Gmail => Err(Error::Other("Jolta can't change Gmail's vacation responder. Change it in Gmail's settings.".into())),
+        None => Err(Error::Other(format!("Jolta can't change automatic replies for {}.", account.address))),
+    }
 }
 
 /// Reads every account's state and stores it. Returns whether anything
@@ -225,24 +224,25 @@ fn recorded_away(account: AccountId, v: &Value) -> Away {
     }
 }
 
-fn turn_off_recorded(dir: &Path, mut file: BTreeMap<String, Value>, a: &Account) -> Result<(Away, TurnedOff)> {
+fn write_recorded(dir: &Path, mut file: BTreeMap<String, Value>, a: &Account, body: &Value) -> Result<Away> {
     let key = a.address.to_lowercase();
     let entry = file.get_mut(&key).filter(|v| v.get("automaticRepliesSetting").is_some());
     let Some(entry) = entry else {
         return Err(Error::Other(format!("Jolta can't change automatic replies for {}.", a.address)));
     };
-    if !recorded_away(a.id, entry).reply.on_at(Utc::now()) {
-        return Ok((recorded_away(a.id, entry), TurnedOff::Already));
+    if let (Some(Value::Object(setting)), Some(Value::Object(patch))) = (entry.get_mut("automaticRepliesSetting"), body.get("automaticRepliesSetting")) {
+        setting.extend(patch.clone());
     }
-    entry["automaticRepliesSetting"]["status"] = json!("disabled");
     let away = recorded_away(a.id, entry);
     std::fs::write(dir.join("away.json"), serde_json::to_vec_pretty(&file).map_err(|e| Error::Other(e.to_string()))?)?;
-    Ok((away, TurnedOff::Now))
+    Ok(away)
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+
+    use serde_json::json;
 
     use super::*;
 

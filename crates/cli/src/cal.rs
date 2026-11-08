@@ -204,8 +204,28 @@ pub enum CalCommand {
         days: u32,
     },
     /// Each Google and Microsoft 365 account's automatic replies as the
-    /// provider says now, or one account's. Reads only; stores what it read.
-    Away { account: Option<String> },
+    /// provider says now, or one account's; stores what it read. With
+    /// --from and --until, sets out of office for the account as the sheet
+    /// does; with --off, ends what is on now, else the next one set.
+    Away {
+        account: Option<String>,
+        /// The first day ("2026-11-11") or moment ("2026-11-11 14:00").
+        #[arg(long, requires = "until", requires = "account")]
+        from: Option<String>,
+        /// The last day, included, or the moment it ends.
+        #[arg(long, requires = "from")]
+        until: Option<String>,
+        #[arg(long, default_value = "")]
+        message: String,
+        /// What Google's out-of-office event declines.
+        #[arg(long, value_enum, default_value_t = DeclineArg::New)]
+        decline: DeclineArg,
+        /// Who outside the organization gets Microsoft 365's reply.
+        #[arg(long, value_enum, default_value_t = OutsideArg::All)]
+        outside: OutsideArg,
+        #[arg(long, requires = "account", conflicts_with = "from")]
+        off: bool,
+    },
     /// Times everyone known is free for a meeting, as Find a time suggests
     /// them. Reads only.
     FindTime {
@@ -338,7 +358,22 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             println!("Hidden calendars aren't synced. Show one with `jolta cal show <id> on`.");
             Ok(())
         }
-        CalCommand::Away { account } => {
+        CalCommand::Away { account: Some(name), from: Some(from), until: Some(until), message, decline, outside, .. } => {
+            set_away(jolta, &name, &from, &until, message, decline, outside).await
+        }
+        CalCommand::Away { account: Some(name), off: true, .. } => {
+            let a = jolta.store.read(|c| store::find_account(c, &name))?;
+            let here = tz::here();
+            let (ended, _) = away::plan::end(jolta, a.id, away::plan::Reach::NowOrNext, &Horizon::around(Utc::now(), here), here).await?;
+            println!(
+                "{}: {}; {} out-of-office events ended",
+                a.address,
+                if ended.replies { "automatic replies turned off" } else { "automatic replies unchanged" },
+                ended.events
+            );
+            send_calendar_ops(jolta).await
+        }
+        CalCommand::Away { account, .. } => {
             let accounts = match account {
                 Some(name) => vec![jolta.store.read(|c| store::find_account(c, &name))?],
                 None => jolta.store.read(store::accounts)?,
@@ -1043,4 +1078,76 @@ fn print_card(card: &Card) {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum DeclineArg {
+    New,
+    All,
+    None,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum OutsideArg {
+    All,
+    Contacts,
+    None,
+}
+
+/// Sets out of office for one account, as the sheet does, and sends the
+/// event's op at once.
+async fn set_away(jolta: &Jolta, name: &str, from: &str, until: &str, message: String, decline: DeclineArg, outside: OutsideArg) -> Result<()> {
+    use jolta_core::calendar::away::plan::{self, Absence, Request};
+    let here = tz::here();
+    let a = jolta.store.read(|c| store::find_account(c, name))?;
+    let day = |t: &str| NaiveDate::parse_from_str(t.trim(), "%Y-%m-%d");
+    let moment = |t: &str| -> Result<DateTime<Utc>> {
+        let wall = chrono::NaiveDateTime::parse_from_str(t.trim(), "%Y-%m-%d %H:%M").with_context(|| format!("{t:?} is not a day like 2026-11-11 or a time like \"2026-11-11 14:00\""))?;
+        Ok(tz::instant(wall, here))
+    };
+    let absence = match (day(from), day(until)) {
+        (Ok(first), Ok(last)) => Absence::Days { first, last },
+        _ => Absence::Times { from: moment(from)?, until: moment(until)? },
+    };
+    let request = Request {
+        accounts: vec![a.id],
+        absence,
+        message,
+        audience: match outside {
+            OutsideArg::All => away::Audience::All,
+            OutsideArg::Contacts => away::Audience::Contacts,
+            OutsideArg::None => away::Audience::Organization,
+        },
+        declines: match decline {
+            DeclineArg::New => jolta_core::calendar::AutoDecline::New,
+            DeclineArg::All => jolta_core::calendar::AutoDecline::All,
+            DeclineArg::None => jolta_core::calendar::AutoDecline::None,
+        },
+    };
+    if let Some(problem) = request.problem(Utc::now(), here) {
+        bail!("{problem}");
+    }
+    let targets = jolta.store.read(plan::targets)?;
+    let steps: Vec<plan::Step> = plan::plan(&targets, &request, here).into_iter().filter(|s| s.account == a.id).collect();
+    for s in &steps {
+        println!("{}: {}", a.address, s.line);
+        if let Some((title, url)) = &s.link {
+            println!("  {title}: {url}");
+        }
+    }
+    let (applied, _) = plan::apply(jolta, &steps, &Horizon::around(Utc::now(), here), here).await;
+    for done in applied {
+        done.result?;
+    }
+    send_calendar_ops(jolta).await
+}
+
+/// Sends the calendar ops due now, as the app's worker would.
+async fn send_calendar_ops(jolta: &Jolta) -> Result<()> {
+    for settled in jolta_core::calendar::ops::run_due(jolta, Horizon::around(Utc::now(), tz::here())).await? {
+        if let Some(f) = settled.failure {
+            println!("{}", f.message);
+        }
+    }
+    Ok(())
 }

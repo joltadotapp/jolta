@@ -2,11 +2,10 @@
 //! which `MailboxSettings.ReadWrite` from the calendar sign-in reads and
 //! changes.
 
-use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{Api, GraphCalendar, When, instant};
-use crate::calendar::away::{Audience, AutoReply, Away, TurnedOff};
+use crate::calendar::away::{Audience, AutoReply, Away};
 use crate::{AccountId, Result};
 
 const SETTING: &str = "/me/mailboxSettings/automaticRepliesSetting";
@@ -16,8 +15,9 @@ impl GraphCalendar {
         read(self, account).await
     }
 
-    pub async fn turn_off_automatic_replies(&self, account: AccountId, now: DateTime<Utc>) -> Result<(Away, TurnedOff)> {
-        turn_off(self, account, now).await
+    /// Sends `body` to the mailbox settings and reads the replies back.
+    pub async fn set_automatic_replies(&self, account: AccountId, body: &Value) -> Result<Away> {
+        set(self, account, body).await
     }
 
     /// An `automaticRepliesSetting` as Graph gives it.
@@ -46,26 +46,20 @@ async fn read(api: &impl Api, account: AccountId) -> Result<Away> {
     Ok(GraphCalendar::away_of(account, &reply))
 }
 
-/// Sets only the status, so Outlook keeps the window and the messages for
-/// the next time.
-async fn turn_off(api: &impl Api, account: AccountId, now: DateTime<Utc>) -> Result<(Away, TurnedOff)> {
-    let before = read(api, account).await?;
-    if !before.reply.on_at(now) {
-        return Ok((before, TurnedOff::Already));
-    }
-    let body = json!({ "automaticRepliesSetting": { "status": "disabled" } });
-    let (status, reply) = api.request("PATCH", "/me/mailboxSettings", Some(&body), &[]).await?;
+async fn set(api: &impl Api, account: AccountId, body: &Value) -> Result<Away> {
+    let (status, reply) = api.request("PATCH", "/me/mailboxSettings", Some(body), &[]).await?;
     if !(200..300).contains(&status) {
         return Err(api.failure(status, &reply));
     }
-    Ok((Away { reply: AutoReply::Off, ..before }, TurnedOff::Now))
+    read(api, account).await
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
     use chrono_tz::{Europe, Tz};
 
     use super::*;
@@ -111,7 +105,9 @@ mod tests {
             self.sent.lock().unwrap().push((format!("{method} {url}"), body.cloned()));
             let mut setting = self.setting.lock().unwrap();
             if method == "PATCH" {
-                setting["status"] = body.unwrap()["automaticRepliesSetting"]["status"].clone();
+                for (k, v) in body.unwrap()["automaticRepliesSetting"].as_object().unwrap() {
+                    setting[k] = v.clone();
+                }
                 return Ok((200, json!({})));
             }
             Ok((200, setting.clone()))
@@ -127,23 +123,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turning_off_changes_only_the_status_and_only_while_on() {
+    async fn a_change_is_sent_and_read_back() {
         let mailbox = Mailbox { setting: Mutex::new(setting("scheduled")), sent: Mutex::default() };
-        let during = Utc.with_ymd_and_hms(2027, 1, 4, 12, 0, 0).unwrap();
-        let (away, outcome) = turn_off(&mailbox, AccountId(2), during).await.unwrap();
-        assert_eq!((away.reply, outcome), (AutoReply::Off, TurnedOff::Now));
+        let off = json!({"automaticRepliesSetting": {"status": "disabled"}});
+        let away = set(&mailbox, AccountId(2), &off).await.unwrap();
+        assert_eq!(away.reply, AutoReply::Off);
+        assert_eq!(away.external, "<html><body>Away until Monday.</body></html>", "turning off keeps the messages for next time");
         let sent = mailbox.sent.lock().unwrap().clone();
-        assert_eq!(sent[1], ("PATCH /me/mailboxSettings".into(), Some(json!({"automaticRepliesSetting": {"status": "disabled"}}))));
-
-        let (_, again) = turn_off(&mailbox, AccountId(2), during).await.unwrap();
-        assert_eq!(again, TurnedOff::Already, "twice changes nothing more");
-        assert_eq!(mailbox.sent.lock().unwrap().len(), 3, "the second Turn off only reads");
-
-        let later = Mailbox { setting: Mutex::new(setting("scheduled")), sent: Mutex::default() };
-        let before = Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap();
-        let (away, outcome) = turn_off(&later, AccountId(2), before).await.unwrap();
-        assert_eq!(outcome, TurnedOff::Already, "a window set for later stays");
-        assert!(matches!(away.reply, AutoReply::On { .. }));
-        assert_eq!(later.sent.lock().unwrap().len(), 1);
+        assert_eq!(sent, vec![("PATCH /me/mailboxSettings".into(), Some(off)), (format!("GET {SETTING}"), None)]);
     }
 }

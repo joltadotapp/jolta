@@ -168,6 +168,8 @@ struct PaletteView: View {
         } else {
             out.append(PaletteItem(id: "mail", title: "Go to Mail", icon: "tray", keys: CalendarCommand.mail.keys) { [model] in model.mode = .mail })
         }
+        out.append(PaletteItem(id: "out-of-office", title: "Out of office…", detail: "Automatic replies and an out-of-office event",
+                               icon: "airplane") { [model] in model.openAwaySheet() })
         out.append(PaletteItem(id: "calendar-settings", title: "Calendar Settings…", icon: "gearshape") { [model] in model.openSettings(.calendar) })
         out.append(PaletteItem(id: "sync", title: "Sync now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
