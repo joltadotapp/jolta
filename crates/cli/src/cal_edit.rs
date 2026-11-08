@@ -250,8 +250,8 @@ fn guest(spec: &str) -> Attendee {
 fn print_dialog(d: &change::UpdateDialog) {
     println!("{}", d.title);
     println!("  {}", d.body);
-    if let Some(note) = &d.note {
-        println!("  {note}");
+    if let Some(box_label) = &d.email_guests {
+        println!("  [ ] {box_label}: `jolta cal email-guests <event>` after saving");
     }
     for c in &d.choices {
         let flag = match c.notify {
@@ -295,6 +295,40 @@ async fn save_with_guests(jolta: &Jolta, d: &draft::EventDraft, scope: Option<Sc
 
 fn horizon() -> Horizon {
     Horizon::around(Utc::now(), tz::here())
+}
+
+#[derive(Args)]
+pub struct AcceptProposalArgs {
+    /// The id of the message with the guest's proposal.
+    message: i64,
+    /// For a proposal for one occurrence: this event (the default), this
+    /// and following events, or all.
+    #[arg(long, value_enum)]
+    scope: Option<ScopeArg>,
+    #[command(flatten)]
+    people: Guests,
+    #[command(flatten)]
+    send: Send,
+}
+
+/// Accept proposal as the card and the editor do: the meeting in the
+/// account's own calendar at the time proposed, saved through Send an
+/// update? with --notify. Nothing opens; without --notify the dialog is
+/// printed and nothing is saved.
+pub async fn accept_proposal(jolta: &Jolta, a: AcceptProposalArgs) -> Result<()> {
+    let accepting = jolta_core::calendar::proposal::accept_draft(jolta, jolta_core::MessageId(a.message)).await?;
+    println!("{}", accepting.header);
+    let scopes = jolta.store.read(|c| draft::plan_save(c, &accepting.draft, tz::here()))?.scopes;
+    let scope = a.scope.map(Into::into).or(scopes.first().map(|s| s.scope));
+    if a.people.notify.is_none() {
+        let plan = jolta.store.read(|c| draft::plan_save(c, &accepting.draft, tz::here()))?;
+        if let Some(dialog) = &plan.dialog {
+            print_dialog(dialog);
+            println!("Nothing saved: pick one with --notify.");
+            return Ok(());
+        }
+    }
+    save_with_guests(jolta, &accepting.draft, scope, &a.people, &a.send).await
 }
 
 /// The minutes a new event lasts without --end or --minutes: Outlook's default.
@@ -478,6 +512,11 @@ fn occurrence_on(jolta: &Jolta, id: i64, day: &str) -> Result<Bounds> {
     found.map(|o| o.bounds).with_context(|| format!("#{id} has no occurrence on {day}"))
 }
 
+/// `occurrence_on` for the day asked for, if one was.
+pub fn occurrence_bounds(jolta: &Jolta, id: i64, day: Option<&str>) -> Result<Option<Bounds>> {
+    day.map(|d| occurrence_on(jolta, id, d)).transpose()
+}
+
 /// The editor's draft of the event, at the occurrence asked for.
 fn drafted(jolta: &Jolta, id: i64, occurrence: Option<&str>) -> Result<draft::EventDraft> {
     let at = occurrence.map(|d| occurrence_on(jolta, id, d)).transpose()?;
@@ -595,9 +634,9 @@ fn print_delete_plan(plan: &draft::DeletePlan) {
     for (scope, c) in &plan.cancel {
         println!("{} ({scope})", c.title);
         println!("  {}", c.body);
-        match (&c.note, c.message) {
+        match (&c.email_guests, c.message) {
             (_, true) => println!("  --message carries your words"),
-            (Some(note), false) => println!("  {note}"),
+            (Some(box_label), false) => println!("  [ ] {box_label}: `jolta cal email-guests <event>` before deleting"),
             (None, false) => {}
         }
     }

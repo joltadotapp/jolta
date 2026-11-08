@@ -39,6 +39,9 @@ pub use crate::engine::{MAX_ATTEMPTS, UNDO_SEND_SECONDS};
 /// Ops sent at once, across events.
 pub const AT_ONCE: usize = 4;
 
+/// How long an op that couldn't reach its server waits before it tries again.
+pub const OFFLINE_RETRY_SECONDS: i64 = 60;
+
 /// Writes one op makes after 412s, each merged with the server's version,
 /// before it gives up: Google's `answer` uses the same bound.
 const MERGE_ROUNDS: usize = 3;
@@ -108,6 +111,23 @@ pub enum Write {
     /// objects and versions they were filed with, which Undo puts back;
     /// `events` are what the op's calendar gets (`moving::plan`).
     Move { from: CalendarId, how: How, rows: Vec<Row>, events: Vec<EventData> },
+    /// The user's answer to an invitation, kept in the store while the
+    /// provider couldn't be reached and sent through it once it can:
+    /// `event` is the copy answered, as answered.
+    Answer { event: EventData, answered: Answered },
+}
+
+/// An answer to send through the calendar copy's provider, as
+/// `rsvp::answer` takes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answered {
+    pub answer: rsvp::Answer,
+    pub note: Option<String>,
+    /// False for Don't send a reply.
+    pub notify: bool,
+    /// The occurrence answered alone; None for the whole event or series.
+    pub occurrence: Option<Moment>,
+    pub proposal: Option<rsvp::Proposal>,
 }
 
 /// A stored row as an op takes it out, so putting it back keeps the object
@@ -135,6 +155,7 @@ impl Write {
             Write::Delete(_) => "delete",
             Write::Cancel { .. } => "cancel",
             Write::Move { .. } => "move",
+            Write::Answer { .. } => "rsvp",
         }
     }
 
@@ -142,7 +163,7 @@ impl Write {
     pub fn event(&self) -> Option<&EventData> {
         match self {
             Write::Create(events) | Write::Delete(events) | Write::Move { events, .. } => events.iter().find(|e| e.recurrence_id.is_none()).or(events.first()),
-            Write::Update { event, .. } | Write::Cancel { occurrence: event, .. } => Some(event),
+            Write::Update { event, .. } | Write::Cancel { occurrence: event, .. } | Write::Answer { event, .. } => Some(event),
         }
     }
 
@@ -156,7 +177,7 @@ impl Write {
                 }
             }
             Write::Cancel { series, .. } if series.recurrence_id == base.recurrence_id => *series = base.clone(),
-            Write::Create(_) | Write::Cancel { .. } | Write::Move { .. } => {}
+            Write::Create(_) | Write::Cancel { .. } | Write::Move { .. } | Write::Answer { .. } => {}
         }
     }
 
@@ -169,7 +190,7 @@ impl Write {
             Write::Update { base, dropped, .. } if dropped.is_empty() => Some(Change::Update(base.clone())),
             Write::Update { .. } => None,
             Write::Delete(events) => Some(Change::Create(events.clone())),
-            Write::Cancel { .. } => None,
+            Write::Cancel { .. } | Write::Answer { .. } => None,
             Write::Move { from, events, .. } => Some(Change::Move { uid: events.first().map(|e| e.uid.clone()).unwrap_or_default(), to: *from }),
         }
     }
@@ -283,6 +304,46 @@ pub fn queue(conn: &Connection, edit: &Edit, now: i64, horizon: &Horizon) -> Res
 /// a move, in the calendar the move leaves the event in.
 pub fn queue_after(conn: &Connection, edit: &Edit, after: CalendarOpId, now: i64, horizon: &Horizon) -> Result<Option<CalendarOpId>> {
     queue_op(conn, edit, Link { after: Some(after), following: false }, now, horizon)
+}
+
+/// Queues an answer the store already holds, to go through the provider
+/// of `calendar` as soon as it can, after the event's other ops. An answer
+/// still waiting there for the same occurrence goes, and an answer for the
+/// whole series takes every waiting one with it: only the newest answer is
+/// sent.
+pub fn queue_answer(conn: &Connection, calendar: CalendarId, event: &EventData, answered: Answered, now: i64) -> Result<CalendarOpId> {
+    let rid = answered.occurrence.as_ref().map(store::moment_text);
+    conn.execute(
+        "DELETE FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND (?3 IS NULL OR recurrence_id = ?3) AND kind = 'rsvp' AND state = 'pending'",
+        params![calendar, event.uid, rid],
+    )?;
+    let id = store::insert_calendar_op(
+        conn,
+        &CalendarOp {
+            id: CalendarOpId(0),
+            calendar,
+            uid: event.uid.clone(),
+            recurrence_id: answered.occurrence,
+            scope: if answered.occurrence.is_some() { Scope::This } else { Scope::All },
+            notify: if answered.notify { Notify::All } else { Notify::Nobody },
+            message: answered.note.clone(),
+            write: Write::Answer { event: event.clone(), answered },
+            extra: None,
+            remote_key: event.uid.clone(),
+            held: None,
+            passed_over: false,
+            send_after: now,
+            state: OpState::Pending,
+            tried: false,
+            attempts: 0,
+            error: None,
+            lost: Vec::new(),
+            created: now,
+            after: None,
+        },
+    )?;
+    store::refresh_changed_locally(conn, calendar, &event.uid)?;
+    Ok(id)
 }
 
 /// How an op of This and following belongs to its pair.
@@ -420,7 +481,7 @@ fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held:
             }
             !super::draft::guests(calendar, &account, occurrence).is_empty()
         }
-        Write::Move { .. } => false,
+        Write::Move { .. } | Write::Answer { .. } => false,
     };
     if organizer::sends_itself(calendar) {
         let event = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;
@@ -470,7 +531,7 @@ fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held:
         Write::Update { base, event, .. } => OpWrite::Update { held: &held, base, event, extra, dropped: &dropped },
         Write::Delete(_) => OpWrite::Delete { held: &held },
         Write::Cancel { occurrence, row, .. } => OpWrite::Cancel { held: &held, occurrence, changed: row.is_some() },
-        Write::Move { .. } => return Ok(()),
+        Write::Move { .. } | Write::Answer { .. } => return Ok(()),
     };
     sources::writable(calendar.source, &request).map_err(|e| Error::Other(format!("{e}, so Jolta didn't change {}", calendar.name)))
 }
@@ -857,6 +918,8 @@ fn apply(conn: &Connection, calendar: CalendarId, write: &Write, remote_key: &st
             }
             uid
         }
+        // `rsvp::keep_answer` stored the answer before it queued the op.
+        Write::Answer { .. } => None,
         Write::Cancel { series, occurrence, row } => {
             let master = stored(conn, calendar, &series.uid, None)?.ok_or_else(|| Error::NotFound(format!("event {} in its calendar", series.uid)))?;
             let mut cut = series.clone();
@@ -911,6 +974,12 @@ fn revert(conn: &Connection, op: &CalendarOp, horizon: &Horizon) -> Result<()> {
         }
         return Ok(());
     }
+    // The server has the copy as it was before the answer: the next sync
+    // lists the calendar whole and stores every row of it again.
+    if let Write::Answer { .. } = &op.write {
+        conn.execute("UPDATE event SET etag = NULL WHERE calendar_id = ?1 AND uid = ?2", params![op.calendar, op.uid])?;
+        return store::forget_calendar_cursor(conn, op.calendar);
+    }
     let back = match &op.write {
         Write::Create(events) => Some(Write::Delete(events.clone())),
         Write::Update { base, event, fresh: false, .. } => Some(Write::Update { base: event.clone(), event: base.clone(), dropped: Vec::new(), fresh: false }),
@@ -929,7 +998,7 @@ fn revert(conn: &Connection, op: &CalendarOp, horizon: &Horizon) -> Result<()> {
                 return Ok(());
             }
         },
-        Write::Move { .. } => unreachable!("a move is put back above"),
+        Write::Move { .. } | Write::Answer { .. } => unreachable!("put back above"),
     };
     let key = op.filed_under();
     if let Some(back) = back {
@@ -963,6 +1032,9 @@ pub enum Undone {
 pub fn undo(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horizon) -> Result<Undone> {
     let op = store::calendar_op(conn, id)?;
     let title = op.write.event().map(|e| e.title.clone()).unwrap_or_default();
+    if let Write::Answer { .. } = op.write {
+        return Err(Error::Other(format!("Your answer to {title} can't be undone; answer again to change it")));
+    }
     if store::newest_calendar_op(conn, op.calendar, &op.uid)? != Some(id) {
         return Err(Error::Other(format!("{title} changed again since; undo that change first")));
     }
@@ -1067,6 +1139,7 @@ pub fn apply_mine(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horiz
         }
         Write::Create(_) => return Err(Error::Other("A new event has nothing to apply".into())),
         Write::Move { .. } => return Err(Error::Other("A move has nothing to apply".into())),
+        Write::Answer { .. } => return Err(Error::Other("An answer has nothing to apply".into())),
     };
     queue(conn, &Edit { calendar: op.calendar, change, notify: op.notify, message: op.message.clone(), extra: op.extra.clone() }, now, horizon)
 }
@@ -1240,6 +1313,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
                 // delete failed: the next syncs show what each holds.
                 Write::Move { how: How::Copy, .. } => format!("Jolta couldn't move {title}: {reason}. If it shows in both calendars, delete one."),
                 Write::Move { .. } => format!("Jolta couldn't move {title}: {reason}"),
+                Write::Answer { .. } => format!("Jolta couldn't send your answer to {title}: {reason}"),
                 _ => format!("Jolta couldn't save the change to {title}: {reason}"),
             };
             let event = stored(conn, op.moved_from().unwrap_or(op.calendar), &op.uid, op.recurrence_id.as_ref())?.map(|s| s.id);
@@ -1391,15 +1465,22 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
             return Ok(out);
         }
         let sent = futures::future::join_all(ops.into_iter().map(|op| async move {
-            let result = send(jolta, &op).await.map_err(|e| e.to_string());
+            let result = send(jolta, &op).await;
             (op, result)
         }))
         .await;
         for (op, result) in sent {
             let now = chrono::Utc::now().timestamp();
+            // Nothing reached the server: the op waits for the network
+            // without using up an attempt, however long it is offline.
+            if let Err(Error::Offline(reason)) = &result {
+                let (id, reason) = (op.id, reason.clone());
+                jolta.store.write_async(move |tx| store::wait_offline_calendar_op(tx, id, &reason, now + OFFLINE_RETRY_SECONDS)).await?;
+                continue;
+            }
             let (result, mailed) = match result {
                 Ok((sent, mailed)) => (Ok(sent), mailed),
-                Err(e) => (Err(e), None),
+                Err(e) => (Err(e.to_string()), None),
             };
             let settled = jolta.store.write_async(move |tx| settle(tx, &op, result, now, &horizon)).await?;
             out.push(Settled { mailed, ..settled });
@@ -1412,6 +1493,10 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
 /// guests hear of the op through the outbox of the account it sends from,
 /// which comes back with the result.
 async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<(Sent, Option<crate::AccountId>)> {
+    if let Write::Answer { answered, .. } = &op.write {
+        rsvp::send_answer(jolta, op.calendar, &op.uid, answered).await?;
+        return Ok((Sent::Done { version: None, merged: false }, None));
+    }
     let id = op.calendar;
     let calendar = jolta.store.read_async(move |c| store::calendar(c, id)).await?;
     if let Some(from) = op.moved_from() {
@@ -1565,6 +1650,7 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
             Written::Stale | Written::Gone => Err(Error::Other("the server refused the new event".into())),
         },
         Write::Move { .. } => Err(Error::Other("a move goes through deliver_move".into())),
+        Write::Answer { .. } => Err(Error::Other("an answer goes through rsvp::answer".into())),
         Write::Update { base, event, dropped, fresh } => {
             let Some(held) = &op.held else { return Err(Error::Other("an edit without the version it changes".into())) };
             let dropped: Vec<EventData> = dropped.iter().map(|r| r.event.clone()).collect();

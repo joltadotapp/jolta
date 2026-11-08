@@ -229,6 +229,8 @@ final class CalendarModel {
     @ObservationIgnored var gathering: Task<Void, Never>?
     /// Shows a toast, with the token Undo takes back.
     @ObservationIgnored var toast: ((String, Int64?) -> Void)?
+    /// Opens a filled-in message in mail's compose: Email guests.
+    @ObservationIgnored var openCompose: ((ComposeData) -> Void)?
     private(set) var list = CalendarList(accounts: [], otherCalendars: []) {
         didSet { writableCalendars = Set((list.accounts.flatMap(\.calendars) + list.otherCalendars).filter(\.writable).map(\.id)) }
     }
@@ -694,6 +696,31 @@ final class CalendarModel {
         open(editor)
     }
 
+    /// Accept proposal: the meeting at the time a guest proposed, with the
+    /// proposal named above the fields.
+    func openProposal(_ p: ProposalDraft) {
+        guard confirmLeaving({ self.openProposal(p) }) else { return }
+        let day: Date? = switch p.time {
+        case .timed(let start, _): Date(timeIntervalSince1970: TimeInterval(start))
+        case .allDay(let first, _): Self.keyFormat.date(from: first)
+        }
+        go(to: day ?? .now)
+        let shown = events.first { $0.record.eventId == p.eventId && $0.record.time == p.time }
+        selectedID = shown?.id
+        let editor = EventEditorModel(core: core, draft: p.draft, event: shown)
+        editor.proposal = p.header
+        open(editor)
+    }
+
+    /// Email guests for `event`, from its detail, the editor or after a save.
+    func emailGuests(_ event: CalEvent, address: String? = nil) {
+        do {
+            openCompose?(try core.emailGuests(eventId: event.record.eventId, time: event.record.time, address: address))
+        } catch {
+            toast?("\(error)", nil)
+        }
+    }
+
     /// Double-click on empty time: a new event on that half hour.
     func newEvent(day: CalendarDay, minute: Int) {
         let s = Int64(Self.at(day.start, minutes: minute / 30 * 30).timeIntervalSince1970)
@@ -810,7 +837,13 @@ final class CalendarModel {
         let send = { [weak self] (scope: EditScope?, prompted: Bool) in
             guard let self else { return }
             guard let dialog = plan.dialog else { return perform(scope, nil, nil) }
-            self.after(prompted) { self.sendPrompt = SendPrompt(dialog: dialog, back: back) { perform(scope, $0, $1) } }
+            self.after(prompted) {
+                self.sendPrompt = SendPrompt(dialog: dialog, back: back) { notify, message, email in
+                    perform(scope, notify, message)
+                    // The save selects the event as it is now, at its new time.
+                    if email, let event = self.selected { self.emailGuests(event) }
+                }
+            }
         }
         guard !plan.scopes.isEmpty else { return send(nil, false) }
         scopePrompt = ScopePrompt(title: "Change a repeating event", line: plan.prompt, choices: plan.scopes, cancel: cancel) { send($0, true) }
@@ -892,7 +925,14 @@ final class CalendarModel {
                 guard let event else { return self.toast?("Open the meeting in the calendar to decline it.", nil) ?? () }
                 self.after(prompted) { self.declinePrompt = DeclinePrompt(info: decline) { [weak self] tell in self?.declineAndRemove(event, occurrenceOnly: scope == .this, tell: tell) } }
             } else if let cancel = plan.cancel.first(where: { $0.scope == (scope ?? .all) }) {
-                self.after(prompted) { self.cancelPrompt = CancelPrompt(dialog: cancel) { message in perform(scope, message) } }
+                self.after(prompted) {
+                    self.cancelPrompt = CancelPrompt(dialog: cancel) { [weak self] message, email in
+                        // Read before the delete takes the event out of the store.
+                        let mail = email ? event.flatMap { try? self?.core.emailGuests(eventId: $0.record.eventId, time: $0.record.time, address: nil) } : nil
+                        perform(scope, message)
+                        if let mail { self?.openCompose?(mail) }
+                    }
+                }
             } else {
                 perform(scope, nil)
             }

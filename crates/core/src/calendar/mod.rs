@@ -20,6 +20,7 @@ pub mod moving;
 mod model;
 pub mod ops;
 pub mod organizer;
+pub mod emailing;
 pub mod proposal;
 pub mod quick;
 pub mod recur;

@@ -49,6 +49,10 @@ pub enum Error {
     NotFound(String),
     #[error("invalid query: {0}")]
     Query(String),
+    /// The request never reached the server: no network, no name lookup or
+    /// no connection. Sending it again later can't do anything twice.
+    #[error("{0}")]
+    Offline(String),
     #[error("{0}")]
     Other(String),
 }

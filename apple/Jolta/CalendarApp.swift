@@ -6,6 +6,7 @@ extension AppModel {
     func startCalendar() {
         calendar.onChange = { [weak self] in self?.scheduleReminders() }
         calendar.toast = { [weak self] text, token in self?.notify(text, calendarUndo: token) }
+        calendar.openCompose = { [weak self] compose in self?.openCompose(compose) }
         notifier.onOpenEvent = { [weak self] id, fireAt in
             guard let self else { return }
             showMainWindow()
@@ -39,6 +40,51 @@ extension AppModel {
             Task {
                 try? await Task.sleep(for: .seconds(3))
                 if let window = KeyRouter.shared.window { bench.run(window: window) { [weak self] in self?.mode = .calendar } }
+            }
+        }
+    }
+
+    /// A message the calendar filled in, such as Email guests, in mail's
+    /// compose: the compose pane lives beside the mail list.
+    func openCompose(_ prefilled: ComposeData) {
+        composeReminder = nil
+        composeSchedule = nil
+        compose = prefilled
+    }
+
+    /// Email guests for one occurrence of an event, or with `address` a
+    /// mail to that person on it.
+    func emailGuests(eventID: Int64, time: OccurrenceTime?, address: String? = nil) {
+        do {
+            openCompose(try core.emailGuests(eventId: eventID, time: time, address: address))
+        } catch {
+            notify("\(error)")
+        }
+    }
+
+    /// The palette's Email guests: the selected event in calendar mode, else
+    /// the meeting running now or the next one with other people on it.
+    func emailGuestsOfNextMeeting() {
+        if mode == .calendar, let event = calendar.selected {
+            return emailGuests(eventID: event.record.eventId, time: event.record.time)
+        }
+        guard let next = try? core.nextMeetingWithGuests(now: Int64(Date.now.timeIntervalSince1970)) else {
+            return notify("No meeting with other people in the coming week")
+        }
+        emailGuests(eventID: next.eventId, time: next.time)
+    }
+
+    /// Accept proposal on a guest's proposal (its card's link, or A): the
+    /// meeting at the time proposed in the editor, in calendar mode. Saving
+    /// it sends the update through Send an update?.
+    func acceptProposal(message: Int64) {
+        Task {
+            do {
+                let proposal = try await core.acceptProposal(messageId: message)
+                mode = .calendar
+                calendar.openProposal(proposal)
+            } catch {
+                notify("\(error)")
             }
         }
     }

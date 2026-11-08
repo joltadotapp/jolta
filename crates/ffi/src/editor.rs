@@ -171,8 +171,9 @@ pub struct SendChoice {
 pub struct UpdateDialogInfo {
     pub title: String,
     pub body: String,
-    /// Where a message field would be: "To add a note, use Email guests after saving."
-    pub note: Option<String>,
+    /// Where a message field would be: a box, "Email the guests a note
+    /// after saving", that opens `email_guests` once the save is done.
+    pub email_guests: Option<String>,
     /// Shows a message field: Jolta's own mail carries the user's words.
     pub message: bool,
     pub choices: Vec<SendChoice>,
@@ -196,7 +197,7 @@ impl From<cal::change::UpdateDialog> for UpdateDialogInfo {
         UpdateDialogInfo {
             title: d.title,
             body: d.body,
-            note: d.note,
+            email_guests: d.email_guests,
             message: d.message,
             choices: d
                 .choices
@@ -225,7 +226,9 @@ pub struct CancelDialogInfo {
     pub body: String,
     /// Shows a message field: the cancellation carries the user's words.
     pub message: bool,
-    pub note: Option<String>,
+    /// In its place, a box: "Email the guests a note after cancelling".
+    /// Read `email_guests` before the delete: the event leaves the store.
+    pub email_guests: Option<String>,
 }
 
 /// "Decline and remove?" for a meeting someone else organizes.
@@ -411,7 +414,7 @@ impl From<draft::DeletePlan> for DeletePlan {
             cancel: plan
                 .cancel
                 .into_iter()
-                .map(|(scope, d)| CancelDialogInfo { scope: scope.into(), title: d.title, body: d.body, message: d.message, note: d.note })
+                .map(|(scope, d)| CancelDialogInfo { scope: scope.into(), title: d.title, body: d.body, message: d.message, email_guests: d.email_guests })
                 .collect(),
             decline: plan.decline.map(|d| DeclineInfo { title: d.title, body: d.body, organizer: d.organizer }),
             senders: senders(plan.senders),
@@ -608,6 +611,36 @@ impl Core {
 
 fn horizon() -> Horizon {
     Horizon::around(Utc::now(), tz::here())
+}
+
+/// Accept proposal: the meeting at the time a guest proposed, for the editor.
+#[derive(uniffi::Record)]
+pub struct ProposalDraft {
+    pub draft: EventDraft,
+    /// Above the fields: "Bo Nilsson proposed this time: \"Thursday is full\"".
+    pub header: String,
+    /// The occurrence it opened, as the views name it: hidden in the grid
+    /// while the draft shows, as for E.
+    pub event_id: i64,
+    pub time: OccurrenceTime,
+}
+
+#[uniffi::export]
+impl Core {
+    /// Accept proposal on a message's card: the organizer's own copy of the
+    /// meeting at the time the guest proposed, for one occurrence that
+    /// occurrence. Saving it goes through `plan_save` and `save_event` like
+    /// any edit, so Send an update? tells the guests; the card then reads
+    /// Accepted.
+    pub async fn accept_proposal(&self, message_id: i64) -> Result<ProposalDraft> {
+        let jolta = self.jolta.clone();
+        let a = self
+            .runtime
+            .spawn(async move { cal::proposal::accept_draft(&jolta, jolta_core::MessageId(message_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        Ok(ProposalDraft { draft: a.draft.into(), header: a.header, event_id: a.event.0, time: a.at.into() })
+    }
 }
 
 /// A calendar of the editor's picker for a stored event.

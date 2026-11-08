@@ -156,6 +156,9 @@ struct PaletteView: View {
         }
         out.append(PaletteItem(id: "join-next", title: "Join next meeting", detail: model.calendar.nextMeeting?.title ?? "",
                                icon: "video", keys: CalendarCommand.joinNext.keys) { [model] in model.joinNextMeeting() })
+        let emailing = model.mode == .calendar ? model.calendar.selected?.title : nil
+        out.append(PaletteItem(id: "email-guests", title: "Email guests", detail: emailing ?? "The meeting now or next, with other people",
+                               icon: "envelope") { [model] in model.emailGuestsOfNextMeeting() })
         if model.mode == .mail {
             out.append(PaletteItem(id: "calendar", title: "Go to Calendar", icon: "calendar", keys: CalendarCommand.calendar.keys) { [model] in
                 model.mode = .calendar

@@ -151,6 +151,24 @@ pub enum CalCommand {
     /// Decline the guest's proposal on a message, as its card's Decline
     /// proposal does. Waits until the mail has left.
     DeclineProposal { message: i64 },
+    /// Email guests, as the event's detail does: print the mail it opens,
+    /// to everyone on the event but you and rooms; with --to, to that one
+    /// person; with --send, send it with that text first.
+    EmailGuests {
+        /// The event's id, as `jolta cal list` shows it after the title.
+        event: i64,
+        /// One occurrence of a series, by its day: "2026-11-24".
+        #[arg(long)]
+        occurrence: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        send: Option<String>,
+    },
+    /// Accept the guest's proposal on a message, as its card's Accept
+    /// proposal and the editor's Save do: the meeting moves to the time
+    /// proposed and Send an update? tells the guests as --notify says.
+    AcceptProposal(crate::cal_edit::AcceptProposalArgs),
     /// Print the invitation cards of a message as the reader shows them,
     /// with what an update struck through as ~~old~~.
     Card { message: i64 },
@@ -610,6 +628,9 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             let t = Instant::now();
             let done = respond::answer(jolta, &request).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
+            if done.queued {
+                println!("Queued in the calendar ops; `jolta cal ops --send` sends it once the server can be reached.");
+            }
             match done.mailed_from {
                 Some(account) => engine.send(account, t).await,
                 None => Ok(()),
@@ -655,6 +676,19 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
             match done.mailed_from {
                 Some(account) => engine.send(account, t).await,
+                None => Ok(()),
+            }
+        }
+        CalCommand::AcceptProposal(a) => crate::cal_edit::accept_proposal(jolta, a).await,
+        CalCommand::EmailGuests { event, occurrence, to, send } => {
+            let at = crate::cal_edit::occurrence_bounds(jolta, event, occurrence.as_deref())?;
+            let mut c = jolta.store.read(|conn| jolta_core::calendar::emailing::prefill(conn, jolta_core::calendar::EventId(event), at, to.as_deref(), tz::here()))?;
+            println!("From account {}\nTo: {}\nSubject: {}\n\n{}", c.account.map_or(0, |a| a.0), c.to, c.subject, c.body);
+            match send {
+                Some(text) => {
+                    c.body = format!("{text}\n\n{}", c.body);
+                    crate::send_compose(jolta, &c).await
+                }
                 None => Ok(()),
             }
         }
@@ -921,7 +955,8 @@ fn print_card(card: &Card) {
             line("when", &e.changes.when, &e.when);
             if let Some(p) = &e.proposal {
                 println!("  proposed by {}, currently {}", p.proposer, p.now.as_deref().unwrap_or("unknown"));
-                println!("  {}", if p.declined { "declined" } else if p.declining.is_some() { "Decline proposal offered" } else { "no Decline proposal" });
+                let offered: Vec<&str> = [(p.accepting.is_some(), "Accept proposal"), (p.declining.is_some(), "Decline proposal")].into_iter().filter(|(on, _)| *on).map(|(_, w)| w).collect();
+                println!("  {}", if p.declined { "declined".to_string() } else if p.accepted { "accepted".to_string() } else if offered.is_empty() { "no Accept or Decline proposal".to_string() } else { format!("{} offered", offered.join(" and ")) });
             }
             line("repeat", &e.changes.repeat, &e.repeat);
             line("place", &e.changes.location, &e.location);

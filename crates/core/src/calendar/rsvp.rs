@@ -5,7 +5,7 @@
 //! `tentativelyAccept` and `decline`; on Google a patch of the user's own
 //! attendee entry; on CalDAV the user's PARTSTAT in the stored object, after
 //! which the server's scheduling sends the reply. Answers go out at once and
-//! fail when offline, until the calendar op queue exists.
+//! queue while the provider can't be reached (`answer_or_queue`).
 //!
 //! `imip_reply` writes the reply mail (RFC 6047) Jolta sends itself: for an
 //! invitation no synced calendar holds, and on iCloud, which doesn't tell an
@@ -25,11 +25,12 @@ use sha2::{Digest, Sha256};
 use super::ical_edit::{Component, Object, Prop};
 use super::series::{self, Horizon};
 use super::sources::Change;
+use super::ops::{self, Answered};
 use super::{Attendee, Bounds, Calendar, CalendarSource, EventData, EventId, EventStatus, Local, Moment, Person, Response, Role, Span, Zone, sync, tz};
 use crate::compose::Built;
 use crate::{Error, Jolta, Result, store};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Answer {
     Accept,
     Maybe,
@@ -124,6 +125,93 @@ impl Target {
 pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
     let here = tz::here();
     let (calendar, target) = target_of(jolta, rsvp.event, &rsvp.scope, None).await?;
+    answerable(&calendar, &target)?;
+    let source = sync::calendar_source(jolta, &calendar).await?;
+    let (landed, written) = source.answer(&calendar, &target, rsvp).await?;
+
+    let (rsvp, calendar_id) = (rsvp.clone(), calendar.id);
+    let written = match written {
+        Some(Change::Upsert { etag, events, raw, .. }) => Some(Written { etag, events, blob: raw.map(|r| jolta.blobs.put(&r)).transpose()? }),
+        _ => None,
+    };
+    jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
+}
+
+/// `answer`, unless the provider can't be reached or an earlier change to
+/// the copy still waits to be sent: then the answer is kept in the store
+/// and queued behind it, to go through the provider once (`ops::queue_answer`).
+/// True when it was queued.
+pub async fn answer_or_queue(jolta: &Jolta, rsvp: &Rsvp) -> Result<bool> {
+    let event = rsvp.event;
+    let waits = jolta
+        .store
+        .read_async(move |c| {
+            let (calendar, uid): (super::CalendarId, String) = c
+                .query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or_else(|| Error::NotFound(format!("event {event}")))?;
+            store::calendar_op_waiting(c, calendar, &uid)
+        })
+        .await?;
+    if !waits {
+        match answer(jolta, rsvp).await {
+            Err(Error::Offline(_)) => {}
+            done => return done.map(|()| false),
+        }
+    }
+    let here = tz::here();
+    let (calendar, target) = target_of(jolta, rsvp.event, &rsvp.scope, None).await?;
+    answerable(&calendar, &target)?;
+    let rsvp = rsvp.clone();
+    jolta
+        .store
+        .write_async(move |tx| {
+            // An occurrence without a row of its own gets one only from the
+            // provider, under the id it gives it: one made here would send
+            // the answer to the series' object.
+            let fresh = matches!(target.occurrence, Some(Occurrence { stored: None, .. }));
+            if !fresh {
+                record(tx, calendar.id, &target, &rsvp, &target.event.remote_id, here)?;
+            }
+            let answered = Answered {
+                answer: rsvp.answer,
+                note: rsvp.note.clone(),
+                notify: rsvp.notify,
+                // A standalone occurrence's own recurrence id too, so the
+                // replay finds it among the occurrences without a series.
+                occurrence: target.recurrence_id(),
+                proposal: rsvp.proposal,
+            };
+            ops::queue_answer(tx, calendar.id, &with_answer(&target.event.data, &rsvp, &target.me), answered, chrono::Utc::now().timestamp())
+        })
+        .await?;
+    Ok(true)
+}
+
+/// Sends an answer `answer_or_queue` queued, through the provider of
+/// `calendar`'s copy of `uid` as it is stored now.
+pub(crate) async fn send_answer(jolta: &Jolta, calendar: super::CalendarId, uid: &str, answered: &Answered) -> Result<()> {
+    let uid = uid.to_string();
+    let event = jolta
+        .store
+        .read_async(move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM event WHERE calendar_id = ?1 AND uid = ?2 ORDER BY recurrence_id <> '', id LIMIT 1",
+                params![calendar, uid],
+                |r| r.get::<_, EventId>(0),
+            )
+            .optional()?)
+        })
+        .await?
+        .ok_or_else(|| Error::Other("the invitation is no longer in your calendar".into()))?;
+    let scope = answered.occurrence.map_or(Scope::Series, Scope::Occurrence);
+    let rsvp = Rsvp { event, answer: answered.answer, note: answered.note.clone(), notify: answered.notify, scope, proposal: answered.proposal };
+    answer(jolta, &rsvp).await
+}
+
+/// Refuses an answer Jolta can't send through the copy's calendar, before
+/// anything changes.
+fn answerable(calendar: &Calendar, target: &Target) -> Result<()> {
     match calendar.source {
         CalendarSource::Local => return Err(Error::Other("This event is in a calendar on this Mac only. Answering it by mail isn't built yet.".into())),
         CalendarSource::EventKit => {
@@ -139,16 +227,7 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
     if organizer.is_none() && target.event.data.attendees.is_empty() {
         return Err(Error::Other("This event has no organizer or guests, so there is no invitation to answer.".into()));
     }
-
-    let source = sync::calendar_source(jolta, &calendar).await?;
-    let (landed, written) = source.answer(&calendar, &target, rsvp).await?;
-
-    let (rsvp, calendar_id) = (rsvp.clone(), calendar.id);
-    let written = match written {
-        Some(Change::Upsert { etag, events, raw, .. }) => Some(Written { etag, events, blob: raw.map(|r| jolta.blobs.put(&r)).transpose()? }),
-        _ => None,
-    };
-    jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
+    Ok(())
 }
 
 /// Refuses an answer through a calendar the account with address `account`
@@ -580,7 +659,7 @@ pub struct ImipReply<'a> {
 
 /// A new time for a meeting, or for one occurrence of a series, that an
 /// attendee proposes with a Maybe or a Decline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Proposal {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,

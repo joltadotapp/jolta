@@ -494,7 +494,8 @@ fn http_client(follow_redirects: bool) -> Result<reqwest::Client> {
 }
 
 fn http_error(e: reqwest::Error) -> Error {
-    Error::Other(format!("calendar request failed: {e}"))
+    let text = format!("calendar request failed: {e}");
+    if e.is_connect() { Error::Offline(text) } else { Error::Other(text) }
 }
 
 /// Percent-encodes everything but unreserved characters, for an id in a

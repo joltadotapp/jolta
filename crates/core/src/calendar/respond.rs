@@ -90,6 +90,9 @@ pub struct Outcome {
     pub mailed_from: Option<AccountId>,
     /// The calendar whose copy changed.
     pub calendar: Option<CalendarId>,
+    /// The provider couldn't be reached, or a change to the copy still
+    /// waits: the answer is in the calendar op queue.
+    pub queued: bool,
 }
 
 /// Whether an event's detail offers answers: an invitation to the user
@@ -187,11 +190,20 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     // The provider tells the organizer the answer, and the new time when
     // Jolta doesn't mail it, only when they changed.
     let carried = store::GivenAnswer { proposal: given.proposal.filter(|_| !plan.mail), ..given.clone() };
-    if let (Some(notify), Some(copy)) = (plan.provider, r.copy)
-        && !again(&carried, r.shown, before.as_ref())
-    {
-        let scope = rid.map_or(Scope::Series, Scope::Occurrence);
-        rsvp::answer(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
+    let mut queued = false;
+    if let (Some(notify), Some(copy)) = (plan.provider, r.copy) {
+        // A series answer goes again over an answer to one occurrence still
+        // waiting, which it replaces.
+        let (calendar, uid) = (copy.calendar, r.uid.clone());
+        let over_occurrence = rid.is_none() && jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid, true)).await?;
+        if again(&carried, r.shown, before.as_ref()) && !over_occurrence {
+            // The same answer is still on its way while its op waits.
+            let (calendar, uid) = (copy.calendar, r.uid.clone());
+            queued = jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid, false)).await?;
+        } else {
+            let scope = rid.map_or(Scope::Series, Scope::Occurrence);
+            queued = rsvp::answer_or_queue(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
+        }
     }
 
     let blob = mail.as_ref().map(|m| jolta.blobs.put(&m.raw)).transpose()?;
@@ -246,7 +258,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
         })
         .await?;
     let mut calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
-    let mut text = told(req, &r, plan);
+    let mut text = told(req, &r, plan, queued);
     // A copy the user added elsewhere follows the answer, telling nobody.
     if r.copy.is_none() {
         match super::add::follow(jolta, r.account, &r.uid, rid, req.answer).await {
@@ -255,7 +267,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             Err(e) => text = format!("{text} The copy in your calendar didn't change: {e}"),
         }
     }
-    Ok(Outcome { text, mailed_from: waiting.then_some(r.account), calendar })
+    Ok(Outcome { text, mailed_from: waiting.then_some(r.account), calendar, queued })
 }
 
 /// The answer kept, given again the same way, to an invitation that still
@@ -278,8 +290,29 @@ fn who(r: &Resolved) -> &str {
 
 /// "Accepted. Google told Ann.", "Declined Thu 5 Nov. Jolta emailed Ann.",
 /// "Answered maybe without telling Ann."; with a new time "Proposed Fri 6
-/// Nov, 14:00 to 14:45 with a maybe. Microsoft 365 told Ann."
-fn told(req: &Request, r: &Resolved, plan: Plan) -> String {
+/// Nov, 14:00 to 14:45 with a maybe. Microsoft 365 told Ann."; queued
+/// "Accepted. Google tells Ann as soon as Jolta reaches it."
+fn told(req: &Request, r: &Resolved, plan: Plan, queued: bool) -> String {
+    let text = told_now(req, r, plan);
+    if !queued {
+        return text;
+    }
+    let provider = match r.copy.map(|c| c.source) {
+        Some(CalendarSource::Google) => "Google",
+        Some(CalendarSource::Graph) => "Microsoft 365",
+        _ => "your calendar",
+    };
+    let soon = format!("as soon as Jolta reaches {}", if provider == "your calendar" { "it" } else { provider });
+    for said in [" Google told ", " Microsoft 365 told "] {
+        if let Some(at) = text.find(said) {
+            let rest = &text[at + said.len()..];
+            return format!("{}{}tells {} {soon}.", &text[..at], &said[..said.len() - "told ".len()], rest.trim_end_matches('.'));
+        }
+    }
+    format!("{text} It reaches {provider} {soon}.")
+}
+
+fn told_now(req: &Request, r: &Resolved, plan: Plan) -> String {
     if let Some(p) = &req.proposal {
         let here = tz::here();
         let (start, end) = (p.start.with_timezone(&here), p.end.with_timezone(&here));
@@ -551,7 +584,7 @@ pub(crate) mod tests {
         let (j, _) = jolta("respond-mail");
         let message = import(&j, mail!("google-request.eml"));
         let done = run(&j, request(message, Answer::Maybe, Some("Ten minutes late"), true, false)).unwrap();
-        assert_eq!(done, Outcome { text: "Answered maybe. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None });
+        assert_eq!(done, Outcome { text: "Answered maybe. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None, queued: false });
 
         let sent = outbox(&j);
         assert_eq!(sent.len(), 1, "exactly one reply");
@@ -637,7 +670,7 @@ pub(crate) mod tests {
         let (j, _) = jolta("respond-quiet");
         let message = import(&j, mail!("google-request.eml"));
         let done = run(&j, request(message, Answer::Decline, None, false, false)).unwrap();
-        assert_eq!(done, Outcome { text: "Declined without telling Ann.".into(), mailed_from: None, calendar: None });
+        assert_eq!(done, Outcome { text: "Declined without telling Ann.".into(), mailed_from: None, calendar: None, queued: false });
         assert!(outbox(&j).is_empty(), "no mail");
         assert_eq!(card_answer(&j, message, mail!("google-request.eml")), Some(Response::Declined));
 
@@ -845,7 +878,7 @@ pub(crate) mod tests {
             let case = format!("{source:?} calendar {remote_id} with {access:?}");
 
             let done = run(&j, request(message, Answer::Accept, None, true, false)).unwrap_or_else(|e| panic!("{case}: {e}"));
-            assert_eq!(done, Outcome { text: "Accepted. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None }, "{case}");
+            assert_eq!(done, Outcome { text: "Accepted. Jolta emailed Ann.".into(), mailed_from: Some(AccountId(1)), calendar: None, queued: false }, "{case}");
             assert_eq!(outbox(&j)[0].0, ME, "{case}: from the receiving account");
             assert_eq!(card_answer(&j, message, mail!("google-request.eml")), Some(Response::Accepted), "{case}: the answer given from Jolta, never the owner's");
             set_outbox(&j, "UPDATE outbox SET state = 'sent'");
@@ -1214,6 +1247,167 @@ pub(crate) mod tests {
         answer_at(&j, &friday(), now()).await.unwrap();
         assert_eq!(outbox(&j).len(), 1, "the same proposal again is no second mail");
         assert_eq!(server.await.unwrap(), ["PUT /cal/copy.ics If-Match \"1\"", "PUT /cal/copy.ics If-Match \"2\""], "each time quietly, over the version Jolta holds");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Check 4: an answer given while the copy's server can't be reached is
+    /// kept and shown at once and waits in the queue, using up no attempt
+    /// while the network is gone; the same answer again adds nothing; back
+    /// online it reaches the server once.
+    #[tokio::test]
+    async fn an_answer_given_offline_goes_once_back_online() {
+        use crate::calendar::ops::{self, OpState};
+        use crate::calendar::sources::caldav::tests::caldav_server;
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta("respond-offline");
+        let raw = mail!("google-request.eml");
+        let message = import(&j, raw);
+        let me = [crate::calendar::invitation::tests::ME.to_string()];
+        let sent = invitation::find(raw, &me).remove(0);
+        let uid = sent.event.uid.clone();
+        let blob = j.blobs.put(invitation::calendar_text(raw, &uid).unwrap().as_bytes()).unwrap();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let point_at = |port: u16| {
+            j.store.write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, format!("http://127.0.0.1:{port}/cal/")])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&format!("http://127.0.0.1:{port}/")))
+            })
+        };
+        point_at(closed).unwrap();
+        j.store.write(|tx| store::apply_item(tx, calendar, "invite.ics", Some("\"1\""), &[sent.event.clone()], Some(&blob), &series::Horizon::around(now(), tz::here())).map(|_| ())).unwrap();
+        let ops_of = |j: &Jolta| j.store.read(|c| store::calendar_ops(c, 10)).unwrap();
+
+        let done = answer_at(&j, &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
+        assert!(done.queued, "{}", done.text);
+        assert_eq!(done.text, "Accepted. Jolta emailed Ann. It reaches your calendar as soon as Jolta reaches it.");
+        assert_eq!(outbox(&j).len(), 1, "the reply mail waits in the outbox as ever");
+        let queued = ops_of(&j);
+        assert_eq!(queued.iter().map(|o| (o.write.kind(), o.state, o.attempts)).collect::<Vec<_>>(), [("rsvp", OpState::Pending, 0)]);
+        let copy = j.store.read(|c| store::stored_event(c, &uid, None, None, tz::here())).unwrap().expect("the copy");
+        assert_eq!(copy.event.my_response(), Some(Response::Accepted), "shown at once");
+        let marked: bool = j.store.read(|c| Ok(c.query_row("SELECT changed_locally FROM event WHERE calendar_id = ?1", [calendar], |r| r.get(0))?)).unwrap();
+        assert!(marked, "not synced yet");
+        assert_eq!(card_answer(&j, message, raw), Some(Response::Accepted));
+
+        let again = answer_at(&j, &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
+        assert!(again.queued, "the same answer again says it still waits: {}", again.text);
+        assert_eq!((ops_of(&j).len(), outbox(&j).len()), (1, 1), "one op, one mail");
+
+        let at = chrono::Utc::now().timestamp();
+        assert!(ops::run_due(&j, series::Horizon::now()).await.unwrap().is_empty(), "nothing settled while offline");
+        let waiting = &ops_of(&j)[0];
+        assert_eq!((waiting.state, waiting.attempts), (OpState::Pending, 0), "a try that never reached the server isn't an attempt");
+        assert!(waiting.send_after >= at + ops::OFFLINE_RETRY_SECONDS, "tried again in a minute");
+
+        let (_, at_server, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
+        point_at(reqwest::Url::parse(&at_server.remote_id).unwrap().port().unwrap()).unwrap();
+        j.store.write(|tx| Ok(tx.execute_batch("UPDATE calendar_op SET send_after = 0")?)).unwrap();
+        let settled = ops::run_due(&j, series::Horizon::now()).await.unwrap();
+        assert_eq!(settled.iter().map(|s| s.failure.is_none()).collect::<Vec<_>>(), [true]);
+        assert_eq!(ops_of(&j)[0].state, OpState::Done);
+        assert!(ops::run_due(&j, series::Horizon::now()).await.unwrap().is_empty(), "sent once");
+        assert_eq!(server.await.unwrap(), ["PUT /cal/invite.ics If-Match \"1\""], "one quiet PUT over the version Jolta held");
+        let marked: bool = j.store.read(|c| Ok(c.query_row("SELECT changed_locally FROM event WHERE calendar_id = ?1", [calendar], |r| r.get(0))?)).unwrap();
+        assert!(!marked, "synced");
+        let err = j.store.write(|tx| ops::undo(tx, queued[0].id, 0, &series::Horizon::now())).unwrap_err().to_string();
+        assert!(err.contains("can't be undone"), "{err}");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A second, different answer given while the first still waits takes
+    /// its place: only the newest answer goes.
+    #[tokio::test]
+    async fn a_newer_answer_replaces_the_one_waiting() {
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta("respond-offline-twice");
+        let raw = mail!("google-request.eml");
+        let message = import(&j, raw);
+        let sent = invitation::find(raw, &[crate::calendar::invitation::tests::ME.to_string()]).remove(0);
+        let blob = j.blobs.put(invitation::calendar_text(raw, &sent.event.uid).unwrap().as_bytes()).unwrap();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        j.store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, format!("http://127.0.0.1:{closed}/cal/")])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&format!("http://127.0.0.1:{closed}/")))?;
+                store::apply_item(tx, calendar, "invite.ics", Some("\"1\""), &[sent.event.clone()], Some(&blob), &series::Horizon::around(now(), tz::here())).map(|_| ())
+            })
+            .unwrap();
+        for answer in [Answer::Accept, Answer::Decline] {
+            assert!(answer_at(&j, &request(message, answer, None, true, false), now()).await.unwrap().queued);
+        }
+        let ops = j.store.read(|c| store::calendar_ops(c, 10)).unwrap();
+        let answers: Vec<Option<Answer>> = ops.iter().map(|o| match &o.write { crate::calendar::ops::Write::Answer { answered, .. } => Some(answered.answer), _ => None }).collect();
+        assert_eq!(answers, [Some(Answer::Decline)], "the decline alone waits");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A CalDAV calendar whose server can't be reached, holding `ics` as
+    /// one resource: the rows' ids by recurrence id text, and the port.
+    fn offline_copy(name: &str, ics: &str) -> (Jolta, crate::calendar::CalendarId, Vec<(String, EventId)>) {
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta(name);
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let events = crate::calendar::ical::read(ics, &[crate::calendar::invitation::tests::ME.to_string()]).unwrap();
+        let blob = j.blobs.put(ics.as_bytes()).unwrap();
+        let rows = j
+            .store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, format!("http://127.0.0.1:{closed}/cal/")])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&format!("http://127.0.0.1:{closed}/")))?;
+                store::apply_item(tx, calendar, "occ.ics", Some("\"1\""), &events, Some(&blob), &series::Horizon::around(now(), tz::here()))?;
+                let mut stmt = tx.prepare("SELECT recurrence_id, id FROM event ORDER BY recurrence_id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        (j, calendar, rows)
+    }
+
+    fn waiting(j: &Jolta) -> Vec<(Option<String>, Answer)> {
+        j.store
+            .read(|c| store::calendar_ops(c, 10))
+            .unwrap()
+            .into_iter()
+            .filter_map(|o| match o.write {
+                crate::calendar::ops::Write::Answer { answered, .. } => Some((o.recurrence_id.map(|r| store::moment_text(&r)), answered.answer)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const ORGANIZED: &str = "ORGANIZER:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\n";
+
+    /// An invitation to two occurrences without their series: an answer to
+    /// the second, queued, stays the second's (check 2).
+    #[tokio::test]
+    async fn a_queued_answer_keeps_its_standalone_occurrence() {
+        let ev = |rid: &str| format!("BEGIN:VEVENT\r\nUID:occ\r\nRECURRENCE-ID:{rid}\r\nDTSTART:{rid}\r\nDTEND:{}\r\nSUMMARY:Sync\r\n{ORGANIZED}END:VEVENT\r\n", rid.replace("T10", "T11"));
+        let ics = format!("BEGIN:VCALENDAR\r\n{}{}END:VCALENDAR\r\n", ev("20261112T100000Z"), ev("20261119T100000Z"));
+        let (j, _, rows) = offline_copy("respond-offline-alone", &ics);
+        let second = rows.iter().find(|(rid, _)| rid.contains("1119")).unwrap().1;
+        let rsvp = Rsvp { event: second, answer: Answer::Accept, note: None, notify: true, scope: Scope::Series, proposal: None };
+        assert!(rsvp::answer_or_queue(&j, &rsvp).await.unwrap());
+        let queued = waiting(&j);
+        assert!(queued.len() == 1 && queued[0].0.as_deref().is_some_and(|r| r.contains("1119")), "{queued:?}");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// An answer to the whole series takes the place of one to an
+    /// occurrence still waiting: the organizer hears only the newest.
+    #[tokio::test]
+    async fn a_series_answer_replaces_a_waiting_occurrence_answer() {
+        let ics = format!("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:occ\r\nDTSTART:20261112T100000Z\r\nDTEND:20261112T110000Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Sync\r\n{ORGANIZED}END:VEVENT\r\nEND:VCALENDAR\r\n");
+        let (j, _, rows) = offline_copy("respond-offline-series", &ics);
+        let master = rows[0].1;
+        let at = |s: &str| Moment::Time(crate::calendar::Local { wall: chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: crate::calendar::Zone::Tz(chrono_tz::UTC) });
+        let one = Rsvp { event: master, answer: Answer::Decline, note: None, notify: true, scope: Scope::Occurrence(at("2026-11-19 10:00")), proposal: None };
+        assert!(rsvp::answer_or_queue(&j, &one).await.unwrap());
+        let all = Rsvp { scope: Scope::Series, answer: Answer::Accept, ..one };
+        assert!(rsvp::answer_or_queue(&j, &all).await.unwrap());
+        assert_eq!(waiting(&j), [(None, Answer::Accept)], "the series answer alone");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 }

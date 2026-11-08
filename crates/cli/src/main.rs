@@ -513,13 +513,18 @@ async fn send(
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         c.attachments.push(AttachmentFile { name, mime_type: "application/octet-stream".into(), path: path.display().to_string() });
     }
+    send_compose(jolta, &c).await
+}
+
+/// Sends `c` through the engine as the app's Send does, and waits until it left.
+async fn send_compose(jolta: &Jolta, c: &jolta_core::compose::Compose) -> Result<()> {
     let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let sink: jolta_core::engine::Sink = Arc::new(move |e| {
         let _ = events.send(e);
     });
     let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
     let t0 = Instant::now();
-    let id = engine.send(&c, None, None)?;
+    let id = engine.send(c, None, None)?;
     println!("queued as outbox {id}: to {} cc {} subject {:?}", c.to, c.cc, c.subject);
     while let Some(e) = rx.recv().await {
         match e {

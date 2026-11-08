@@ -24,7 +24,7 @@ fn event(c: &EventCard) -> String {
             .as_ref()
             .map(|a| a.message)
             .or(c.removing.as_ref().map(|r| r.message))
-            .or(c.proposal.as_ref().and_then(|p| p.declining))
+            .or(c.proposal.as_ref().and_then(|p| p.accepting.or(p.declining)))
             .map(|m| format!(" data-rsvp=\"{}\"", m.0))
             .unwrap_or_default(),
         c.label
@@ -34,8 +34,10 @@ fn event(c: &EventCard) -> String {
         let _ = write!(h, "<span class=\"jolta-invite-answer\">{}</span>", answer_word(answer));
     }
     h.push_str(&copy_link(c));
-    if c.proposal.as_ref().is_some_and(|p| p.declined) {
-        h.push_str("<span class=\"jolta-invite-answer\">Declined</span>");
+    match &c.proposal {
+        Some(p) if p.declined => h.push_str("<span class=\"jolta-invite-answer\">Declined</span>"),
+        Some(p) if p.accepted => h.push_str("<span class=\"jolta-invite-answer\">Accepted</span>"),
+        _ => {}
     }
     let _ = write!(h, "</div><div class=\"jolta-invite-title\">{}</div>", escape(&c.title));
     match (&c.changes.when, &c.when) {
@@ -50,7 +52,7 @@ fn event(c: &EventCard) -> String {
     if let Some(other) = &c.elsewhere {
         let _ = write!(h, "<div class=\"jolta-invite-elsewhere\">{}</div>", escape(other));
     }
-    if let Some(now) = c.proposal.as_ref().and_then(|p| p.now.as_ref()) {
+    if let Some(now) = c.proposal.as_ref().filter(|p| !p.accepted).and_then(|p| p.now.as_ref()) {
         let _ = write!(h, "<div class=\"jolta-invite-was\">Currently {}</div>", escape(now));
     }
     let facts: Vec<String> = [(REPEAT, &c.repeat, &c.changes.repeat), (PLACE, &c.location, &c.changes.location), (VIDEO, &None, &c.changes.join)]
@@ -164,9 +166,16 @@ fn answers(a: &Answering, given: Option<Response>) -> String {
     h
 }
 
-/// Decline proposal for the organizer, and where accepting one happens.
+/// Accept proposal and Decline proposal for the organizer.
 fn proposal(p: &Proposed) -> String {
     let mut h = String::new();
+    if let Some(m) = p.accepting {
+        let _ = write!(
+            h,
+            "<a class=\"jolta-accept-proposal\" href=\"x-rsvp:{}/accept-proposal\" title=\"Open the meeting at this time in the editor, then send the update (A)\">Accept proposal<kbd>A</kbd></a>",
+            m.0
+        );
+    }
     if let Some(m) = p.declining {
         let _ = write!(
             h,
@@ -174,9 +183,6 @@ fn proposal(p: &Proposed) -> String {
             m.0,
             escape(&p.proposer)
         );
-    }
-    if !p.declined {
-        h.push_str("<span class=\"jolta-invite-hint\" title=\"Move the meeting in your calendar to take this time\">Accept in your calendar</span>");
     }
     h
 }
@@ -500,7 +506,19 @@ mod tests {
 
     #[test]
     fn a_proposal_shows_the_time_now_and_decline_proposal() {
-        let proposed = |declining: Option<MessageId>, declined| Proposed { now: Some("Thu 12 Nov · 16:00 to 17:00".into()), proposer: "Bo <i>".into(), declining, declined, uid: "plan".into(), recurrence_id: None, address: "bo@example.com".into() };
+        let proposed = |declining: Option<MessageId>, declined| Proposed {
+            now: Some("Thu 12 Nov · 16:00 to 17:00".into()),
+            proposer: "Bo <i>".into(),
+            note: String::new(),
+            time: None,
+            accepting: declining,
+            accepted: false,
+            declining,
+            declined,
+            uid: "plan".into(),
+            recurrence_id: None,
+            address: "bo@example.com".into(),
+        };
         let with = |p: Proposed| card(&Card::Event(EventCard { label: "New time proposed", answer: None, join: None, proposal: Some(p), ..hostile() }));
 
         let open = with(proposed(Some(MessageId(9)), false));
@@ -508,12 +526,16 @@ mod tests {
         assert!(open.contains("<div class=\"jolta-invite-was\">Currently Thu&#32;12&#32;Nov&#32;·&#32;16:00&#32;to&#32;17:00</div>"), "{open}");
         assert!(open.find("jolta-invite-when").unwrap() < open.find("jolta-invite-was").unwrap(), "the proposed time first");
         assert!(open.contains("href=\"x-rsvp:9/decline-proposal\" title=\"Keep the meeting's time and tell Bo&#32;&lt;i&gt; (N)\">Decline proposal<kbd>N</kbd></a>"), "{open}");
-        assert!(open.contains(">Accept in your calendar</span>"));
+        assert!(open.contains("href=\"x-rsvp:9/accept-proposal\" title=\"Open the meeting at this time in the editor, then send the update (A)\">Accept proposal<kbd>A</kbd></a>"), "{open}");
+        assert!(open.find("accept-proposal").unwrap() < open.find("decline-proposal").unwrap(), "Accept first");
 
         let declined = with(proposed(None, true));
-        assert!(!declined.contains("x-rsvp:") && !declined.contains("Accept in your calendar"), "{declined}");
+        assert!(!declined.contains("x-rsvp:"), "{declined}");
         assert!(declined.contains("<span class=\"jolta-invite-answer\">Declined</span>"));
+        let accepted = with(Proposed { accepted: true, ..proposed(None, false) });
+        assert!(!accepted.contains("x-rsvp:") && accepted.contains("<span class=\"jolta-invite-answer\">Accepted</span>"), "{accepted}");
+        assert!(!accepted.contains("jolta-invite-was"), "the meeting is at the time shown: no Currently line");
         let a_guest = with(proposed(None, false));
-        assert!(!a_guest.contains("decline-proposal") && a_guest.contains("Accept in your calendar"), "not the organizer: no Decline proposal");
+        assert!(!a_guest.contains("proposal\""), "not the organizer: neither button: {a_guest}");
     }
 }

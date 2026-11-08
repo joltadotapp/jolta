@@ -170,6 +170,8 @@ extension AppModel {
         case .undo: undo()
         case .compose: startCompose()
         case .reply: reply(.reply, threadID: row?.threadId)
+        case .replyAll where shownInvitation == nil && shownProposal?.accepting == true:
+            if let p = shownProposal { acceptProposal(message: p.messageId) }
         case .replyAll: reply(.replyAll, threadID: row?.threadId)
         case .forward: reply(.forward, threadID: row?.threadId)
         case .toggleVIP: toggleVIP()
@@ -178,7 +180,7 @@ extension AppModel {
         case .saveAttachments:
             if let message = openThread?.filesMessageId { saveAttachments(message: message) } else { notify("No attachments in this conversation") }
         case .help: showsHelp.toggle()
-        case .decline where shownInvitation == nil && shownProposal != nil:
+        case .decline where shownInvitation == nil && shownProposal?.declining == true:
             if let p = shownProposal { declineProposal(message: p.messageId) }
         case .accept, .maybe, .decline: if let answer = command.answer { answerInvitation(answer) }
         case .propose: openPropose()

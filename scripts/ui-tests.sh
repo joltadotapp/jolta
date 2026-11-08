@@ -42,6 +42,11 @@ for t in $TESTS; do
 		"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-team.ics" --name Team --color '#3f8f6b' >/dev/null
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Team me@test.invalid >/dev/null
 	fi
+	if [ "$t" = testAcceptProposalAndEmailGuests ]; then
+		"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-team.ics" --name Team --color '#3f8f6b' >/dev/null
+		"$JOLTA" --data-dir "$dir" dev calendar-as-google Team me@test.invalid >/dev/null
+		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/09-counter.eml" >/dev/null
+	fi
 	if [ "$t" = testAnswerInvitationInCalendar ]; then
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Work me@test.invalid >/dev/null
 	fi
