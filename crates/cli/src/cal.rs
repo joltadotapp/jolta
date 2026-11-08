@@ -78,13 +78,13 @@ async fn rooms_command(jolta: &Jolta, account: &str, consent: bool, port: u16, f
         None => Vec::new(),
         Some(when) => {
             let wall = chrono::NaiveDateTime::parse_from_str(when.trim(), "%Y-%m-%d %H:%M").with_context(|| format!("{when:?} is not a time like \"2026-11-10 14:00\""))?;
-            let start = tz::instant(wall, tz::here());
+            let (start, end) = (tz::instant(wall, tz::here()), tz::instant(wall, tz::here()) + Duration::minutes(minutes));
             let addresses: Vec<String> = shown.iter().map(|(address, ..)| address.clone()).collect();
-            let found = freebusy::room_schedules(jolta, a.id, &addresses, start, start + Duration::minutes(minutes)).await?;
+            let found = freebusy::room_schedules(jolta, a.id, &addresses, start, end).await?;
             found
                 .iter()
                 .map(|s| match &s.availability {
-                    Availability::Known(busy) if busy.iter().any(|b| b.kind.blocks()) => "busy".to_string(),
+                    Availability::Known(busy) if busy.iter().any(|b| b.kind.blocks() && b.start < end && b.end > start) => "busy".to_string(),
                     Availability::Known(_) => "free".to_string(),
                     Availability::Unknown(why) => format!("unknown, {}", why.reason()),
                 })
