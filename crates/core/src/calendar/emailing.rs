@@ -22,9 +22,11 @@ pub fn recipients(calendar: &Calendar, account: &str, event: &EventData) -> Vec<
     let mine = draft::mine(calendar, account, event);
     let is_me = |address: &str| mine.iter().any(|m| m.trim().eq_ignore_ascii_case(address.trim()));
     let guest_of_hidden = event.options.hide_guests && draft::other_organizer(calendar, account, event).is_some();
-    let people = event.attendees.iter().filter(|a| !guest_of_hidden && !a.is_me && !matches!(a.role, Role::Room | Role::Resource)).map(|a| &a.person);
+    // `is_me` and `organizer_is_me` mark a shared calendar's owner too;
+    // `draft::mine` takes them only in a calendar the account owns.
+    let people = event.attendees.iter().filter(|a| !guest_of_hidden && !matches!(a.role, Role::Room | Role::Resource)).map(|a| &a.person);
     let mut out: Vec<Person> = Vec::new();
-    for p in event.organizer.iter().filter(|_| !event.organizer_is_me).chain(people) {
+    for p in event.organizer.iter().chain(people) {
         if p.address.trim().is_empty() || is_me(&p.address) || out.iter().any(|o| o.address.eq_ignore_ascii_case(p.address.trim())) {
             continue;
         }
@@ -204,6 +206,33 @@ mod tests {
             .unwrap();
         assert_eq!(to(&j.store.read(|c| prefill(c, theirs, None, None, Brussels)).unwrap()), ["ann@example.com"]);
         assert_eq!(to(&j.store.read(|c| prefill(c, mine, None, None, Brussels)).unwrap()), ["bo@example.com", "cy@example.com"]);
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A calendar shared with the account marks its owner as the copy's
+    /// self; the owner is someone else to write to (check 1).
+    #[test]
+    fn a_shared_calendars_owner_is_a_guest() {
+        let (j, _) = jolta("emailing-shared");
+        let team = j
+            .store
+            .write(|tx| {
+                let remote = store::RemoteCalendar { remote_id: "/cal/team/".into(), name: "Team".into(), color: None, zone: None, access: crate::calendar::Access::Write, primary: false, refresh: None, video: None };
+                let cals = store::sync_calendar_list(tx, crate::AccountId(1), crate::calendar::CalendarSource::CalDav, &[remote])?;
+                Ok(cals.iter().find(|c| c.name == "Team").unwrap().id)
+            })
+            .unwrap();
+        let id = meeting(&j, team, "shared", "ORGANIZER:mailto:bo@example.com\r\nATTENDEE:mailto:me@example.com\r\nATTENDEE:mailto:bo@example.com\r\n");
+        j.store
+            .write(|tx| {
+                let data: String = tx.query_row("SELECT data FROM event WHERE id = ?1", [id], |r| r.get(0))?;
+                let mut e: EventData = serde_json::from_str(&data).unwrap();
+                e.organizer_is_me = true;
+                e.attendees.iter_mut().for_each(|a| a.is_me = a.person.address == "bo@example.com");
+                store::set_event_data(tx, id, &e)
+            })
+            .unwrap();
+        assert_eq!(to(&j.store.read(|c| prefill(c, id, None, None, Brussels)).unwrap()), ["bo@example.com"], "the owner, never the account");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 

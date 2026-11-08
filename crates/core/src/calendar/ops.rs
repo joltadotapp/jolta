@@ -308,12 +308,13 @@ pub fn queue_after(conn: &Connection, edit: &Edit, after: CalendarOpId, now: i64
 
 /// Queues an answer the store already holds, to go through the provider
 /// of `calendar` as soon as it can, after the event's other ops. An answer
-/// still waiting there for the same occurrence goes: only the newest
-/// answer is sent.
+/// still waiting there for the same occurrence goes, and an answer for the
+/// whole series takes every waiting one with it: only the newest answer is
+/// sent.
 pub fn queue_answer(conn: &Connection, calendar: CalendarId, event: &EventData, answered: Answered, now: i64) -> Result<CalendarOpId> {
-    let rid = answered.occurrence.as_ref().map(store::moment_text).unwrap_or_default();
+    let rid = answered.occurrence.as_ref().map(store::moment_text);
     conn.execute(
-        "DELETE FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id = ?3 AND kind = 'rsvp' AND state = 'pending'",
+        "DELETE FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND (?3 IS NULL OR recurrence_id = ?3) AND kind = 'rsvp' AND state = 'pending'",
         params![calendar, event.uid, rid],
     )?;
     let id = store::insert_calendar_op(

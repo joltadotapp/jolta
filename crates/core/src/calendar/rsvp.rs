@@ -177,7 +177,9 @@ pub async fn answer_or_queue(jolta: &Jolta, rsvp: &Rsvp) -> Result<bool> {
                 answer: rsvp.answer,
                 note: rsvp.note.clone(),
                 notify: rsvp.notify,
-                occurrence: target.occurrence.as_ref().map(|o| o.recurrence_id),
+                // A standalone occurrence's own recurrence id too, so the
+                // replay finds it among the occurrences without a series.
+                occurrence: target.recurrence_id(),
                 proposal: rsvp.proposal,
             };
             ops::queue_answer(tx, calendar.id, &with_answer(&target.event.data, &rsvp, &target.me), answered, chrono::Utc::now().timestamp())

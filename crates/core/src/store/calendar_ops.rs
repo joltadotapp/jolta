@@ -375,11 +375,13 @@ pub fn calendar_op_waiting(conn: &Connection, calendar: CalendarId, uid: &str) -
     )?)
 }
 
-/// Whether an answer to the event waits or is on its way.
-pub fn answer_waiting(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<bool> {
+/// Whether an answer to the event waits or is on its way; with
+/// `occurrences_only`, an answer to one of its occurrences alone.
+pub fn answer_waiting(conn: &Connection, calendar: CalendarId, uid: &str, occurrences_only: bool) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND kind = 'rsvp' AND state IN ('pending', 'sending'))",
-        params![calendar, uid],
+        "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND kind = 'rsvp' AND state IN ('pending', 'sending')
+                          AND (NOT ?3 OR recurrence_id <> ''))",
+        params![calendar, uid, occurrences_only],
         |r| r.get(0),
     )?)
 }

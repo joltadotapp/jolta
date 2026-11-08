@@ -192,10 +192,14 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     let carried = store::GivenAnswer { proposal: given.proposal.filter(|_| !plan.mail), ..given.clone() };
     let mut queued = false;
     if let (Some(notify), Some(copy)) = (plan.provider, r.copy) {
-        if again(&carried, r.shown, before.as_ref()) {
+        // A series answer goes again over an answer to one occurrence still
+        // waiting, which it replaces.
+        let (calendar, uid) = (copy.calendar, r.uid.clone());
+        let over_occurrence = rid.is_none() && jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid, true)).await?;
+        if again(&carried, r.shown, before.as_ref()) && !over_occurrence {
             // The same answer is still on its way while its op waits.
             let (calendar, uid) = (copy.calendar, r.uid.clone());
-            queued = jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid)).await?;
+            queued = jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid, false)).await?;
         } else {
             let scope = rid.map_or(Scope::Series, Scope::Occurrence);
             queued = rsvp::answer_or_queue(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
@@ -1336,6 +1340,74 @@ pub(crate) mod tests {
         let ops = j.store.read(|c| store::calendar_ops(c, 10)).unwrap();
         let answers: Vec<Option<Answer>> = ops.iter().map(|o| match &o.write { crate::calendar::ops::Write::Answer { answered, .. } => Some(answered.answer), _ => None }).collect();
         assert_eq!(answers, [Some(Answer::Decline)], "the decline alone waits");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A CalDAV calendar whose server can't be reached, holding `ics` as
+    /// one resource: the rows' ids by recurrence id text, and the port.
+    fn offline_copy(name: &str, ics: &str) -> (Jolta, crate::calendar::CalendarId, Vec<(String, EventId)>) {
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta(name);
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let events = crate::calendar::ical::read(ics, &[crate::calendar::invitation::tests::ME.to_string()]).unwrap();
+        let blob = j.blobs.put(ics.as_bytes()).unwrap();
+        let rows = j
+            .store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, format!("http://127.0.0.1:{closed}/cal/")])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&format!("http://127.0.0.1:{closed}/")))?;
+                store::apply_item(tx, calendar, "occ.ics", Some("\"1\""), &events, Some(&blob), &series::Horizon::around(now(), tz::here()))?;
+                let mut stmt = tx.prepare("SELECT recurrence_id, id FROM event ORDER BY recurrence_id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        (j, calendar, rows)
+    }
+
+    fn waiting(j: &Jolta) -> Vec<(Option<String>, Answer)> {
+        j.store
+            .read(|c| store::calendar_ops(c, 10))
+            .unwrap()
+            .into_iter()
+            .filter_map(|o| match o.write {
+                crate::calendar::ops::Write::Answer { answered, .. } => Some((o.recurrence_id.map(|r| store::moment_text(&r)), answered.answer)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const ORGANIZED: &str = "ORGANIZER:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@example.com\r\n";
+
+    /// An invitation to two occurrences without their series: an answer to
+    /// the second, queued, stays the second's (check 2).
+    #[tokio::test]
+    async fn a_queued_answer_keeps_its_standalone_occurrence() {
+        let ev = |rid: &str| format!("BEGIN:VEVENT\r\nUID:occ\r\nRECURRENCE-ID:{rid}\r\nDTSTART:{rid}\r\nDTEND:{}\r\nSUMMARY:Sync\r\n{ORGANIZED}END:VEVENT\r\n", rid.replace("T10", "T11"));
+        let ics = format!("BEGIN:VCALENDAR\r\n{}{}END:VCALENDAR\r\n", ev("20261112T100000Z"), ev("20261119T100000Z"));
+        let (j, _, rows) = offline_copy("respond-offline-alone", &ics);
+        let second = rows.iter().find(|(rid, _)| rid.contains("1119")).unwrap().1;
+        let rsvp = Rsvp { event: second, answer: Answer::Accept, note: None, notify: true, scope: Scope::Series, proposal: None };
+        assert!(rsvp::answer_or_queue(&j, &rsvp).await.unwrap());
+        let queued = waiting(&j);
+        assert!(queued.len() == 1 && queued[0].0.as_deref().is_some_and(|r| r.contains("1119")), "{queued:?}");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// An answer to the whole series takes the place of one to an
+    /// occurrence still waiting: the organizer hears only the newest.
+    #[tokio::test]
+    async fn a_series_answer_replaces_a_waiting_occurrence_answer() {
+        let ics = format!("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:occ\r\nDTSTART:20261112T100000Z\r\nDTEND:20261112T110000Z\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Sync\r\n{ORGANIZED}END:VEVENT\r\nEND:VCALENDAR\r\n");
+        let (j, _, rows) = offline_copy("respond-offline-series", &ics);
+        let master = rows[0].1;
+        let at = |s: &str| Moment::Time(crate::calendar::Local { wall: chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: crate::calendar::Zone::Tz(chrono_tz::UTC) });
+        let one = Rsvp { event: master, answer: Answer::Decline, note: None, notify: true, scope: Scope::Occurrence(at("2026-11-19 10:00")), proposal: None };
+        assert!(rsvp::answer_or_queue(&j, &one).await.unwrap());
+        let all = Rsvp { scope: Scope::Series, answer: Answer::Accept, ..one };
+        assert!(rsvp::answer_or_queue(&j, &all).await.unwrap());
+        assert_eq!(waiting(&j), [(None, Answer::Accept)], "the series answer alone");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 }
