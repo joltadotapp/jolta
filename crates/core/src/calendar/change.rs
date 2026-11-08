@@ -198,9 +198,10 @@ pub struct UpdateDialog {
     /// Who gets what: "4 get the new time. Jan Peeters is new and gets an
     /// invitation."
     pub body: String,
-    /// Under the body, where a message field would be: "To add a note, use
-    /// Email guests after saving."
-    pub note: Option<String>,
+    /// Where a message field would be, on a server whose updates carry no
+    /// words of the user's: a box that opens Email guests once the update
+    /// is saved, "Email the guests after saving".
+    pub email_guests: Option<String>,
     /// A message field, where the mail carries the user's words.
     pub message: bool,
     /// The buttons, each with what it sends.
@@ -247,7 +248,7 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, from: Option<&s
     let back = SendChoice { label: "Keep editing".into(), notify: None, style: ChoiceStyle::Back };
     let hold = caps.hold_update == Hold::Always;
     let message = !caps.sends_itself;
-    let note = (!message).then(|| "To add a note, use Email guests after saving.".to_string());
+    let email_guests = (!message).then(|| "Email the guests a note after saving".to_string());
     let sent_from = |what: &str| from.filter(|_| message).map_or_else(String::new, |a| format!(" Jolta sends {what} from {a}."));
     let mut choices = Vec::new();
     if hold {
@@ -264,7 +265,7 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, from: Option<&s
             true => (format!("Send invitations to {}?", count(told, "person", "people")), format!("{body}{}", sent_from("them"))),
             false => (format!("{mailer} will email {}", count(told, "person", "people")), format!("{body} {mailer} sends the invitations as soon as Jolta saves the meeting.")),
         };
-        return Some(UpdateDialog { title, body, note, message, choices });
+        return Some(UpdateDialog { title, body, email_guests, message, choices });
     }
     if people_only && caps.new_people_only {
         let others = match c.kept.len() {
@@ -282,7 +283,7 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, from: Option<&s
         if caps.outside_only {
             choices.push(SendChoice { label: "Only guests who don't use Google Calendar".into(), notify: Some(Notify::Outside), style: ChoiceStyle::Link });
         }
-        return Some(UpdateDialog { title, body, note, message, choices });
+        return Some(UpdateDialog { title, body, email_guests, message, choices });
     }
     choices.push(SendChoice { label: "Send".into(), notify: Some(Notify::All), style: ChoiceStyle::Primary });
     if caps.outside_only {
@@ -309,7 +310,7 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, from: Option<&s
         let body = format!("{mailer} sends every change to a meeting's time, title, place or description to its guests. Jolta can't save this change without emailing them.");
         (format!("{mailer} will email {}", count(told, "person", "people")), body)
     };
-    Some(UpdateDialog { title, body, note, message, choices })
+    Some(UpdateDialog { title, body, email_guests, message, choices })
 }
 
 /// The dialog for deleting a meeting the user organizes, for `people`
@@ -322,9 +323,10 @@ pub struct CancelDialog {
     pub body: String,
     /// A message field, where the cancellation carries the user's words.
     pub message: bool,
-    /// Where the message field would be: "To add a note, use Email guests
-    /// after cancelling."
-    pub note: Option<String>,
+    /// Where the message field would be, as Google's cancellation carries
+    /// no words (Koen's decision 4): a box that opens Email guests once the
+    /// meeting is cancelled.
+    pub email_guests: Option<String>,
     /// The guests it tells.
     pub people: usize,
 }
@@ -339,8 +341,8 @@ pub fn cancel_dialog(people: usize, caps: &Capabilities, mailer: &str, scope: su
         Scope::Following => (format!("Cancel this and the following occurrences for {n}?"), format!("Everyone gets an update from {mailer} that ends the series before this occurrence.")),
     };
     let message = caps.cancel_message && scope != Scope::Following;
-    let note = (!message).then(|| "To add a note, use Email guests after cancelling.".to_string());
-    CancelDialog { title, body, message, note, people }
+    let email_guests = (!message).then(|| "Email the guests a note after cancelling".to_string());
+    CancelDialog { title, body, message, email_guests, people }
 }
 
 fn count(n: usize, one: &str, many: &str) -> String {
@@ -533,7 +535,7 @@ mod tests {
         let g = dialog(&c, &caps_of(Google), "Google", None, false).unwrap();
         assert_eq!(g.title, "Send an update to 6 people?");
         assert_eq!(g.body, "4 get the new time. Jan Peeters is new and gets an invitation. Els Maes is removed and gets a cancellation.");
-        assert_eq!(g.note.as_deref(), Some("To add a note, use Email guests after saving."), "no message field on an update");
+        assert_eq!(g.email_guests.as_deref(), Some("Email the guests a note after saving"), "no message field on an update: Email guests instead");
         assert_eq!(
             buttons(&g),
             [
@@ -553,7 +555,7 @@ mod tests {
         let l = dialog(&c, &caps_of(Local), "Jolta", Some("me@example.com"), false).unwrap();
         assert_eq!(l.title, "Send an update to 6 people?");
         assert!(l.body.ends_with(" Jolta sends it from me@example.com."), "{}", l.body);
-        assert!(l.message && l.note.is_none(), "Jolta's own mail carries a message");
+        assert!(l.message && l.email_guests.is_none(), "Jolta's own mail carries a message");
         assert_eq!(buttons(&l), [("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart), ("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::All), ChoiceStyle::Primary)]);
         assert!(!g.message, "Google's update carries no message");
 
@@ -598,10 +600,10 @@ mod tests {
         use crate::calendar::CalendarSource::{Google, Graph};
         use crate::calendar::ops::Scope;
         let m = cancel_dialog(6, &caps_of(Graph), "Microsoft 365", Scope::All);
-        assert_eq!((m.title.as_str(), m.body.as_str(), m.message, m.note), ("Cancel the meeting for 6 people?", "Everyone gets a cancellation from Microsoft 365.", true, None));
+        assert_eq!((m.title.as_str(), m.body.as_str(), m.message, m.email_guests), ("Cancel the meeting for 6 people?", "Everyone gets a cancellation from Microsoft 365.", true, None));
         let g = cancel_dialog(1, &caps_of(Google), "Google", Scope::All);
         assert_eq!((g.title.as_str(), g.message), ("Cancel the meeting for 1 person?", false), "Google's delete takes no message (decision 4)");
-        assert_eq!(g.note.as_deref(), Some("To add a note, use Email guests after cancelling."));
+        assert_eq!(g.email_guests.as_deref(), Some("Email the guests a note after cancelling"));
         assert!(!cancel_dialog(6, &caps_of(Graph), "Microsoft 365", Scope::Following).message, "ending a series is an update, with no comment");
     }
 

@@ -256,6 +256,17 @@ pub struct EventDetail {
     /// The user's last edit met a change made elsewhere and the server's
     /// value stayed for some fields.
     pub conflict: Option<ConflictInfo>,
+    /// Email guests applies: someone besides the user is on it, and an
+    /// account of the user's sends for its calendar.
+    pub email_guests: bool,
+}
+
+/// The meeting the palette's Email guests writes about.
+#[derive(uniffi::Record)]
+pub struct GuestsMeeting {
+    pub event_id: i64,
+    pub time: OccurrenceTime,
+    pub title: String,
 }
 
 /// "Changed elsewhere while you edited. Your new time wasn't saved." with
@@ -747,12 +758,13 @@ impl Core {
     /// description document, as for `open_thread`.
     pub fn calendar_event(&self, event_id: i64, time: Option<OccurrenceTime>, app_css: String) -> Result<EventDetail> {
         let at = time.map(Bounds::try_from).transpose()?;
-        let (d, account, added, not_synced, conflict) = self.jolta.store.read(|c| {
+        let (d, account, added, not_synced, conflict, email_guests) = self.jolta.store.read(|c| {
             let d = detail::open(c, EventId(event_id), at, tz::here(), &app_css)?;
             let account = d.calendar.account_id.map(|a| store::account(c, a)).transpose()?.map(|a| a.address).unwrap_or_default();
             let added = store::is_added_copy(c, d.calendar.id, &d.event.uid)?;
             let conflict = cal::ops::conflict(c, d.calendar.id, &d.event.uid)?;
-            Ok((d, account, added, store::event_not_synced(c, EventId(event_id))?, conflict))
+            let email_guests = cal::emailing::possible(c, &d.calendar, &d.event)?;
+            Ok((d, account, added, store::event_not_synced(c, EventId(event_id))?, conflict, email_guests))
         })?;
         // A copy added for another account is answered from its mail, which
         // tells the organizer; answering the copy would tell nobody.
@@ -815,6 +827,7 @@ impl Core {
                 .collect(),
             not_synced,
             conflict: conflict.map(|c| ConflictInfo { op: c.op.0, message: c.message, action: c.action }),
+            email_guests,
         })
     }
 
@@ -844,6 +857,25 @@ impl Core {
     /// the event moved or went, or its calendar is hidden or silent.
     pub fn calendar_reminder(&self, id: String, fire_at: i64) -> Result<Option<ReminderRecord>> {
         Ok(self.calendar_reminders(fire_at, fire_at + 1)?.into_iter().find(|r| r.id == id))
+    }
+
+    /// Email guests: compose to everyone on the occurrence `time` of an
+    /// event but the user and rooms, from its account, "Re: <title>", the
+    /// event named in the first line. With `address`, to that person only,
+    /// for an address in the detail. For a cancellation, call it before the
+    /// delete.
+    pub fn email_guests(&self, event_id: i64, time: Option<OccurrenceTime>, address: Option<String>) -> Result<crate::ComposeData> {
+        let at = time.map(Bounds::try_from).transpose()?;
+        let c = self.jolta.store.read(|c| cal::emailing::prefill(c, EventId(event_id), at, address.as_deref(), tz::here()))?;
+        Ok(c.into())
+    }
+
+    /// The meeting the palette's Email guests writes about when no event is
+    /// selected: the one running that started last, else the next within a
+    /// week with someone else on it.
+    pub fn next_meeting_with_guests(&self, now: i64) -> Result<Option<GuestsMeeting>> {
+        let next = self.jolta.store.read(|c| cal::emailing::next_meeting(c, instant(now)))?;
+        Ok(next.map(|(event, at, title)| GuestsMeeting { event_id: event.0, time: at.into(), title }))
     }
 
     /// The online meeting to join at `now`: one starting within 10 minutes,

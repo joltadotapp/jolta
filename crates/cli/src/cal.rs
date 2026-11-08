@@ -151,6 +151,20 @@ pub enum CalCommand {
     /// Decline the guest's proposal on a message, as its card's Decline
     /// proposal does. Waits until the mail has left.
     DeclineProposal { message: i64 },
+    /// Email guests, as the event's detail does: print the mail it opens,
+    /// to everyone on the event but you and rooms; with --to, to that one
+    /// person; with --send, send it with that text first.
+    EmailGuests {
+        /// The event's id, as `jolta cal list` shows it after the title.
+        event: i64,
+        /// One occurrence of a series, by its day: "2026-11-24".
+        #[arg(long)]
+        occurrence: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        send: Option<String>,
+    },
     /// Accept the guest's proposal on a message, as its card's Accept
     /// proposal and the editor's Save do: the meeting moves to the time
     /// proposed and Send an update? tells the guests as --notify says.
@@ -666,6 +680,18 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             }
         }
         CalCommand::AcceptProposal(a) => crate::cal_edit::accept_proposal(jolta, a).await,
+        CalCommand::EmailGuests { event, occurrence, to, send } => {
+            let at = crate::cal_edit::occurrence_bounds(jolta, event, occurrence.as_deref())?;
+            let mut c = jolta.store.read(|conn| jolta_core::calendar::emailing::prefill(conn, jolta_core::calendar::EventId(event), at, to.as_deref(), tz::here()))?;
+            println!("From account {}\nTo: {}\nSubject: {}\n\n{}", c.account.map_or(0, |a| a.0), c.to, c.subject, c.body);
+            match send {
+                Some(text) => {
+                    c.body = format!("{text}\n\n{}", c.body);
+                    crate::send_compose(jolta, &c).await
+                }
+                None => Ok(()),
+            }
+        }
         CalCommand::DeclineProposal { message } => {
             let engine = Outgoing::start(jolta)?;
             let t = Instant::now();

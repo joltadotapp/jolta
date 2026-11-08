@@ -171,8 +171,9 @@ pub struct SendChoice {
 pub struct UpdateDialogInfo {
     pub title: String,
     pub body: String,
-    /// Where a message field would be: "To add a note, use Email guests after saving."
-    pub note: Option<String>,
+    /// Where a message field would be: a box, "Email the guests a note
+    /// after saving", that opens `email_guests` once the save is done.
+    pub email_guests: Option<String>,
     /// Shows a message field: Jolta's own mail carries the user's words.
     pub message: bool,
     pub choices: Vec<SendChoice>,
@@ -196,7 +197,7 @@ impl From<cal::change::UpdateDialog> for UpdateDialogInfo {
         UpdateDialogInfo {
             title: d.title,
             body: d.body,
-            note: d.note,
+            email_guests: d.email_guests,
             message: d.message,
             choices: d
                 .choices
@@ -225,7 +226,9 @@ pub struct CancelDialogInfo {
     pub body: String,
     /// Shows a message field: the cancellation carries the user's words.
     pub message: bool,
-    pub note: Option<String>,
+    /// In its place, a box: "Email the guests a note after cancelling".
+    /// Read `email_guests` before the delete: the event leaves the store.
+    pub email_guests: Option<String>,
 }
 
 /// "Decline and remove?" for a meeting someone else organizes.
@@ -411,7 +414,7 @@ impl From<draft::DeletePlan> for DeletePlan {
             cancel: plan
                 .cancel
                 .into_iter()
-                .map(|(scope, d)| CancelDialogInfo { scope: scope.into(), title: d.title, body: d.body, message: d.message, note: d.note })
+                .map(|(scope, d)| CancelDialogInfo { scope: scope.into(), title: d.title, body: d.body, message: d.message, email_guests: d.email_guests })
                 .collect(),
             decline: plan.decline.map(|d| DeclineInfo { title: d.title, body: d.body, organizer: d.organizer }),
             senders: senders(plan.senders),

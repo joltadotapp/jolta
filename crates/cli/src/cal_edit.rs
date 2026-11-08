@@ -250,8 +250,8 @@ fn guest(spec: &str) -> Attendee {
 fn print_dialog(d: &change::UpdateDialog) {
     println!("{}", d.title);
     println!("  {}", d.body);
-    if let Some(note) = &d.note {
-        println!("  {note}");
+    if let Some(box_label) = &d.email_guests {
+        println!("  [ ] {box_label}: `jolta cal email-guests <event>` after saving");
     }
     for c in &d.choices {
         let flag = match c.notify {
@@ -512,6 +512,11 @@ fn occurrence_on(jolta: &Jolta, id: i64, day: &str) -> Result<Bounds> {
     found.map(|o| o.bounds).with_context(|| format!("#{id} has no occurrence on {day}"))
 }
 
+/// `occurrence_on` for the day asked for, if one was.
+pub fn occurrence_bounds(jolta: &Jolta, id: i64, day: Option<&str>) -> Result<Option<Bounds>> {
+    day.map(|d| occurrence_on(jolta, id, d)).transpose()
+}
+
 /// The editor's draft of the event, at the occurrence asked for.
 fn drafted(jolta: &Jolta, id: i64, occurrence: Option<&str>) -> Result<draft::EventDraft> {
     let at = occurrence.map(|d| occurrence_on(jolta, id, d)).transpose()?;
@@ -629,9 +634,9 @@ fn print_delete_plan(plan: &draft::DeletePlan) {
     for (scope, c) in &plan.cancel {
         println!("{} ({scope})", c.title);
         println!("  {}", c.body);
-        match (&c.note, c.message) {
+        match (&c.email_guests, c.message) {
             (_, true) => println!("  --message carries your words"),
-            (Some(note), false) => println!("  {note}"),
+            (Some(box_label), false) => println!("  [ ] {box_label}: `jolta cal email-guests <event>` before deleting"),
             (None, false) => {}
         }
     }
