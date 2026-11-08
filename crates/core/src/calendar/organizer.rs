@@ -179,10 +179,11 @@ pub fn letters(write: &Write, notify: Notify, me: &[String]) -> Vec<(Person, Not
 
 /// Raises the SEQUENCE of `event`, the saved version of `base`, when guests
 /// must take it as a new version (RFC 5546 section 2.1.4): a new time, day,
-/// repeat rule, place, title, description or status. A new guest list
-/// alone keeps it, as RFC 5546 allows.
+/// repeat rule, place, title, description, status or guest list. Exchange
+/// raises it for a new guest list too (C3 spec, section 2), so a guest
+/// invited again after a cancellation gets a version above it.
 pub fn next_sequence(base: &EventData, event: &mut EventData) {
-    let raises = [Field::Time, Field::Repeat, Field::Location, Field::Title, Field::Description, Field::Status];
+    let raises = [Field::Time, Field::Repeat, Field::Location, Field::Title, Field::Description, Field::Status, Field::People];
     if raises.iter().any(|f| f.differs(base, event)) && event.sequence <= base.sequence {
         event.sequence = base.sequence + 1;
     }
@@ -302,7 +303,7 @@ pub fn apply_reply(conn: &Connection, account: &Account, sender: &str, reply: &I
         for (stored, mut e) in rows {
             let Some(guest) = e.attendees.iter_mut().find(|a| same(&a.person.address, &answer.person.address)) else { continue };
             guest.response = answer.response;
-            guest.comment.clone_from(&answer.comment);
+            guest.comment = answer.comment.trim().to_string();
             let (remote_id, etag, blob) = match &stored {
                 Some(s) => (s.remote_id.clone(), s.etag.clone(), s.blob.clone()),
                 None => (master.remote_id.clone(), master.etag.clone(), master.blob.clone()),
@@ -759,7 +760,7 @@ mod tests {
         let mut people = base.clone();
         people.attendees.pop();
         next_sequence(&base, &mut people);
-        assert_eq!(people.sequence, 2, "a new guest list alone keeps the version");
+        assert_eq!(people.sequence, 3, "a new guest list is a new version");
     }
 
     #[test]
@@ -925,14 +926,14 @@ mod tests {
             e.attendees.push(guest("dee@example.com", Role::Optional));
             queue(&j, told(cal, Change::Update(e), Notify::Changed, None)).unwrap();
             run(&j);
-            assert_eq!(outbox(&j)[5..], [("REQUEST".into(), "me@example.com".into(), "dee@example.com".into(), "1".into())], "the others get nothing");
+            assert_eq!(outbox(&j)[5..], [("REQUEST".into(), "me@example.com".into(), "dee@example.com".into(), "2".into())], "the others get nothing");
 
             queue(&j, told(cal, Change::Delete { uid: "p1@jolta.app".into() }, Notify::All, Some("Sorry"))).unwrap();
             run(&j);
             let cancels: Vec<_> = outbox(&j)[6..].iter().map(|(m, _, to, seq)| (m.clone(), to.clone(), seq.clone())).collect();
             assert_eq!(
                 cancels,
-                [("CANCEL".into(), "ann@example.com".into(), "2".into()), ("CANCEL".into(), "cy@example.com".into(), "2".into()), ("CANCEL".into(), "dee@example.com".into(), "2".into())]
+                [("CANCEL".into(), "ann@example.com".into(), "3".into()), ("CANCEL".into(), "cy@example.com".into(), "3".into()), ("CANCEL".into(), "dee@example.com".into(), "3".into())]
             );
             std::fs::remove_dir_all(&j.data_dir).ok();
         }
