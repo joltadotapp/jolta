@@ -474,23 +474,40 @@ async fn apply_one(jolta: &Jolta, s: &Step, horizon: &Horizon, here: Tz) -> Resu
     jolta
         .store
         .write_async(move |tx| {
-            let (from, until) = window(&planned.event.span, here);
-            let overlapping = away_events(tx, &account, now, here)?
-                .into_iter()
-                .find(|f| f.calendar == planned.calendar && reusable(&f.event, &planned.event) && { let (a, b) = window(&f.event.span, here); a < until && from < b });
-            let edit = match overlapping {
-                Some(f) => {
-                    let event = EventData { span: planned.event.span, kind: kind_for(&f.event, &planned.event), ..f.event };
-                    Edit { extra: update_extra(&planned.extra, &event), ..Edit::quiet(planned.calendar, Change::Update(event)) }
-                }
-                None => {
-                    let event = EventData { uid: ops::new_uid()?, ..planned.event };
-                    Edit { extra: Some(planned.extra), ..Edit::quiet(planned.calendar, Change::Create(vec![event])) }
-                }
-            };
-            ops::queue(tx, &edit, now.timestamp(), &horizon).map(drop)
+            let existing = away_events(tx, &account, now, here)?;
+            for edit in replacing(&existing, planned, ops::new_uid()?, here) {
+                ops::queue(tx, &edit, now.timestamp(), &horizon)?;
+            }
+            Ok(())
         })
         .await
+}
+
+/// The edits that put the planned event in its calendar. It replaces the
+/// out-of-office events there that it overlaps, so setting days again
+/// leaves one: the first that can take the new days moves to them, and
+/// the others go, such as the busy event Google gets in place of a status
+/// event, which can't become one.
+fn replacing(existing: &[Found], planned: Planned, uid: String, here: Tz) -> Vec<Edit> {
+    let (from, until) = window(&planned.event.span, here);
+    let overlapping: Vec<&Found> = existing
+        .iter()
+        .filter(|f| f.calendar == planned.calendar && { let (a, b) = window(&f.event.span, here); a < until && from < b })
+        .collect();
+    let moved = overlapping.iter().find(|f| reusable(&f.event, &planned.event));
+    let mut edits: Vec<Edit> = overlapping
+        .iter()
+        .filter(|f| moved.is_none_or(|m| m.event.uid != f.event.uid))
+        .map(|f| Edit::quiet(f.calendar, Change::Delete { uid: f.event.uid.clone() }))
+        .collect();
+    edits.push(match moved {
+        Some(f) => {
+            let event = EventData { span: planned.event.span, kind: kind_for(&f.event, &planned.event), ..f.event.clone() };
+            Edit { extra: update_extra(&planned.extra, &event), ..Edit::quiet(planned.calendar, Change::Update(event)) }
+        }
+        None => Edit { extra: Some(planned.extra), ..Edit::quiet(planned.calendar, Change::Create(vec![EventData { uid, ..planned.event }])) },
+    });
+    edits
 }
 
 /// Whether an existing event can become the planned one by its time alone:
@@ -807,6 +824,28 @@ mod tests {
         assert!(reusable(&status, &google));
         let graph = EventData { show_as: ShowAs::OutOfOffice, ..plain.clone() };
         assert!(reusable(&graph, &EventData { kind: EventKind::Default, ..google }), "Microsoft 365 and CalDAV say it by show as");
+    }
+
+    #[test]
+    fn setting_days_again_leaves_one_event() {
+        let target = [target(2, AccountKind::Gmail, Some(CalendarSource::Google), true)];
+        let planned = plan(&target, &request(WEEK), Brussels)[0].event.clone().unwrap();
+        let mut busy = found("busy", planned.event.span);
+        busy.calendar = planned.calendar;
+        busy.event.show_as = ShowAs::Busy;
+        let kinds = |edits: &[Edit]| edits.iter().map(|e| match &e.change {
+            Change::Create(_) => "create".to_string(),
+            Change::Update(e) => format!("update {}", e.uid),
+            Change::Delete { uid } => format!("delete {uid}"),
+            _ => "other".into(),
+        }).collect::<Vec<_>>();
+        assert_eq!(kinds(&replacing(std::slice::from_ref(&busy), planned.clone(), "new".into(), Brussels)), ["delete busy", "create"], "Google's busy stand-in is replaced, not kept beside a second one");
+
+        let mut status = found("status", planned.event.span);
+        status.calendar = planned.calendar;
+        status.event.kind = EventKind::OutOfOffice { declines: AutoDecline::None, message: String::new() };
+        let elsewhere = Found { calendar: CalendarId(99), ..busy.clone() };
+        assert_eq!(kinds(&replacing(&[busy, status, elsewhere], planned, "new".into(), Brussels)), ["delete busy", "update status"]);
     }
 
     #[test]
