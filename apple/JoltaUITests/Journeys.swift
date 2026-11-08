@@ -350,7 +350,8 @@ final class Journeys: XCTestCase {
 
     /// Moving between calendars: the editor's calendar picker on a stored
     /// event moves it there with its other changes, and Z takes back both;
-    /// a meeting someone else organizes offers no picker.
+    /// a meeting someone else organizes offers no picker, and the user's own
+    /// meeting with guests finds the calendars on this Mac greyed.
     func testMoveBetweenCalendars() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
@@ -402,6 +403,22 @@ final class Journeys: XCTestCase {
         let notice = app.descendants(matching: .any).matching(identifier: "editor-notice").firstMatch
         XCTAssertTrue(notice.waitForExistence(timeout: 5), "E opens someone else's meeting, saying who organizes it")
         XCTAssertFalse(picker.exists, "it stays in the calendar the invitation reached: no picker")
+        app.typeKey(.escape, modifierFlags: [])
+
+        let team = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Team sync,")).firstMatch
+        XCTAssertTrue(team.waitForExistence(timeout: 5), "the user's own meeting on a Google calendar")
+        team.click()
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "a meeting the user organizes has the picker")
+        picker.click()
+        let mac = app.menuItems["Work"]
+        XCTAssertTrue(mac.waitForExistence(timeout: 5))
+        XCTAssertFalse(mac.isEnabled, "a calendar on this Mac is greyed for a meeting with guests")
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "move-picker"
+        shot.lifetime = .keepAlways
+        add(shot)
+        app.typeKey(.escape, modifierFlags: [])
         app.typeKey(.escape, modifierFlags: [])
     }
 
