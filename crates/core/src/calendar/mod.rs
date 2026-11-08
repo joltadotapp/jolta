@@ -11,6 +11,7 @@ pub mod description;
 pub mod detail;
 pub mod draft;
 pub mod filing;
+pub mod focus;
 pub mod freebusy;
 pub mod ical;
 pub mod ical_edit;

@@ -172,6 +172,9 @@ impl Scheduler {
             if let Some(f) = s.failure {
                 (self.sink)(Event::CalendarOpFailed { calendar: s.calendar, event: f.event, message: f.message });
             }
+            if let Some(message) = s.notice {
+                (self.sink)(Event::CalendarNotice { message });
+            }
             for calendar in std::iter::once(s.calendar).chain(s.moved_from) {
                 if !changed.contains(&calendar) {
                     changed.push(calendar);

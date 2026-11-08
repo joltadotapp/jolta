@@ -180,7 +180,7 @@ fn uncovered(provider: Vec<Busy>, mut stored: Vec<Busy>) -> Vec<Busy> {
 
 /// An occurrence that blocks the user's time, as a busy block. An all-day
 /// one blocks its days from midnight in `here`.
-fn stored_busy(o: &OccurrenceRow, here: Tz) -> Option<Busy> {
+pub(super) fn stored_busy(o: &OccurrenceRow, here: Tz) -> Option<Busy> {
     if !o.busy {
         return None;
     }

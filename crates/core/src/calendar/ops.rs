@@ -1156,6 +1156,9 @@ pub struct Settled {
     /// The op failed, met a conflict or found its event deleted, and its
     /// change wasn't saved: what to tell the user.
     pub failure: Option<Failure>,
+    /// It was saved, and the user should hear how: Google refusing focus
+    /// time, the first time (`focus::landed`).
+    pub notice: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1195,10 +1198,14 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
     let calendar = store::calendar(conn, op.calendar)?;
     let title = op.write.event().map(|e| e.title.as_str()).unwrap_or("the event");
     let mut failure = None;
+    let mut notice = None;
     match sent {
         Ok(Sent::Done { version, merged }) => {
             store::settle_calendar_op(conn, op.id, OpState::Done)?;
             land(conn, op, version.as_ref(), !merged, horizon)?;
+            if let Some((v, _)) = &version {
+                notice = super::focus::landed(conn, op, &v.events, calendar.account_id, now)?.map(str::to_string);
+            }
         }
         Ok(Sent::Conflict { version, lost }) => {
             // The server kept the occurrence a delete took out: the series
@@ -1324,7 +1331,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
     if let Some(from) = op.moved_from() {
         store::refresh_changed_locally(conn, from, &op.uid)?;
     }
-    Ok(Settled { op: op.id, calendar: op.calendar, moved_from: op.moved_from(), mailed: None, failure })
+    Ok(Settled { op: op.id, calendar: op.calendar, moved_from: op.moved_from(), mailed: None, failure, notice })
 }
 
 /// This and following whose old series the server kept whole: the new

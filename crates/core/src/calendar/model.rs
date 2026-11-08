@@ -246,11 +246,16 @@ impl EventKind {
         *self == EventKind::Default
     }
 
-    /// The kind an event shows as: its own, or out of office, declining
-    /// nothing, for an event shown as out of office without one.
-    pub fn shown(&self, show_as: ShowAs) -> EventKind {
+    /// The kind an event shows as: its own; else out of office, declining
+    /// nothing, for an event shown as out of office; else focus time for a
+    /// busy event with the Focus time category, which Jolta gives focus
+    /// time where the calendar has no kind for it (`focus::CATEGORY`).
+    pub fn shown(&self, show_as: ShowAs, categories: &[String]) -> EventKind {
         match self {
             EventKind::Default if show_as == ShowAs::OutOfOffice => EventKind::OutOfOffice { declines: AutoDecline::None, message: String::new() },
+            EventKind::Default if show_as == ShowAs::Busy && categories.iter().any(|c| c.eq_ignore_ascii_case(super::focus::CATEGORY)) => {
+                EventKind::Focus { declines: AutoDecline::None, do_not_disturb: false, message: String::new() }
+            }
             kind => kind.clone(),
         }
     }
@@ -442,11 +447,14 @@ mod tests {
 
     #[test]
     fn the_detail_line_and_the_strip_label() {
-        let shown = EventKind::Default.shown(ShowAs::OutOfOffice);
+        let shown = EventKind::Default.shown(ShowAs::OutOfOffice, &[]);
         assert_eq!(shown.line().as_deref(), Some("Out of office"));
-        assert_eq!(EventKind::Default.shown(ShowAs::Busy), EventKind::Default);
+        assert_eq!(EventKind::Default.shown(ShowAs::Busy, &[]), EventKind::Default);
         let google = EventKind::OutOfOffice { declines: AutoDecline::New, message: String::new() };
-        assert_eq!(google.shown(ShowAs::Busy), google, "a provider's own kind wins");
+        assert_eq!(google.shown(ShowAs::Busy, &[]), google, "a provider's own kind wins");
+        let focus = ["Focus time".to_string()];
+        assert_eq!(EventKind::Default.shown(ShowAs::Busy, &focus).line().as_deref(), Some("Focus time"), "Microsoft 365's busy event with the category");
+        assert_eq!(EventKind::Default.shown(ShowAs::Free, &focus), EventKind::Default, "shown as free, it isn't focus time");
         assert_eq!(google.line().as_deref(), Some("Out of office · declines new invitations"));
         assert_eq!(EventKind::Focus { declines: AutoDecline::None, do_not_disturb: true, message: String::new() }.line().as_deref(), Some("Focus time · Do not disturb in Chat"));
         assert_eq!(EventKind::WorkingLocation(Workplace::Home).line().as_deref(), Some("Working from home"));

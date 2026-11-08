@@ -1548,7 +1548,7 @@ pub(crate) mod tests {
             "originalStartTimeZone": "Romance Standard Time", "showAs": "oof"
         }));
         assert_eq!(
-            away.kind.shown(away.show_as),
+            away.kind.shown(away.show_as, &away.categories),
             EventKind::OutOfOffice { declines: crate::calendar::AutoDecline::None, message: String::new() },
             "shown as Google's out of office is; Graph says nothing about what it declines"
         );
