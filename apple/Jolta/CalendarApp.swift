@@ -74,6 +74,13 @@ extension AppModel {
         emailGuests(eventID: next.eventId, time: next.time)
     }
 
+    /// Invite from Find a time: the new meeting in the editor, in calendar
+    /// mode on its week. Saving it sends the invitations through Send an update?.
+    func openInvite(_ draft: EventDraft) {
+        mode = .calendar
+        calendar.openNew(draft)
+    }
+
     /// Accept proposal on a guest's proposal (its card's link, or A): the
     /// meeting at the time proposed in the editor, in calendar mode. Saving
     /// it sends the update through Send an update?.
@@ -188,8 +195,8 @@ extension AppModel {
             showsDayPanel.toggle()
             return true
         }
-        if palette != nil || showsHelp {
-            if event.keyCode == 53 { palette = nil; showsHelp = false }
+        if palette != nil || showsHelp || findTime != nil {
+            if event.keyCode == 53 { palette = nil; showsHelp = false; findTime = nil }
             return true
         }
         let cal = calendar

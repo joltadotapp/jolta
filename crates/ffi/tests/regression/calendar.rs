@@ -605,6 +605,7 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         show_as_note: d.show_as_note.clone(),
         move_to: None,
         room: d.room.clone(),
+        room_name: d.room_name.clone(),
         location: d.location.clone(),
         description: d.description.clone(),
         video: d.video,

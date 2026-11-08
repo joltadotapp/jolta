@@ -57,6 +57,14 @@ for t in $TESTS; do
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Rooms me@test.invalid >/dev/null
 		printf '{"people": {"bruegel@rooms.test.invalid": {"known": []}}}' >"$dir/free-busy.json"
 	fi
+	if [ "$t" = testFindTimeInvite ]; then
+		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/10-planning.eml" >/dev/null
+		day=$(date -v-7d +%Y%m%d)
+		printf 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:room-1@test.invalid\r\nDTSTART:%sT090000Z\r\nDTEND:%sT100000Z\r\nSUMMARY:Review\r\nORGANIZER:mailto:me@test.invalid\r\nATTENDEE:mailto:me@test.invalid\r\nATTENDEE;CUTYPE=ROOM;CN=Bruegel:mailto:bruegel@rooms.test.invalid\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n' "$day" "$day" >"$dir/rooms.ics"
+		"$JOLTA" --data-dir "$dir" cal import "$dir/rooms.ics" --name Rooms >/dev/null
+		"$JOLTA" --data-dir "$dir" dev calendar-as-google Rooms me@test.invalid >/dev/null
+		printf '{"people": {"ann@test.invalid": {"known": []}, "bob@test.invalid": {"known": []}, "carl@test.invalid": {"known": []}, "bruegel@rooms.test.invalid": {"known": []}}}' >"$dir/free-busy.json"
+	fi
 	if [ "$t" = testTurnOffAutomaticReplies ]; then
 		printf '{"me@test.invalid": {"automaticRepliesSetting": {"status": "alwaysEnabled", "externalAudience": "all"}}}' >"$dir/away.json"
 	fi

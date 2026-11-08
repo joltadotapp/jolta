@@ -49,7 +49,8 @@ struct ComposeView: View {
                 ActionButton(icon: "trash", title: "Discard", key: "⌘⌫", showsTitle: false) { model.discardCompose() }
                     .keyboardShortcut(.delete, modifiers: .command)
                 SendButton { model.sendCompose() }
-                    .keyboardShortcut(.return, modifiers: .command)
+                    // ⌘Return is Find a time's Invite while its panel is up.
+                    .keyboardShortcut(model.findTime == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
                 }
                 .fixedSize()
             }

@@ -8,7 +8,7 @@ use jolta_core::calendar::freebusy::{self, Found, Lookup};
 use jolta_core::calendar::{Person, tz};
 use jolta_core::{AccountId, MessageId, ThreadId, compose, store};
 
-use crate::calendar::TimeSlot;
+use crate::calendar::{PersonRecord, TimeSlot};
 use crate::{ComposeData, Core, CoreError, ReplyMode, Result};
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +237,21 @@ impl Core {
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         self.find_time(account, people, days).await
+    }
+
+    /// Find a time with the event editor's people and rooms, through the
+    /// account of the event's calendar. The rooms come after the people,
+    /// marked as rooms.
+    pub async fn find_time_for_people(&self, account_id: i64, people: Vec<PersonRecord>, rooms: Vec<String>, days: u32) -> Result<FindTimeOutcome> {
+        let mut outcome = self.find_time(AccountId(account_id), people.iter().map(crate::editor::person).collect(), days).await?;
+        if let FindTimeOutcome::Ready { info } = &mut outcome
+            && let (Some(first), Some(last)) = (info.days.first(), info.days.last())
+            && !rooms.is_empty()
+        {
+            let (from, to) = (first.start, last.end);
+            info.people.extend(self.room_availability(account_id, rooms, from, to).await?);
+        }
+        Ok(outcome)
     }
 
     /// The user's own busy times, for Insert my availability.

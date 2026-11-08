@@ -18,7 +18,7 @@ struct RoomPicker: View {
     let people: Int
     /// Addresses already on the meeting, left out of the list.
     let taken: Set<String>
-    let add: (String) -> Void
+    let add: (RoomInfo) -> Void
     let close: () -> Void
 
     @State private var outcome: RoomsOutcome?
@@ -255,7 +255,7 @@ struct RoomPicker: View {
             if group.hasPrefix("list") || group == "unlisted" { return r.equipment ?? r.place ?? r.address }
             return r.place ?? "From your meetings"
         }()
-        return Button { add(r.address) } label: {
+        return Button { add(r) } label: {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(r.name).font(.system(size: 12.5)).lineLimit(1)
@@ -368,7 +368,7 @@ struct RoomPicker: View {
     private func choose() {
         let rooms = flat
         guard rooms.indices.contains(selected) else { return }
-        add(rooms[selected].address)
+        add(rooms[selected])
     }
 
     static func isAddress(_ s: String) -> Bool {

@@ -870,6 +870,63 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(panel.waitForNonExistence(timeout: 5), "a second Esc closes the panel")
     }
 
+    /// Invite from Find a time: ⌘Return on a conversation with three people
+    /// and a room added with R opens the editor with all of them, the
+    /// subject without its AW: as title and Meet on; ⇧⌘F in the editor opens
+    /// Find a time on the editor's people and room, and Return there moves
+    /// the event to the time picked.
+    func testFindTimeInvite() throws {
+        let app = try launch()
+        text(app, "AW: Planning day").click()
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
+        app.typeText("Find a time")
+        XCTAssertTrue(paletteRow(app, "Find a time").waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        let invite = app.descendants(matching: .any).matching(identifier: "find-time-invite").firstMatch
+        XCTAssertTrue(invite.waitForExistence(timeout: 10), "a conversation's Find a time offers Invite")
+
+        app.typeKey("r", modifierFlags: [])
+        let picker = app.textFields.matching(identifier: "room-picker-search").firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "R opens the room picker")
+        XCTAssertTrue(app.buttons.matching(identifier: "room-row-bruegel@rooms.test.invalid").firstMatch.waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(picker.waitForNonExistence(timeout: 5), "Return adds the room")
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: invite)], timeout: 5)
+
+        app.typeKey(.return, modifierFlags: .command)
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘Return opens the editor")
+        XCTAssertEqual(title.value as? String, "Planning day", "the subject without AW:")
+        let chips = app.descendants(matching: .any).matching(identifier: "person-chip")
+        XCTAssertEqual(chips.count, 3, "everyone on the conversation but the user")
+        XCTAssertTrue(chips.matching(NSPredicate(format: "value BEGINSWITH %@", "Carl Smet, required")).firstMatch.exists, "Cc'd people are Required too")
+        XCTAssertEqual(app.textFields["editor-room"].value as? String, "Bruegel", "the room, by its name")
+        XCTAssertTrue((app.textFields["editor-description"].value as? String ?? "").hasPrefix("Conversation: message:%3Cui-10@test.invalid%3E"), "a link back to the conversation")
+        let start = app.textFields["editor-start"].value as? String
+
+        app.typeKey("f", modifierFlags: [.command, .shift])
+        let pick = app.descendants(matching: .any).matching(identifier: "find-time-pick").firstMatch
+        XCTAssertTrue(pick.waitForExistence(timeout: 10), "⇧⌘F opens Find a time from the editor")
+        XCTAssertFalse(invite.exists, "with no second Invite")
+        XCTAssertTrue(text(app, "Bruegel").exists, "the editor's room is a row")
+        app.typeKey(.rightArrow, modifierFlags: [])
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(pick.waitForNonExistence(timeout: 5), "Return uses the time")
+        XCTAssertTrue(title.exists, "and leaves the editor open")
+        XCTAssertNotEqual(app.textFields["editor-start"].value as? String, start, "at the next suggested time")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "editor-length").firstMatch.title, "30 min", "with the meeting's length")
+
+        app.buttons["Remove the room"].click()
+        XCTAssertEqual(app.textFields["editor-room"].value as? String, "", "× takes the room off")
+        app.textFields["editor-room"].click()
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "the Room field opens the room picker")
+        XCTAssertTrue(app.buttons.matching(identifier: "room-row-bruegel@rooms.test.invalid").firstMatch.waitForExistence(timeout: 5), "with the recent room")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(picker.waitForNonExistence(timeout: 5), "Return takes it")
+        XCTAssertEqual(app.textFields["editor-room"].value as? String, "Bruegel")
+    }
+
     /// Return in a new section's query field saves it. The page used to read
     /// the sections before they reloaded, drop the new row under the focused
     /// field, and crash (2026-11-04, a "Starred" section with is:starred).

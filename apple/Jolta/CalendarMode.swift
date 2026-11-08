@@ -58,6 +58,11 @@ struct CalendarModeView: View {
                 RepeatPopoverLayer(editor: editor, picker: picker, row: anchor)
             }
         }
+        .overlayPreferenceValue(RoomRowAnchor.self) { anchor in
+            if let editor = cal.editor, editor.roomsOpen, let anchor, let account = cal.calendarInfo(editor.draft.calendarId)?.accountId {
+                RoomPickerLayer(core: model.core, editor: editor, accountId: account, row: anchor)
+            }
+        }
         .animation(.snappy(duration: 0.2), value: cal.editor.map(ObjectIdentifier.init))
         .confirmation(Binding(get: { cal.discard }, set: { cal.discard = $0 }))
         .overlay {
@@ -95,6 +100,44 @@ private struct RepeatPopoverLayer: View {
                 RepeatPopover(picker: picker, day: editor.day, arrowY: rowMid - top, cancel: { editor.repeatPicker = nil }, done: { editor.finishRepeat() })
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                     .offset(x: geo.size.width - 400 - 14 - 340, y: top)
+            }
+        }
+    }
+}
+
+/// The room picker under the editor's Room field, its right edge on the
+/// field's, reaching over the week. A click anywhere else closes it.
+private struct RoomPickerLayer: View {
+    let core: Core
+    let editor: EventEditorModel
+    let accountId: Int64
+    let row: Anchor<CGRect>
+    @State private var height: CGFloat = 360
+
+    var body: some View {
+        GeometryReader { geo in
+            let field = geo[row]
+            let slot = editor.interval.map { FindTimeSlot(start: Int64($0.start.timeIntervalSince1970), end: Int64($0.end.timeIntervalSince1970), missing: []) }
+            let room = editor.draft.room.trimmingCharacters(in: .whitespaces).lowercased()
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { editor.roomsOpen = false }
+                RoomPicker(
+                    core: core,
+                    accountId: accountId,
+                    slot: slot,
+                    fallbackStart: Int64(CalendarModel.at(editor.day, minutes: 9 * 60).timeIntervalSince1970),
+                    people: editor.draft.people.count + 1,
+                    taken: room.isEmpty ? [] : [room],
+                    add: { picked in
+                        editor.setRoom(address: picked.address, name: picked.origin == .typed ? "" : picked.name)
+                        editor.roomsOpen = false
+                    },
+                    close: { editor.roomsOpen = false }
+                )
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                .offset(x: max(12, field.maxX - 440), y: min(field.maxY + 6, max(12, geo.size.height - height - 12)))
             }
         }
     }

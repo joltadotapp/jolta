@@ -299,20 +299,24 @@ const REPLY_PREFIXES: &[&str] = &["re", "fwd", "fw", "aw", "sv", "vs", "antw", "
 
 /// Lower-cased subject without reply and forward prefixes.
 pub fn base_subject(subject: &str) -> (String, bool) {
+    let s = without_reply_prefixes(subject);
+    let had_prefix = s.len() != subject.trim().len();
+    (s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase(), had_prefix)
+}
+
+/// The subject as written without its reply and forward prefixes ("Re:",
+/// "AW:", "Antw:", "Fwd:", "Re[2]:").
+pub fn without_reply_prefixes(subject: &str) -> &str {
     let mut s = subject.trim();
-    let mut had_prefix = false;
-    loop {
-        let Some(colon) = s.find(':') else { break };
+    while let Some(colon) = s.find(':') {
         let head = s[..colon].trim();
         let head = head.split('[').next().unwrap_or(head).trim();
-        if REPLY_PREFIXES.iter().any(|p| head.eq_ignore_ascii_case(p)) {
-            s = s[colon + 1..].trim_start();
-            had_prefix = true;
-        } else {
+        if !REPLY_PREFIXES.iter().any(|p| head.eq_ignore_ascii_case(p)) {
             break;
         }
+        s = s[colon + 1..].trim_start();
     }
-    (s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase(), had_prefix)
+    s
 }
 
 /// Picks the thread for a new message. A provider thread id wins. Otherwise

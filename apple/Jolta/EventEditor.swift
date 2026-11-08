@@ -71,6 +71,8 @@ final class EventEditorModel {
     var proposal: String?
     /// Quick create found no day or time: the focus starts on the start time.
     var focusTime = false
+    /// The room picker under the Room field, while it is open.
+    var roomsOpen = false
 
     init(core: Core, draft: EventDraft, event: CalEvent?) {
         self.core = core
@@ -226,6 +228,18 @@ final class EventEditorModel {
         refreshTexts()
     }
 
+    /// Find a time picked a time: the event moves there, with that length.
+    func setTimes(start: Int64, end: Int64) {
+        draft.time = .timed(start: start, end: end)
+        refreshTexts()
+    }
+
+    /// The room picker's room, or none; a typed address has no name.
+    func setRoom(address: String, name: String) {
+        draft.room = address
+        draft.roomName = name
+    }
+
     func setLength(minutes: Int) {
         guard let (start, _) = interval else { return }
         let s = Int64(start.timeIntervalSince1970)
@@ -356,9 +370,16 @@ struct EventEditorPanel: View {
             DispatchQueue.main.async { focus = firstFocus }
             if editor.focusTime { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { focus = firstFocus } }
         }
-        .onChange(of: focus) { old, _ in
+        .onChange(of: focus) { old, new in
             if old == .start || old == .end { editor.commit() }
+            if new == .room, roomAccount != nil, !editor.locked(.room) { editor.roomsOpen = true }
         }
+        .onChange(of: editor.roomsOpen) { _, open in
+            // The picker had the keys; the field after the room takes them back.
+            if !open { focus = editor.locked(.location) ? nil : .location }
+        }
+        // Find a time over the editor takes Esc, Return and ⌘Return.
+        .disabled(model.findTime != nil)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("event-editor")
     }
@@ -614,11 +635,22 @@ struct EventEditorPanel: View {
                     PeopleField(editor: editor, account: cal.calendarInfo(editor.draft.calendarId)?.accountId, focus: $focus)
                 }
             }
-            if !editor.draft.responses.isEmpty || emailable != nil {
+            if !editor.draft.responses.isEmpty || emailable != nil || canFindTime {
                 EditorRow(icon: nil) {
                     HStack(spacing: 8) {
                         Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
                         Spacer(minLength: 0)
+                        if canFindTime {
+                            Button { findTime() } label: {
+                                HStack(spacing: 5) { Text("Find a time"); KeyHint(key: "⇧⌘F") }
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color(Theme.accent))
+                            .keyboardShortcut("f", modifiers: [.command, .shift])
+                            .help("See when everyone is free and pick a time (⇧⌘F)")
+                            .accessibilityIdentifier("editor-find-time")
+                        }
                         if let event = emailable {
                             Button("Email guests") { cal.emailGuests(event) }
                                 .buttonStyle(.plain)
@@ -654,6 +686,23 @@ struct EventEditorPanel: View {
         .zIndex(1)
     }
 
+    /// The account whose provider Find a time and the room picker ask: the
+    /// one of the event's calendar. None for a calendar on this Mac.
+    private var roomAccount: Int64? { cal.calendarInfo(editor.draft.calendarId)?.accountId }
+
+    /// Find a time looks the people up through the calendar's account, for a time the user may change.
+    private var canFindTime: Bool { roomAccount != nil && !editor.locked(.time) && editor.interval != nil }
+
+    /// ⇧⌘F: Find a time with this event's people and room; its pick comes
+    /// back into this editor with the length chosen there.
+    private func findTime() {
+        guard let account = roomAccount, let (start, end) = editor.interval else { return }
+        editor.commit()
+        let people = editor.draft.people.filter { !$0.isMe }.map { PersonRecord(name: $0.name, address: $0.address) }
+        model.findTime(for: .editor(account: account, people: people, room: editor.draft.room.trimmingCharacters(in: .whitespaces), editor: ObjectIdentifier(editor)),
+                       minutes: max(15, Int64(end.timeIntervalSince(start) / 60)))
+    }
+
     /// The stored event Email guests writes about, when others are on it.
     private var emailable: CalEvent? {
         guard !editor.isNew, let event = editor.event, editor.draft.people.contains(where: { !$0.isMe }) else { return nil }
@@ -679,9 +728,7 @@ struct EventEditorPanel: View {
     private var placeSection: some View {
         EditorSection {
             if shows(.room, editor.draft.room) {
-                EditorRow(icon: "building.2") {
-                    plainOrField(.room, text: \.room, prompt: "Add a room", focus: .room, id: "editor-room")
-                }
+                EditorRow(icon: "building.2") { roomField }
             }
             ForEach(editor.problems(.room), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
             if shows(.location, editor.draft.location) {
@@ -732,6 +779,44 @@ struct EventEditorPanel: View {
                     .accessibilityIdentifier("editor-video")
                 }
             }
+        }
+    }
+
+    /// The room picker opens from the Room field, on a click or when the
+    /// field gets the focus; it lists rooms and takes a typed address. A
+    /// calendar on this Mac has no provider to ask, so its field takes an address.
+    @ViewBuilder private var roomField: some View {
+        if editor.locked(.room) || roomAccount == nil {
+            if editor.locked(.room) {
+                plainOrField(.room, text: \.room, prompt: "Add a room", focus: .room, id: "editor-room")
+            } else {
+                TextField("Add a room", text: Binding(get: { editor.draft.room }, set: { editor.setRoom(address: $0, name: "") }))
+                    .textFieldStyle(.plain)
+                    .focused($focus, equals: .room)
+                    .frame(maxWidth: .infinity)
+                    .fieldBox(focused: focus == .room)
+                    .accessibilityIdentifier("editor-room")
+            }
+        } else {
+            HStack(spacing: 6) {
+                TextField("Add a room", text: .constant(editor.draft.roomName.isEmpty ? editor.draft.room : editor.draft.roomName))
+                    .textFieldStyle(.plain)
+                    .focused($focus, equals: .room)
+                    .help(editor.draft.room)
+                    .accessibilityIdentifier("editor-room")
+                if !editor.draft.room.isEmpty {
+                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color(Theme.text3))
+                        .help("Remove the room")
+                        .accessibilityLabel("Remove the room")
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .fieldBox(focused: focus == .room || editor.roomsOpen)
+            .contentShape(Rectangle())
+            .onTapGesture { editor.roomsOpen = true }
+            .anchorPreference(key: RoomRowAnchor.self, value: .bounds) { $0 }
         }
     }
 
@@ -877,6 +962,12 @@ struct EventEditorPanel: View {
 }
 
 // MARK: - Pieces
+
+/// The Room field's bounds, which the room picker opens under.
+struct RoomRowAnchor: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
+}
 
 /// The Repeat row's bounds, which the repeat popover's arrow points at.
 struct RepeatRowAnchor: PreferenceKey {
