@@ -143,15 +143,22 @@ pub fn organizer(conn: &Connection, account: AccountId, me: &[String], uid: &str
 /// Whether a message naming `organizer`, From `from`, is the organizer's:
 /// it names the meeting's organizer, when there is one, and comes from that
 /// address, from a provider sending for it, or for the user's own meeting
-/// from another of the user's addresses.
+/// from another of the user's addresses. iCloud names Apple's relay as the
+/// ORGANIZER, with the organizer's own address in EMAIL, which Microsoft
+/// 365's copy and Graph's sender give instead: a mail naming the relay from
+/// the meeting's organizer is the organizer's.
 pub fn sent_by(me: &[String], meeting: Option<&str>, organizer: &str, from: &str) -> bool {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     let mine = |a: &str| me.iter().any(|m| same(m, a));
-    if organizer.trim().is_empty() || meeting.is_some_and(|m| !same(m, organizer)) {
+    let relayed = organizer.trim().to_ascii_lowercase().ends_with(APPLE_RELAY) && meeting.is_some_and(|m| same(m, from));
+    if organizer.trim().is_empty() || (meeting.is_some_and(|m| !same(m, organizer)) && !relayed) {
         return false;
     }
-    same(organizer, from) || SENDS_FOR_ORGANIZERS.iter().any(|s| same(s, from)) || (mine(organizer) && mine(from))
+    relayed || same(organizer, from) || SENDS_FOR_ORGANIZERS.iter().any(|s| same(s, from)) || (mine(organizer) && mine(from))
 }
+
+/// The domain of the addresses iCloud gives organizers in its invitations.
+const APPLE_RELAY: &str = "@imip.me.com";
 
 /// The other versions of `sent`, the event a message names, and which of
 /// them came before it. Other mails count only on the account the message
