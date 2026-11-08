@@ -99,6 +99,9 @@ pub struct CalendarInfo {
     pub synced: Option<i64>,
     /// Why the last sync failed, until one succeeds.
     pub sync_error: Option<String>,
+    /// For a calendar on this Mac, the account its meetings' invitations
+    /// go from.
+    pub send_from: Option<i64>,
 }
 
 #[derive(uniffi::Record)]
@@ -532,10 +535,12 @@ impl Core {
     /// Every account with its calendar switch and calendars, then the
     /// calendars of no account.
     pub fn calendars(&self) -> Result<CalendarList> {
-        let (accounts, calendars, counts, on) = self.jolta.store.read(|c| {
+        let (accounts, calendars, counts, on, send_from) = self.jolta.store.read(|c| {
             let accounts = store::accounts(c)?;
             let on = accounts.iter().map(|a| Ok((a.id, store::account_calendar_on(c, a.id)?))).collect::<jolta_core::Result<BTreeMap<_, _>>>()?;
-            Ok((accounts, store::calendars(c)?, store::event_counts(c)?, on))
+            let calendars = store::calendars(c)?;
+            let send_from = calendars.iter().map(|k| Ok((k.id, store::calendar_send_from(c, k.id)?))).collect::<jolta_core::Result<BTreeMap<_, _>>>()?;
+            Ok((accounts, calendars, store::event_counts(c)?, on, send_from))
         })?;
         let scheduler = self.scheduler();
         let mut by_account: BTreeMap<Option<AccountId>, Vec<CalendarInfo>> = BTreeMap::new();
@@ -555,6 +560,7 @@ impl Core {
                 events: counts.get(&c.id).copied().unwrap_or(0) as u32,
                 synced: c.synced,
                 sync_error: scheduler.as_ref().and_then(|s| s.error(c.id)),
+                send_from: send_from.get(&c.id).copied().flatten().map(|a| a.0),
                 name: c.name,
             };
             by_account.entry(c.account_id).or_default().push(info);
