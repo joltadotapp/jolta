@@ -610,6 +610,32 @@ fn horizon() -> Horizon {
     Horizon::around(Utc::now(), tz::here())
 }
 
+/// Accept proposal: the meeting at the time a guest proposed, for the editor.
+#[derive(uniffi::Record)]
+pub struct ProposalDraft {
+    pub draft: EventDraft,
+    /// Above the fields: "Bo Nilsson proposed this time: \"Thursday is full\"".
+    pub header: String,
+}
+
+#[uniffi::export]
+impl Core {
+    /// Accept proposal on a message's card: the organizer's own copy of the
+    /// meeting at the time the guest proposed, for one occurrence that
+    /// occurrence. Saving it goes through `plan_save` and `save_event` like
+    /// any edit, so Send an update? tells the guests; the card then reads
+    /// Accepted.
+    pub async fn accept_proposal(&self, message_id: i64) -> Result<ProposalDraft> {
+        let jolta = self.jolta.clone();
+        let a = self
+            .runtime
+            .spawn(async move { cal::proposal::accept_draft(&jolta, jolta_core::MessageId(message_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        Ok(ProposalDraft { draft: a.draft.into(), header: a.header })
+    }
+}
+
 /// A calendar of the editor's picker for a stored event.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct MoveChoice {

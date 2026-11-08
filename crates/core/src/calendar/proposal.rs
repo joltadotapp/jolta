@@ -1,15 +1,133 @@
 //! The organizer's side of a guest's proposal for a new time. Decline
 //! proposal mails the guest an iMIP DECLINECOUNTER from the account the
-//! proposal came to, once. Accepting a proposal changes the meeting itself,
-//! which belongs to the calendar's editor; the card says to do it there.
+//! proposal came to, once. Accept proposal opens the editor on the
+//! meeting in the account's own calendar at the time proposed; saving it
+//! sends the update through Send an update? like any change of time.
 
 use chrono::Utc;
-use rusqlite::OptionalExtension;
+use chrono_tz::Tz;
+use rusqlite::{Connection, OptionalExtension};
 
-use super::card::{self, Card};
-use super::{invitation, rsvp, tz};
+use super::card::{self, Card, Proposed};
+use super::draft::{self, EventDraft};
+use super::{Bounds, Span, invitation, rsvp, series, tz};
 use crate::model::{AccountId, MessageId};
 use crate::{Error, Jolta, Result, imap, store};
+
+/// What the card checked of a message's proposal, with the account it came to.
+struct Checked {
+    account: AccountId,
+    /// The account's address.
+    from: String,
+    raw: Vec<u8>,
+    proposal: Proposed,
+    title: String,
+}
+
+/// The proposal on a message's card, as the card offers it.
+async fn checked(jolta: &Jolta, message: MessageId) -> Result<Checked> {
+    let (account, sender): (AccountId, String) = jolta
+        .store
+        .read_async(move |c| {
+            c.query_row("SELECT account_id, from_addr FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or_else(|| Error::NotFound(format!("message {message}")))
+        })
+        .await?;
+    let raw = imap::message_source(jolta, message).await?;
+    let blobs = jolta.blobs.clone();
+    let found = raw.clone();
+    jolta
+        .store
+        .read_async(move |c| {
+            let every: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
+            let from = store::account(c, account)?.address;
+            let invitations = invitation::find(&found, &every);
+            let cx = card::Context { message, account, me: &every, sender: &sender, now: Utc::now(), here: tz::here(), blobs: &blobs };
+            let (proposal, title) = card::cards(c, &invitations, &cx)?
+                .into_iter()
+                .find_map(|card| match card {
+                    Card::Event(e) => e.proposal.map(|p| (p, e.title)),
+                    Card::Reply(_) => None,
+                })
+                .ok_or_else(|| Error::Other("This message has no proposal for a new time.".into()))?;
+            Ok(Checked { account, from, raw: found, proposal, title })
+        })
+        .await
+}
+
+/// The editor's draft for accepting a guest's proposal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Accepting {
+    /// The meeting in the account's own calendar at the time proposed: for
+    /// a proposal for one occurrence, that occurrence, which the scope
+    /// prompt saves for This event first.
+    pub draft: EventDraft,
+    /// Above the fields: "Bo Nilsson proposed this time: \"Thursday is full\"".
+    pub header: String,
+}
+
+/// Accept proposal on a message's card: the organizer's own copy of the
+/// meeting (check 1) in the editor at the time the guest proposed, for the
+/// occurrence a COUNTER with a RECURRENCE-ID names (check 2), offered only
+/// when the card counts the proposal as a guest's (check 3). Nothing is
+/// saved here. A proposal already accepted isn't offered again (check 4).
+pub async fn accept_draft(jolta: &Jolta, message: MessageId) -> Result<Accepting> {
+    let Checked { account, proposal, .. } = checked(jolta, message).await?;
+    let first = first_name(&proposal);
+    if proposal.accepted {
+        return Err(Error::Other(format!("{first}'s proposal is accepted already: the meeting is at that time.")));
+    }
+    if proposal.declined {
+        return Err(Error::Other(format!("{first}'s proposal was declined already.")));
+    }
+    if proposal.accepting.is_none() {
+        return Err(Error::Other(match proposal.declining {
+            Some(_) => "Jolta can't find this meeting in this account's own calendar, where accepting the proposal changes it.".into(),
+            None => "Only the meeting's organizer can accept this proposal.".into(),
+        }));
+    }
+    let here = tz::here();
+    jolta.store.read_async(move |c| accepted_draft(c, account, &proposal, here)).await
+}
+
+/// The draft of `proposal`'s meeting in the account's own calendar, moved
+/// to the time proposed.
+fn accepted_draft(conn: &Connection, account: AccountId, proposal: &Proposed, here: Tz) -> Result<Accepting> {
+    let receiver = store::account(conn, account)?.address;
+    let own = |c: &super::Calendar| c.is_own(&receiver);
+    let missing = || Error::Other("The meeting is no longer in your calendar.".into());
+    let master = store::stored_event_in(conn, &proposal.uid, None, Some(account), here, own)?.ok_or_else(missing)?;
+    let (event, at) = match &proposal.recurrence_id {
+        None => (master.event_id, None),
+        Some(rid) => match store::stored_event_in(conn, &proposal.uid, Some(rid), Some(account), here, own)? {
+            Some(changed) => (changed.event_id, None),
+            None => {
+                let occurrence = series::occurrence(std::slice::from_ref(&master.event), rid, here).ok_or_else(missing)?;
+                (master.event_id, Some(occurrence.span.bounds(here)))
+            }
+        },
+    };
+    let mut d = draft::draft_for_event(conn, event, at, here)?;
+    if d.locks.contains(&draft::DraftField::Time) {
+        return Err(Error::Other(d.notice.unwrap_or_else(|| "The meeting's time can't change here.".into())));
+    }
+    let zone = match d.span {
+        Span::Timed { start, .. } => start.zone,
+        Span::AllDay { .. } => super::Zone::Tz(here),
+    };
+    d.span = match proposal.time {
+        Some(Bounds::Utc { start, end }) => draft::timed_span(start.timestamp(), end.timestamp(), zone, here),
+        Some(Bounds::Days { .. }) | None => return Err(Error::Other("Jolta accepts proposals with a start and an end time; change this meeting's days in the editor.".into())),
+    };
+    let said = format!("{} proposed this time", proposal.proposer);
+    let header = if proposal.note.is_empty() { said } else { format!("{said}: \"{}\"", proposal.note) };
+    Ok(Accepting { draft: d, header })
+}
+
+fn first_name(p: &Proposed) -> String {
+    p.proposer.split_whitespace().next().unwrap_or("the guest").to_string()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declined {
@@ -26,45 +144,25 @@ pub struct Declined {
 /// outbox keeps it as that message's answer. Declining again sends nothing
 /// new: a no still waiting goes now.
 pub async fn decline(jolta: &Jolta, message: MessageId) -> Result<Declined> {
-    let (account, sender): (AccountId, String) = jolta
-        .store
-        .read_async(move |c| {
-            c.query_row("SELECT account_id, from_addr FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?
-                .ok_or_else(|| Error::NotFound(format!("message {message}")))
-        })
-        .await?;
-    let raw = imap::message_source(jolta, message).await?;
-    let blobs = jolta.blobs.clone();
-    let (from, proposal, built) = jolta
-        .store
-        .read_async(move |c| {
-            let every: Vec<String> = store::accounts(c)?.into_iter().map(|a| a.address).collect();
-            let from = store::account(c, account)?.address;
-            let invitations = invitation::find(&raw, &every);
-            let here = tz::here();
-            let cx = card::Context { message, account, me: &every, sender: &sender, now: Utc::now(), here, blobs: &blobs };
-            let (proposal, title) = card::cards(c, &invitations, &cx)?
-                .into_iter()
-                .find_map(|card| match card {
-                    Card::Event(e) => e.proposal.map(|p| (p, e.title)),
-                    Card::Reply(_) => None,
-                })
-                .ok_or_else(|| Error::Other("This message has no proposal to decline.".into()))?;
-            if proposal.declining.is_none() && !proposal.declined {
-                return Err(Error::Other("Only the meeting's organizer can decline this proposal.".into()));
-            }
-            if proposal.address.is_empty() {
-                return Err(Error::Other("The proposal names no guest.".into()));
-            }
-            // The proposal the card checked, never another one in the mail.
-            let rid = proposal.recurrence_id.as_ref();
-            let text = invitation::part_text(&raw, invitation::Method::Counter, &proposal.uid, rid, here)
-                .ok_or_else(|| Error::Other("Jolta has no copy of this proposal to answer.".into()))?;
-            let built = rsvp::imip_decline_counter(&text, &proposal.uid, rid, &from, &proposal.address, &title, here)?;
-            Ok((from, proposal, built))
-        })
-        .await?;
+    let Checked { account, from, raw, proposal, title } = checked(jolta, message).await.map_err(|e| match e {
+        Error::Other(t) if t.starts_with("This message has no proposal") => Error::Other("This message has no proposal to decline.".into()),
+        e => e,
+    })?;
+    if proposal.accepted {
+        return Err(Error::Other(format!("{}'s proposal is accepted already: the meeting is at that time.", first_name(&proposal))));
+    }
+    if proposal.declining.is_none() && !proposal.declined {
+        return Err(Error::Other("Only the meeting's organizer can decline this proposal.".into()));
+    }
+    if proposal.address.is_empty() {
+        return Err(Error::Other("The proposal names no guest.".into()));
+    }
+    // The proposal the card checked, never another one in the mail.
+    let here = tz::here();
+    let rid = proposal.recurrence_id.as_ref();
+    let text = invitation::part_text(&raw, invitation::Method::Counter, &proposal.uid, rid, here)
+        .ok_or_else(|| Error::Other("Jolta has no copy of this proposal to answer.".into()))?;
+    let built = rsvp::imip_decline_counter(&text, &proposal.uid, rid, &from, &proposal.address, &title, here)?;
 
     let blob = jolta.blobs.put(&built.raw)?;
     let waiting = jolta
@@ -75,7 +173,7 @@ pub async fn decline(jolta: &Jolta, message: MessageId) -> Result<Declined> {
             None => store::queue_outbox(tx, account, None, &blob, &built.message_id, &from, &built.recipients, Some(message), 0).map(|_| true),
         })
         .await?;
-    let first = proposal.proposer.split_whitespace().next().unwrap_or("the guest").to_string();
+    let first = first_name(&proposal);
     let text = if proposal.declined { format!("{first}'s proposal was declined already.") } else { format!("Declined {first}'s proposal. Jolta emailed {first}.") };
     Ok(Declined { text, mailed_from: waiting.then_some(account) })
 }
@@ -172,6 +270,10 @@ mod tests {
             Some(Proposed {
                 now: Some("Thu 12 Nov · 16:00 to 17:00".into()),
                 proposer: "Bo Nilsson".into(),
+                note: "Thursday is full".into(),
+                time: Some(Bounds::Utc { start: at("2026-11-13 14:00"), end: at("2026-11-13 15:00") }),
+                accepting: Some(message),
+                accepted: false,
                 declining: Some(message),
                 declined: false,
                 uid: "plan".into(),
@@ -188,7 +290,7 @@ mod tests {
         assert_eq!(done, Declined { text: "Declined Bo's proposal. Jolta emailed Bo.".into(), mailed_from: Some(AccountId(1)) });
         assert_eq!(outbox(&j), [(ME.to_string(), "bo@example.com".to_string(), Some(message.0), "DECLINECOUNTER".to_string())], "from the organizer to the proposer");
         let c = card_of(&j, message, &raw);
-        assert_eq!(c.proposal.as_ref().map(|p| (p.declining, p.declined)), Some((None, true)), "the card says it was handled");
+        assert_eq!(c.proposal.as_ref().map(|p| (p.accepting, p.declining, p.declined)), Some((None, None, true)), "the card says it was handled");
         assert_eq!(c.availability, None, "a declined time needs no conflicts");
 
         assert_eq!(run(decline(&j, message)).unwrap().text, "Bo's proposal was declined already.");
@@ -296,6 +398,120 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    fn save(j: &Jolta, d: &EventDraft) -> Option<crate::calendar::ops::CalendarOpId> {
+        let horizon = Horizon::around(now(), Brussels);
+        j.store.write(|tx| draft::save_draft(tx, d, None, Some(crate::calendar::ops::Notify::All), None, now().timestamp(), &horizon, Brussels)).unwrap().op
+    }
+
+    fn at(s: &str) -> DateTime<Utc> {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap().and_utc()
+    }
+
+    /// Check 4: Accept proposal opens the meeting at the proposed time and
+    /// saving sends one update; the card then reads Accepted and offers
+    /// nothing, also once the server's newer version is back, so accepting
+    /// again sends nothing. Undo offers the proposal again.
+    #[test]
+    fn a_proposal_is_accepted_through_the_editor_once() {
+        let (j, calendar) = jolta("proposal-accept");
+        my_meeting(&j, calendar);
+        let raw = counter("a1", "bo@example.com", ME, "bo@example.com", "20261113T140000Z");
+        let message = import(&j, raw.as_bytes());
+        let p = card_of(&j, message, &raw).proposal.expect("Bo's proposal");
+        assert_eq!((p.accepting, p.declining, p.accepted), (Some(message), Some(message), false));
+        assert_eq!(p.note, "Thursday is full");
+
+        let a = run(accept_draft(&j, message)).unwrap();
+        assert_eq!(a.header, "Bo Nilsson proposed this time: \"Thursday is full\"");
+        assert_eq!((a.draft.calendar, a.draft.uid.as_str()), (calendar, "plan"), "the organizer's own copy");
+        assert_eq!(a.draft.span.bounds(Brussels), Bounds::Utc { start: at("2026-11-13 14:00"), end: at("2026-11-13 15:00") });
+        let plan = j.store.read(|c| draft::plan_save(c, &a.draft, Brussels)).unwrap();
+        assert!(plan.dialog.is_some() && plan.scopes.is_empty(), "Send an update? for Bo, no scope for a single meeting");
+        let op = save(&j, &a.draft).expect("one update queued");
+
+        let c = card_of(&j, message, &raw);
+        let p = c.proposal.clone().expect("still shown");
+        assert_eq!((p.accepting, p.declining, p.accepted), (None, None, true), "accepted: no buttons");
+        assert!(run(accept_draft(&j, message)).unwrap_err().to_string().contains("accepted already"));
+        assert!(run(decline(&j, message)).unwrap_err().to_string().contains("accepted already"));
+        assert!(outbox(&j).is_empty(), "no DECLINECOUNTER after accepting");
+
+        let horizon = Horizon::around(now(), Brussels);
+        j.store.write(|tx| crate::calendar::ops::undo(tx, op, now().timestamp(), &horizon)).unwrap();
+        assert_eq!(card_of(&j, message, &raw).proposal.and_then(|p| p.accepting), Some(message), "Undo puts the meeting back and offers the proposal again");
+        save(&j, &run(accept_draft(&j, message)).unwrap().draft).expect("accepted again");
+
+        // The server's version after the update: a higher SEQUENCE at the new time.
+        let mut moved = j.store.read(|c| store::stored_series(c, "plan", None)).unwrap().remove(0);
+        moved.sequence = 2;
+        j.store.write(|tx| tx.execute_batch("DELETE FROM calendar_op").map_err(Into::into)).unwrap();
+        j.store.write(|tx| store::apply_item(tx, calendar, "plan.ics", Some("\"2\""), &[moved], None, &horizon)).unwrap();
+        let c = card_of(&j, message, &raw);
+        assert!(c.proposal.as_ref().is_some_and(|p| p.accepted), "{:?}", c.proposal);
+        assert!(!notes(&c).iter().any(|n| n.contains("newer version")), "{:?}", notes(&c));
+        let ops = j.store.read(|c| store::calendar_ops(c, 10)).unwrap();
+        assert!(ops.is_empty(), "nothing more queued");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Check 2: a proposal for one occurrence opens that occurrence, where
+    /// it is now, and the scope prompt starts at This event.
+    #[test]
+    fn a_proposal_for_an_occurrence_edits_that_occurrence() {
+        use crate::calendar::ops::Scope;
+        let (j, calendar) = jolta("proposal-accept-occurrence");
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:1\r\nDTSTART;TZID=Europe/Brussels:20261110T100000\r\n\
+                   DTEND;TZID=Europe/Brussels:20261110T103000\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Planning\r\nORGANIZER;CN=Me:mailto:me@example.com\r\n\
+                   ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:1\r\n\
+                   RECURRENCE-ID;TZID=Europe/Brussels:20261117T100000\r\nDTSTART;TZID=Europe/Brussels:20261118T140000\r\n\
+                   DTEND;TZID=Europe/Brussels:20261118T143000\r\nSUMMARY:Planning\r\nORGANIZER;CN=Me:mailto:me@example.com\r\n\
+                   ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let events = crate::calendar::ical::read(ics, &[ME.to_string()]).unwrap();
+        j.store.write(|tx| store::apply_item(tx, calendar, "plan.ics", None, &events, None, &Horizon::around(now(), Brussels))).unwrap();
+        let accept = |id: &str, rid: &str| {
+            let raw = counter(id, "bo@example.com", ME, "bo@example.com", "20261124T140000Z")
+                .replace("SEQUENCE:1\r\n", &format!("SEQUENCE:1\r\nRECURRENCE-ID:{rid}\r\n"));
+            run(accept_draft(&j, import(&j, raw.as_bytes()))).unwrap().draft
+        };
+        let d = accept("o1", "20261124T090000Z");
+        let base = d.base.as_ref().unwrap();
+        let tuesday = crate::calendar::Moment::Time(crate::calendar::Local { wall: at("2026-11-24 10:00").naive_utc(), zone: crate::calendar::Zone::Tz(Brussels) });
+        assert!(base.recurrence_id.is_some_and(|r| r.names(&tuesday, Brussels)), "the unchanged occurrence of 24 Nov: {:?}", base.recurrence_id);
+        assert_eq!(d.span.bounds(Brussels), Bounds::Utc { start: at("2026-11-24 14:00"), end: at("2026-11-24 15:00") });
+        let plan = j.store.read(|c| draft::plan_save(c, &d, Brussels)).unwrap();
+        assert_eq!(plan.scopes.first().map(|s| s.scope), Some(Scope::This), "This event first");
+
+        let d = accept("o2", "20261117T090000Z");
+        assert_eq!(d.base.as_ref().map(|b| b.span.bounds(Brussels)), Some(Bounds::Utc { start: at("2026-11-18 13:00"), end: at("2026-11-18 13:30") }), "the moved one, where it is now");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Check 1: a meeting the account organizes, held only in a calendar
+    /// shared with it, isn't the user's to change: Decline proposal stays,
+    /// Accept proposal doesn't show.
+    #[test]
+    fn accept_needs_the_meeting_in_the_accounts_own_calendar() {
+        let (j, _) = jolta("proposal-accept-shared");
+        let shared = j
+            .store
+            .write(|tx| {
+                let remote = store::RemoteCalendar { remote_id: "/cal/team/".into(), name: "Team".into(), color: None, zone: None, access: crate::calendar::Access::Write, primary: false, refresh: None, video: None };
+                let cals = store::sync_calendar_list(tx, AccountId(1), crate::calendar::CalendarSource::CalDav, &[remote])?;
+                let team = cals.iter().find(|c| c.name == "Team").unwrap().id;
+                tx.execute("UPDATE calendar SET shown = 1 WHERE id = ?1", [team])?;
+                tx.execute("DELETE FROM event", [])?;
+                Ok(team)
+            })
+            .unwrap();
+        my_meeting(&j, shared);
+        let raw = counter("sh1", "bo@example.com", ME, "bo@example.com", "20261113T140000Z");
+        let message = import(&j, raw.as_bytes());
+        let p = card_of(&j, message, &raw).proposal.expect("Bo's proposal");
+        assert_eq!((p.accepting, p.declining.is_some()), (None, true));
+        assert!(run(accept_draft(&j, message)).unwrap_err().to_string().contains("own calendar"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// A guest's proposal for a meeting someone else organizes, copied to
     /// the user, shows but offers no Decline: only the organizer answers it.
     #[test]
@@ -308,8 +524,9 @@ mod tests {
         let raw = counter("n1", "bo@example.com", "ann@example.com", "bo@example.com", "20261113T140000Z");
         let message = import(&j, raw.as_bytes());
         let p = card_of(&j, message, &raw).proposal.expect("Bo's proposal to Ann's meeting");
-        assert_eq!((p.declining, p.declined), (None, false), "the user is a guest here, not the organizer");
+        assert_eq!((p.accepting, p.declining, p.declined), (None, None, false), "the user is a guest here, not the organizer");
         assert!(run(decline(&j, message)).unwrap_err().to_string().contains("Only the meeting's organizer"));
+        assert!(run(accept_draft(&j, message)).unwrap_err().to_string().contains("Only the meeting's organizer"));
         assert!(outbox(&j).is_empty());
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }

@@ -48,6 +48,9 @@ pub struct OpenProposal {
     /// "Bo Nilsson".
     pub proposer: String,
     pub expanded: bool,
+    /// A takes Accept proposal, N Decline proposal.
+    pub accepting: bool,
+    pub declining: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -152,7 +155,15 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
         .enumerate()
         .flat_map(|(i, cards)| cards.iter().map(move |c| (i, c)))
         .filter_map(|(i, c)| match c {
-            Card::Event(e) => e.proposal.as_ref().and_then(|p| p.declining.map(|message| OpenProposal { message, proposer: p.proposer.clone(), expanded: open(i) })),
+            Card::Event(e) => e.proposal.as_ref().and_then(|p| {
+                p.accepting.or(p.declining).map(|message| OpenProposal {
+                    message,
+                    proposer: p.proposer.clone(),
+                    expanded: open(i),
+                    accepting: p.accepting.is_some(),
+                    declining: p.declining.is_some(),
+                })
+            }),
             Card::Reply(_) => None,
         })
         .collect();

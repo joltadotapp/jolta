@@ -297,6 +297,40 @@ fn horizon() -> Horizon {
     Horizon::around(Utc::now(), tz::here())
 }
 
+#[derive(Args)]
+pub struct AcceptProposalArgs {
+    /// The id of the message with the guest's proposal.
+    message: i64,
+    /// For a proposal for one occurrence: this event (the default), this
+    /// and following events, or all.
+    #[arg(long, value_enum)]
+    scope: Option<ScopeArg>,
+    #[command(flatten)]
+    people: Guests,
+    #[command(flatten)]
+    send: Send,
+}
+
+/// Accept proposal as the card and the editor do: the meeting in the
+/// account's own calendar at the time proposed, saved through Send an
+/// update? with --notify. Nothing opens; without --notify the dialog is
+/// printed and nothing is saved.
+pub async fn accept_proposal(jolta: &Jolta, a: AcceptProposalArgs) -> Result<()> {
+    let accepting = jolta_core::calendar::proposal::accept_draft(jolta, jolta_core::MessageId(a.message)).await?;
+    println!("{}", accepting.header);
+    let scopes = jolta.store.read(|c| draft::plan_save(c, &accepting.draft, tz::here()))?.scopes;
+    let scope = a.scope.map(Into::into).or(scopes.first().map(|s| s.scope));
+    if a.people.notify.is_none() {
+        let plan = jolta.store.read(|c| draft::plan_save(c, &accepting.draft, tz::here()))?;
+        if let Some(dialog) = &plan.dialog {
+            print_dialog(dialog);
+            println!("Nothing saved: pick one with --notify.");
+            return Ok(());
+        }
+    }
+    save_with_guests(jolta, &accepting.draft, scope, &a.people, &a.send).await
+}
+
 /// The minutes a new event lasts without --end or --minutes: Outlook's default.
 const DEFAULT_MINUTES: i64 = 30;
 

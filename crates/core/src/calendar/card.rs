@@ -65,8 +65,8 @@ pub struct EventCard {
     pub proposal: Option<Proposed>,
 }
 
-/// A guest's proposal for a new time, which the organizer can decline.
-/// Accepting it changes the meeting, which happens in the calendar.
+/// A guest's proposal for a new time, which the organizer can accept, in
+/// the editor, or decline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Proposed {
     /// The meeting's time now: "Thu 12 Nov · 16:00 to 16:45". None when the
@@ -74,7 +74,19 @@ pub struct Proposed {
     pub now: Option<String>,
     /// "Bo Nilsson".
     pub proposer: String,
-    /// Decline proposal, for the meeting's organizer, until it is declined.
+    /// The guest's note, empty without one.
+    pub note: String,
+    /// The time proposed.
+    pub time: Option<Bounds>,
+    /// Accept proposal, for the meeting's organizer while the account's own
+    /// calendar holds the meeting, until it is accepted or declined.
+    pub accepting: Option<MessageId>,
+    /// The meeting in the account's own calendar is at the time proposed.
+    /// Read from the meeting, not kept, so taking the change back with
+    /// Undo offers the proposal again.
+    pub accepted: bool,
+    /// Decline proposal, for the meeting's organizer, until it is accepted
+    /// or declined.
     pub declining: Option<MessageId>,
     /// Jolta sent the organizer's no.
     pub declined: bool,
@@ -306,7 +318,10 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
         && sent.recurrence_id.is_none()
         && at.is_some()
         && store::stored_event_in(conn, &shown.uid, at.as_ref(), Some(cx.account), cx.here, owned)?.is_some_and(|c| update::cancels(&c, sent.sequence));
-    let newer = history.newer.or(occurrence_cancelled.then_some(Method::Cancel));
+    // A guest's proposal the organizer accepted made the copy newer; it
+    // reads as accepted, not as replaced, unless the meeting was cancelled.
+    let accepted = method == Method::Counter && !history.not_from_guest && taken(conn, sent.uid.as_str(), shown, &receiver, cx)?;
+    let newer = history.newer.or(occurrence_cancelled.then_some(Method::Cancel)).filter(|m| !accepted || *m == Method::Cancel);
     // An older version only points to the newer one: its time, link and
     // answers are out of date.
     let current = newer.is_none();
@@ -386,11 +401,11 @@ fn event(conn: &Connection, invitation: &Invitation, message: &[EventData], desc
     }
 
     let proposal = match &countered_now {
-        Some(now) if current && trusted => Some(proposed(conn, sent, now, &receiver, cx)?),
+        Some(now) if current && trusted => Some(proposed(conn, sent, now, &receiver, bounds, accepted, cx)?),
         _ => None,
     };
     // A declined proposal's time no longer needs its conflicts.
-    let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish) || (method == Method::Counter && !proposal.as_ref().is_some_and(|p| p.declined));
+    let wants_time = matches!(method, Method::Request | Method::Add | Method::Publish) || (method == Method::Counter && !proposal.as_ref().is_some_and(|p| p.declined || p.accepted));
     let availability = match bounds {
         Some(bounds) if current && wants_time && ends(bounds, cx) > cx.now => availability(conn, &shown.uid, bounds, &shown.title, cx)?,
         _ => None,
@@ -440,20 +455,44 @@ fn countered(conn: &Connection, counter: &EventData, before: &[EventData], cx: &
 }
 
 /// What the organizer sees of a guest's proposal: the meeting's time now,
-/// and Decline proposal when the account the proposal came to organizes it.
-fn proposed(conn: &Connection, counter: &EventData, now: &[EventData], receiver: &str, cx: &Context) -> Result<Proposed> {
+/// and Accept proposal and Decline proposal when the account the proposal
+/// came to organizes it. Accept also needs the meeting in the account's
+/// own calendar (check 1), where the editor changes it.
+#[allow(clippy::too_many_arguments)]
+fn proposed(conn: &Connection, counter: &EventData, now: &[EventData], receiver: &str, time: Option<Bounds>, accepted: bool, cx: &Context) -> Result<Proposed> {
     let organizes = update::organizer(conn, cx.account, cx.me, &counter.uid)?.is_some_and(|o| o.trim().eq_ignore_ascii_case(receiver));
     let declined = store::calendar_answer_to(conn, cx.message)?.is_some();
+    let open = organizes && !declined && !accepted;
+    let held = store::stored_event_in(conn, &counter.uid, None, Some(cx.account), cx.here, |c| c.is_own(receiver))?.is_some();
     let guest = update::proposer(counter, cx.sender);
     Ok(Proposed {
         now: Lines::of(now, cx).map(|l| l.when()),
         proposer: guest.map_or_else(|| "A guest".into(), |a| name(&a.person, &[], false)),
-        declining: (organizes && !declined).then_some(cx.message),
+        note: guest.map(|a| a.comment.trim().to_string()).unwrap_or_default(),
+        time,
+        accepting: (open && held && time.is_some()).then_some(cx.message),
+        accepted,
+        declining: open.then_some(cx.message),
         declined,
         uid: counter.uid.clone(),
         recurrence_id: counter.recurrence_id,
         address: guest.map(|a| a.person.address.clone()).unwrap_or_default(),
     })
+}
+
+/// Whether the meeting a guest's COUNTER is about stands at the time it
+/// proposes in the receiving account's own calendar: the series or single
+/// event, or the occurrence the COUNTER names, where it is now.
+fn taken(conn: &Connection, uid: &str, counter: &EventData, receiver: &str, cx: &Context) -> Result<bool> {
+    let Some(master) = store::stored_event_in(conn, uid, None, Some(cx.account), cx.here, |c| c.is_own(receiver))? else { return Ok(false) };
+    let now = match &counter.recurrence_id {
+        None => Some(master.event),
+        Some(rid) => match store::stored_event_in(conn, uid, Some(rid), Some(cx.account), cx.here, |c| c.is_own(receiver))? {
+            Some(changed) => Some(changed.event),
+            None => series::occurrence(std::slice::from_ref(&master.event), rid, cx.here),
+        },
+    };
+    Ok(now.is_some_and(|e| e.span.bounds(cx.here) == counter.span.bounds(cx.here)))
 }
 
 /// Whether the organizer takes proposals for a new time: the invitation

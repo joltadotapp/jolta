@@ -151,6 +151,10 @@ pub enum CalCommand {
     /// Decline the guest's proposal on a message, as its card's Decline
     /// proposal does. Waits until the mail has left.
     DeclineProposal { message: i64 },
+    /// Accept the guest's proposal on a message, as its card's Accept
+    /// proposal and the editor's Save do: the meeting moves to the time
+    /// proposed and Send an update? tells the guests as --notify says.
+    AcceptProposal(crate::cal_edit::AcceptProposalArgs),
     /// Print the invitation cards of a message as the reader shows them,
     /// with what an update struck through as ~~old~~.
     Card { message: i64 },
@@ -661,6 +665,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 None => Ok(()),
             }
         }
+        CalCommand::AcceptProposal(a) => crate::cal_edit::accept_proposal(jolta, a).await,
         CalCommand::DeclineProposal { message } => {
             let engine = Outgoing::start(jolta)?;
             let t = Instant::now();
@@ -924,7 +929,8 @@ fn print_card(card: &Card) {
             line("when", &e.changes.when, &e.when);
             if let Some(p) = &e.proposal {
                 println!("  proposed by {}, currently {}", p.proposer, p.now.as_deref().unwrap_or("unknown"));
-                println!("  {}", if p.declined { "declined" } else if p.declining.is_some() { "Decline proposal offered" } else { "no Decline proposal" });
+                let offered: Vec<&str> = [(p.accepting.is_some(), "Accept proposal"), (p.declining.is_some(), "Decline proposal")].into_iter().filter(|(on, _)| *on).map(|(_, w)| w).collect();
+                println!("  {}", if p.declined { "declined".to_string() } else if p.accepted { "accepted".to_string() } else if offered.is_empty() { "no Accept or Decline proposal".to_string() } else { format!("{} offered", offered.join(" and ")) });
             }
             line("repeat", &e.changes.repeat, &e.repeat);
             line("place", &e.changes.location, &e.location);

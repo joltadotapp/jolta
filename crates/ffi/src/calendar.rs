@@ -325,18 +325,22 @@ impl From<jolta_core::reader::OpenInvitation> for InvitationInfo {
 }
 
 /// A guest's proposal in the open conversation that the user, its
-/// meeting's organizer, can decline.
+/// meeting's organizer, can accept or decline.
 #[derive(uniffi::Record)]
 pub struct ProposalInfo {
     pub message_id: i64,
     /// "Bo Nilsson".
     pub proposer: String,
     pub expanded: bool,
+    /// A opens Accept proposal.
+    pub accepting: bool,
+    /// N declines it.
+    pub declining: bool,
 }
 
 impl From<jolta_core::reader::OpenProposal> for ProposalInfo {
     fn from(p: jolta_core::reader::OpenProposal) -> Self {
-        ProposalInfo { message_id: p.message.0, proposer: p.proposer, expanded: p.expanded }
+        ProposalInfo { message_id: p.message.0, proposer: p.proposer, expanded: p.expanded, accepting: p.accepting, declining: p.declining }
     }
 }
 
