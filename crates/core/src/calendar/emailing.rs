@@ -14,12 +14,12 @@ use crate::compose::{self, Compose};
 use crate::{Error, Result, store};
 
 /// Who Email guests writes to: everyone on `event` but the user and rooms,
-/// the organizer first. On a meeting someone else organizes whose guest
-/// list is hidden from guests, only the organizer, whom the user can see.
-/// `me` holds the addresses of every account of the user's.
-pub fn recipients(calendar: &Calendar, account: &str, event: &EventData, me: &[String]) -> Vec<Person> {
-    let mut mine = draft::mine(calendar, account, event);
-    mine.extend(me.iter().cloned());
+/// the organizer first. The user is the calendar's account with the
+/// aliases its calendar marks, never another account of the user's, which
+/// may well be a guest (check 1). On a meeting someone else organizes whose
+/// guest list is hidden from guests, only the organizer, whom the user can see.
+pub fn recipients(calendar: &Calendar, account: &str, event: &EventData) -> Vec<Person> {
+    let mine = draft::mine(calendar, account, event);
     let is_me = |address: &str| mine.iter().any(|m| m.trim().eq_ignore_ascii_case(address.trim()));
     let guest_of_hidden = event.options.hide_guests && draft::other_organizer(calendar, account, event).is_some();
     let people = event.attendees.iter().filter(|a| !guest_of_hidden && !a.is_me && !matches!(a.role, Role::Room | Role::Resource)).map(|a| &a.person);
@@ -46,8 +46,7 @@ fn sender(conn: &Connection, calendar: &Calendar, event: &EventData) -> Result<O
 /// calendar and someone else is on it.
 pub fn possible(conn: &Connection, calendar: &Calendar, event: &EventData) -> Result<bool> {
     let Some(account) = sender(conn, calendar, event)? else { return Ok(false) };
-    let every: Vec<String> = store::accounts(conn)?.into_iter().map(|a| a.address).collect();
-    Ok(!recipients(calendar, &account.address, event, &every).is_empty())
+    Ok(!recipients(calendar, &account.address, event).is_empty())
 }
 
 /// The compose Email guests opens for the occurrence `at` of `event`, to
@@ -56,8 +55,7 @@ pub fn prefill(conn: &Connection, event: EventId, at: Option<Bounds>, only: Opti
     let d = detail::open(conn, event, at, here, "")?;
     let account = sender(conn, &d.calendar, &d.event)?
         .ok_or_else(|| Error::Other(format!("Pick the account {} sends from in Settings › Calendar first.", d.calendar.name)))?;
-    let every: Vec<String> = store::accounts(conn)?.into_iter().map(|a| a.address).collect();
-    let mut people = recipients(&d.calendar, &account.address, &d.event, &every);
+    let mut people = recipients(&d.calendar, &account.address, &d.event);
     if let Some(only) = only {
         people.retain(|p| p.address.eq_ignore_ascii_case(only.trim()));
     }
@@ -169,7 +167,7 @@ mod tests {
              ATTENDEE:mailto:BO@example.com\r\nURL:https://example.com\r\n",
         );
         let c = j.store.read(|c| prefill(c, mine, None, None, Brussels)).unwrap();
-        assert_eq!(to(&c), ["bo@example.com", "ann@example.com"], "not the user, their other account, the room or Bo twice");
+        assert_eq!(to(&c), ["bo@example.com", "ann@example.com", "me@work.example"], "not the user, the room or Bo twice; the user's other account is a guest like any");
         assert_eq!((c.account, c.subject.as_str()), (Some(crate::AccountId(1)), "Re: Planning"));
         assert_eq!(c.body, "Planning, Thu 12 Nov 16:00 to 17:00\n\n\n-- Me", "the event named first, then room to write, then the signature");
 
