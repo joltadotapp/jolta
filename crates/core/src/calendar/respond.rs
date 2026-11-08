@@ -191,11 +191,15 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
     // Jolta doesn't mail it, only when they changed.
     let carried = store::GivenAnswer { proposal: given.proposal.filter(|_| !plan.mail), ..given.clone() };
     let mut queued = false;
-    if let (Some(notify), Some(copy)) = (plan.provider, r.copy)
-        && !again(&carried, r.shown, before.as_ref())
-    {
-        let scope = rid.map_or(Scope::Series, Scope::Occurrence);
-        queued = rsvp::answer_or_queue(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
+    if let (Some(notify), Some(copy)) = (plan.provider, r.copy) {
+        if again(&carried, r.shown, before.as_ref()) {
+            // The same answer is still on its way while its op waits.
+            let (calendar, uid) = (copy.calendar, r.uid.clone());
+            queued = jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid)).await?;
+        } else {
+            let scope = rid.map_or(Scope::Series, Scope::Occurrence);
+            queued = rsvp::answer_or_queue(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
+        }
     }
 
     let blob = mail.as_ref().map(|m| jolta.blobs.put(&m.raw)).transpose()?;
@@ -1283,7 +1287,7 @@ pub(crate) mod tests {
         assert_eq!(card_answer(&j, message, raw), Some(Response::Accepted));
 
         let again = answer_at(&j, &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
-        assert!(!again.queued, "the same answer again needs nothing more: {}", again.text);
+        assert!(again.queued, "the same answer again says it still waits: {}", again.text);
         assert_eq!((ops_of(&j).len(), outbox(&j).len()), (1, 1), "one op, one mail");
 
         let at = chrono::Utc::now().timestamp();

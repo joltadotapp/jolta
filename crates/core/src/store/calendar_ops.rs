@@ -375,6 +375,15 @@ pub fn calendar_op_waiting(conn: &Connection, calendar: CalendarId, uid: &str) -
     )?)
 }
 
+/// Whether an answer to the event waits or is on its way.
+pub fn answer_waiting(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND kind = 'rsvp' AND state IN ('pending', 'sending'))",
+        params![calendar, uid],
+        |r| r.get(0),
+    )?)
+}
+
 /// Marks an event's rows "not synced yet" exactly while one of its ops
 /// waits or is on its way.
 pub fn refresh_changed_locally(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<()> {
