@@ -537,8 +537,10 @@ fn is_room(a: &Attendee) -> bool {
     matches!(a.role, Role::Room | Role::Resource)
 }
 
+/// The event's room: a room attendee, else the first resource, as
+/// Microsoft 365 and Google read a booked room back.
 fn room_of(e: &EventData) -> Option<&Attendee> {
-    e.attendees.iter().find(|a| a.role == Role::Room)
+    e.attendees.iter().find(|a| a.role == Role::Room).or_else(|| e.attendees.iter().find(|a| a.role == Role::Resource))
 }
 
 /// The first alert that pops up some minutes before the start.
@@ -586,8 +588,13 @@ fn event_of(draft: &EventDraft) -> EventData {
             DraftField::Time => e.span = draft.span,
             DraftField::People | DraftField::Room => {
                 let room = draft.room.trim();
+                let was_room = room_of(&e).map(|a| a.person.address.clone());
                 let kept_room = room_of(&e).filter(|a| a.person.address.eq_ignore_ascii_case(room)).cloned();
-                let others = e.attendees.iter().filter(|a| a.role == Role::Resource).cloned();
+                let others = e
+                    .attendees
+                    .iter()
+                    .filter(|a| a.role == Role::Resource && !was_room.as_ref().is_some_and(|w| w.eq_ignore_ascii_case(&a.person.address)))
+                    .cloned();
                 let mut attendees: Vec<Attendee> = draft.people.clone();
                 attendees.extend(others);
                 if !room.is_empty() {
@@ -1895,6 +1902,28 @@ mod tests {
         s.write(|tx| save_draft(tx, &reopened, None, Some(ops::Notify::Nobody), None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!((stored.location.as_str(), stored.attendees.len()), ("Gent, Belfort", 1), "a location of the user's own stays");
+    }
+
+    /// Microsoft 365 and Google read a room back as a resource: the editor
+    /// shows it in the Room field, and changing it replaces it.
+    #[test]
+    fn a_room_read_back_as_a_resource_is_the_room() {
+        let stored = EventData {
+            attendees: vec![
+                Attendee { person: Person { address: "ann@example.com".into(), name: "Ann".into() }, role: Role::Required, response: Response::Accepted, comment: String::new(), is_me: false },
+                Attendee { person: Person { address: "bruegel@rooms.example".into(), name: "Bruegel".into() }, role: Role::Resource, response: Response::Accepted, comment: String::new(), is_me: false },
+            ],
+            location: "Bruegel".into(),
+            ..EventData::new("u1", span("2026-11-25 10:00", "2026-11-25 10:30"))
+        };
+        let mut d = opened(&stored, CalendarId(1));
+        assert_eq!((d.room.as_str(), d.room_name.as_str(), d.location.as_str(), d.people.len()), ("bruegel@rooms.example", "Bruegel", "", 1), "the resource is the room");
+        assert!(changed(&d, &stored).is_empty());
+
+        (d.room, d.room_name) = ("ensor@rooms.example".into(), "Ensor".into());
+        let saved = event_of(&d);
+        assert_eq!(saved.attendees.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), ["ann@example.com", "ensor@rooms.example"], "the old room goes, once");
+        assert_eq!(saved.location, "Ensor");
     }
 
     #[test]
