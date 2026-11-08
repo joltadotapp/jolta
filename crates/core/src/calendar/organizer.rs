@@ -79,7 +79,12 @@ pub fn op_mails(op: &CalendarOp, sender: &Account, changed: &[EventData]) -> Res
                 let sequence = series.sequence.max(occurrence.sequence);
                 imip_cancel(occurrence, sequence, &organizer, &to, message, seed(occurrence, sequence))?
             }
-            (Notice::Cancellation, Write::Update { event, .. }) => imip_cancel(event, event.sequence, &organizer, &to, message, seed(event, event.sequence))?,
+            // The person taken off is the one the cancellation names.
+            (Notice::Cancellation, Write::Update { base, event, .. }) => {
+                let removed: Vec<_> = base.attendees.iter().filter(|a| a.person.address.eq_ignore_ascii_case(&to.address)).cloned().collect();
+                let uninvited = EventData { attendees: removed, ..event.clone() };
+                imip_cancel(&uninvited, event.sequence, &organizer, &to, message, seed(event, event.sequence))?
+            }
             (_, Write::Create(events)) => {
                 let list: Vec<&EventData> = events.iter().collect();
                 let Some(first) = list.first() else { continue };
@@ -105,19 +110,10 @@ pub fn op_mails(op: &CalendarOp, sender: &Account, changed: &[EventData]) -> Res
 /// A new time or repeat rule sent to the guests asks them again, so their
 /// answers start over, as Google and Microsoft 365 do.
 pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify) {
-    let stamp = |e: &mut EventData| {
-        if let Some(a) = sender
-            && e.organizer.is_none()
-            && e.attendees.iter().any(|g| !g.is_me && !g.person.address.eq_ignore_ascii_case(&a.address))
-        {
-            e.organizer = Some(organizer_of(a));
-            e.organizer_is_me = true;
-        }
-    };
     match write {
-        Write::Create(events) => events.iter_mut().for_each(stamp),
+        Write::Create(events) => events.iter_mut().for_each(|e| stamp(e, sender)),
         Write::Update { base, event, .. } => {
-            stamp(event);
+            stamp(event, sender);
             if [&*base, &*event].iter().any(|e| e.organizer.is_some() && !e.attendees.is_empty()) {
                 next_sequence(base, event);
                 if notify != Notify::Nobody && (Field::Time.differs(base, event) || Field::Repeat.differs(base, event)) {
@@ -130,6 +126,17 @@ pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify) {
         }
         Write::Cancel { series, .. } => series.sequence += 1,
         Write::Delete(_) => {}
+    }
+}
+
+/// Makes `sender` the organizer of `e` when it has guests and no organizer.
+pub fn stamp(e: &mut EventData, sender: Option<&Account>) {
+    if let Some(a) = sender
+        && e.organizer.is_none()
+        && e.attendees.iter().any(|g| !g.is_me && !g.person.address.eq_ignore_ascii_case(&a.address))
+    {
+        e.organizer = Some(organizer_of(a));
+        e.organizer_is_me = true;
     }
 }
 
@@ -256,6 +263,11 @@ pub fn apply_reply(conn: &Connection, account: &Account, sender: &str, reply: &I
         if !organizes {
             continue;
         }
+        // Judged against the meeting as it is once the user's edits are
+        // sent or taken back.
+        if store::calendar_op_waiting(conn, calendar.id, uid)? {
+            return Ok(Read::Wait);
+        }
         // The rows the answer lands on: the occurrence's own, one made from
         // the series for an occurrence without one, or the series and the
         // occurrences changed on their own that the guest didn't answer
@@ -264,8 +276,11 @@ pub fn apply_reply(conn: &Connection, account: &Account, sender: &str, reply: &I
         let rows: Vec<(Option<super::ops::Stored>, EventData)> = match &reply.event.recurrence_id {
             Some(rid) => {
                 let own = super::ops::series(conn, calendar.id, uid)?.into_iter().find(|e| e.recurrence_id.is_some_and(|r| r.names(rid, here)));
+                let excluded = master.event.recurrence.as_ref().is_some_and(|r| r.exdates.iter().any(|x| x.names(rid, here)));
                 match own {
+                    Some(e) if e.status == EventStatus::Cancelled => return Ok(Read::Ignored),
                     Some(e) => vec![(super::ops::stored(conn, calendar.id, uid, e.recurrence_id.as_ref())?, e)],
+                    None if excluded => return Ok(Read::Ignored),
                     None if super::ops::is_occurrence(&master.event, rid, here) => match super::series::occurrence(std::slice::from_ref(&master.event), rid, here) {
                         // An unchanged occurrence is named by its start on
                         // the series' clock, whatever clock the reply used.
@@ -291,14 +306,13 @@ pub fn apply_reply(conn: &Connection, account: &Account, sender: &str, reply: &I
         if !invited(target) && !invited(&master.event) {
             return Ok(Read::Ignored);
         }
-        if store::guest_reply_stamp(conn, calendar.id, uid, &key, &answer.person.address)?.is_some_and(|t| t >= stamp_of(reply)) {
+        // A newer answer for this occurrence, or for the whole series, wins.
+        let newer = |k: &str| -> Result<bool> { Ok(store::guest_reply_stamp(conn, calendar.id, uid, k, &answer.person.address)?.is_some_and(|t| t >= stamp_of(reply))) };
+        if newer(&key)? || (!key.is_empty() && newer("")?) {
             return Ok(Read::Ignored);
         }
         if reply.event.sequence < target.sequence && reply.dated && !reply.event.span.start().names(&target.span.start(), here) {
             return Ok(Read::Ignored);
-        }
-        if store::calendar_op_waiting(conn, calendar.id, uid)? {
-            return Ok(Read::Wait);
         }
         for (stored, mut e) in rows {
             let Some(guest) = e.attendees.iter_mut().find(|a| same(&a.person.address, &answer.person.address)) else { continue };
@@ -1151,6 +1165,117 @@ mod tests {
                 ],
                 "the moved occurrence alone, the cancelled one alone with a higher SEQUENCE, then the series with its moved occurrence"
             );
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        fn at(s: &str) -> Local {
+            Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) }
+        }
+
+        fn weekly(j: &Jolta, cal: CalendarId) -> EventData {
+            let mut series = meeting(&["ann@example.com", "bo@example.com"]);
+            series.recurrence = Some(crate::calendar::Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=4".into()], ..Default::default() });
+            queue(j, told(cal, Change::Create(vec![series]), Notify::All, None)).unwrap();
+            run(j);
+            j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event
+        }
+
+        /// Sol S1: a series update carries its changed occurrences as it
+        /// left them, not a later move still inside its undo window.
+        #[test]
+        fn a_series_update_never_carries_a_later_edit_still_to_be_undone() {
+            let (j, cal) = local("u5b-s1", true);
+            let mut renamed = weekly(&j, cal);
+            renamed.title = "Planning weekly".into();
+            queue(&j, told(cal, Change::Update(renamed), Notify::All, None)).unwrap();
+            let week2 = Moment::Time(at("2026-12-01 14:00"));
+            let master = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event;
+            let mut moved = crate::calendar::series::occurrence(std::slice::from_ref(&master), &week2, tz::here()).unwrap();
+            moved.span = Span::Timed { start: at("2026-12-01 16:00"), end: at("2026-12-01 16:30") };
+            let now = Utc::now().timestamp();
+            let pending = j.store.write(|tx| ops::queue(tx, &told(cal, Change::Update(moved), Notify::All, None), now, &horizon())).unwrap().unwrap();
+            run(&j);
+            assert_eq!(j.store.write(|tx| ops::undo(tx, pending, now, &horizon())).unwrap(), ops::Undone::Dropped);
+            let rename: Vec<_> = vevents(&j).into_iter().skip(2).collect();
+            assert!(rename.iter().all(|(_, list)| list.len() == 1), "the rename went without the move taken back: {rename:?}");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Sol S2: a late reply to a cancelled occurrence doesn't bring it back.
+        #[test]
+        fn a_reply_to_a_cancelled_occurrence_changes_nothing() {
+            let (j, cal) = local("u5b-s2", true);
+            weekly(&j, cal);
+            queue(&j, told(cal, Change::DeleteOccurrence { uid: "p1@jolta.app".into(), recurrence_id: Moment::Time(at("2026-12-08 14:00")) }, Notify::All, None)).unwrap();
+            run(&j);
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", Some("20261208T130000Z"), "20261116T100000Z", ""));
+            assert!(read(&j).is_empty());
+            assert_eq!(j.store.read(|c| ops::series(c, cal, "p1@jolta.app")).unwrap().len(), 1, "no row for the cancelled occurrence");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Sol S3: the guest taken off is the one their cancellation names.
+        #[test]
+        fn a_removed_guests_cancellation_names_them() {
+            let (j, cal) = local("u5b-s3", true);
+            sent_meeting(&j, cal, false);
+            let mut e = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event;
+            e.attendees.retain(|a| a.person.address != "bo@example.com");
+            queue(&j, told(cal, Change::Update(e), Notify::Changed, None)).unwrap();
+            run(&j);
+            let blob: String = j.store.read(|c| Ok(c.query_row("SELECT blob FROM outbox ORDER BY id DESC LIMIT 1", [], |r| r.get(0))?)).unwrap();
+            let raw = String::from_utf8_lossy(&j.blobs.get(&blob).unwrap()).replace("\r\n ", "");
+            let ics = &raw[raw.find("BEGIN:VCALENDAR").unwrap()..];
+            let obj = Object::parse(ics);
+            let ev = obj.calendar().unwrap().components().find(|c| c.name() == "VEVENT").unwrap().clone();
+            let attendees: Vec<&str> = ev.props().filter(|p| p.is("ATTENDEE")).filter_map(|p| p.address()).collect();
+            assert_eq!(attendees, ["bo@example.com"]);
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Sol S4: an older answer for one occurrence loses to a newer one
+        /// for the whole series.
+        #[test]
+        fn an_older_occurrence_reply_loses_to_a_newer_series_reply() {
+            use crate::calendar::Response::Accepted;
+            let (j, cal) = local("u5b-s4", true);
+            weekly(&j, cal);
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T110000Z", ""));
+            read(&j);
+            import(&j, &reply("ann@example.com", "ann@example.com", "DECLINED", Some("20261201T130000Z"), "20261116T100000Z", ""));
+            assert!(read(&j).is_empty());
+            let week2 = Moment::Time(at("2026-12-01 14:00"));
+            let shown = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", Some(&week2))).unwrap();
+            assert!(shown.is_none_or(|s| s.event.attendees[0].response == Accepted), "week 2 keeps the series' newer accept");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Sol S5: an answer to the old time waits out an edit that Undo
+        /// may take back, and counts once it is.
+        #[test]
+        fn a_reply_waits_out_an_edit_that_undo_takes_back() {
+            use crate::calendar::Response::Accepted;
+            let (j, cal) = local("u5b-s5", true);
+            sent_meeting(&j, cal, false);
+            let mut moved = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event;
+            moved.span = Span::Timed { start: at("2026-11-24 16:00"), end: at("2026-11-24 16:30") };
+            let now = Utc::now().timestamp();
+            let op = j.store.write(|tx| ops::queue(tx, &told(cal, Change::Update(moved), Notify::All, None), now, &horizon())).unwrap().unwrap();
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T100000Z", "SEQUENCE:0\r\nDTSTART;TZID=Europe/Brussels:20261124T140000\r\n"));
+            assert!(read(&j).is_empty(), "it waits");
+            j.store.write(|tx| ops::undo(tx, op, now, &horizon())).unwrap();
+            assert_eq!(read(&j), [cal], "the time it answered is the meeting's again");
+            assert_eq!(answers(&j, cal, None)[0].1, Accepted);
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Sol S6: the same new meeting saved twice queues one op.
+        #[test]
+        fn the_same_new_meeting_twice_queues_once() {
+            let (j, cal) = local("u5b-s6", true);
+            let edit = told(cal, Change::Create(vec![meeting(&["ann@example.com"])]), Notify::All, None);
+            assert!(queue(&j, edit.clone()).unwrap().is_some());
+            assert_eq!(queue(&j, edit).unwrap(), None);
             std::fs::remove_dir_all(&j.data_dir).ok();
         }
 

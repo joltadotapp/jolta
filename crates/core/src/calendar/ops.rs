@@ -260,10 +260,18 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
     if !caps::of(&calendar).writable {
         return Err(Error::Other(format!("{} is read-only", calendar.name)));
     }
-    let Some(Planned { mut write, remote_key, held }) = plan(conn, &calendar, &edit.change, horizon.here)? else { return Ok(None) };
-    if organizer::sends_itself(&calendar)
-        && let Some(e) = write.event()
+    // A new meeting Jolta mails itself is the sending account's: stamped
+    // before the store is compared, so the same create again is no change.
+    let mut change = edit.change.clone();
+    let mails_itself = organizer::sends_itself(&calendar);
+    if let (true, Change::Create(events)) = (mails_itself, &mut change)
+        && let Some(first) = events.first().cloned()
     {
+        let sender = organizer::sender(conn, &calendar, &first)?;
+        events.iter_mut().for_each(|e| organizer::stamp(e, sender.as_ref()));
+    }
+    let Some(Planned { mut write, remote_key, held }) = plan(conn, &calendar, &change, horizon.here)? else { return Ok(None) };
+    if mails_itself && let Some(e) = write.event() {
         let sender = organizer::sender(conn, &calendar, e)?;
         organizer::prepare(&mut write, sender.as_ref(), edit.notify);
     }
@@ -277,6 +285,7 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
     };
     let waits = edit.notify != Notify::Nobody || write.removes_occurrences() || link.following;
     let delay = if waits { UNDO_SEND_SECONDS } else { 0 };
+    let series_update = matches!(&write, Write::Update { event, .. } if event.recurrence_id.is_none());
     apply(conn, calendar.id, &write, &remote_key, horizon)?;
     let id = store::insert_calendar_op(
         conn,
@@ -303,6 +312,12 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
             after: link.after,
         },
     )?;
+    // Its update carries the series' changed occurrences as this op left
+    // them, not as later edits still to be sent or undone have them.
+    if mails_itself && series_update {
+        let changed: Vec<EventData> = series(conn, calendar.id, &uid)?.into_iter().filter(|e| e.recurrence_id.is_some()).collect();
+        store::set_calendar_op_changed(conn, id, &changed)?;
+    }
     store::refresh_changed_locally(conn, calendar.id, &uid)?;
     Ok(Some(id))
 }
@@ -1179,8 +1194,8 @@ async fn mail_guests(jolta: &Jolta, op: &CalendarOp, calendar: &Calendar) -> Res
     if op.notify == Notify::Nobody {
         return Ok(None);
     }
-    let (cal, uid) = (calendar.clone(), op.uid.clone());
-    let (sender, changed) = jolta.store.read_async(move |c| Ok((organizer::sender(c, &cal, &event)?, series(c, cal.id, &uid)?))).await?;
+    let (cal, id) = (calendar.clone(), op.id);
+    let (sender, changed) = jolta.store.read_async(move |c| Ok((organizer::sender(c, &cal, &event)?, store::calendar_op_changed(c, id)?))).await?;
     let Some(sender) = sender else { return Err(Error::Other(format!("no account sends the invitations for {}", calendar.name))) };
     let mails = organizer::op_mails(op, &sender, &changed)?;
     if mails.is_empty() {

@@ -17,5 +17,8 @@ CREATE TABLE guest_reply (
     stamp INTEGER NOT NULL,
     PRIMARY KEY (calendar_id, uid, recurrence_id, guest)
 );
--- The outbox rows of the invitations an op mailed, comma-separated.
+-- The outbox rows of the invitations an op mailed, comma-separated, and
+-- for an op on a series Jolta mails itself, its changed occurrences as the
+-- op left them (JSON), which its update carries.
 ALTER TABLE calendar_op ADD COLUMN outbox TEXT;
+ALTER TABLE calendar_op ADD COLUMN changed TEXT;

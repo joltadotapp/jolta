@@ -243,6 +243,18 @@ pub fn set_calendar_op_lost(conn: &Connection, id: CalendarOpId, lost: &[Field])
     Ok(())
 }
 
+/// Keeps the changed occurrences of a series as an op left them.
+pub fn set_calendar_op_changed(conn: &Connection, id: CalendarOpId, changed: &[EventData]) -> Result<()> {
+    conn.execute("UPDATE calendar_op SET changed = ?2 WHERE id = ?1", params![id.0, to_json(changed)?])?;
+    Ok(())
+}
+
+/// The changed occurrences `set_calendar_op_changed` kept for an op.
+pub fn calendar_op_changed(conn: &Connection, id: CalendarOpId) -> Result<Vec<EventData>> {
+    let text: Option<String> = conn.query_row("SELECT changed FROM calendar_op WHERE id = ?1", [id.0], |r| r.get(0))?;
+    Ok(text.map(|t| serde_json::from_str(&t)).transpose().map_err(|e| crate::Error::Other(format!("calendar op {}: {e}", id.0)))?.unwrap_or_default())
+}
+
 /// Links an op to the outbox rows of the invitations it mailed.
 pub fn set_calendar_op_outbox(conn: &Connection, id: CalendarOpId, outbox: &[i64]) -> Result<()> {
     let list: Vec<String> = outbox.iter().map(i64::to_string).collect();
