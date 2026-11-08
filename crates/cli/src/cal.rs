@@ -20,13 +20,82 @@ use jolta_core::store::{self, OccurrenceRow};
 
 use crate::{pct, truncate};
 
-/// Find a time's lookup for the CLI; calendar off is an error here.
-async fn find_time_lookup(jolta: &Jolta, account: &str, addresses: &[String], days: u32) -> Result<freebusy::Found> {
+/// Find a time's lookup for the CLI, with `rooms` after the people as the
+/// panel adds them; calendar off is an error here.
+async fn find_time_lookup(jolta: &Jolta, account: &str, addresses: &[String], rooms: &[String], days: u32) -> Result<freebusy::Found> {
     let a = jolta.store.read(|c| store::find_account(c, account))?;
     match freebusy::look_up(jolta, a.id, addresses, Utc::now(), days).await? {
-        freebusy::Lookup::Found(found) => Ok(found),
+        freebusy::Lookup::Found(mut found) => {
+            if let (Some(first), Some(last)) = (found.windows.first(), found.windows.last()) {
+                found.others.extend(freebusy::room_schedules(jolta, a.id, rooms, first.start, last.end).await?);
+            }
+            Ok(found)
+        }
         freebusy::Lookup::CalendarOff { address, .. } => bail!("calendar is off for {address}; run `jolta cal enable {address}` first"),
     }
+}
+
+/// `jolta cal rooms`: asks for the room lists when told to, reads them
+/// again, and prints each room, free or busy at `free` when given.
+async fn rooms_command(jolta: &Jolta, account: &str, consent: bool, port: u16, free: Option<&str>, minutes: i64, typed: &[String]) -> Result<()> {
+    use jolta_core::calendar::rooms::{self as rooms, Access};
+    let a = jolta.store.read(|c| store::find_account(c, account))?;
+    if consent {
+        let (a, pending) = rooms::begin_consent(jolta, a.id, port).await?;
+        println!("Jolta asks for {}'s room lists (Place.Read.All). Only an admin may be able to allow it.", a.address);
+        let answer = crate::browser_consent(pending, port, a.provider_label()).await?;
+        rooms::finish_consent(jolta, &a, answer).await?;
+    }
+    let listing = rooms::refresh(jolta, a.id).await?;
+    let access = match &listing.access {
+        Access::NotOffered => "not offered by this provider; recent rooms only".to_string(),
+        Access::NotAsked => "not asked yet (run with --consent)".to_string(),
+        Access::Refused(reason) => format!("refused: {reason}"),
+        Access::Granted if listing.none_listed() => "allowed, but the organization lists no rooms".to_string(),
+        Access::Granted => "allowed".to_string(),
+    };
+    println!("{}: room lists {access}", a.address);
+    let mut shown: Vec<(String, String, String)> = listing
+        .rooms
+        .iter()
+        .map(|r| {
+            let size = r.capacity.map_or_else(|| "size unknown".to_string(), |c| format!("{c} people"));
+            let place = [r.building.clone(), r.floor.clone().map(|f| format!("floor {f}"))].into_iter().flatten().collect::<Vec<_>>().join(", ");
+            let list = r.list.as_deref().map_or(String::new(), |l| format!(" [{l}]"));
+            (r.address.clone(), r.name.clone(), format!("{size}{}{list}, {:?}", if place.is_empty() { String::new() } else { format!(", {place}") }, r.source))
+        })
+        .collect();
+    for t in typed {
+        if !shown.iter().any(|(address, ..)| address.eq_ignore_ascii_case(t)) {
+            shown.push((t.to_ascii_lowercase(), t.clone(), "typed".into()));
+        }
+    }
+    if shown.is_empty() {
+        println!("No rooms: none listed, and none on this account's meetings of the last 180 days.");
+        return Ok(());
+    }
+    let states = match free {
+        None => Vec::new(),
+        Some(when) => {
+            let wall = chrono::NaiveDateTime::parse_from_str(when.trim(), "%Y-%m-%d %H:%M").with_context(|| format!("{when:?} is not a time like \"2026-11-10 14:00\""))?;
+            let (start, end) = (tz::instant(wall, tz::here()), tz::instant(wall, tz::here()) + Duration::minutes(minutes));
+            let addresses: Vec<String> = shown.iter().map(|(address, ..)| address.clone()).collect();
+            let found = freebusy::room_schedules(jolta, a.id, &addresses, start, end).await?;
+            found
+                .iter()
+                .map(|s| match &s.availability {
+                    Availability::Known(busy) if busy.iter().any(|b| b.kind.blocks() && b.start < end && b.end > start) => "busy".to_string(),
+                    Availability::Known(_) => "free".to_string(),
+                    Availability::Unknown(why) => format!("unknown, {}", why.reason()),
+                })
+                .collect()
+        }
+    };
+    for (i, (address, name, detail)) in shown.iter().enumerate() {
+        let state = states.get(i).map_or(String::new(), |s| format!("  {s}"));
+        println!("  {name} <{address}>  {detail}{state}");
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -197,8 +266,10 @@ pub enum CalCommand {
     /// through the account's provider, or why they aren't known. Reads only.
     Freebusy {
         account: String,
-        #[arg(required = true)]
         addresses: Vec<String>,
+        /// A room's address, looked up beside the people.
+        #[arg(long = "room")]
+        rooms: Vec<String>,
         /// Working days to look at.
         #[arg(long, default_value_t = 5)]
         days: u32,
@@ -230,8 +301,10 @@ pub enum CalCommand {
     /// them. Reads only.
     FindTime {
         account: String,
-        #[arg(required = true)]
         addresses: Vec<String>,
+        /// A room's address: a busy room blocks a time like a busy person.
+        #[arg(long = "room")]
+        rooms: Vec<String>,
         #[arg(long, default_value_t = 30)]
         minutes: i64,
         #[arg(long, default_value_t = 5)]
@@ -239,6 +312,26 @@ pub enum CalCommand {
         /// Also suggest times outside other people's working hours.
         #[arg(long)]
         any_hours: bool,
+    },
+    /// The rooms an account offers for meetings: on Microsoft 365 its
+    /// organization's room lists once allowed, and on every account the
+    /// rooms of its meetings of the last 180 days. Reads the room lists again.
+    Rooms {
+        account: String,
+        /// Ask Microsoft 365 for the room lists (Place.Read.All) in the browser.
+        #[arg(long)]
+        consent: bool,
+        /// Listen for the consent on this port, for an SSH tunnel.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Say whether each room is free from this moment ("2026-11-10 14:00").
+        #[arg(long)]
+        free: Option<String>,
+        #[arg(long, default_value_t = 30, requires = "free")]
+        minutes: i64,
+        /// A typed room address to look up beside the rest.
+        #[arg(long = "room")]
+        rooms: Vec<String>,
     },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
@@ -405,8 +498,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             }
             Ok(())
         }
-        CalCommand::Freebusy { account, addresses, days } => {
-            let found = find_time_lookup(jolta, &account, &addresses, days).await?;
+        CalCommand::Freebusy { account, addresses, rooms, days } => {
+            let found = find_time_lookup(jolta, &account, &addresses, &rooms, days).await?;
             let here = tz::here();
             let hours_text = |h: &availability::WorkingHours| {
                 let weekdays: Vec<String> = std::iter::successors(Some(chrono::Weekday::Mon), |d| Some(d.succ()))
@@ -440,8 +533,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             }
             Ok(())
         }
-        CalCommand::FindTime { account, addresses, minutes, days, any_hours } => {
-            let found = find_time_lookup(jolta, &account, &addresses, days).await?;
+        CalCommand::FindTime { account, addresses, rooms, minutes, days, any_hours } => {
+            let found = find_time_lookup(jolta, &account, &addresses, &rooms, days).await?;
             let here = tz::here();
             let options = availability::SuggestOptions { respect_others_hours: !any_hours };
             let slots = availability::suggest(&found.own, &found.others, &found.hours, Duration::minutes(minutes), Utc::now(), days, options);
@@ -454,6 +547,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             }
             Ok(())
         }
+        CalCommand::Rooms { account, consent, port, free, minutes, rooms } => rooms_command(jolta, &account, consent, port, free.as_deref(), minutes, &rooms).await,
         CalCommand::Disable { account } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
             sync::disable(jolta, a.id)?;

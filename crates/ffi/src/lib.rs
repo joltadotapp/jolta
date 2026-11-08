@@ -20,6 +20,7 @@ mod away;
 pub mod calendar;
 pub mod editor;
 mod find_time;
+mod rooms;
 pub mod quick;
 pub mod repeat;
 
@@ -531,13 +532,22 @@ pub enum OAuthProvider {
     Microsoft,
 }
 
+/// What a browser sign-in adds.
+#[derive(Clone)]
+enum SignInFor {
+    Account,
+    /// Calendar access for this account.
+    Calendar(jolta_core::Account),
+    /// The room lists of this Microsoft 365 account's organization.
+    Rooms(jolta_core::Account),
+}
+
 /// A browser sign-in in progress. Open `url()`, then await `finish()`.
 #[derive(uniffi::Object)]
 pub struct SignIn {
     url: String,
     provider: jolta_core::oauth::Provider,
-    /// Set for a calendar consent: the account that gains calendar access.
-    calendar_for: Option<jolta_core::Account>,
+    purpose: SignInFor,
     pending: Mutex<Option<jolta_core::oauth::Pending>>,
     jolta: Jolta,
     runtime: tokio::runtime::Handle,
@@ -552,7 +562,8 @@ impl SignIn {
 
     /// Waits for the browser to come back, then adds (or re-authorizes) the
     /// account. A calendar consent instead keeps the grant, turns calendar on
-    /// and syncs the shown calendars.
+    /// and syncs the shown calendars. A room lists consent records the
+    /// answer, and a refusal comes back as the error with Microsoft's reason.
     pub async fn finish(&self) -> Result<AccountInfo> {
         let pending = self
             .pending
@@ -561,14 +572,21 @@ impl SignIn {
             .take()
             .ok_or_else(|| CoreError::Failed { message: "this sign-in already finished".into() })?;
         let (jolta, provider, engine) = (self.jolta.clone(), self.provider, self.engine.clone());
-        let calendar_for = self.calendar_for.clone();
+        let purpose = self.purpose.clone();
         self.runtime
             .spawn(async move {
-                let signed = pending
-                    .finish()
-                    .await
-                    .map_err(|e| jolta_core::Error::Auth(jolta_core::graph::explain_sign_in_error(&e.to_string())))?;
-                if let Some(account) = calendar_for {
+                let explain = |e: jolta_core::Error| jolta_core::Error::Auth(jolta_core::graph::explain_sign_in_error(&e.to_string()));
+                if let SignInFor::Rooms(account) = purpose {
+                    let consent = pending.finish_consent(std::future::pending()).await.map_err(explain)?;
+                    let rooms = jolta_core::calendar::rooms::finish_consent(&jolta, &account, consent).await?;
+                    if let jolta_core::calendar::rooms::Access::Refused(reason) = rooms.access {
+                        return Err(jolta_core::Error::Auth(reason));
+                    }
+                    let account = jolta.store.read(|c| store::account(c, account.id))?;
+                    return Ok(AccountInfo::from(account));
+                }
+                let signed = pending.finish().await.map_err(explain)?;
+                if let SignInFor::Calendar(account) = purpose {
                     jolta_core::oauth::save_grant(&account, &signed)?;
                     let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
                     if let Some(engine) = engine {
@@ -1412,7 +1430,7 @@ impl Core {
         Ok(Arc::new(SignIn {
             url: pending.url.clone(),
             provider,
-            calendar_for: None,
+            purpose: SignInFor::Account,
             pending: Mutex::new(Some(pending)),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
@@ -1436,7 +1454,7 @@ impl Core {
         Ok(Arc::new(SignIn {
             url: pending.url.clone(),
             provider,
-            calendar_for: Some(account),
+            purpose: SignInFor::Calendar(account),
             pending: Mutex::new(Some(pending)),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),

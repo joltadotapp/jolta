@@ -15,7 +15,10 @@ mod add;
 pub(crate) use add::pattern;
 mod away;
 mod freebusy;
+mod rooms;
 mod write;
+
+pub use rooms::directory;
 
 pub(crate) use add::transaction_id;
 pub(crate) use write::writable;
@@ -50,6 +53,8 @@ const BATCH: usize = 20;
 pub struct GraphCalendar {
     http: reqwest::Client,
     account: Account,
+    /// The account's own token, or the room lists' one.
+    grant: oauth::Grant,
     /// The zone for events whose own zone Graph names in a way Jolta can't
     /// map (`tzone://Microsoft/Custom`).
     here: Tz,
@@ -218,7 +223,12 @@ type Masters = BTreeMap<String, Option<(GraphEvent, Vec<u8>)>>;
 
 impl GraphCalendar {
     pub fn new(account: &Account) -> Result<GraphCalendar> {
-        Ok(GraphCalendar { http: http_client(true)?, account: account.clone(), here: tz::here() })
+        Ok(GraphCalendar { http: http_client(true)?, account: account.clone(), grant: oauth::Grant::Account, here: tz::here() })
+    }
+
+    /// For the Places API, with the token of the room lists consent.
+    pub fn for_rooms(account: &Account) -> Result<GraphCalendar> {
+        Ok(GraphCalendar { grant: oauth::Grant::Rooms, ..GraphCalendar::new(account)? })
     }
 
     /// One request with the account's token and Jolta's `Prefer` header.
@@ -229,7 +239,7 @@ impl GraphCalendar {
         let url = if url.starts_with('/') { format!("{BASE}{url}") } else { url.to_string() };
         let url = provider_url(&url, "graph.microsoft.com")?;
         for attempt in 0..5u32 {
-            let token = oauth::access_token(&self.account).await?;
+            let token = oauth::token(&self.account, self.grant).await?;
             let mut req = self.http.request(method.clone(), url.clone()).bearer_auth(&token).header("Prefer", PREFER);
             for (k, v) in headers {
                 req = req.header(*k, *v);
@@ -995,7 +1005,7 @@ fn answer_body(rsvp: &Rsvp) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::TimeZone;
     use chrono_tz::{America, Europe};
 
@@ -1090,7 +1100,7 @@ mod tests {
         (serde_json::from_value(v.clone()).unwrap(), serde_json::to_vec(&v).unwrap())
     }
 
-    fn mapped(v: Value) -> EventData {
+    pub(crate) fn mapped(v: Value) -> EventData {
         let (g, _) = graph(v);
         let uid = g.ical_uid.clone().unwrap();
         event(&g, uid, None, &["me@example.com".into()], Europe::Brussels).unwrap()

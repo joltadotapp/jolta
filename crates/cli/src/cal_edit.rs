@@ -805,6 +805,9 @@ pub struct DraftArgs {
     /// Delete the event as the editor's Delete does.
     #[arg(long, requires = "event")]
     delete: bool,
+    /// The Send an update? dialog's choice, for a meeting or a room.
+    #[arg(long, value_enum)]
+    notify: Option<NotifyArg>,
     #[command(flatten)]
     send: Send,
 }
@@ -836,7 +839,7 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     let h = horizon();
     let now = Utc::now().timestamp();
     let saved = match (a.save, a.delete, a.event) {
-        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, None, None, now, &h, here))?,
+        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, a.notify.map(Into::into), None, now, &h, here))?,
         (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), None, now, &h, here))?,
         _ => return Ok(()),
     };

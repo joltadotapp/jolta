@@ -833,6 +833,43 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// R in Find a time opens the room picker, which offers the room of a
+    /// meeting from last week; Return adds it as a row after the people. A
+    /// typed address is offered as itself, and Esc closes the picker before
+    /// the panel.
+    func testFindTimeWithRoom() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
+        app.typeText("Find a time")
+        XCTAssertTrue(paletteRow(app, "Find a time").waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        let panel = app.descendants(matching: .any).matching(identifier: "find-time").firstMatch
+        XCTAssertTrue(panel.waitForExistence(timeout: 5), "the palette opens Find a time")
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "find-time-add-room").firstMatch.waitForExistence(timeout: 10), "the header offers + Room")
+
+        app.typeKey("r", modifierFlags: [])
+        let picker = app.textFields.matching(identifier: "room-picker-search").firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "R opens the room picker")
+        XCTAssertTrue(text(app, "RECENT ROOMS").waitForExistence(timeout: 5), "an account without room lists offers recent rooms")
+        XCTAssertTrue(app.buttons.matching(identifier: "room-row-bruegel@rooms.test.invalid").firstMatch.exists, "the room of last week's meeting")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(picker.waitForNonExistence(timeout: 5), "Return adds the room and closes the picker")
+        XCTAssertTrue(text(app, "Room").waitForExistence(timeout: 5), "the room is a row, labelled as a room")
+
+        app.typeKey("r", modifierFlags: [])
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertFalse(text(app, "RECENT ROOMS").waitForExistence(timeout: 2), "the room already added isn't offered again")
+        app.typeText("ensor@rooms.test.invalid")
+        XCTAssertTrue(text(app, "TYPED ADDRESS").waitForExistence(timeout: 5), "a typed address is offered as itself")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(picker.waitForNonExistence(timeout: 5), "Esc closes the picker")
+        XCTAssertTrue(panel.exists, "and leaves the panel open")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(panel.waitForNonExistence(timeout: 5), "a second Esc closes the panel")
+    }
+
     /// Return in a new section's query field saves it. The page used to read
     /// the sections before they reloaded, drop the new row under the focused
     /// field, and crash (2026-11-04, a "Starred" section with is:starred).
