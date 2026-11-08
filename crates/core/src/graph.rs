@@ -5,7 +5,7 @@
 //! sent and drafted as the MIME Jolta builds. Graph files sent mail in Sent
 //! Items itself. New mail is found by polling the inbox's delta.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -40,6 +40,40 @@ pub struct Graph {
 
 fn http_error(e: impl std::fmt::Display) -> Error {
     Error::Other(format!("Microsoft Graph: {e}"))
+}
+
+fn failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
+    let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    let message = json["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
+    Error::Other(format!("Microsoft Graph {}: {message}", status.as_u16()))
+}
+
+/// One page of a folder's delta, or Graph saying it no longer knows the
+/// delta link. Exchange keeps only the last few generations of a link: a
+/// second copy of the store that moved the same link on three times makes
+/// this one's 410 SyncStateNotFound (seen 2026-11-08), and a link also
+/// expires on its own.
+enum DeltaPage {
+    Page(Value),
+    Forgotten,
+}
+
+trait DeltaSource {
+    async fn delta_page(&self, url: &str) -> Result<DeltaPage>;
+}
+
+impl DeltaSource for Graph {
+    async fn delta_page(&self, url: &str) -> Result<DeltaPage> {
+        let (status, bytes) = self.respond(reqwest::Method::GET, url, None).await?;
+        if status.is_success() {
+            return Ok(DeltaPage::Page(serde_json::from_slice(&bytes).map_err(http_error)?));
+        }
+        let code = serde_json::from_slice::<Value>(&bytes).ok().and_then(|j| j["error"]["code"].as_str().map(str::to_ascii_lowercase));
+        if status == reqwest::StatusCode::GONE || code.is_some_and(|c| c.starts_with("syncstate")) {
+            return Ok(DeltaPage::Forgotten);
+        }
+        Err(failure(status, &bytes))
+    }
 }
 
 /// "2026-10-30T12:27:04Z" (or with fractions or an offset) to unix seconds.
@@ -95,9 +129,19 @@ impl Graph {
         Ok(Graph { http, account: account.clone() })
     }
 
-    /// One request with the account's token. Throttling (429) and brief
-    /// outages (503, 504) are retried after the server's Retry-After.
+    /// One request with the account's token, failing on any status but success.
     async fn send(&self, method: reqwest::Method, url: &str, body: Option<(&str, Vec<u8>)>) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+        let (status, bytes) = self.respond(method, url, body).await?;
+        if !status.is_success() {
+            return Err(failure(status, &bytes));
+        }
+        Ok((status, bytes))
+    }
+
+    /// One request with the account's token and its answer, whatever the
+    /// status. Throttling (429) and brief outages (503, 504) are retried
+    /// after the server's Retry-After.
+    async fn respond(&self, method: reqwest::Method, url: &str, body: Option<(&str, Vec<u8>)>) -> Result<(reqwest::StatusCode, Vec<u8>)> {
         let url = if url.starts_with("https://") { url.to_string() } else { format!("{BASE}{url}") };
         for attempt in 0..5 {
             let token = oauth::access_token(&self.account).await?;
@@ -122,11 +166,6 @@ impl Graph {
                 continue;
             }
             let bytes = resp.bytes().await.map_err(http_error)?.to_vec();
-            if !status.is_success() {
-                let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-                let message = json["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
-                return Err(Error::Other(format!("Microsoft Graph {}: {message}", status.as_u16())));
-            }
             return Ok((status, bytes));
         }
         unreachable!("the last attempt returns")
@@ -215,64 +254,11 @@ impl Graph {
                 jolta.store.write_async(move |tx| store::clear_mailbox(tx, id)).await?;
                 continue;
             }
-            self.sync_folder(jolta, m, &mut report, &mut unfiled, progress).await?;
+            sync_folder(self, jolta, m, &mut report, &mut unfiled, progress).await?;
         }
         jolta.store.write_async(move |tx| store::delete_unfiled(tx, &unfiled)).await?;
         report.bodies = self.fetch_bodies(jolta).await?;
         Ok(report)
-    }
-
-    async fn sync_folder(
-        &self,
-        jolta: &Jolta,
-        mailbox: &Mailbox,
-        report: &mut SyncReport,
-        unfiled: &mut Vec<MessageId>,
-        progress: &mut impl FnMut(SyncEvent),
-    ) -> Result<()> {
-        let mailbox_id = mailbox.id;
-        let cursor: Option<String> = jolta
-            .store
-            .read_async(move |c| Ok(c.query_row("SELECT delta_link FROM mailbox WHERE id = ?1", [mailbox_id], |r| r.get(0))?))
-            .await?;
-        let mut next = Some(cursor.unwrap_or_else(|| format!("/me/mailFolders/{}/messages/delta?$select={SELECT}", mailbox.remote_id)));
-        let (mut new, mut removed, mut changed) = (0, 0, 0);
-        let mut delta_link = None;
-        while let Some(url) = next {
-            let page = match self.get(&url).await {
-                Ok(p) => p,
-                // An expired delta link (410 / syncStateNotFound) means start over.
-                Err(Error::Other(m)) if m.contains(" 410") || m.contains("SyncState") => {
-                    jolta.store.write_async(move |tx| store::clear_mailbox(tx, mailbox_id)).await?;
-                    Value::Object(Default::default())
-                }
-                Err(e) => return Err(e),
-            };
-            let items = page["value"].as_array().cloned().unwrap_or_default();
-            let account_id = self.account.id;
-            let delta = jolta.store.write_async(move |tx| apply_delta(tx, account_id, mailbox_id, &items)).await?;
-            let n = delta.new;
-            new += n;
-            removed += delta.removed;
-            changed += delta.changed;
-            report.new_messages.extend(delta.new_ids);
-            unfiled.extend(delta.unfiled);
-            if n > 0 {
-                progress(SyncEvent::Headers { mailbox: mailbox.name.clone(), done: new, total: new });
-            }
-            next = page["@odata.nextLink"].as_str().map(str::to_string);
-            delta_link = page["@odata.deltaLink"].as_str().map(str::to_string).or(delta_link);
-        }
-        if let Some(link) = delta_link {
-            jolta.store
-                .write_async(move |tx| Ok(tx.execute("UPDATE mailbox SET delta_link = ?2 WHERE id = ?1", rusqlite::params![mailbox_id, link])?))
-                .await?;
-        }
-        report.new += new;
-        report.removed += removed;
-        report.flag_changes += changed;
-        progress(SyncEvent::Mailbox { name: mailbox.name.clone(), new, removed, flag_changes: changed });
-        Ok(())
     }
 
     /// The message as MIME, for reading and the search index.
@@ -431,6 +417,88 @@ pub fn explain_sign_in_error(message: &str) -> String {
     message.to_string()
 }
 
+async fn sync_folder(
+    api: &impl DeltaSource,
+    jolta: &Jolta,
+    mailbox: &Mailbox,
+    report: &mut SyncReport,
+    unfiled: &mut Vec<MessageId>,
+    progress: &mut impl FnMut(SyncEvent),
+) -> Result<()> {
+    let (mailbox_id, account_id) = (mailbox.id, mailbox.account_id);
+    let cursor: Option<String> = jolta
+        .store
+        .read_async(move |c| Ok(c.query_row("SELECT delta_link FROM mailbox WHERE id = ?1", [mailbox_id], |r| r.get(0))?))
+        .await?;
+    let start = format!("/me/mailFolders/{}/messages/delta?$select={SELECT}", mailbox.remote_id);
+    // A round from `start` lists every message in the folder, so the ones it
+    // leaves out have gone; a round from a delta link lists only changes.
+    let mut listed: Option<HashSet<String>> = cursor.is_none().then(HashSet::new);
+    let mut next = Some(cursor.unwrap_or_else(|| start.clone()));
+    let (mut new, mut removed, mut changed) = (0, 0, 0);
+    let mut delta_link = None;
+    while let Some(url) = next.take() {
+        let page = match api.delta_page(&url).await? {
+            DeltaPage::Page(p) => p,
+            DeltaPage::Forgotten if listed.is_none() => {
+                tracing::info!("Graph forgot the delta link of {}; listing the folder again", mailbox.name);
+                listed = Some(HashSet::new());
+                delta_link = None;
+                next = Some(start.clone());
+                continue;
+            }
+            DeltaPage::Forgotten => return Err(Error::Other(format!("Microsoft Graph lost its place listing {}", mailbox.name))),
+        };
+        let items = page["value"].as_array().cloned().unwrap_or_default();
+        if let Some(listed) = &mut listed {
+            listed.extend(items.iter().filter(|i| i.get("@removed").is_none()).filter_map(|i| i["id"].as_str().map(str::to_string)));
+        }
+        let delta = jolta.store.write_async(move |tx| apply_delta(tx, account_id, mailbox_id, &items)).await?;
+        let n = delta.new;
+        new += n;
+        removed += delta.removed;
+        changed += delta.changed;
+        report.new_messages.extend(delta.new_ids);
+        unfiled.extend(delta.unfiled);
+        if n > 0 {
+            progress(SyncEvent::Headers { mailbox: mailbox.name.clone(), done: new, total: new });
+        }
+        next = page["@odata.nextLink"].as_str().map(str::to_string);
+        delta_link = page["@odata.deltaLink"].as_str().map(str::to_string).or(delta_link);
+    }
+    if let Some(listed) = listed {
+        let gone = jolta.store.write_async(move |tx| unlink_unlisted(tx, account_id, mailbox_id, &listed)).await?;
+        removed += gone.len();
+        unfiled.extend(gone);
+    }
+    if let Some(link) = delta_link {
+        jolta.store
+            .write_async(move |tx| Ok(tx.execute("UPDATE mailbox SET delta_link = ?2 WHERE id = ?1", rusqlite::params![mailbox_id, link])?))
+            .await?;
+    }
+    report.new += new;
+    report.removed += removed;
+    report.flag_changes += changed;
+    progress(SyncEvent::Mailbox { name: mailbox.name.clone(), new, removed, flag_changes: changed });
+    Ok(())
+}
+
+/// Takes out of the folder the messages a full listing of it left out,
+/// except those with a change still queued. Returns their ids, which `sync`
+/// deletes if no other folder has them.
+fn unlink_unlisted(tx: &rusqlite::Connection, account_id: AccountId, mailbox_id: MailboxId, listed: &HashSet<String>) -> Result<Vec<MessageId>> {
+    let pending = store::pending_messages(tx, account_id)?;
+    let here: Vec<(MessageId, String)> = tx
+        .prepare("SELECT m.id, m.remote_id FROM message m JOIN message_mailbox mm ON mm.message_id = m.id WHERE mm.mailbox_id = ?1")?
+        .query_map([mailbox_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let gone: Vec<MessageId> = here.into_iter().filter(|(id, remote)| !listed.contains(remote) && !pending.contains(id)).map(|(id, _)| id).collect();
+    for id in &gone {
+        tx.execute("DELETE FROM message_mailbox WHERE mailbox_id = ?1 AND message_id = ?2", rusqlite::params![mailbox_id, id])?;
+    }
+    Ok(gone)
+}
+
 /// Applies one page of a folder's delta to the store. Returns the new,
 /// removed and changed counts, the ids of the new messages, and the ids taken
 /// out of this folder, which `sync` deletes if no other folder adds them.
@@ -556,6 +624,80 @@ mod tests {
         store.write(|tx| apply_delta(tx, AccountId(1), inbox, &removed)).unwrap();
         store.write(|tx| apply_delta(tx, AccountId(1), archive, &added)).unwrap();
         assert_eq!(store.read(|c| Ok(row(c)?)).unwrap(), [2]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Graph's answers by URL; a URL it was not given is a link Graph forgot.
+    struct Pages(HashMap<String, Value>, std::sync::Mutex<Vec<String>>);
+
+    impl DeltaSource for Pages {
+        async fn delta_page(&self, url: &str) -> Result<DeltaPage> {
+            self.1.lock().unwrap().push(url.to_string());
+            Ok(self.0.get(url).cloned().map_or(DeltaPage::Forgotten, DeltaPage::Page))
+        }
+    }
+
+    fn mail(id: &str, subject: &str) -> Value {
+        json!({"id": id, "subject": subject, "receivedDateTime": "2026-11-08T09:00:00Z", "isRead": false})
+    }
+
+    /// A delta link Graph has forgotten (410 SyncStateNotFound, after a copy
+    /// of the store moved the same link on) starts the folder over in the
+    /// same sync: what Graph lists stays or arrives, what it no longer lists
+    /// leaves, and the new link is saved. Found on 2026-11-08: the old code
+    /// emptied the folder and kept the dead link, so no mail arrived again.
+    #[tokio::test]
+    async fn a_forgotten_delta_link_starts_the_folder_over() {
+        let dir = std::env::temp_dir().join(format!("jolta-graph-forgotten-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let jolta = Jolta::open(&dir).unwrap();
+        let dead = "https://graph/dead";
+        jolta
+            .store
+            .write(|tx| {
+                tx.execute_batch(&format!(
+                    "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'graph', 'a@x', 'a@x', 'r', 0);
+                     INSERT INTO mailbox (id, account_id, remote_id, name, role, delta_link) VALUES (1, 1, 'in', 'Inbox', 'inbox', '{dead}');
+                     INSERT INTO thread (id, account_id) VALUES (1, 1);
+                     INSERT INTO message (id, account_id, remote_id, thread_id, date, flags, blob) VALUES (7, 1, 'kept', 1, 0, 0, 'body7'), (8, 1, 'gone', 1, 0, 0, NULL);
+                     INSERT INTO message_mailbox (mailbox_id, message_id) VALUES (1, 7), (1, 8);"
+                ))?;
+                Ok(())
+            })
+            .unwrap();
+        let start = format!("/me/mailFolders/in/messages/delta?$select={SELECT}");
+        let graph = Pages(
+            HashMap::from([
+                (start.clone(), json!({"value": [mail("kept", "Old")], "@odata.nextLink": "https://graph/next"})),
+                ("https://graph/next".into(), json!({"value": [mail("fresh", "New")], "@odata.deltaLink": "https://graph/live"})),
+                ("https://graph/live".into(), json!({"value": [], "@odata.deltaLink": "https://graph/live"})),
+            ]),
+            Default::default(),
+        );
+        let inbox = jolta.store.read(|c| store::mailboxes(c, AccountId(1))).unwrap().remove(0);
+        let mut report = SyncReport::default();
+        let mut unfiled = Vec::new();
+        sync_folder(&graph, &jolta, &inbox, &mut report, &mut unfiled, &mut |_| {}).await.unwrap();
+        jolta.store.write(|tx| store::delete_unfiled(tx, &unfiled)).unwrap();
+
+        let listed = |c: &rusqlite::Connection| -> rusqlite::Result<Vec<(i64, String, Option<String>)>> {
+            c.prepare("SELECT m.id, m.remote_id, m.blob FROM message m JOIN message_mailbox mm ON mm.message_id = m.id WHERE mm.mailbox_id = 1 ORDER BY m.remote_id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        };
+        let rows = jolta.store.read(|c| Ok(listed(c)?)).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].1, "fresh");
+        assert_eq!(rows[1], (7, "kept".into(), Some("body7".into())), "a message Graph still lists keeps its row and body");
+        assert_eq!((report.new, report.removed), (1, 1));
+        let saved: Option<String> = jolta.store.read(|c| Ok(c.query_row("SELECT delta_link FROM mailbox WHERE id = 1", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(saved.as_deref(), Some("https://graph/live"));
+
+        // The next sync goes on from the new link.
+        let mut report = SyncReport::default();
+        sync_folder(&graph, &jolta, &inbox, &mut report, &mut Vec::new(), &mut |_| {}).await.unwrap();
+        assert_eq!(graph.1.lock().unwrap().last().map(String::as_str), Some("https://graph/live"));
+        assert_eq!(jolta.store.read(|c| Ok(listed(c)?)).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
