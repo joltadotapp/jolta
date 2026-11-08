@@ -108,15 +108,18 @@ pub fn op_mails(op: &CalendarOp, sender: &Account, changed: &[EventData]) -> Res
 /// sending account, and raises the SEQUENCE of a meeting's new version
 /// (RFC 5546): what a local calendar's store holds is what the guests get.
 /// A new time or repeat rule sent to the guests asks them again, so their
-/// answers start over, as Google and Microsoft 365 do.
-pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify) {
+/// answers start over, as Google and Microsoft 365 do; a series that only
+/// ends sooner, as This and following leaves the old one, keeps them, as
+/// Google does: every occurrence left is one the guests answered.
+pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify, here: Tz) {
     match write {
         Write::Create(events) => events.iter_mut().for_each(|e| stamp(e, sender)),
         Write::Update { base, event, .. } => {
             stamp(event, sender);
             if [&*base, &*event].iter().any(|e| e.organizer.is_some() && !e.attendees.is_empty()) {
                 next_sequence(base, event);
-                if notify != Notify::Nobody && (Field::Time.differs(base, event) || Field::Repeat.differs(base, event)) {
+                let asks_again = Field::Time.differs(base, event) || (Field::Repeat.differs(base, event) && !fewer_occurrences(base, event, here));
+                if notify != Notify::Nobody && asks_again {
                     for a in event.attendees.iter_mut().filter(|a| !a.is_me && !sender.is_some_and(|s| s.address.eq_ignore_ascii_case(&a.person.address))) {
                         a.response = super::Response::NeedsAction;
                         a.comment.clear();
@@ -127,6 +130,22 @@ pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify) {
         Write::Cancel { series, .. } => series.sequence += 1,
         Write::Delete(_) | Write::Move { .. } | Write::Answer { .. } => {}
     }
+}
+
+/// Whether every occurrence of the series `event` is one `base` has at the
+/// same time: the series ends sooner or lost occurrences, and gained none.
+fn fewer_occurrences(base: &EventData, event: &EventData, here: Tz) -> bool {
+    if base.recurrence.is_none() || event.recurrence.is_none() || base.span != event.span {
+        return false;
+    }
+    let year = |y| chrono::Utc.with_ymd_and_hms(y, 1, 1, 0, 0, 0).unwrap();
+    let all = recur::Window { start: year(1900), end: year(2200) };
+    let left = recur::expand(event, &[], all, here);
+    if left.is_empty() || left.len() >= recur::SERIES_CAP {
+        return false;
+    }
+    let had = recur::expand(base, &[], all, here);
+    left.iter().all(|o| had.iter().any(|h| h.span == o.span))
 }
 
 /// Makes `sender` the organizer of `e` when it has guests and no organizer.
@@ -1110,6 +1129,32 @@ mod tests {
             import(&j, &reply("ann@example.com", "ann@example.com", "DECLINED", None, "20261116T120000Z", "SEQUENCE:0\r\nDTSTART;TZID=Europe/Brussels:20261124T140000\r\n"));
             read(&j);
             assert_eq!(answers(&j, cal, None)[0].1, NeedsAction, "an answer to the old time doesn't count");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// This and following ends the old series sooner: the occurrences it
+        /// keeps are the ones the guests answered, so their answers stay, as
+        /// Google keeps them; Exchange as a guest keeps its own and sends no
+        /// new reply, which left the organizer's copy reading no answer
+        /// (C3 U11, R4 A9). More occurrences ask again.
+        #[test]
+        fn a_series_ended_sooner_keeps_the_answers_and_a_longer_one_asks_again() {
+            use crate::calendar::Response::{Accepted, NeedsAction};
+            let (j, cal) = local("u11-ended-sooner", true);
+            sent_meeting(&j, cal, true);
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T100000Z", "SEQUENCE:0\r\n"));
+            read(&j);
+            assert_eq!(answers(&j, cal, None)[0].1, Accepted);
+            let master = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event;
+            let third = Moment::Time(Local { wall: NaiveDateTime::parse_from_str("2026-12-08 14:00", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) });
+            let ended = crate::calendar::split::ended(&master, &third, Brussels);
+            j.store.write(|tx| ops::queue(tx, &told(cal, Change::Update(ended), Notify::All, None), Utc::now().timestamp(), &horizon())).unwrap();
+            let after = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event;
+            assert!(after.sequence > master.sequence, "the shorter series is a new version");
+            assert_eq!(answers(&j, cal, None)[0].1, Accepted, "the occurrences left are the ones Ann accepted");
+            let longer = EventData { recurrence: Some(crate::calendar::Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=6".into()], ..Default::default() }), ..after };
+            j.store.write(|tx| ops::queue(tx, &told(cal, Change::Update(longer), Notify::All, None), Utc::now().timestamp(), &horizon())).unwrap();
+            assert_eq!(answers(&j, cal, None)[0].1, NeedsAction, "occurrences Ann never saw ask again");
             std::fs::remove_dir_all(&j.data_dir).ok();
         }
 
