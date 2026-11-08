@@ -39,20 +39,44 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
             timing(i),
         ])?;
     }
-    // A cancellation of the whole event, newer than every invitation to it on
-    // the account, ends the answer given: an invitation after it, such as
-    // the organizer adding the user again, asks for a new one.
-    let mut forget = conn.prepare_cached(
-        "DELETE FROM invitation_answer
-         WHERE account_id = (SELECT account_id FROM message WHERE id = ?1) AND uid = ?2
-           AND NOT EXISTS (
-             SELECT 1 FROM invitation i JOIN message m ON m.id = i.message_id, message c
+    for i in invitations.iter().filter(|i| i.method == Method::Cancel && i.event.recurrence_id.is_none()) {
+        forget_answer(conn, id, i)?;
+    }
+    Ok(())
+}
+
+/// The organizer's cancellation of the whole event, newer than every
+/// invitation to it on the account, ends the answer given and takes back
+/// its reply still waiting: an invitation after it, such as the organizer
+/// adding the user again, asks for a new one.
+fn forget_answer(conn: &Connection, message: MessageId, cancel: &Invitation) -> Result<()> {
+    let uid = &cancel.event.uid;
+    let (account, address, from): (AccountId, String, String) = conn.query_row(
+        "SELECT m.account_id, a.address, m.from_addr FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let me = [address];
+    let organizer = update::organizer(conn, account, &me, uid)?;
+    let named = cancel.event.organizer.as_ref().map(|o| o.address.as_str()).unwrap_or_default();
+    let newer_invitation: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM invitation i JOIN message m ON m.id = i.message_id, message c
              WHERE c.id = ?1 AND i.uid = ?2 AND i.method IN ('REQUEST', 'ADD') AND m.account_id = c.account_id
                AND (m.date, m.id) > (c.date, c.id))",
+        params![message, uid],
+        |r| r.get(0),
     )?;
-    for i in invitations.iter().filter(|i| i.method == Method::Cancel && i.event.recurrence_id.is_none()) {
-        forget.execute(params![id, i.event.uid])?;
+    if newer_invitation || !update::sent_by(&me, organizer.as_deref(), named, &from) {
+        return Ok(());
     }
+    let mut stmt = conn.prepare_cached(
+        "SELECT o.id FROM invitation_answer a JOIN outbox o ON o.id = a.reply WHERE a.account_id = ?1 AND a.uid = ?2 AND o.state = 'queued'",
+    )?;
+    let waiting = stmt.query_map(params![account, uid], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for reply in waiting {
+        super::cancel_send(conn, reply)?;
+    }
+    conn.execute("DELETE FROM invitation_answer WHERE account_id = ?1 AND uid = ?2", params![account, uid])?;
     Ok(())
 }
 

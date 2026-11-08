@@ -978,7 +978,12 @@ pub(crate) mod tests {
         let m1 = import(&j, first.as_bytes());
         run(&j, request(m1, Answer::Accept, None, true, false)).unwrap();
         assert_eq!(card_answer(&j, m1, first.as_bytes()), Some(Response::Accepted));
+        let posing = dated(11, "x1", "CANCEL").replace("From: ann@example.com", "From: eve@example.net");
+        import(&j, posing.as_bytes());
+        assert_eq!(card_answer(&j, m1, first.as_bytes()), Some(Response::Accepted), "a stranger's cancellation ends nothing");
+        assert_eq!(replies(&j).len(), 1, "and the reply still goes");
         import(&j, dated(11, "r2", "CANCEL").as_bytes());
+        assert!(replies(&j).is_empty(), "the Accept still waiting goes with the answer");
         let again = dated(12, "r3", "REQUEST");
         let m3 = import(&j, again.as_bytes());
         assert_eq!(card_answer(&j, m3, again.as_bytes()), None, "invited again after the cancellation: no answer yet, as a first invitation");

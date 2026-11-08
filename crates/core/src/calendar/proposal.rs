@@ -583,6 +583,31 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// A cancellation of the whole series, later than a proposal for one of
+    /// its occurrences and naming the proposer, ends that proposal.
+    #[test]
+    fn a_cancelled_series_ends_a_proposal_for_its_occurrence() {
+        let (j, calendar) = jolta("proposal-series-cancelled");
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:1\r\nDTSTART;TZID=Europe/Brussels:20261110T100000\r\n\
+                   DTEND;TZID=Europe/Brussels:20261110T103000\r\nRRULE:FREQ=WEEKLY\r\nSUMMARY:Planning\r\nORGANIZER;CN=Me:mailto:me@example.com\r\n\
+                   ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let events = crate::calendar::ical::read(ics, &[ME.to_string()]).unwrap();
+        j.store.write(|tx| store::apply_item(tx, calendar, "plan.ics", None, &events, None, &Horizon::around(now(), Brussels))).unwrap();
+        let raw = counter("oc1", "bo@example.com", ME, "bo@example.com", "20261124T140000Z").replace("SEQUENCE:1\r\n", "SEQUENCE:1\r\nRECURRENCE-ID:20261124T090000Z\r\n");
+        let message = import(&j, raw.as_bytes());
+        assert!(card_of(&j, message, &raw).proposal.is_some_and(|p| p.accepting.is_some()), "open before the cancellation");
+        let cancel = format!(
+            "From: {ME}\r\nTo: bo@example.com\r\nSubject: Cancelled: Planning\r\nMessage-ID: <oc2@example.com>\r\n\
+             Content-Type: text/calendar; method=CANCEL\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:2\r\n\
+             DTSTAMP:20261104T110000Z\r\nDTSTART;TZID=Europe/Brussels:20261110T100000\r\nSTATUS:CANCELLED\r\nORGANIZER;CN=Me:mailto:{ME}\r\n\
+             ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        import(&j, cancel.as_bytes());
+        let c = card_of(&j, message, &raw);
+        assert!(c.outdated && c.proposal.is_none_or(|p| p.accepting.is_none()), "{:?}", c.notes);
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// A guest's proposal for a meeting someone else organizes, copied to
     /// the user, shows but offers no Decline: only the organizer answers it.
     #[test]

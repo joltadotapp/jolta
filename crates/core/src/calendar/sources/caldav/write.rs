@@ -310,6 +310,9 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
                     return Err(Error::Other("The calendar's copy no longer has this series.".into()));
                 }
                 let mut changed = vevent(event);
+                if organizer::asks_again(base, event, here) {
+                    ask_again(&mut changed, event.options.request_responses);
+                }
                 add_lines(&mut changed, extra)?;
                 obj.add_after_master(changed);
                 return Ok(obj.to_string());
@@ -680,6 +683,14 @@ mod tests {
         let out = edited_text(text, &base, &moved, None, &[], Brussels).unwrap();
         assert!(ann(&out).contains("PARTSTAT=NEEDS-ACTION") && ann(&out).contains("RSVP=TRUE"), "{}", ann(&out));
         assert!(out.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@icloud.com\r\n"), "the organizer's own line: {out}");
+
+        let second = Moment::Time(Local { wall: NaiveDateTime::parse_from_str("2026-12-01 09:00", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(chrono_tz::UTC) });
+        let was = crate::calendar::series::occurrence(std::slice::from_ref(&base), &second, Brussels).unwrap();
+        let mut moved = was.clone();
+        moved.span = Span::Timed { start: utc("2026-12-01 11:00"), end: utc("2026-12-01 11:30") };
+        let out = edited_text(text, &was, &moved, None, &[], Brussels).unwrap().replace("\r\n ", "");
+        let last_ann = out.lines().filter(|l| l.contains("ann@example.com")).last().unwrap().to_string();
+        assert!(out.contains("RECURRENCE-ID") && last_ann.contains("PARTSTAT=NEEDS-ACTION"), "an occurrence moved the first time: {out}");
     }
 
     /// A meeting iCloud scheduled: a guest who stays keeps their line with

@@ -181,7 +181,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
     let read_up_to = if sent.method == Method::Counter { Version { sequence: i64::MAX, stamp: None } } else { this };
     let mut versions = mails(seen, organizer.as_deref(), uid, rid.as_ref(), read_up_to)?;
     if rid.is_some() {
-        let series = mails(seen, organizer.as_deref(), uid, None, this)?;
+        let series = mails(seen, organizer.as_deref(), uid, None, read_up_to)?;
         versions.extend(series.into_iter().filter(|(method, ..)| *method == Method::Cancel));
     }
     let mut before: Option<(Version, Vec<EventData>)> = None;
