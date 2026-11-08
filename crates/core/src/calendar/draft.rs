@@ -80,6 +80,9 @@ pub struct EventDraft {
     pub span: Span,
     /// Everyone on the event but rooms, with their answers.
     pub people: Vec<Attendee>,
+    /// Names quick create couldn't tie to one person the user wrote to:
+    /// saving waits until each is picked or removed.
+    pub unresolved: Vec<Unresolved>,
     /// What the organizer lets the guests do.
     pub options: MeetingOptions,
     /// One room's address.
@@ -114,6 +117,13 @@ pub struct EventDraft {
     /// sends the organizer's show as with the next update (C3 spec,
     /// section 3): "Your guests see this with the next update."
     pub show_as_note: Option<String>,
+}
+
+/// A name typed in quick create and the people it could be, best first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unresolved {
+    pub typed: String,
+    pub choices: Vec<Person>,
 }
 
 /// What another feature fills in when it opens the editor: C4's Invite
@@ -257,6 +267,7 @@ pub fn draft_for_new(conn: &Connection, calendar: Option<CalendarId>, span: Opti
         title: String::new(),
         span,
         people: Vec::new(),
+        unresolved: Vec::new(),
         options: MeetingOptions::default(),
         room: String::new(),
         location: String::new(),
@@ -391,6 +402,7 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         title: e.title.clone(),
         span: e.span,
         people: e.attendees.iter().filter(|a| !is_room(a)).cloned().collect(),
+        unresolved: Vec::new(),
         options: e.options,
         // A location that only repeats the room, as saving a room puts it
         // there, isn't one of its own.
@@ -645,6 +657,14 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
                 problem(Some(DraftField::Time), "The last day is before the first.".into(), true);
             }
         }
+    }
+    for u in &draft.unresolved {
+        let text = if u.choices.is_empty() {
+            format!("You haven't written to anyone called {}. Type their address, or remove the name.", u.typed)
+        } else {
+            format!("Choose who {} is, or remove the name.", u.typed)
+        };
+        problem(Some(DraftField::People), text, true);
     }
     let room = draft.room.trim();
     if !room.is_empty() {

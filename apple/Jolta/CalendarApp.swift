@@ -190,6 +190,8 @@ extension AppModel {
         case .maybe: answerSelectedEvent(.maybe)
         case .decline: answerSelectedEvent(.decline)
         case .newEvent: cal.newEvent()
+        case .quickCreate: palette = .quickEvent
+        case .goToDate: palette = .goToDate
         case .edit: cal.editSelected()
         case .delete: cal.deleteSelected()
         case .undo: undo()

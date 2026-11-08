@@ -245,6 +245,16 @@ pub enum CalCommand {
     /// path, telling nobody; without an event it is a new event in
     /// --calendar, else the default calendar.
     Draft(crate::cal_edit::DraftArgs),
+    /// Read a line as quick create does, "Lunch with Jan fri 12:30 at Mok",
+    /// and print what it became and the editor's draft. Nothing is saved.
+    Quick(crate::cal_edit::QuickArgs),
+    /// The day G goes to for a typed date: "fri", "14 dec", "morgen".
+    Go {
+        text: Vec<String>,
+        /// Today as another day, "2026-11-07".
+        #[arg(long)]
+        today: Option<String>,
+    },
     /// The calendar new events go to, as Settings › Calendar sets it: print
     /// it, set it, or with --clear go back to the first writable one.
     Default {
@@ -278,6 +288,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Caps { calendar } => crate::cal_edit::print_caps(jolta, calendar),
         CalCommand::SendFrom { calendar, account } => crate::cal_edit::send_from(jolta, calendar, &account),
         CalCommand::Draft(a) => crate::cal_edit::draft(jolta, a).await,
+        CalCommand::Quick(a) => crate::cal_edit::quick(jolta, a).await,
+        CalCommand::Go { text, today } => crate::cal_edit::go(&text.join(" "), today.as_deref()),
         CalCommand::Default { calendar, clear } => crate::cal_edit::default_calendar(jolta, calendar, clear),
         CalCommand::Enable { account, port } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;

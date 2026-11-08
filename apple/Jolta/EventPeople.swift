@@ -21,6 +21,11 @@ struct PeopleField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             FlowLayout(spacing: 5) {
+                ForEach(editor.draft.unresolved, id: \.typed) { name in
+                    UnresolvedChip(name: name) { editor.resolve(name, as: $0) } remove: {
+                        editor.draft.unresolved.removeAll { $0.typed == name.typed }
+                    }
+                }
                 ForEach(guests, id: \.address) { p in
                     PersonChip(person: p, saved: !editor.isNew, selected: selected == p.address) {
                         selected = p.address
@@ -156,6 +161,44 @@ struct PeopleField: View {
         guard let s = selected, let i = order.firstIndex(of: s) else { return }
         let j = i + by
         selected = order.indices.contains(j) ? order[j] : nil
+    }
+}
+
+/// A name quick create couldn't tie to one person the user wrote to. Its
+/// menu lists who it could be and Remove; saving waits until one is chosen.
+private struct UnresolvedChip: View {
+    let name: UnresolvedPerson
+    let pick: (PersonRecord) -> Void
+    let remove: () -> Void
+
+    private static let warning = Color(NSColor(hex: 0xC9302C))
+
+    var body: some View {
+        Menu {
+            ForEach(name.choices, id: \.address) { p in
+                Button(p.name.isEmpty ? p.address : "\(p.name) · \(p.address)") { pick(p) }
+            }
+            if !name.choices.isEmpty { Divider() }
+            Button("Remove \(name.typed)", action: remove)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "questionmark.circle").font(.system(size: 10.5, weight: .semibold))
+                Text(name.typed).lineLimit(1)
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(Self.warning)
+            .padding(.horizontal, 7)
+            .frame(height: 21)
+            .overlay(Capsule().strokeBorder(Self.warning.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+            .contentShape(Capsule())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(name.choices.isEmpty ? "Nobody you wrote to is called \(name.typed). Type their address, or remove the name." : "Choose who \(name.typed) is")
+        .accessibilityLabel("\(name.typed), not chosen yet")
+        .accessibilityIdentifier("unresolved-chip")
     }
 }
 
