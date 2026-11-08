@@ -212,7 +212,7 @@ impl Core {
         Ok(match set {
             Some((w, from, until)) => {
                 let days = is_midnight(from, here) && is_midnight(until, here);
-                let until = if days { until - Duration::days(1) } else { until };
+                let until = if days { tz::instant(last_day(until, here).and_time(NaiveTime::MIN), here) } else { until };
                 AwayRequest {
                     account_ids: vec![w.account.0],
                     all_day: days,
@@ -406,6 +406,12 @@ fn row(a: &Account, step: plan::Step, current: Option<(DateTime<Utc>, DateTime<U
     }
 }
 
+/// The last day a window that ends at midnight on `here` covers: the day
+/// before, by the calendar, which is 23 or 25 hours earlier when the clocks change.
+fn last_day(until: DateTime<Utc>, here: Tz) -> chrono::NaiveDate {
+    until.with_timezone(&here).date_naive() - Duration::days(1)
+}
+
 fn is_midnight(t: DateTime<Utc>, here: Tz) -> bool {
     t.with_timezone(&here).time() == NaiveTime::MIN
 }
@@ -418,7 +424,7 @@ fn window_text((from, until): (DateTime<Utc>, DateTime<Utc>), now: DateTime<Utc>
     let end = if until == DateTime::<Utc>::MAX_UTC {
         None
     } else if days {
-        Some(day(until - Duration::days(1)))
+        Some(last_day(until, here).format("%a %-d %b").to_string())
     } else {
         Some(moment(until))
     };
@@ -486,6 +492,9 @@ mod tests {
         assert_eq!(window_text((at(9, 8), at(9, 16)), now, here), "Out of office now, until Mon 9 Nov, 17:00.");
         assert_eq!(window_text((at(9, 8), DateTime::<Utc>::MAX_UTC), now, here), "Out of office now, with no end set.");
         assert_eq!(list(&["a".into(), "b".into(), "c".into()]), "a, b and c");
+        // Brussels moves to summer time on Sunday 28 March 2027.
+        let spring = |d, h| Utc.with_ymd_and_hms(2027, 3, d, h, 0, 0).unwrap();
+        assert_eq!(window_text((spring(26, 23), spring(28, 22)), now, here), "Out of office from Sat 27 Mar to Sun 28 Mar.");
     }
 
     #[test]

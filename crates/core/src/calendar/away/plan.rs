@@ -352,8 +352,8 @@ fn window(span: &Span, here: Tz) -> (DateTime<Utc>, DateTime<Utc>) {
 /// How far Turn off reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
-    /// Only what is on now: the strip's Turn off, which must never end a
-    /// window set elsewhere since the strip last read.
+    /// Only what is on now: the strip's Turn off, which leaves replies set
+    /// for later alone, as when they were set elsewhere since it read.
     Now,
     /// What is on now, else the next one set: the sheet's and Settings'.
     NowOrNext,
@@ -477,7 +477,7 @@ async fn apply_one(jolta: &Jolta, s: &Step, horizon: &Horizon, here: Tz) -> Resu
             let (from, until) = window(&planned.event.span, here);
             let overlapping = away_events(tx, &account, now, here)?
                 .into_iter()
-                .find(|f| f.calendar == planned.calendar && { let (a, b) = window(&f.event.span, here); a < until && from < b });
+                .find(|f| f.calendar == planned.calendar && reusable(&f.event, &planned.event) && { let (a, b) = window(&f.event.span, here); a < until && from < b });
             let edit = match overlapping {
                 Some(f) => {
                     let event = EventData { span: planned.event.span, kind: kind_for(&f.event, &planned.event), ..f.event };
@@ -491,6 +491,13 @@ async fn apply_one(jolta: &Jolta, s: &Step, horizon: &Horizon, here: Tz) -> Resu
             ops::queue(tx, &edit, now.timestamp(), &horizon).map(drop)
         })
         .await
+}
+
+/// Whether an existing event can become the planned one by its time alone:
+/// it shows as out of office, and on Google it is a status event, which a
+/// patch can't make of a plain one.
+fn reusable(existing: &EventData, planned: &EventData) -> bool {
+    existing.show_as == ShowAs::OutOfOffice && (planned.kind.is_default() || matches!(existing.kind, EventKind::OutOfOffice { .. }))
 }
 
 /// The kind an existing event keeps when it moves to the new days: Google's
@@ -788,6 +795,18 @@ mod tests {
         assert_eq!(request(Absence::Days { first: day("2026-11-13"), last: day("2026-11-11") }).problem(now, Brussels), Some("The end is before the start."));
         assert_eq!(request(Absence::Days { first: day("2026-11-11"), last: day("2026-11-11") }).problem(now, Brussels), Some("That time is over already."));
         assert_eq!(request(Absence::Times { from: now, until: now }).problem(now, Brussels), Some("The end is before the start."));
+    }
+
+    #[test]
+    fn only_an_out_of_office_event_is_moved_to_new_days() {
+        let target = [target(2, AccountKind::Gmail, Some(CalendarSource::Google), true)];
+        let google = plan(&target, &request(WEEK), Brussels)[0].event.clone().unwrap().event;
+        let plain = EventData { show_as: ShowAs::Busy, title: TITLE.into(), ..EventData::new("busy", google.span) };
+        assert!(!reusable(&plain, &google), "a busy event titled Out of office would never decline");
+        let status = EventData { show_as: ShowAs::OutOfOffice, kind: EventKind::OutOfOffice { declines: AutoDecline::None, message: String::new() }, ..plain.clone() };
+        assert!(reusable(&status, &google));
+        let graph = EventData { show_as: ShowAs::OutOfOffice, ..plain.clone() };
+        assert!(reusable(&graph, &EventData { kind: EventKind::Default, ..google }), "Microsoft 365 and CalDAV say it by show as");
     }
 
     #[test]
