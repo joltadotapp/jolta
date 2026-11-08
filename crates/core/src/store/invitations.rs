@@ -117,15 +117,15 @@ pub fn stored_event_in(
     keep: impl Fn(&Calendar) -> bool,
 ) -> Result<Option<StoredEvent>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
+        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM event e JOIN calendar c ON c.id = e.calendar_id
          WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR (c.account_id = ?3 AND {NOT_ADDED}))"
     ))?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account], |r| {
         let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, source, r.get::<_, String>(4)?))
+        Ok((copy_rank(uid, r.get(5)?, source, is_default, calendar_id), event_id, calendar_id, source, r.get::<_, String>(4)?))
     })?;
-    let mut best: Option<((bool, bool, i64), StoredEvent)> = None;
+    let mut best: Option<((bool, bool, bool, i64), StoredEvent)> = None;
     for row in rows {
         let (rank, event_id, calendar_id, source, data) = row?;
         if best.as_ref().is_some_and(|(b, _)| *b <= rank) || !keep(&super::calendar(conn, calendar_id)?) {
@@ -145,14 +145,14 @@ pub fn stored_event_in(
 /// only when one is given, and then never a copy the user added.
 pub fn stored_series(conn: &Connection, uid: &str, account: Option<AccountId>) -> Result<Vec<EventData>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
+        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM event e JOIN calendar c ON c.id = e.calendar_id
          WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR (c.account_id = ?2 AND {NOT_ADDED}))"
     ))?;
     let rows = stmt
         .query_map(params![uid, account], |r| {
             let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
+            Ok((copy_rank(uid, r.get(5)?, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let Some(best) = rows.iter().map(|(rank, _, calendar, _)| (*rank, *calendar)).min() else { return Ok(Vec::new()) };

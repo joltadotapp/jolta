@@ -622,7 +622,8 @@ impl OccurrenceRow {
 
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
-     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default, e.changed_locally";
+     e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default, e.changed_locally,
+     ifnull(json_extract(e.data, '$.organizer_is_me'), 0)";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -687,7 +688,7 @@ pub fn occurrences(conn: &Connection, from: NaiveDate, to: NaiveDate, here: Tz) 
         params![from_utc, to_utc, longest_utc.unwrap_or(0), from_day, to_day, longest_days.unwrap_or(0)],
         |r| {
             let row = occurrence_row(r)?;
-            let rank = crate::calendar::series::copy_rank(&row.uid, r.get(17)?, r.get(18)?, row.calendar_id);
+            let rank = crate::calendar::series::copy_rank(&row.uid, r.get(20)?, r.get(17)?, r.get(18)?, row.calendar_id);
             Ok((row, rank))
         },
     )?;
@@ -1074,6 +1075,36 @@ mod tests {
             .read(|c| crate::calendar::remind::between(c, Utc.with_ymd_and_hms(2026, 11, 17, 0, 0, 0).unwrap(), Utc.with_ymd_and_hms(2026, 11, 18, 0, 0, 0).unwrap(), Brussels))
             .unwrap();
         assert_eq!(fires.iter().map(|r| r.calendar_id).collect::<Vec<_>>(), [second], "one reminder, from the copy the view shows");
+    }
+
+    #[test]
+    fn a_meeting_the_user_organizes_shows_the_organizers_copy() {
+        let s = store("own-copy");
+        let guest = work_calendar(&s);
+        let organizer = s.write(|tx| add_calendar(tx, CalendarSource::Graph, &remote("work", false))).unwrap().id;
+        s.write(|tx| set_calendar_shown(tx, organizer, true)).unwrap();
+        let alarm = crate::calendar::Alarm { trigger: crate::calendar::AlarmTrigger::MinutesBefore(10), email: false };
+        let meeting = |mine: bool| EventData {
+            title: "Planning".into(),
+            organizer_is_me: mine,
+            alarms: vec![alarm],
+            ..EventData::new("jolta-5f1a2b3c4d5e6f708192a3b4c5d6e7f8", timed("2026-11-17 14:00", 60))
+        };
+        apply(&s, guest, "guest-copy", None, &[meeting(false)]);
+        apply(&s, organizer, "organizer-copy", None, &[meeting(true)]);
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let rows = s.read(|c| occurrences(c, day(17), day(18), Brussels)).unwrap();
+        assert_eq!(
+            rows.iter().map(|o| (o.calendar_id, o.copies)).collect::<Vec<_>>(),
+            [(organizer, 2)],
+            "a meeting Jolta made has a UID of its own: the user's organizer copy shows, though the guest's calendar came first"
+        );
+        let fires = s
+            .read(|c| crate::calendar::remind::between(c, Utc.with_ymd_and_hms(2026, 11, 17, 0, 0, 0).unwrap(), Utc.with_ymd_and_hms(2026, 11, 18, 0, 0, 0).unwrap(), Brussels))
+            .unwrap();
+        assert_eq!(fires.iter().map(|r| r.calendar_id).collect::<Vec<_>>(), [organizer], "the reminder follows the copy the view shows");
+        let found = s.read(|c| crate::store::invitations::stored_event(c, &meeting(true).uid, None, None, Brussels)).unwrap();
+        assert_eq!(found.map(|e| e.calendar_id), Some(organizer), "and so does the copy a card or the detail finds by UID");
     }
 
     #[test]
