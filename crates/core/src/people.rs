@@ -37,6 +37,14 @@ struct Entry {
     by_account: HashMap<AccountId, f64>,
 }
 
+/// Who a name typed in quick create is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Match {
+    One(Person),
+    /// None or several: the people to pick from, best first.
+    Unclear(Vec<Person>),
+}
+
 /// Everyone Jolta can suggest, ranked. Build it once and query it per keystroke.
 pub struct People {
     entries: Vec<Entry>,
@@ -154,6 +162,26 @@ impl People {
         hits.sort_by(|a, b| b.0.total_cmp(&a.0));
         hits.into_iter().take(limit).map(|(_, e)| e.person.clone()).collect()
     }
+
+    /// The person a name means when exactly one person the user has written
+    /// to has every typed word as a whole word of their name or address
+    /// ("Jan" is Jan Peeters, not Janine). An address is that address. An
+    /// address-book entry nobody wrote to never counts, so a guess never
+    /// becomes a guest.
+    pub fn resolve(&self, typed: &str) -> Match {
+        let typed = typed.trim();
+        if typed.contains('@') {
+            let known = self.entries.iter().find(|e| e.person.address.eq_ignore_ascii_case(typed));
+            return Match::One(known.map_or_else(|| Person { name: String::new(), address: typed.to_string() }, |e| e.person.clone()));
+        }
+        let folded = sort_text(typed);
+        let words: Vec<&str> = folded.split_whitespace().collect();
+        let mut clear = self.entries.iter().filter(|e| !e.by_account.is_empty() && !words.is_empty() && words.iter().all(|t| e.words.iter().any(|w| w == t)));
+        match (clear.next(), clear.next()) {
+            (Some(one), None) => Match::One(one.person.clone()),
+            _ => Match::Unclear(self.suggest(typed, None, &[], 5)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +242,36 @@ mod tests {
         assert!(people.suggest("news", None, &[], 5).is_empty(), "senders you never answered don't");
         assert!(people.suggest("me", None, &[], 5).is_empty(), "your own addresses don't");
         assert!(people.suggest("jan", None, &["JAN@example.com".into()], 5).iter().all(|p| p.address != "jan@example.com"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Decision 10 in the C3 spec: one clear match the user has written to
+    /// becomes a guest; anything else is for the user to pick.
+    #[test]
+    fn resolves_a_name_only_on_one_clear_match() {
+        let (dir, s) = store_with_mail();
+        let book = vec![("Jan Zonder".to_string(), "zonder@example.net".to_string())];
+        let people = s.read(|c| People::build(c, NOW, &book)).unwrap();
+        let jan = Person { name: "Jan Peeters".into(), address: "jan@example.com".into() };
+        assert_eq!(people.resolve("Jan"), Match::One(jan.clone()), "Janine and the book's Jan don't make it unclear");
+        assert_eq!(people.resolve("jan peeters"), Match::One(jan));
+        assert_eq!(people.resolve("Bart"), Match::One(Person { name: String::new(), address: "Bart@friends.test".into() }), "someone you replied to");
+        let Match::Unclear(choices) = people.resolve("Jani") else { panic!("a prefix is a guess") };
+        assert_eq!(addresses(choices), ["janine@work.test"]);
+        assert_eq!(people.resolve("Zonder"), Match::Unclear(vec![Person { name: "Jan Zonder".into(), address: "zonder@example.net".into() }]), "nobody wrote to the book's entry");
+        assert_eq!(people.resolve("Nobody"), Match::Unclear(Vec::new()));
+        assert_eq!(people.resolve("new@example.org"), Match::One(Person { name: String::new(), address: "new@example.org".into() }));
+        s.write(|tx| {
+            tx.execute(
+                "INSERT INTO message (id, account_id, remote_id, thread_id, from_addr, to_addrs, date) VALUES (8, 1, '8', 8, 'me@home.test', 'Jan Claes <jc@example.com>', ?1)",
+                [NOW],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let people = s.read(|c| People::build(c, NOW, &[])).unwrap();
+        let Match::Unclear(choices) = people.resolve("Jan") else { panic!("two Jans") };
+        assert!(addresses(choices).starts_with(&["jc@example.com".to_string(), "jan@example.com".to_string()]));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

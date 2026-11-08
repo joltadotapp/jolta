@@ -428,6 +428,11 @@ fn compare(a: &MomentKey, b: &MomentKey) -> std::cmp::Ordering {
     }
 }
 
+/// Whether `rrule` reads an RRULE value, UNTIL included.
+pub fn valid(text: &str) -> bool {
+    Rule::parse(text).is_some()
+}
+
 /// An RRULE with UNTIL taken out, since `rrule` can't place a UTC UNTIL on
 /// a wall clock it treats as UTC.
 struct Rule {

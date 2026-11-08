@@ -12,8 +12,12 @@ use std::ops::Range;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
+use rusqlite::Connection;
 
-use super::{Local, Span, Zone, repeat, tz};
+use super::draft::{self, EventDraft, Unresolved};
+use super::{Attendee, Local, Person, Recurrence, Response, Role, Span, Zone, recur, repeat, tz};
+use crate::Result;
+use crate::people::{Match, People};
 
 /// A clock time typed in English, Dutch or French: "9", "930", "14:30",
 /// "9.30", "2pm", "9u30", "9h", "noon", "midi". A bare hour from 1 to 7,
@@ -170,6 +174,29 @@ pub fn go_to_date(text: &str, today: NaiveDate, prefs: &Prefs) -> Option<NaiveDa
         }
     }
     None
+}
+
+/// The editor's draft for what `parse` read, in the default calendar. A
+/// name becomes a guest only on one clear match among the people the user
+/// has written to; otherwise it waits in `unresolved` for the user.
+pub fn draft(conn: &Connection, people: &People, parsed: &Parsed, now: DateTime<Utc>, here: Tz) -> Result<EventDraft> {
+    let mut d = draft::draft_for_new(conn, None, parsed.when, now, here)?;
+    d.title.clone_from(&parsed.title);
+    d.location = parsed.location.clone().unwrap_or_default();
+    if let Some(rule) = &parsed.repeat {
+        let rec = Recurrence { rules: vec![rule.clone()], ..Default::default() };
+        d.repeat = recur::describe(&rec, &d.span);
+        d.rule = Some(rec);
+    }
+    let person = |p: crate::people::Person| Person { address: p.address, name: p.name };
+    for name in &parsed.people {
+        match people.resolve(name) {
+            Match::One(p) if d.people.iter().any(|a| a.person.address.eq_ignore_ascii_case(&p.address)) => {}
+            Match::One(p) => d.people.push(Attendee { person: person(p), role: Role::Required, response: Response::NeedsAction, comment: String::new(), is_me: false }),
+            Match::Unclear(choices) => d.unresolved.push(Unresolved { typed: name.clone(), choices: choices.into_iter().map(person).collect() }),
+        }
+    }
+    Ok(d)
 }
 
 // ---------------------------------------------------------------------------
@@ -2016,6 +2043,45 @@ mod tests {
         assert_eq!(when(&p), "Sun 8 Nov 09:00–09:30 Europe/Lisbon");
         let p = parse("Call tomorrow 9am Europe/Lisbon", ref_a(), &prefs());
         assert_eq!(when(&p), "Sun 8 Nov 09:00–09:30 Europe/Lisbon");
+    }
+
+    #[test]
+    fn the_draft_takes_people_only_on_a_clear_match() {
+        use crate::store::Store;
+        let dir = std::env::temp_dir().join(format!("jolta-quick-draft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Store::open(&dir.join("jolta.sqlite")).unwrap();
+        let calendar = s.write(|tx| super::super::ops::new_local_calendar(tx, "Test", None)).unwrap().id;
+        s.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'me@home.test', 'me', 'a1', 0);
+                 INSERT INTO message (id, account_id, remote_id, thread_id, from_addr, to_addrs, date)
+                 VALUES (1, 1, '1', 1, 'me@home.test', 'Jan Peeters <jan@example.com>, Els Maes <els@example.com>, Els Claes <claes@example.com>', 1794000000);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let now = ref_a().with_timezone(&Utc);
+        let people = s.read(|c| People::build(c, now.timestamp(), &[])).unwrap();
+        let parsed = parse("Lunch with Jan and Els fri 12:30 at Mok every week", ref_a(), &prefs());
+        let d = s.read(|c| draft(c, &people, &parsed, now, Brussels)).unwrap();
+        assert_eq!(d.calendar, calendar);
+        assert_eq!(d.title, "Lunch with Jan and Els");
+        assert_eq!(d.location, "Mok");
+        assert_eq!(d.people.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), ["jan@example.com"]);
+        assert_eq!(d.unresolved.len(), 1, "two people called Els");
+        assert_eq!(d.unresolved[0].typed, "Els");
+        assert_eq!(d.unresolved[0].choices.len(), 2);
+        assert_eq!(d.rule.as_ref().map(|r| r.rules.clone()), Some(vec!["FREQ=WEEKLY;BYDAY=FR".to_string()]));
+        assert_eq!(d.repeat.as_deref(), Some("Weekly on Friday"));
+        let problems = s.read(|c| draft::check_draft(c, &d, Brussels)).unwrap();
+        assert!(problems.iter().any(|p| p.blocking && p.text == "Choose who Els is, or remove the name."), "{problems:?}");
+
+        let parsed = parse("Read chapter 12", ref_a(), &prefs());
+        let d = s.read(|c| draft(c, &people, &parsed, now, Brussels)).unwrap();
+        assert_eq!(d.span, draft::timed_span(now.timestamp() + 1800, now.timestamp() + 3600, Zone::Tz(Brussels), Brussels), "the next half hour");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
