@@ -265,7 +265,7 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
         && let Some(e) = write.event()
     {
         let sender = organizer::sender(conn, &calendar, e)?;
-        organizer::prepare(&mut write, sender.as_ref());
+        organizer::prepare(&mut write, sender.as_ref(), edit.notify);
     }
     check(conn, &calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref(), Some(edit.notify))?;
     let first = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;

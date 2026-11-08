@@ -546,8 +546,23 @@ impl Engine {
         if let Link::Imap(session, caps) = link {
             self.file_sent_copies(account, session, *caps, &sent).await?;
         }
+        self.read_replies(account.id).await;
         self.file_responses(account.id).await;
         self.announce(account.id, report.new_messages, started).await
+    }
+
+    /// Takes the guests' answers to meetings this account organizes in a
+    /// calendar on this Mac from their reply mail. A failure here doesn't
+    /// stop the sync.
+    async fn read_replies(&self, account: AccountId) {
+        let jolta = self.jolta.clone();
+        let horizon = crate::calendar::series::Horizon::around(chrono::Utc::now(), crate::calendar::tz::here());
+        match tokio::task::spawn_blocking(move || crate::calendar::organizer::read_replies(&jolta, account, &horizon)).await {
+            Ok(Ok(changed)) if !changed.is_empty() => (self.sink)(Event::CalendarsChanged(changed)),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("reading replies to meetings stopped: {e}"),
+            Err(e) => tracing::warn!("reading replies to meetings stopped: {e}"),
+        }
     }
 
     /// Files the replies to the account's own meetings that say nothing

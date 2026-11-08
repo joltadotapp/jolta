@@ -18,10 +18,12 @@ use super::change::{self, Field};
 use super::ical_edit::{self, Component, Object, Prop};
 use super::ops::{CalendarOp, Notify, Write};
 use super::rsvp::{Mail, imip_mail};
-use super::{Calendar, CalendarSource, EventData, EventStatus, Moment, Person, Span, Zone, recur};
+use super::invitation::{self, Invitation, Method};
+use super::series::Horizon;
+use super::{Calendar, CalendarId, CalendarSource, EventData, EventStatus, Moment, Person, Span, Zone, recur};
 use crate::compose::Built;
-use crate::model::Account;
-use crate::{Result, store};
+use crate::model::{Account, AccountId};
+use crate::{Jolta, Result, store};
 
 /// Whether Jolta itself mails the guests of meetings in `calendar`.
 pub fn sends_itself(calendar: &Calendar) -> bool {
@@ -100,7 +102,9 @@ pub fn op_mails(op: &CalendarOp, sender: &Account, changed: &[EventData]) -> Res
 /// Makes the user the organizer of a meeting Jolta sends itself, as the
 /// sending account, and raises the SEQUENCE of a meeting's new version
 /// (RFC 5546): what a local calendar's store holds is what the guests get.
-pub fn prepare(write: &mut Write, sender: Option<&Account>) {
+/// A new time or repeat rule sent to the guests asks them again, so their
+/// answers start over, as Google and Microsoft 365 do.
+pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify) {
     let stamp = |e: &mut EventData| {
         if let Some(a) = sender
             && e.organizer.is_none()
@@ -116,6 +120,12 @@ pub fn prepare(write: &mut Write, sender: Option<&Account>) {
             stamp(event);
             if [&*base, &*event].iter().any(|e| e.organizer.is_some() && !e.attendees.is_empty()) {
                 next_sequence(base, event);
+                if notify != Notify::Nobody && (Field::Time.differs(base, event) || Field::Repeat.differs(base, event)) {
+                    for a in event.attendees.iter_mut().filter(|a| !a.is_me && !sender.is_some_and(|s| s.address.eq_ignore_ascii_case(&a.person.address))) {
+                        a.response = super::Response::NeedsAction;
+                        a.comment.clear();
+                    }
+                }
             }
         }
         Write::Cancel { series, .. } => series.sequence += 1,
@@ -175,6 +185,146 @@ pub fn next_sequence(base: &EventData, event: &mut EventData) {
     let raises = [Field::Time, Field::Repeat, Field::Location, Field::Title, Field::Description, Field::Status];
     if raises.iter().any(|f| f.differs(base, event)) && event.sequence <= base.sequence {
         event.sequence = base.sequence + 1;
+    }
+}
+
+/// Reads the guests' replies that reached `account` for meetings it
+/// organizes in calendars on this Mac, and returns the calendars whose
+/// answers changed. A reply waits while an edit of its meeting is still
+/// to be sent, and is read once.
+pub fn read_replies(jolta: &Jolta, account: AccountId, horizon: &Horizon) -> Result<Vec<CalendarId>> {
+    let (account, unread) = jolta.store.read(|c| Ok((store::account(c, account)?, store::unread_local_replies(c, account)?)))?;
+    let mut changed = Vec::new();
+    for reply in unread {
+        let Ok(raw) = jolta.blobs.get(&reply.blob) else { continue };
+        let found: Vec<Invitation> = invitation::find(&raw, &[]).into_iter().filter(|i| i.method == Method::Reply).collect();
+        jolta.store.write(|tx| {
+            let mut waits = false;
+            for answer in &found {
+                match apply_reply(tx, &account, &reply.from_addr, answer, horizon)? {
+                    Read::Taken(id) if !changed.contains(&id) => changed.push(id),
+                    Read::Wait => waits = true,
+                    _ => {}
+                }
+            }
+            if !waits {
+                store::read_reply(tx, account.id, &reply.message_id)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(changed)
+}
+
+/// What one reply did to the organizer's meeting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    Taken(CalendarId),
+    /// Not a guest's answer to a meeting `account` organizes here, or older
+    /// than the answer the guest gave since.
+    Ignored,
+    /// An edit of the meeting is still to be sent; read it after.
+    Wait,
+}
+
+/// Google sends the replies of its users to an organizer outside Google
+/// from this address, naming the guest in the reply (`filing`).
+const GOOGLE_FOR_GUESTS: &str = "calendar-notification@google.com";
+
+/// Takes a guest's iMIP REPLY, which `sender` mailed to `account`, into the
+/// meeting it answers (RFC 5546 section 3.2.3): the guest's answer and
+/// note, on the series or the one occurrence it names.
+///
+/// It counts only for a meeting in a calendar on this Mac that `account`
+/// organizes (check 1), for the occurrence its RECURRENCE-ID names as a
+/// moment (check 2), from the guest's own address, or Google's for its
+/// users, for a guest on the meeting (check 3), and when it is newer by
+/// DTSTAMP than the last answer taken from that guest there (check 4). An
+/// answer to a time the meeting no longer has, from before an update the
+/// guest hasn't answered, doesn't count either.
+pub fn apply_reply(conn: &Connection, account: &Account, sender: &str, reply: &Invitation, horizon: &Horizon) -> Result<Read> {
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    let from_google = same(sender, GOOGLE_FOR_GUESTS);
+    let Some(answer) = reply.event.attendees.iter().find(|a| from_google || same(&a.person.address, sender)) else { return Ok(Read::Ignored) };
+    let uid = &reply.event.uid;
+    let here = horizon.here;
+    for calendar in store::calendars(conn)?.into_iter().filter(|c| sends_itself(c) && c.is_own(&account.address)) {
+        let Some(master) = super::ops::stored(conn, calendar.id, uid, None)? else { continue };
+        let organizes = master.event.organizer.as_ref().is_some_and(|o| same(&o.address, &account.address));
+        let invited = |e: &EventData| e.attendees.iter().any(|a| !a.is_me && same(&a.person.address, &answer.person.address));
+        if !organizes {
+            continue;
+        }
+        // The rows the answer lands on: the occurrence's own, one made from
+        // the series for an occurrence without one, or the series and the
+        // occurrences changed on their own that the guest didn't answer
+        // since.
+        let key = reply.event.recurrence_id.as_ref().map(|r| reply_key(r, here)).unwrap_or_default();
+        let rows: Vec<(Option<super::ops::Stored>, EventData)> = match &reply.event.recurrence_id {
+            Some(rid) => {
+                let own = super::ops::series(conn, calendar.id, uid)?.into_iter().find(|e| e.recurrence_id.is_some_and(|r| r.names(rid, here)));
+                match own {
+                    Some(e) => vec![(super::ops::stored(conn, calendar.id, uid, e.recurrence_id.as_ref())?, e)],
+                    None if super::ops::is_occurrence(&master.event, rid, here) => match super::series::occurrence(std::slice::from_ref(&master.event), rid, here) {
+                        // An unchanged occurrence is named by its start on
+                        // the series' clock, whatever clock the reply used.
+                        Some(e) => vec![(None, EventData { recurrence_id: Some(e.span.start()), ..e })],
+                        None => return Ok(Read::Ignored),
+                    },
+                    None => return Ok(Read::Ignored),
+                }
+            }
+            None => {
+                let mut rows = vec![(None, master.event.clone())];
+                for e in super::ops::series(conn, calendar.id, uid)?.into_iter().filter(|e| e.recurrence_id.is_some()) {
+                    let own = e.recurrence_id.as_ref().map(|r| reply_key(r, here)).unwrap_or_default();
+                    let later = store::guest_reply_stamp(conn, calendar.id, uid, &own, &answer.person.address)?.is_some_and(|t| t > stamp_of(reply));
+                    if !later {
+                        rows.push((super::ops::stored(conn, calendar.id, uid, e.recurrence_id.as_ref())?, e));
+                    }
+                }
+                rows
+            }
+        };
+        let Some((_, target)) = rows.first() else { return Ok(Read::Ignored) };
+        if !invited(target) && !invited(&master.event) {
+            return Ok(Read::Ignored);
+        }
+        if store::guest_reply_stamp(conn, calendar.id, uid, &key, &answer.person.address)?.is_some_and(|t| t >= stamp_of(reply)) {
+            return Ok(Read::Ignored);
+        }
+        if reply.event.sequence < target.sequence && reply.dated && !reply.event.span.start().names(&target.span.start(), here) {
+            return Ok(Read::Ignored);
+        }
+        if store::calendar_op_waiting(conn, calendar.id, uid)? {
+            return Ok(Read::Wait);
+        }
+        for (stored, mut e) in rows {
+            let Some(guest) = e.attendees.iter_mut().find(|a| same(&a.person.address, &answer.person.address)) else { continue };
+            guest.response = answer.response;
+            guest.comment.clone_from(&answer.comment);
+            let (remote_id, etag, blob) = match &stored {
+                Some(s) => (s.remote_id.clone(), s.etag.clone(), s.blob.clone()),
+                None => (master.remote_id.clone(), master.etag.clone(), master.blob.clone()),
+            };
+            store::insert_event(conn, calendar.id, &remote_id, etag.as_deref(), &e, blob.as_deref())?;
+        }
+        store::set_guest_reply_stamp(conn, calendar.id, uid, &key, &answer.person.address, stamp_of(reply))?;
+        store::rebuild_series(conn, calendar.id, uid, horizon)?;
+        return Ok(Read::Taken(calendar.id));
+    }
+    Ok(Read::Ignored)
+}
+
+fn stamp_of(reply: &Invitation) -> i64 {
+    reply.stamp.map_or(0, |t| t.timestamp())
+}
+
+/// An occurrence as `guest_reply` keys it: its instant in UTC, or its day.
+fn reply_key(m: &Moment, here: Tz) -> String {
+    match m {
+        Moment::Date(d) => d.format("%Y%m%d").to_string(),
+        Moment::Time(t) => t.instant(here).format("%Y%m%dT%H%M%SZ").to_string(),
     }
 }
 
@@ -637,7 +787,7 @@ mod tests {
     mod queue {
         use chrono::Utc;
 
-        use crate::calendar::invitation::tests::jolta;
+        use crate::calendar::invitation::tests::{import, jolta};
         use crate::calendar::ops::{self, Change, Edit, Notify};
         use crate::calendar::series::Horizon;
         use crate::calendar::{CalendarId, EventData, Span, draft, tz};
@@ -816,6 +966,131 @@ mod tests {
             assert!(err.to_string().contains("Ann organizes Planning"), "{err}");
             run(&j);
             assert!(outbox(&j).is_empty());
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// A guest's iMIP reply mail from `from`, answering as `attendee`.
+        fn reply(from: &str, attendee: &str, partstat: &str, rid: Option<&str>, stamp: &str, extra: &str) -> Vec<u8> {
+            let rid = rid.map_or(String::new(), |r| format!("RECURRENCE-ID:{r}\r\n"));
+            format!(
+                "From: {from}\r\nTo: me@example.com\r\nSubject: Reply\r\nMessage-ID: <{}@example.com>\r\nDate: Mon, 16 Nov 2026 10:00:00 +0000\r\n\
+                 MIME-Version: 1.0\r\nContent-Type: text/calendar; method=REPLY; charset=utf-8\r\n\r\n\
+                 BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:p1@jolta.app\r\n{rid}\
+                 DTSTAMP:{stamp}\r\nORGANIZER:mailto:me@example.com\r\nATTENDEE;PARTSTAT={partstat}:mailto:{attendee}\r\n{extra}END:VEVENT\r\nEND:VCALENDAR\r\n",
+                crate::calendar::ops::new_uid().unwrap()
+            )
+            .into_bytes()
+        }
+
+        fn read(j: &Jolta) -> Vec<CalendarId> {
+            read_replies(j, AccountId(1), &horizon()).unwrap()
+        }
+
+        fn answers(j: &Jolta, cal: CalendarId, rid: Option<&Moment>) -> Vec<(String, crate::calendar::Response, String)> {
+            let e = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", rid)).unwrap().unwrap().event;
+            e.attendees.into_iter().map(|a| (a.person.address, a.response, a.comment)).collect()
+        }
+
+        fn sent_meeting(j: &Jolta, cal: CalendarId, weekly: bool) {
+            let mut m = meeting(&["ann@example.com", "bo@example.com"]);
+            if weekly {
+                m.recurrence = Some(crate::calendar::Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=4".into()], ..Default::default() });
+            }
+            queue(j, told(cal, Change::Create(vec![m]), Notify::All, None)).unwrap();
+            run(j);
+        }
+
+        #[test]
+        fn a_guests_reply_lands_in_the_organizers_meeting_once_and_never_over_a_newer_one() {
+            use crate::calendar::Response::{Accepted, Declined, NeedsAction};
+            let (j, cal) = local("u5b-reply", true);
+            sent_meeting(&j, cal, false);
+            import(&j, &reply("ann@example.com", "ann@example.com", "DECLINED", None, "20261116T100000Z", "COMMENT:Away\r\n"));
+            assert_eq!(read(&j), [cal]);
+            assert_eq!(answers(&j, cal, None)[0], ("ann@example.com".into(), Declined, "Away".into()));
+            assert!(read(&j).is_empty(), "each reply is read once");
+
+            // Check 4: an older answer arriving later changes nothing.
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T090000Z", ""));
+            read(&j);
+            assert_eq!(answers(&j, cal, None)[0].1, Declined);
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T110000Z", ""));
+            read(&j);
+            assert_eq!(answers(&j, cal, None)[0], ("ann@example.com".into(), Accepted, String::new()));
+
+            // Check 3: only the guest answers for the guest, and only guests.
+            import(&j, &reply("ann@example.com", "bo@example.com", "DECLINED", None, "20261116T120000Z", ""));
+            import(&j, &reply("eve@example.com", "eve@example.com", "ACCEPTED", None, "20261116T120000Z", ""));
+            assert!(read(&j).is_empty());
+            assert_eq!(answers(&j, cal, None)[1].1, NeedsAction, "Ann can't answer for Bo");
+            assert_eq!(answers(&j, cal, None).len(), 2, "a stranger isn't added");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Check 2: an occurrence named in UTC is the Brussels occurrence.
+        #[test]
+        fn a_reply_for_one_occurrence_answers_that_occurrence_alone() {
+            use crate::calendar::Response::{Accepted, NeedsAction, Tentative};
+            let (j, cal) = local("u5b-reply-one", true);
+            sent_meeting(&j, cal, true);
+            import(&j, &reply("bo@example.com", "bo@example.com", "TENTATIVE", Some("20261201T130000Z"), "20261116T100000Z", ""));
+            assert_eq!(read(&j), [cal]);
+            let week2 = Moment::Time(Local { wall: NaiveDateTime::parse_from_str("2026-12-01 14:00", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) });
+            assert_eq!(answers(&j, cal, Some(&week2))[1].1, Tentative, "the occurrence holds its own answer");
+            assert_eq!(answers(&j, cal, None)[1].1, NeedsAction, "the series keeps its own");
+            import(&j, &reply("bo@example.com", "bo@example.com", "ACCEPTED", None, "20261116T090000Z", ""));
+            read(&j);
+            assert_eq!((answers(&j, cal, None)[1].1, answers(&j, cal, Some(&week2))[1].1), (Accepted, Tentative), "an older series answer leaves a newer occurrence answer");
+            import(&j, &reply("bo@example.com", "bo@example.com", "ACCEPTED", Some("20261229T130000Z"), "20261116T110000Z", ""));
+            import(&j, &reply("bo@example.com", "bo@example.com", "ACCEPTED", Some("20261202T130000Z"), "20261116T110000Z", ""));
+            assert!(read(&j).is_empty(), "week 5 and a Wednesday aren't occurrences");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Check 1: a reply counts only for a meeting the receiving account
+        /// organizes here.
+        #[test]
+        fn a_reply_to_someone_elses_meeting_changes_nothing() {
+            let (j, cal) = local("u5b-reply-theirs", true);
+            let theirs = EventData {
+                organizer: Some(Person { address: "zed@example.com".into(), name: "Zed".into() }),
+                attendees: vec![guest("me@example.com", Role::Required), guest("ann@example.com", Role::Required)],
+                ..meeting(&[])
+            };
+            queue(&j, told(cal, Change::Create(vec![theirs]), Notify::Nobody, None)).unwrap();
+            run(&j);
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T100000Z", ""));
+            assert!(read(&j).is_empty());
+            assert_eq!(answers(&j, cal, None)[1].1, crate::calendar::Response::NeedsAction);
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        #[test]
+        fn a_new_time_asks_again_and_an_answer_to_the_old_time_waits_out() {
+            use crate::calendar::Response::{Accepted, NeedsAction};
+            let (j, cal) = local("u5b-reply-moved", true);
+            sent_meeting(&j, cal, false);
+            import(&j, &reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T100000Z", "SEQUENCE:0\r\nDTSTART;TZID=Europe/Brussels:20261124T140000\r\n"));
+            read(&j);
+            assert_eq!(answers(&j, cal, None)[0].1, Accepted);
+            let mut moved = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", None)).unwrap().unwrap().event;
+            moved.span = Span::Timed {
+                start: Local { wall: NaiveDateTime::parse_from_str("2026-11-24 16:00", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) },
+                end: Local { wall: NaiveDateTime::parse_from_str("2026-11-24 16:30", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) },
+            };
+            let edit = told(cal, Change::Update(moved), Notify::All, None);
+            j.store.write(|tx| ops::queue(tx, &edit, Utc::now().timestamp(), &horizon())).unwrap();
+            assert_eq!(answers(&j, cal, None)[0].1, NeedsAction, "a new time asks again");
+            import(&j, &reply("bo@example.com", "bo@example.com", "ACCEPTED", None, "20261116T110000Z", "SEQUENCE:1\r\nDTSTART;TZID=Europe/Brussels:20261124T160000\r\n"));
+            assert!(read(&j).is_empty(), "the reply waits while the update waits to go");
+            assert_eq!(answers(&j, cal, None)[1].1, NeedsAction);
+            j.store.write(|tx| Ok(tx.execute("UPDATE calendar_op SET send_after = 0", [])?)).unwrap();
+            run(&j);
+            assert_eq!(read(&j), [cal], "then it is read");
+            assert_eq!(answers(&j, cal, None)[1].1, Accepted);
+            import(&j, &reply("ann@example.com", "ann@example.com", "DECLINED", None, "20261116T120000Z", "SEQUENCE:0\r\nDTSTART;TZID=Europe/Brussels:20261124T140000\r\n"));
+            read(&j);
+            assert_eq!(answers(&j, cal, None)[0].1, NeedsAction, "an answer to the old time doesn't count");
             std::fs::remove_dir_all(&j.data_dir).ok();
         }
 
