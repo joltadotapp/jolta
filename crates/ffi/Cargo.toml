@@ -15,9 +15,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
 futures.workspace = true
-chrono-tz.workspace = true
