@@ -626,7 +626,7 @@ impl OccurrenceRow {
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
      e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default, e.changed_locally,
-     ifnull(json_extract(e.data, '$.organizer_is_me'), 0), json_extract(e.data, '$.kind')";
+     ifnull(json_extract(e.data, '$.organizer_is_me'), 0), e.data -> '$.kind'";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -996,6 +996,37 @@ mod tests {
         let without = snapshot(&s);
         assert_eq!(without.1, first.1, "without ETags the occurrences are the same");
         assert_eq!(first.1.len(), 4);
+    }
+
+    #[test]
+    fn occurrences_carry_each_kind() {
+        use crate::calendar::{AutoDecline, Workplace};
+        let s = store("kinds");
+        let cal = work_calendar(&s);
+        let kinds = [
+            ("plain", ShowAs::Busy, EventKind::Default),
+            ("away", ShowAs::OutOfOffice, EventKind::Default),
+            ("focus", ShowAs::Busy, EventKind::Focus { declines: AutoDecline::New, do_not_disturb: true, message: String::new() }),
+            ("home", ShowAs::Free, EventKind::WorkingLocation(Workplace::Home)),
+            ("cake", ShowAs::Free, EventKind::Birthday),
+        ];
+        for (i, (uid, show_as, kind)) in kinds.iter().enumerate() {
+            let e = EventData { title: uid.to_string(), show_as: *show_as, kind: kind.clone(), ..EventData::new(*uid, timed(&format!("2026-11-03 {:02}:00", 9 + i), 30)) };
+            apply(&s, cal, uid, None, std::slice::from_ref(&e));
+        }
+        let rows = s.read(|c| occurrences(c, NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(), NaiveDate::from_ymd_opt(2026, 11, 4).unwrap(), Brussels)).unwrap();
+        let got: Vec<(String, EventKind)> = rows.into_iter().map(|o| (o.title, o.kind)).collect();
+        assert_eq!(
+            got,
+            [
+                ("plain".to_string(), EventKind::Default),
+                ("away".into(), EventKind::OutOfOffice { declines: AutoDecline::None, message: String::new() }),
+                ("focus".into(), kinds[2].2.clone()),
+                ("home".into(), kinds[3].2.clone()),
+                ("cake".into(), EventKind::Birthday),
+            ],
+            "a kind stored as a bare string reads back too, and out of office comes from Show as"
+        );
     }
 
     #[test]
