@@ -17,7 +17,7 @@ use super::ops::{self, CalendarOpId, Change, Edit, Extra, Scope};
 use super::series::{self, Horizon};
 use super::{
     Alarm, AlarmTrigger, Attendee, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Local, Meeting, MeetingOptions, MeetingProvider,
-    Moment, Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, caps, description, detail, merge, organizer, repeat, split, tz,
+    Moment, Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, caps, description, detail, meeting, merge, organizer, repeat, split, tz,
 };
 use crate::{AccountId, Error, Result, store};
 
@@ -409,7 +409,8 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         location: if mirrors_room(&e.location, &room) { String::new() } else { e.location.clone() },
         room,
         description: parts.editable.clone(),
-        video: None,
+        // A video call asked for and not made yet, while its op waits.
+        video: e.video,
         show_as: e.show_as,
         reminder: reminder_of(&e.alarms).map_or(Reminder::Off, Reminder::Before),
         visibility: e.visibility,
@@ -545,7 +546,7 @@ fn changed(draft: &EventDraft, base: &EventData) -> Vec<DraftField> {
             DraftField::Options => draft.options != was.options,
             DraftField::Room => !draft.room.trim().eq_ignore_ascii_case(&was.room),
             DraftField::Location => draft.location != was.location,
-            DraftField::Video => draft.video.is_some(),
+            DraftField::Video => draft.video != was.video,
             DraftField::Description => draft.description.trim_end() != was.description,
             DraftField::Calendar => false,
             DraftField::ShowAs => draft.show_as != was.show_as,
@@ -611,7 +612,8 @@ fn event_of(draft: &EventDraft) -> EventData {
             // An occurrence's series repeats by the rule; This and following
             // and All events take it from the draft.
             DraftField::Repeat if e.recurrence_id.is_none() => e.recurrence.clone_from(&draft.rule),
-            DraftField::Repeat | DraftField::Video | DraftField::Calendar => {}
+            DraftField::Video => e.video = draft.video,
+            DraftField::Repeat | DraftField::Calendar => {}
         }
     }
     // The location is the user's, or else the room's address (C4 spec,
@@ -690,11 +692,12 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
         }
     }
     if let Some(video) = draft.video {
-        let text = match caps.video.contains(&video) {
-            true => "Jolta can't make video calls yet. Remove it to save.".to_string(),
-            false => format!("{} calendars can't make this video call.", provider(&calendar)),
-        };
-        problem(Some(DraftField::Video), text, true);
+        let choice = meeting::video_choices(&calendar).into_iter().find(|c| c.provider == video);
+        if let Some(m) = &draft.meeting {
+            problem(Some(DraftField::Video), format!("{} has a video call already: {}.", draft.title.trim(), m.join_url), true);
+        } else if let Some(why) = choice.map_or(Some(format!("{} can't have a video call", calendar.name)), |c| c.refusal) {
+            problem(Some(DraftField::Video), format!("{why}. Remove the video call or choose another calendar."), true);
+        }
     }
     if !caps.show_as.is_empty() && !caps.show_as.contains(&draft.show_as) && touched.contains(&DraftField::ShowAs) {
         problem(Some(DraftField::ShowAs), format!("{} calendars can't show an event this way.", provider(&calendar)), true);
@@ -1330,6 +1333,7 @@ mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         }
     }
 
@@ -1555,7 +1559,7 @@ mod tests {
 
         let mut d = new_draft(&s, cal, "Review");
         d.video = Some(MeetingProvider::Teams);
-        assert_eq!(fields(&d), [(Some(DraftField::Video), true)], "no video call can be made yet, so it never drops silently");
+        assert_eq!(fields(&d), [(Some(DraftField::Video), true)], "a calendar on this Mac makes no video call, and it never drops silently");
 
         let mut d = new_draft(&s, cal, "Review");
         d.people = vec![attendee("not an address", false, Role::Required)];
@@ -1567,7 +1571,7 @@ mod tests {
     #[test]
     fn a_new_event_without_a_reminder_tells_the_provider() {
         let (s, _) = setup("reminder");
-        let remote = store::RemoteCalendar { remote_id: "me@example.com".into(), name: "Work".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+        let remote = store::RemoteCalendar { remote_id: "me@example.com".into(), name: "Work".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
         let google = s.write(|tx| store::add_calendar(tx, CalendarSource::Google, &remote)).unwrap().id;
         let now = Utc.timestamp_opt(NOW, 0).unwrap();
         let queued = |reminder: Reminder| {
@@ -1757,5 +1761,97 @@ mod tests {
         let plan = s.read(|c| plan_delete(c, id, None, Brussels)).unwrap();
         assert_eq!((plan.refusal, plan.decline.map(|d| d.organizer)), (None, Some("Jan Peeters".into())), "a guest declines instead of deleting");
         assert!(s.write(|tx| delete_event(tx, id, None, NOW, &horizon(), Brussels)).is_err());
+    }
+
+    fn provider_calendar(s: &Store, source: CalendarSource, video: Option<Vec<MeetingProvider>>) -> CalendarId {
+        let remote = store::RemoteCalendar { remote_id: ME.into(), name: "Work".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None, video };
+        s.write(|tx| store::add_calendar(tx, source, &remote)).unwrap().id
+    }
+
+    fn queued(s: &Store, saved: &Saved) -> ops::CalendarOp {
+        s.read(|c| store::calendar_op(c, saved.op.expect("an op"))).unwrap()
+    }
+
+    /// Add video call (C3 U8): the call the calendar's server makes saves
+    /// with the event, another provider's is refused with the menu's reason,
+    /// and the same save twice queues one op (check 4).
+    #[test]
+    fn a_video_call_saves_where_the_calendar_makes_it() {
+        let (s, _) = setup("video");
+        let graph = provider_calendar(&s, CalendarSource::Graph, Some(vec![MeetingProvider::Teams]));
+        let video_problems = |d: &EventDraft| s.read(|c| check_draft(c, d, Brussels)).unwrap().into_iter().filter(|p| p.field == Some(DraftField::Video)).map(|p| p.text).collect::<Vec<_>>();
+
+        let mut d = new_draft(&s, graph, "Design review");
+        d.video = Some(MeetingProvider::Meet);
+        assert_eq!(video_problems(&d), ["Not on Microsoft 365 calendars. Remove the video call or choose another calendar."]);
+        d.video = Some(MeetingProvider::Teams);
+        assert!(video_problems(&d).is_empty());
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Create(events) = queued(&s, &saved).write else { panic!("a create") };
+        assert_eq!(events[0].video, Some(MeetingProvider::Teams), "the op asks Exchange for the meeting");
+        let again = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        assert_eq!(again.op, None, "the same save again queues nothing");
+
+        let reopened = s.read(|c| draft_for_event(c, event_id(&s, graph, &d.uid), None, Brussels)).unwrap();
+        assert_eq!(reopened.video, Some(MeetingProvider::Teams), "until the server's answer, the call shows as to be made");
+        assert!(s.read(|c| plan_save(c, &reopened, Brussels)).unwrap().unchanged);
+
+        let off = provider_calendar(&s, CalendarSource::Graph, Some(Vec::new()));
+        let mut d = new_draft(&s, off, "Design review");
+        d.video = Some(MeetingProvider::Teams);
+        assert_eq!(video_problems(&d), ["Work can't have a video call. Remove the video call or choose another calendar."], "a calendar whose server allows no Teams meetings");
+    }
+
+    /// A call added to an event already on the server is a change of the
+    /// meeting: it goes out as an update, and an event that has a call
+    /// already takes no second one.
+    #[test]
+    fn a_video_call_added_later_is_an_update() {
+        let (s, _) = setup("video-later");
+        let google = provider_calendar(&s, CalendarSource::Google, None);
+        let event = EventData { title: "Standup".into(), ..EventData::new("u8-later", span("2026-11-24 09:00", "2026-11-24 09:30")) };
+        s.write(|tx| store::apply_item(tx, google, "abc", Some("\"3\""), std::slice::from_ref(&event), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, google, "u8-later"), None, Brussels)).unwrap();
+        assert_eq!(d.video, None);
+        d.video = Some(MeetingProvider::Meet);
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Update { base, event, .. } = queued(&s, &saved).write else { panic!("an update") };
+        assert_eq!((base.video, event.video), (None, Some(MeetingProvider::Meet)));
+        assert!(!change::classify(&base, &event, &[]).meeting.is_empty(), "guests hear of a new call");
+
+        let made = Meeting { provider: MeetingProvider::Meet, join_url: "https://meet.google.com/abc-defg-hij".into(), meeting_id: None, passcode: None, phones: Vec::new(), other_links: Vec::new() };
+        let with_call = EventData { uid: "u8-has".into(), meeting: Some(made), ..event.clone() };
+        s.write(|tx| store::apply_item(tx, google, "def", Some("\"1\""), std::slice::from_ref(&with_call), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, google, "u8-has"), None, Brussels)).unwrap();
+        d.video = Some(MeetingProvider::Meet);
+        let p = s.read(|c| check_draft(c, &d, Brussels)).unwrap();
+        assert!(p.iter().any(|p| p.field == Some(DraftField::Video) && p.blocking && p.text.contains("has a video call already")), "{p:?}");
+    }
+
+    /// A description edit on a Microsoft 365 meeting keeps Exchange's Teams
+    /// block byte for byte, so its Join link still works.
+    #[test]
+    fn a_description_edit_keeps_the_teams_block() {
+        const TEAMS: &str = include_str!("../../tests/fixtures/descriptions/teams-graph.html");
+        let (s, _) = setup("video-teams-block");
+        let graph = provider_calendar(&s, CalendarSource::Graph, None);
+        let join = meeting::detect(&[], None, "", TEAMS).expect("the fixture's Teams link");
+        let event = EventData {
+            title: "Design review".into(),
+            description: TEAMS.into(),
+            description_html: true,
+            meeting: Some(join.clone()),
+            ..EventData::new("u8-teams", span("2026-11-24 14:00", "2026-11-24 15:00"))
+        };
+        s.write(|tx| store::apply_item(tx, graph, "AAMk1", Some("ck1"), std::slice::from_ref(&event), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, graph, "u8-teams"), None, Brussels)).unwrap();
+        d.description = "Walk through the new event editor.".into();
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Update { event: sent, .. } = queued(&s, &saved).write else { panic!("an update") };
+        let kept = description::split(TEAMS, true).kept.expect("a Teams block");
+        assert!(sent.description.ends_with(&kept) && sent.description_html, "the block goes back as Exchange wrote it");
+        assert!(sent.description.contains("Walk through the new event editor."));
+        assert_eq!(meeting::detect(&[], None, "", &sent.description).map(|m| m.join_url), Some(join.join_url), "Join reads the same link back");
+        assert_eq!(sent.meeting, event.meeting, "the meeting itself is left alone");
     }
 }

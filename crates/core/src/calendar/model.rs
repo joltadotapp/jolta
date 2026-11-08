@@ -240,6 +240,12 @@ pub struct EventData {
     /// addresses, which iCloud rewrites to the Apple ID's preferred one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub organizer_is_me: bool,
+    /// A video call the next write asks the server to make: Add video call
+    /// sets it, and the server's answer, which carries the meeting in
+    /// `meeting`, replaces the event. Google's reader sets it for a Meet
+    /// Google is still making.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<MeetingProvider>,
 }
 
 impl EventData {
@@ -269,6 +275,7 @@ impl EventData {
             master_id: None,
             options: MeetingOptions::default(),
             organizer_is_me: false,
+            video: None,
         }
     }
 
@@ -301,6 +308,9 @@ pub struct Calendar {
     pub refresh: Option<i64>,
     /// Unix seconds of the last sync that reached the server.
     pub synced: Option<i64>,
+    /// The video calls the server lets this calendar make, as its calendar
+    /// list says; None until it says, and for sources that never do.
+    pub video: Option<Vec<MeetingProvider>>,
 }
 
 impl Calendar {

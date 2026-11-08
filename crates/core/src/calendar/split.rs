@@ -213,7 +213,7 @@ mod tests {
         let cal = match source {
             CalendarSource::Local => s.write(|tx| ops::new_local_calendar(tx, "Test", None)).unwrap().id,
             _ => s
-                .write(|tx| store::add_calendar(tx, source, &RemoteCalendar { remote_id: "cal".into(), name: "Work".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None }))
+                .write(|tx| store::add_calendar(tx, source, &RemoteCalendar { remote_id: "cal".into(), name: "Work".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None, video: None }))
                 .unwrap()
                 .id,
         };

@@ -404,6 +404,7 @@ mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         };
         let r = read_answer(r#"{"title": "x", "all_day": false, "start": "2026-11-20T18:00", "repeat": "FREQ=HOURLY"}"#, now(), &prefs(), Some(&google), None);
         assert_eq!(r.repeat, None);

@@ -542,6 +542,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 access: jolta_core::calendar::Access::Owner,
                 primary: true,
                 refresh: None,
+                video: None,
             };
             let count = jolta.store.write(|tx| {
                 let calendar = store::add_calendar(tx, jolta_core::calendar::CalendarSource::Local, &remote)?;

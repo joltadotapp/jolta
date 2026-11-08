@@ -42,7 +42,7 @@ impl Field {
             Field::Time => a.span != b.span,
             Field::Repeat => a.recurrence != b.recurrence,
             Field::Location => a.location != b.location,
-            Field::MeetingLink => a.meeting.as_ref().map(|m| &m.join_url) != b.meeting.as_ref().map(|m| &m.join_url),
+            Field::MeetingLink => (a.meeting.as_ref().map(|m| &m.join_url), a.video) != (b.meeting.as_ref().map(|m| &m.join_url), b.video),
             Field::Title => a.title != b.title,
             Field::Description => (&a.description, a.description_html) != (&b.description, b.description_html),
             Field::Status => a.status != b.status,
@@ -62,7 +62,10 @@ impl Field {
             Field::Time => to.span = from.span,
             Field::Repeat => to.recurrence.clone_from(&from.recurrence),
             Field::Location => to.location.clone_from(&from.location),
-            Field::MeetingLink => to.meeting.clone_from(&from.meeting),
+            Field::MeetingLink => {
+                to.meeting.clone_from(&from.meeting);
+                to.video = from.video;
+            }
             Field::Title => to.title.clone_from(&from.title),
             Field::Description => {
                 to.description.clone_from(&from.description);
@@ -499,6 +502,7 @@ mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         })
     }
 

@@ -1384,7 +1384,7 @@ pub(crate) mod tests {
         let graph = j
             .store
             .write(|tx| {
-                let remote = store::RemoteCalendar { remote_id: "AAMk".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                let remote = store::RemoteCalendar { remote_id: "AAMk".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
                 let calendar = store::sync_calendar_list(tx, AccountId(1), crate::calendar::CalendarSource::Graph, &[remote])?[0].id;
                 let mut copy = invitation::find(version("c", "sync", "REQUEST", 1, "20261104T090000Z", &moved).as_bytes(), &[ME.into()]).remove(0).event;
                 copy.sequence = 0;
@@ -1472,7 +1472,7 @@ pub(crate) mod tests {
     fn calendar_of(j: &crate::Jolta, source: CalendarSource, access: crate::calendar::Access) -> CalendarId {
         j.store
             .write(|tx| {
-                let remote = store::RemoteCalendar { remote_id: "remote".into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None };
+                let remote = store::RemoteCalendar { remote_id: "remote".into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None, video: None };
                 Ok(store::sync_calendar_list(tx, AccountId(1), source, &[remote])?[0].id)
             })
             .unwrap()
@@ -1643,7 +1643,7 @@ pub(crate) mod tests {
             let calendar = j
                 .store
                 .write(|tx| {
-                    let remote = store::RemoteCalendar { remote_id: remote_id.into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None };
+                    let remote = store::RemoteCalendar { remote_id: remote_id.into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None, video: None };
                     Ok(store::sync_calendar_list(tx, AccountId(1), source, &[remote])?[0].id)
                 })
                 .unwrap();
@@ -1739,7 +1739,7 @@ pub(crate) mod tests {
         let master = EventData { status: EventStatus::Cancelled, sequence: 2, ..invitation::find(series.as_bytes(), &[ME.into()]).remove(0).event };
         j.store
             .write(|tx| {
-                let remote = store::RemoteCalendar { remote_id: "dee@example.com".into(), name: "Dee".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: false, refresh: None };
+                let remote = store::RemoteCalendar { remote_id: "dee@example.com".into(), name: "Dee".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: false, refresh: None, video: None };
                 let shared = store::sync_calendar_list(tx, AccountId(1), crate::calendar::CalendarSource::Google, &[remote])?[0].id;
                 store::apply_item(tx, shared, "standup", None, std::slice::from_ref(&master), None, &Horizon::around(now(), Brussels)).map(|_| ())
             })

@@ -8,7 +8,7 @@ use clap::Args;
 use jolta_core::Jolta;
 use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Scope, Undone};
 use jolta_core::calendar::series::Horizon;
-use jolta_core::calendar::{Attendee, Bounds, CalendarId, EventData, EventId, Local, Person, Recurrence, Response, Role, Span, Zone, caps, change, draft, tz};
+use jolta_core::calendar::{Attendee, Bounds, CalendarId, EventData, EventId, Local, MeetingProvider, Person, Recurrence, Response, Role, Span, Zone, caps, change, draft, tz};
 use jolta_core::store;
 
 use crate::truncate;
@@ -27,6 +27,27 @@ pub struct When {
     all_day: bool,
 }
 
+/// Add video call, as the editor's menu offers it.
+#[derive(Args)]
+pub struct Video {
+    /// Ask Microsoft 365 for a Teams meeting on save.
+    #[arg(long, conflicts_with = "meet")]
+    teams: bool,
+    /// Ask Google for a Meet on save.
+    #[arg(long)]
+    meet: bool,
+}
+
+impl Video {
+    fn provider(&self) -> Option<MeetingProvider> {
+        match (self.teams, self.meet) {
+            (true, _) => Some(MeetingProvider::Teams),
+            (_, true) => Some(MeetingProvider::Meet),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct CreateArgs {
     #[arg(long)]
@@ -35,6 +56,10 @@ pub struct CreateArgs {
     title: String,
     #[arg(long)]
     location: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    #[command(flatten)]
+    video: Video,
     #[command(flatten)]
     when: When,
     /// Provider fields Jolta doesn't model, as a JSON object merged into the
@@ -150,6 +175,12 @@ pub struct EditArgs {
     title: Option<String>,
     #[arg(long)]
     location: Option<String>,
+    /// The user's own text; a Teams, Meet or Zoom block in the description
+    /// stays after it, as in the editor.
+    #[arg(long)]
+    description: Option<String>,
+    #[command(flatten)]
+    video: Video,
     #[command(flatten)]
     when: When,
     /// Repeat by this RRULE, or "none" for no repeat.
@@ -397,11 +428,13 @@ fn stored_event(jolta: &Jolta, id: i64) -> Result<(CalendarId, String, EventData
 
 pub async fn create(jolta: &Jolta, a: CreateArgs) -> Result<()> {
     let span = a.when.span(None)?.context("--start is needed")?;
-    if !a.with.is_empty() {
+    if !a.with.is_empty() || a.video.provider().is_some() || a.description.is_some() {
         let here = tz::here();
         let mut d = jolta.store.read(|c| draft::draft_for_new(c, Some(CalendarId(a.calendar)), Some(span), Utc::now(), here))?;
         d.title = a.title;
         d.location = a.location.unwrap_or_default();
+        d.description = a.description.unwrap_or_default();
+        d.video = a.video.provider();
         d.people = a.with.iter().map(|s| guest(s)).collect();
         d.options.hide_guests = a.people.hide_guests;
         d.options.allow_new_times = !a.people.no_proposals;
@@ -469,7 +502,7 @@ fn print_scopes(plan: &[draft::ScopeChoice]) {
 
 pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
     let meeting = !a.add.is_empty() || !a.remove.is_empty() || a.people.notify.is_some() || a.people.hide_guests || a.people.no_proposals;
-    if a.occurrence.occurrence.is_some() || a.repeat.is_some() || meeting {
+    if a.occurrence.occurrence.is_some() || a.repeat.is_some() || a.description.is_some() || a.video.provider().is_some() || meeting {
         let here = tz::here();
         let mut d = drafted(jolta, a.event, a.occurrence.occurrence.as_deref())?;
         if let Some(title) = a.title {
@@ -477,6 +510,12 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
         }
         if let Some(location) = a.location {
             d.location = location;
+        }
+        if let Some(text) = a.description {
+            d.description = text;
+        }
+        if let Some(video) = a.video.provider() {
+            d.video = Some(video);
         }
         if let Some(span) = a.when.span(Some(&d.span))? {
             d.span = span;
@@ -659,6 +698,9 @@ pub fn print_caps(jolta: &Jolta, calendar: i64) -> Result<()> {
     println!("  Don't send: {:?}, outside only {}, new people only {}, cancel message {}", k.hold_update, k.outside_only, k.new_people_only, k.cancel_message);
     println!("  repeat: hourly {}, BYSETPOS {}, several BYMONTH {}; this and following {}", k.repeat.hourly, k.repeat.set_pos, k.repeat.several_months, k.split_series);
     println!("  move {:?}, video {:?}, remove video {}", k.move_within, k.video, k.remove_video);
+    for v in jolta_core::calendar::meeting::video_choices(&c) {
+        println!("  Add video call: {}{}", v.label, v.refusal.map(|r| format!(" (greyed: {r})")).unwrap_or_default());
+    }
     println!("  options {:?}", k.options);
     println!("  show as {:?}, max people {:?}", k.show_as, k.max_people);
     Ok(())
@@ -854,6 +896,11 @@ fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
         if !value.is_empty() {
             println!("  {label}: {}", truncate(&value.replace('\n', " / "), 80));
         }
+    }
+    if let Some(m) = &d.meeting {
+        println!("  video call: {} {}", m.provider, m.join_url);
+    } else if let Some(v) = d.video {
+        println!("  video call: {v}, link made on save");
     }
     println!("  show as {:?}, reminder {:?}, visibility {:?}", d.show_as, d.reminder, d.visibility);
     match &d.notice {

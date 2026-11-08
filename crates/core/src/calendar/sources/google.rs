@@ -23,7 +23,7 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, MeetingProvider, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
@@ -58,6 +58,14 @@ struct ListEntry {
     primary: bool,
     #[serde(default)]
     deleted: bool,
+    conference_properties: Option<ConferenceProperties>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConferenceProperties {
+    #[serde(default)]
+    allowed_conference_solution_types: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +160,19 @@ struct Reminder {
 #[serde(rename_all = "camelCase", default)]
 struct ConferenceData {
     entry_points: Vec<EntryPoint>,
+    create_request: Option<CreateRequest>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CreateRequest {
+    status: Option<CreateStatus>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CreateStatus {
+    status_code: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -541,6 +562,11 @@ fn remote_calendar(c: ListEntry) -> RemoteCalendar {
         },
         primary: c.primary,
         refresh: None,
+        // `eventHangout` and `eventNamedHangout` are the classic Hangouts
+        // of consumer and old G Suite accounts, which Jolta doesn't make.
+        video: c.conference_properties.map(|p| {
+            p.allowed_conference_solution_types.iter().filter(|t| *t == "hangoutsMeet").map(|_| MeetingProvider::Meet).collect()
+        }),
     }
 }
 
@@ -642,6 +668,9 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
             guests_modify: g.guests_can_modify,
             ..MeetingOptions::default()
         },
+        // A Meet Google is still making counts as asked for, so a retry
+        // that meets it asks for no second one.
+        video: pending_meet(g).then_some(MeetingProvider::Meet),
     })
 }
 
@@ -654,6 +683,12 @@ fn moment(w: &When, fallback: Zone) -> Option<Moment> {
     let at = w.date_time?;
     let zone = w.time_zone.as_deref().and_then(tz::zone).map(Zone::Tz).unwrap_or(fallback);
     Some(Moment::Time(Local { wall: tz::wall(at.to_utc(), zone, chrono_tz::UTC), zone }))
+}
+
+/// Whether the event's Meet was asked for and isn't made yet.
+fn pending_meet(g: &GoogleEvent) -> bool {
+    g.conference_data.as_ref().and_then(|c| c.create_request.as_ref()).and_then(|r| r.status.as_ref()).is_some_and(|s| s.status_code == "pending")
+        && !entries(g).iter().any(|e| e.kind == EntryKind::Video)
 }
 
 fn entries(g: &GoogleEvent) -> Vec<Entry> {
@@ -818,6 +853,36 @@ mod tests {
             [Change::Upsert { events, .. }] => events[0].clone(),
             other => panic!("expected one upsert, got {other:?}"),
         }
+    }
+
+    /// A Meet Google is still making reads as asked for, so a retried
+    /// PATCH that meets it merges as done instead of asking again (Sol, U8 S1).
+    #[test]
+    fn a_pending_meet_reads_as_asked_for() {
+        let mut raw = json!({ "id": "abc", "iCalUID": "u1", "summary": "Standup",
+            "start": { "dateTime": "2026-11-24T09:00:00+01:00" }, "end": { "dateTime": "2026-11-24T09:30:00+01:00" },
+            "conferenceData": { "createRequest": { "requestId": "r", "status": { "statusCode": "pending" } } } });
+        let read = |raw: &Value| event(&serde_json::from_value(raw.clone()).unwrap(), "u1".into(), &[], Some(chrono_tz::Europe::Brussels), &[]).unwrap();
+        let e = read(&raw);
+        assert_eq!((e.video, e.meeting.is_none()), (Some(MeetingProvider::Meet), true));
+        raw["conferenceData"]["createRequest"]["status"]["statusCode"] = json!("success");
+        raw["conferenceData"]["entryPoints"] = json!([{ "entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij" }]);
+        let e = read(&raw);
+        assert_eq!((e.video, e.meeting.map(|m| m.join_url)), (None, Some("https://meet.google.com/abc-defg-hij".into())));
+    }
+
+    #[test]
+    fn calendar_list_says_which_video_calls_a_calendar_allows() {
+        let entry = |properties: Value| -> RemoteCalendar {
+            let mut c = json!({ "id": "me@example.com", "summary": "Me", "accessRole": "owner", "primary": true });
+            if !properties.is_null() {
+                c["conferenceProperties"] = properties;
+            }
+            remote_calendar(serde_json::from_value(c).unwrap())
+        };
+        assert_eq!(entry(json!({ "allowedConferenceSolutionTypes": ["hangoutsMeet"] })).video, Some(vec![MeetingProvider::Meet]));
+        assert_eq!(entry(json!({ "allowedConferenceSolutionTypes": ["eventHangout"] })).video, Some(Vec::new()), "classic Hangouts isn't Meet");
+        assert_eq!(entry(Value::Null).video, None);
     }
 
     #[test]

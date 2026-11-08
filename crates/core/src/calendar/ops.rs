@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::change::{FIELDS, Field};
 use super::series::Horizon;
 use super::sources::{self, OpWrite, Source, Tell, Version, Written};
-use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, merge, organizer, rsvp, series as occurrences};
+use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, description, merge, organizer, rsvp, series as occurrences};
 use crate::model::text_enum;
 use crate::{Error, Jolta, Result, store};
 
@@ -342,6 +342,16 @@ fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held:
     let account = store::calendar_address(conn, calendar)?.unwrap_or_default();
     let caps = caps::of(calendar);
     let title = write.event().map_or("the event", |e| e.title.as_str());
+    // A calendar on this Mac has no server to make the call, and keeps
+    // what the store holds.
+    let asks = match write {
+        Write::Create(events) => events.iter().find_map(|e| e.video),
+        Write::Update { base, event, .. } if event.video != base.video => event.video,
+        _ => None,
+    };
+    if asks.is_some_and(|v| !caps.video.contains(&v)) {
+        return Err(Error::Other(format!("{} can't have this video call", calendar.name)));
+    }
     let mails = match write {
         Write::Create(events) => events.iter().any(|e| !super::draft::guests(calendar, &account, e).is_empty()),
         Write::Update { base, event, .. } => {
@@ -1096,10 +1106,32 @@ fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: boo
                     later.write.rebase(e);
                 }
             }
+            if let Write::Update { base, event, .. } = &mut later.write
+                && let Some(made) = v.events.iter().find(|e| e.recurrence_id == base.recurrence_id)
+            {
+                carry_call(base, event, made);
+            }
         }
         store::rewrite_calendar_op(conn, &later)?;
     }
     Ok(())
+}
+
+/// An edit queued while an earlier op still asked for a video call starts
+/// from the meeting the server made, so its write keeps the call and the
+/// block the server wrote into the description. Its base and its event
+/// each keep their own text before the block, so the edit still changes
+/// what it changed.
+fn carry_call(base: &mut EventData, event: &mut EventData, made: &EventData) {
+    if base.video.is_none() || made.meeting.is_none() {
+        return;
+    }
+    let block = description::split(&made.description, made.description_html);
+    for e in [&mut *base, &mut *event] {
+        let own = description::split(&e.description, e.description_html).editable;
+        Field::MeetingLink.copy(e, made);
+        (e.description, e.description_html) = block.join(&own);
+    }
 }
 
 /// Where a change made elsewhere was made, for the sentences about it.
@@ -1420,6 +1452,7 @@ pub fn new_local_calendar(conn: &Connection, name: &str, color: Option<&str>) ->
         access: super::Access::Owner,
         primary: true,
         refresh: None,
+        video: None,
     };
     store::add_calendar(conn, CalendarSource::Local, &remote)
 }
@@ -1470,6 +1503,19 @@ mod tests {
 
     fn q(s: &Store, cal: CalendarId, change: Change) -> Option<CalendarOpId> {
         s.write(|tx| queue(tx, &Edit::quiet(cal, change), NOW, &horizon())).unwrap()
+    }
+
+    /// A calendar on this Mac has no server to make a video call, so the
+    /// queue refuses one before the store changes, on a create or an edit.
+    #[test]
+    fn a_calendar_without_video_calls_refuses_one() {
+        let (s, cal) = setup("no-video");
+        let call = EventData { video: Some(crate::calendar::MeetingProvider::Teams), ..event("u8", "Review", "2026-11-24 14:00") };
+        let refused = s.write(|tx| queue(tx, &Edit::quiet(cal, Change::Create(vec![call.clone()])), NOW, &horizon()));
+        assert!(refused.unwrap_err().to_string().contains("can't have this video call"));
+        q(&s, cal, Change::Create(vec![event("u8", "Review", "2026-11-24 14:00")]));
+        assert!(s.write(|tx| queue(tx, &Edit::quiet(cal, Change::Update(call)), NOW, &horizon())).is_err());
+        assert_eq!(shown(&s), pairs(&[("24 14:00", "Review")]));
     }
 
     /// (start, title) of every occurrence in November 2026.
@@ -1751,7 +1797,7 @@ mod tests {
 
     fn remote_calendar(s: &Store, source: CalendarSource, access: Access) -> CalendarId {
         s.write(|tx| {
-            store::add_calendar(tx, source, &RemoteCalendar { remote_id: format!("{source}-{access}"), name: format!("{source}"), color: None, zone: None, access, primary: true, refresh: None })
+            store::add_calendar(tx, source, &RemoteCalendar { remote_id: format!("{source}-{access}"), name: format!("{source}"), color: None, zone: None, access, primary: true, refresh: None, video: None })
         })
         .unwrap()
         .id
@@ -1842,6 +1888,18 @@ mod tests {
         }
     }
 
+    const TEAMS_BLOCK: &str = "Microsoft Teams meeting\nJoin: https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0\nMeeting ID: 123 456 789\n________________";
+
+    /// The event as Exchange makes it when asked for a Teams meeting: the
+    /// meeting, and its block after the description.
+    fn made_call(mut e: EventData) -> EventData {
+        if e.video.take().is_some() {
+            e.description = if e.description.is_empty() { TEAMS_BLOCK.into() } else { format!("{}\n\n{TEAMS_BLOCK}", e.description) };
+            e.meeting = super::super::meeting::detect(&[], None, "", &e.description);
+        }
+        e
+    }
+
     impl Remote for Server {
         async fn write(&self, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
             let took = || self.told.lock().unwrap().push(tell.notify);
@@ -1852,7 +1910,7 @@ mod tests {
                     match self.get(&id) {
                         Some(e) if e.uid == events[0].uid => {}
                         Some(_) => return Err(Error::Other("taken".into())),
-                        None => self.put(&id, events[0].clone()),
+                        None => self.put(&id, made_call(events[0].clone())),
                     }
                     self.answer(self.version(&id))
                 }
@@ -2231,6 +2289,28 @@ mod tests {
         assert_eq!(server.objects.lock().unwrap().len(), 1);
         assert_eq!(shown_where(&s), triples(&[("Standup", "", "1")]), "stored under the server's version");
         assert_eq!(state(&s, create).0, OpState::Done);
+    }
+
+    /// An edit of the description saved while the create that asked for a
+    /// Teams meeting waits keeps the block Exchange writes (Sol, U8 S2).
+    #[test]
+    fn an_edit_behind_a_create_with_a_call_keeps_its_block() {
+        let (s, _) = setup("call-behind");
+        let cal = remote_calendar(&s, CalendarSource::Graph, Access::Owner);
+        let server = Server { names_itself: true, ..Server::default() };
+        let asked = EventData { video: Some(crate::calendar::MeetingProvider::Teams), ..event("u1", "Review", "2026-11-24 09:00") };
+        q(&s, cal, Change::Create(vec![asked.clone()])).unwrap();
+        let edit = q(&s, cal, Change::Update(EventData { description: "Agenda".into(), ..asked.clone() })).unwrap();
+        let cleared = q(&s, cal, Change::Update(asked)).unwrap();
+        for _ in 0..3 {
+            run(&s, &server);
+        }
+        assert_eq!((state(&s, edit).0, state(&s, cleared).0), (OpState::Done, OpState::Done));
+        let id = server.objects.lock().unwrap().keys().next().unwrap().clone();
+        assert_eq!(server.log().len(), 3, "the create and both edits reach the server");
+        let now = server.get(&id).unwrap();
+        assert_eq!(now.description, TEAMS_BLOCK, "the text cleared after it is gone, the block stays as the server wrote it (Sol, U8 S3)");
+        assert!(now.meeting.is_some_and(|m| m.join_url.contains("meetup-join")));
     }
 
     /// Graph names a new event itself: the stored rows move to its id, and

@@ -399,7 +399,7 @@ mod tests {
                     "DELETE FROM calendar WHERE account_id = 1; UPDATE account SET calendar = 0 WHERE id = 1;
                      INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'gmail', '{OTHER}', '{OTHER}', 'a2', 0, 1);"
                 ))?;
-                let cal = |id: &str, name: &str, access, primary| store::RemoteCalendar { remote_id: id.into(), name: name.into(), color: None, zone: None, access, primary, refresh: None };
+                let cal = |id: &str, name: &str, access, primary| store::RemoteCalendar { remote_id: id.into(), name: name.into(), color: None, zone: None, access, primary, refresh: None, video: None };
                 let list = [cal("personal", "Personal", Access::Owner, true), cal("team", "Team", Access::Read, false), cal("side", "Side", Access::Owner, false)];
                 let made = store::sync_calendar_list(tx, AccountId(2), CalendarSource::Google, &list)?;
                 Ok(made.into_iter().map(|c| (c.name, c.id)).collect::<Vec<_>>())

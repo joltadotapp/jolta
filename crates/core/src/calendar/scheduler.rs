@@ -276,6 +276,7 @@ mod tests {
             access: Access::Read,
             primary: true,
             refresh: None,
+            video: None,
         };
         jolta
             .store
@@ -320,6 +321,7 @@ mod tests {
             access: Access::Read,
             primary: true,
             refresh: None,
+            video: None,
         };
         let cal = jolta
             .store

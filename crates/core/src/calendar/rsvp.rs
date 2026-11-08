@@ -949,6 +949,7 @@ mod tests {
                     access: super::super::Access::Owner,
                     primary: true,
                     refresh: None,
+                    video: None,
                 };
                 let calendar = store::sync_calendar_list(tx, crate::AccountId(1), CalendarSource::CalDav, &[remote])?[0].id;
                 store::apply_item(tx, calendar, "/cal/work/plan.ics", Some("\"1\""), &read_events(&text), None, &Horizon::around(Utc::now(), here))?;
@@ -996,6 +997,7 @@ mod tests {
                     access: super::super::Access::Owner,
                     primary: true,
                     refresh: None,
+                    video: None,
                 };
                 let calendar = store::sync_calendar_list(tx, crate::AccountId(1), CalendarSource::CalDav, &[remote])?[0].id;
                 let horizon = Horizon::around(Utc::now(), here);
