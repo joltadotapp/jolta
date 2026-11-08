@@ -15,7 +15,7 @@ use jolta_core::calendar::card::{self, Card, Edit};
 use jolta_core::calendar::availability::{self, Availability, Busy};
 use jolta_core::calendar::{add, freebusy, invitation, proposal, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
-use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Moment, Zone, ical, sync, synth, tz};
+use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, EventKind, Moment, Zone, ical, sync, synth, tz};
 use jolta_core::store::{self, OccurrenceRow};
 
 use crate::{pct, truncate};
@@ -471,7 +471,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 let calendar = names.get(&o.calendar_id).map_or("", String::as_str);
                 days.entry(day).or_default().push(format!(
                     "  {when:<19} {:<40} {:>6} {:<18} {response:<12} {meeting}",
-                    truncate(&title_of(o), 40),
+                    titled(o, 40),
                     crate::cal_edit::event_label(o.event_id, o.not_synced),
                     truncate(calendar, 18)
                 ));
@@ -872,6 +872,18 @@ fn day(n: i32) -> NaiveDate {
 
 fn title_of(o: &OccurrenceRow) -> String {
     if o.title.is_empty() { "(no title)".into() } else { o.title.clone() }
+}
+
+/// The title cut to fit `width` with the kind after it: "Holiday [out of office]".
+fn titled(o: &OccurrenceRow, width: usize) -> String {
+    let tag = match &o.kind {
+        EventKind::OutOfOffice { .. } => " [out of office]".to_string(),
+        EventKind::Focus { .. } => " [focus]".into(),
+        EventKind::WorkingLocation(place) => format!(" [working: {}]", place.label()),
+        EventKind::Default | EventKind::Birthday => String::new(),
+    };
+    let room = width.saturating_sub(tag.chars().count()).max(8);
+    truncate(&title_of(o), room) + &tag
 }
 
 fn moment_text(m: &Moment) -> String {

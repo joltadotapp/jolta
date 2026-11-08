@@ -262,6 +262,7 @@ fn event(
         organizer_is_me,
         options,
         video: None,
+        kind: super::EventKind::Default,
     };
     let stamp = comp.property(&Prop::Dtstamp).and_then(|e| match e.values.first() {
         Some(Value::PartialDateTime(dt)) => utc(dt),

@@ -41,7 +41,7 @@ struct EventDetailCard: View {
         if detail.status == .cancelled { return "Cancelled" }
         if detail.myResponse == .declined { return "You declined" }
         if detail.status == .tentative || detail.showAs == .tentative { return "Tentative" }
-        if detail.showAs == .free { return "Shows as free" }
+        if detail.showAs == .free, detail.kindLine == nil { return "Shows as free" }
         return nil
     }
 
@@ -63,6 +63,10 @@ struct EventDetailCard: View {
                     .help("Close (Esc)")
             }
             Text(when).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).padding(.top, 2)
+            if let line = detail.kindLine {
+                Text(line).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.text2)).padding(.top, 2)
+                    .accessibilityIdentifier("event-detail-kind")
+            }
             if let status {
                 Text(status).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.text2)).padding(.top, 2)
             }

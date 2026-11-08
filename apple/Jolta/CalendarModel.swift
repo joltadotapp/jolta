@@ -71,11 +71,20 @@ struct CalEvent: Identifiable, Equatable {
     var title: String { record.title.isEmpty ? "(no title)" : record.title }
     var isTimed: Bool { start != nil }
 
-    /// All-day events, and timed ones of a day or longer, sit in the row above the hours.
+    /// All-day events, timed ones of a day or longer, and working locations sit in the row above the hours.
     var isLong: Bool {
-        guard let start, let end else { return true }
+        guard let start, let end, place == nil else { return true }
         return end.timeIntervalSince(start) >= 86_400
     }
+
+    /// Where a working location event says the user works: "Home", "Office · Building 2".
+    var place: (label: String, at: Workplace)? {
+        if case .workingLocation(let label, let at) = record.kind { return (label, at) }
+        return nil
+    }
+
+    var isAway: Bool { record.kind == .outOfOffice }
+    var isFocus: Bool { record.kind == .focus }
 
     var isTentative: Bool { record.status == .tentative || record.showAs == .tentative || record.myResponse == .tentative }
     var isFree: Bool { record.showAs == .free }
@@ -124,7 +133,10 @@ struct CalEvent: Identifiable, Equatable {
         if isCancelled { parts.append("cancelled") }
         if let response = record.myResponse, response != .needsAction { parts.append(response.word) }
         else if isTentative { parts.append("tentative") }
-        if isFree { parts.append("free") }
+        if isFree, place == nil { parts.append("free") }
+        if isAway { parts.append("out of office") }
+        if isFocus { parts.append("focus time") }
+        if let place { parts.append("working location: \(place.label)") }
         if record.notSynced { parts.append("not synced yet") }
         return parts.joined(separator: ", ")
     }

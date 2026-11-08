@@ -1,4 +1,5 @@
 import AppKit
+import JoltaFFI
 import QuartzCore
 import SwiftUI
 
@@ -130,6 +131,14 @@ enum EventStyle {
     private static let unsynced = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Not synced yet")?
         .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8.5, weight: .bold).applying(NSImage.SymbolConfiguration(paletteColors: [Theme.text2])))
 
+    private static let moon = NSImage(systemSymbolName: "moon.fill", accessibilityDescription: "Focus time")?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8.5, weight: .semibold).applying(NSImage.SymbolConfiguration(paletteColors: [Theme.text2])))
+
+    /// An out-of-office band: the calendar's color at 45 percent, as Find a time draws it.
+    static func awayFill(_ e: CalEvent) -> NSColor {
+        CalendarColor.color(e.record.color, .bar).withAlphaComponent(0.45)
+    }
+
     /// The room the "not synced yet" mark takes at the box's right edge.
     static func markWidth(_ e: CalEvent) -> CGFloat {
         e.record.notSynced && unsynced != nil ? 13 : 0
@@ -164,8 +173,14 @@ enum EventStyle {
         let short = r.height < 30
         var title: [(String, NSFont)] = [(e.title, titleFont)]
         if short, let start = e.start { title.append(("  " + CalendarModel.clockTime(start), timeFont)) }
-        let titleLine = line(title, width: width)
+        let moonWidth: CGFloat = e.isFocus && moon != nil ? 13 : 0
+        let titleLine = line(title, width: width - moonWidth)
         let titleWidth = CTLineGetTypographicBounds(titleLine, nil, nil, nil)
+        if moonWidth > 0, let moon {
+            let size = moon.size
+            let frame = CGRect(x: x + titleWidth + 4, y: top + ascent - size.height + 1, width: size.width, height: size.height)
+            moon.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
         draw(titleLine, Theme.text)
         if struck {
             Theme.text.setFill()
@@ -450,7 +465,13 @@ final class DayStrip: CanvasView {
             cg.saveGState()
             let alpha = EventStyle.alpha(e, now: content.now)
             if alpha < 1 { cg.setAlpha(alpha) }
-            CalendarColor.color(e.record.color, .allDay).setFill()
+            if let place = e.place {
+                drawPlace(place, item: item, cg: cg)
+                cg.restoreGState()
+                ring(e, r)
+                continue
+            }
+            (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .allDay)).setFill()
             NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
             EventStyle.drawMark(e, in: r)
             var title = line(e.title, Self.laneFont)
@@ -466,16 +487,50 @@ final class DayStrip: CanvasView {
                 CGRect(x: r.minX + 7, y: r.midY, width: min(CTLineGetTypographicBounds(title, nil, nil, nil), width), height: 1).fill()
             }
             cg.restoreGState()
-            if e.id == content.selectedID {
-                Theme.accent.setStroke()
-                let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 6.5, yRadius: 6.5)
-                ring.lineWidth = 2
-                ring.stroke()
-            }
+            ring(e, r)
         }
         if let moved { drawMoved(moved, cg: cg) }
         Theme.line2.setFill()
         CGRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+    }
+
+    private func ring(_ e: CalEvent, _ r: CGRect) {
+        guard e.id == content.selectedID else { return }
+        Theme.accent.setStroke()
+        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 6.5, yRadius: 6.5)
+        ring.lineWidth = 2
+        ring.stroke()
+    }
+
+    private static let placeFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+
+    /// A working location: no box, its place with a glyph in each of its days.
+    private func drawPlace(_ place: (label: String, at: Workplace), item: LaneEvent, cg: CGContext) {
+        let symbol = switch place.at {
+        case .home: "house"
+        case .office: "building.2"
+        case .other: "mappin.and.ellipse"
+        }
+        let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9.5, weight: .medium).applying(NSImage.SymbolConfiguration(paletteColors: [CalendarColor.color(item.event.record.color, .text)])))
+        let r = box(item)
+        for day in item.first...item.last {
+            let cell = CGRect(x: gutter + columnWidth * CGFloat(day) + 3, y: r.minY, width: columnWidth - 6, height: r.height)
+            var x = cell.minX + 5
+            if let glyph {
+                glyph.draw(in: CGRect(x: x, y: cell.midY - glyph.size.height / 2, width: glyph.size.width, height: glyph.size.height),
+                           from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                x += glyph.size.width + 4
+            }
+            var text = line(place.label, Self.placeFont)
+            let width = cell.maxX - x - 4
+            if CTLineGetTypographicBounds(text, nil, nil, nil) > width {
+                text = CTLineCreateTruncatedLine(text, max(0, width), .end, line("…", Self.placeFont)) ?? text
+            }
+            cg.setFillColor(Theme.text2.cgColor)
+            cg.textPosition = CGPoint(x: x, y: r.minY + 14)
+            CTLineDraw(text, cg)
+        }
     }
 
     /// The event being dragged, dashed on the days it would move to.
@@ -792,11 +847,11 @@ final class HourCanvas: CanvasView {
             edge.lineWidth = 1
             edge.stroke()
         } else {
-            CalendarColor.color(e.record.color, .fill).setFill()
+            (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .fill)).setFill()
             box.fill()
             cg.saveGState()
             box.addClip()
-            if e.isTentative {
+            if e.isTentative, !e.isAway {
                 Theme.bg.setStroke()
                 let stripes = NSBezierPath()
                 stripes.lineWidth = 3.5
