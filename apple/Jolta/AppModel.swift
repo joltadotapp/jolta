@@ -70,6 +70,8 @@ final class AppModel {
     /// Accounts whose automatic replies are on now, for the strip over the list.
     private(set) var away: [AwayInfo] = []
     private(set) var turningOffAway: Set<Int64> = []
+    /// Counts `AwayChanged`, so Settings reloads states that aren't on now too.
+    private(set) var awayRevision = 0
     var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
     var section: SectionInfo? { didSet { listChanged() } }
@@ -877,6 +879,7 @@ final class AppModel {
 
     func reloadAway() {
         away = (try? core.awayStates()) ?? []
+        awayRevision += 1
     }
 
     /// Turns automatic replies off where Jolta can (Microsoft 365); Gmail's

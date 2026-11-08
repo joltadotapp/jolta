@@ -573,6 +573,7 @@ impl SignIn {
                     let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
                     if let Some(engine) = engine {
                         list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
+                        engine.calendars().check_away();
                     }
                     let account = jolta.store.read(|c| store::account(c, account.id))?;
                     return Ok(AccountInfo::from(account));

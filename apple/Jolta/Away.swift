@@ -88,9 +88,8 @@ struct OutOfOfficeRows: View {
         if rows.isEmpty {
             SettingsRow("No Google or Microsoft 365 accounts", detail: "Jolta reads automatic replies from Gmail and Microsoft 365.")
         }
-        // Reloads whenever the strip's state changes.
         Color.clear.frame(height: 0)
-            .onChange(of: model.away, initial: true) { reload() }
+            .onChange(of: model.awayRevision, initial: true) { reload() }
             .onAppear { model.core.checkAway() }
     }
 
