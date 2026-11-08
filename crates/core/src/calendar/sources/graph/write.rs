@@ -492,6 +492,7 @@ mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         }
     }
 

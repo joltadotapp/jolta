@@ -62,6 +62,7 @@ impl Webcal {
             access: Access::Read,
             primary: true,
             refresh: Some(header.refresh.unwrap_or(DEFAULT_REFRESH)),
+            video: None,
         }])
     }
 
@@ -281,6 +282,7 @@ mod tests {
             cursor: Some(cursor.into()),
             refresh: None,
             synced: None,
+            video: None,
         };
         let feed = Webcal::new(&calendar.remote_id).unwrap();
         let batch = feed.sync(&calendar, &Known::new()).await.unwrap();

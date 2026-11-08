@@ -206,6 +206,7 @@ pub(crate) mod tests {
                     access: crate::calendar::Access::Owner,
                     primary: true,
                     refresh: None,
+                    video: None,
                 };
                 crate::store::sync_calendar_list(tx, crate::AccountId(1), crate::calendar::CalendarSource::CalDav, &[work])
             })

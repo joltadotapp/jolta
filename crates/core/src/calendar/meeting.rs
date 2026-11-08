@@ -1,7 +1,8 @@
 //! Online meetings: find the join link, meeting id, passcode and dial-in
 //! numbers in an event.
 
-use super::{Meeting, MeetingProvider};
+use super::caps::{self, Capabilities};
+use super::{Calendar, Meeting, MeetingProvider};
 use Host::*;
 use Shape::*;
 use MeetingProvider as P;
@@ -48,6 +49,62 @@ static ROWS: &[Row] = &[
     Row::new(P::RingCentral, Exact("v.ringcentral.com"), Prefix("/join/")).id(),
     Row::new(P::Zoho, AnyTld("meeting.zoho."), Prefix("/")),
 ];
+
+/// One entry of the editor's Add video call menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoChoice {
+    pub provider: MeetingProvider,
+    pub label: &'static str,
+    /// Why the calendar can't have this call, shown greyed in the menu;
+    /// None when it can.
+    pub refusal: Option<String>,
+}
+
+/// A video call the editor offers and when a calendar can have it. Adding
+/// one, such as a personal Zoom link, is one row here.
+struct VideoRow {
+    provider: MeetingProvider,
+    label: &'static str,
+    refusal: fn(&Calendar, &Capabilities) -> Option<String>,
+}
+
+static VIDEO_ROWS: &[VideoRow] = &[
+    VideoRow { provider: P::Teams, label: "Teams meeting", refusal: |c, caps| made_by_server(P::Teams, c, caps) },
+    VideoRow { provider: P::Meet, label: "Google Meet", refusal: |c, caps| made_by_server(P::Meet, c, caps) },
+];
+
+/// Why the server of `calendar` won't make `provider`'s meeting on save,
+/// which only a calendar of the provider's own account does.
+fn made_by_server(provider: MeetingProvider, calendar: &Calendar, caps: &Capabilities) -> Option<String> {
+    if caps.video.contains(&provider) {
+        return None;
+    }
+    let name = super::draft::provider(calendar);
+    Some(match caps::own_video(calendar.source) == Some(provider) {
+        true => format!("{name} doesn't allow it on this calendar"),
+        false => format!("Not on {name} calendars"),
+    })
+}
+
+/// The Add video call menu for `calendar`: the calls it can have, its
+/// account's own first (Teams on Microsoft 365, Meet on Google), then the
+/// others greyed with the reason. Empty when it can have none, as on a
+/// read-only calendar, iCloud or a calendar on this Mac, so the editor
+/// leaves the button out.
+pub fn video_choices(calendar: &Calendar) -> Vec<VideoChoice> {
+    let caps = caps::of(calendar);
+    if !caps.writable {
+        return Vec::new();
+    }
+    let mut choices: Vec<VideoChoice> =
+        VIDEO_ROWS.iter().map(|r| VideoChoice { provider: r.provider, label: r.label, refusal: (r.refusal)(calendar, &caps) }).collect();
+    if choices.iter().all(|c| c.refusal.is_some()) {
+        return Vec::new();
+    }
+    let own = caps::own_video(calendar.source);
+    choices.sort_by_key(|c| (c.refusal.is_some(), Some(c.provider) != own));
+    choices
+}
 
 const ID_LABELS: &[&str] = &["meeting id", "meeting number", "webinar id"];
 const PASSCODE_LABELS: &[&str] = &["passcode", "password"];
@@ -460,6 +517,7 @@ pub fn app_url(m: &Meeting) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calendar::{Access, CalendarId, CalendarSource};
 
     fn in_description(description: &str) -> Option<Meeting> {
         detect(&[], None, "", description)
@@ -467,6 +525,59 @@ mod tests {
 
     fn video(uri: &str) -> Entry {
         Entry { kind: EntryKind::Video, uri: uri.into(), meeting_id: None, passcode: None }
+    }
+
+    fn calendar(source: CalendarSource, access: Access, video: Option<Vec<MeetingProvider>>) -> Calendar {
+        Calendar {
+            id: CalendarId(1),
+            account_id: None,
+            source,
+            remote_id: "x".into(),
+            name: "Work".into(),
+            color: None,
+            zone: None,
+            access,
+            shown: true,
+            counts_as_busy: true,
+            notify: true,
+            default_reminder: None,
+            is_default: false,
+            cursor: None,
+            refresh: None,
+            synced: None,
+            video,
+        }
+    }
+
+    fn menu(c: &Calendar) -> Vec<(MeetingProvider, Option<String>)> {
+        video_choices(c).into_iter().map(|v| (v.provider, v.refusal)).collect()
+    }
+
+    /// The mockup's menu on Microsoft 365, and Google's the other way round.
+    #[test]
+    fn the_accounts_own_video_call_comes_first() {
+        use Access::*;
+        let m365 = calendar(CalendarSource::Graph, Owner, Some(vec![P::Teams]));
+        assert_eq!(menu(&m365), [(P::Teams, None), (P::Meet, Some("Not on Microsoft 365 calendars".into()))]);
+        assert_eq!(video_choices(&m365)[0].label, "Teams meeting");
+        let google = calendar(CalendarSource::Google, Write, None);
+        assert_eq!(menu(&google), [(P::Meet, None), (P::Teams, Some("Not on Google calendars".into()))], "a list read before U8 allows Meet");
+    }
+
+    #[test]
+    fn a_calendar_that_can_make_no_call_offers_none() {
+        use Access::*;
+        for c in [
+            calendar(CalendarSource::Graph, Owner, Some(Vec::new())),
+            calendar(CalendarSource::Google, Owner, Some(Vec::new())),
+            calendar(CalendarSource::Graph, Read, None),
+            calendar(CalendarSource::Google, FreeBusy, None),
+            calendar(CalendarSource::CalDav, Owner, None),
+            calendar(CalendarSource::Local, Owner, None),
+            calendar(CalendarSource::Webcal, Owner, None),
+        ] {
+            assert!(video_choices(&c).is_empty(), "{:?} {:?} {:?}", c.source, c.access, c.video);
+        }
     }
 
     #[test]

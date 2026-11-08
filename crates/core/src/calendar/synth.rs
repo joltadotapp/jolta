@@ -42,6 +42,7 @@ pub fn generate(jolta: &Jolta, now: DateTime<Utc>) -> Result<Built> {
                     access: Access::Owner,
                     primary: true,
                     refresh: None,
+                    video: None,
                 };
                 Ok(store::add_calendar(tx, CalendarSource::Local, &remote)?.id)
             })

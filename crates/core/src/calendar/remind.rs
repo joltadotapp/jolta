@@ -215,6 +215,7 @@ mod tests {
             access: Access::Owner,
             primary: true,
             refresh: None,
+            video: None,
         };
         let id = s.write(|tx| Ok(store::add_calendar(tx, CalendarSource::Local, &remote)?.id)).unwrap();
         (s, id, Folder(dir))

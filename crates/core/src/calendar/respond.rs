@@ -787,6 +787,7 @@ pub(crate) mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         }
     }
 
@@ -834,7 +835,7 @@ pub(crate) mod tests {
             let (calendar, event) = j
                 .store
                 .write(|tx| {
-                    let remote = store::RemoteCalendar { remote_id: remote_id.into(), name: "Bo".into(), color: None, zone: None, access, primary: true, refresh: None };
+                    let remote = store::RemoteCalendar { remote_id: remote_id.into(), name: "Bo".into(), color: None, zone: None, access, primary: true, refresh: None, video: None };
                     let calendar = store::sync_calendar_list(tx, AccountId(1), source, &[remote])?[0].id;
                     store::apply_item(tx, calendar, "bo", None, std::slice::from_ref(&copy), None, &series::Horizon::around(now(), tz::here()))?;
                     let event = tx.query_row("SELECT id FROM event WHERE calendar_id = ?1", [calendar], |r| r.get(0))?;
@@ -885,6 +886,7 @@ pub(crate) mod tests {
                     access: crate::calendar::Access::Owner,
                     primary: true,
                     refresh: None,
+                    video: None,
                 };
                 let calendar = store::sync_calendar_list(tx, AccountId(2), CalendarSource::Google, &[remote])?[0].id;
                 let organizers = invitation::find(raw.as_bytes(), &["me2@example.net".into()]).remove(0).event;

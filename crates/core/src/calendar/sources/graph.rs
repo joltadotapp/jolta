@@ -31,7 +31,7 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, MeetingProvider, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
@@ -264,7 +264,7 @@ impl GraphCalendar {
 
     pub async fn list_calendars(&self) -> Result<Vec<RemoteCalendar>> {
         let mut out = Vec::new();
-        let mut next = Some("/me/calendars?$select=id,name,hexColor,isDefaultCalendar,canEdit,owner&$top=100".to_string());
+        let mut next = Some("/me/calendars?$select=id,name,hexColor,isDefaultCalendar,canEdit,owner,allowedOnlineMeetingProviders&$top=100".to_string());
         while let Some(url) = next {
             let page = get_ok(self, &url).await?;
             for c in page["value"].as_array().into_iter().flatten() {
@@ -580,6 +580,16 @@ fn remote_calendar(c: &Value, me: &str) -> RemoteCalendar {
         },
         primary: c["isDefaultCalendar"].as_bool() == Some(true),
         refresh: None,
+        video: c["allowedOnlineMeetingProviders"].as_array().map(|list| list.iter().filter_map(|p| online_meeting_provider(p.as_str()?)).collect()),
+    }
+}
+
+/// Graph's name for an online meeting provider as Jolta's. Skype for
+/// Business and Skype (consumer) are retired, and Jolta makes neither.
+fn online_meeting_provider(name: &str) -> Option<MeetingProvider> {
+    match name {
+        "teamsForBusiness" => Some(MeetingProvider::Teams),
+        _ => None,
     }
 }
 
@@ -1330,7 +1340,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let store = crate::store::Store::open(&dir.join("jolta.sqlite")).unwrap();
-            let remote = RemoteCalendar { remote_id: "C1".into(), name: "Calendar".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None };
+            let remote = RemoteCalendar { remote_id: "C1".into(), name: "Calendar".into(), color: None, zone: None, access: Access::Owner, primary: true, refresh: None, video: None };
             let calendar = store
                 .write(|tx| {
                     tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (1, 'graph', 'me@example.com', 'me', 'a1', 0, 1)")?;
@@ -1522,12 +1532,16 @@ mod tests {
     #[test]
     fn calendars_and_the_window() {
         let me = "me@example.com";
-        let own = remote_calendar(&json!({"id": "c1", "name": "Calendar", "hexColor": "#e3008c", "isDefaultCalendar": true, "canEdit": true, "owner": {"address": "Me@example.com"}}), me);
+        let own = remote_calendar(&json!({"id": "c1", "name": "Calendar", "hexColor": "#e3008c", "isDefaultCalendar": true, "canEdit": true, "owner": {"address": "Me@example.com"}, "allowedOnlineMeetingProviders": ["teamsForBusiness"]}), me);
         let shared = remote_calendar(&json!({"id": "c2", "name": "Ann", "hexColor": "", "canEdit": true, "owner": {"address": "ann@example.com"}}), me);
         let read = remote_calendar(&json!({"id": "c3", "name": "Holidays", "canEdit": false, "owner": {"address": "ann@example.com"}}), me);
         assert_eq!((own.access, own.primary, own.color.as_deref()), (Access::Owner, true, Some("#e3008c")));
         assert_eq!((shared.access, shared.color), (Access::Write, None));
         assert_eq!(read.access, Access::Read);
+        assert_eq!(own.video, Some(vec![MeetingProvider::Teams]), "the test tenant's default calendar");
+        assert_eq!(shared.video, None, "a list without the field says nothing");
+        let skype = remote_calendar(&json!({"id": "c4", "name": "Old", "owner": {"address": me}, "allowedOnlineMeetingProviders": ["skypeForBusiness", "unknown"]}), me);
+        assert_eq!(skype.video, Some(Vec::new()), "providers Jolta doesn't make count as none");
         assert_eq!(window(NaiveDate::from_ymd_opt(2026, 11, 4).unwrap()), ("2024-11-01T00:00:00Z".into(), "2029-11-01T00:00:00Z".into()));
     }
 

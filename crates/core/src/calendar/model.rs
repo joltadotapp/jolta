@@ -301,6 +301,9 @@ pub struct Calendar {
     pub refresh: Option<i64>,
     /// Unix seconds of the last sync that reached the server.
     pub synced: Option<i64>,
+    /// The video calls the server lets this calendar make, as its calendar
+    /// list says; None until it says, and for sources that never do.
+    pub video: Option<Vec<MeetingProvider>>,
 }
 
 impl Calendar {

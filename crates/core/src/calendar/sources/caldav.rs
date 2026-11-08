@@ -609,6 +609,7 @@ fn calendars(at: &Url, ms: &MultiStatus, default: Option<&Url>, principal: &Url)
             access: access(r, principal),
             primary: false,
             refresh: None,
+            video: None,
         });
     }
     let default = default.map(|d| href_key(d.as_str()));
@@ -729,6 +730,7 @@ pub(crate) mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         };
         (dav, calendar, server)
     }

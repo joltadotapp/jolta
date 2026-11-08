@@ -30,10 +30,13 @@ pub struct RemoteCalendar {
     /// The account's main calendar, shown from the start. Others start hidden.
     pub primary: bool,
     pub refresh: Option<i64>,
+    /// The video calls the server lets this calendar make; None when the
+    /// source doesn't say.
+    pub video: Option<Vec<MeetingProvider>>,
 }
 
 const CALENDAR_COLS: &str = "id, account_id, source, remote_id, name, coalesce(user_color, color), zone, access, shown,
-     counts_as_busy, notify, default_reminder, is_default, cursor, refresh, synced";
+     counts_as_busy, notify, default_reminder, is_default, cursor, refresh, synced, video";
 
 fn calendar_row(r: &Row) -> rusqlite::Result<Calendar> {
     Ok(Calendar {
@@ -53,6 +56,7 @@ fn calendar_row(r: &Row) -> rusqlite::Result<Calendar> {
         cursor: r.get(13)?,
         refresh: r.get(14)?,
         synced: r.get(15)?,
+        video: r.get::<_, Option<String>>(16)?.map(|list| providers(&list)),
     })
 }
 
@@ -75,18 +79,24 @@ pub fn calendar(conn: &Connection, id: CalendarId) -> Result<Calendar> {
         .ok_or_else(|| Error::NotFound(format!("calendar {id}")))
 }
 
+/// A stored list of providers; a name this build doesn't know is left out.
+fn providers(list: &str) -> Vec<MeetingProvider> {
+    list.split(',').filter_map(|p| p.parse().ok()).collect()
+}
+
 /// Inserts or refreshes one calendar. A known calendar keeps what the user
 /// chose: shown, color, counts as busy, notifications.
 fn upsert_calendar(conn: &Connection, account: Option<AccountId>, source: CalendarSource, c: &RemoteCalendar) -> Result<CalendarId> {
     let busy_by_default = source != CalendarSource::Webcal;
+    let video = c.video.as_ref().map(|list| list.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(","));
     Ok(conn.query_row(
-        "INSERT INTO calendar (account_id, source, remote_id, name, color, zone, access, shown, counts_as_busy, refresh)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO calendar (account_id, source, remote_id, name, color, zone, access, shown, counts_as_busy, refresh, video)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT (ifnull(account_id, 0), source, remote_id) DO UPDATE SET
            name = excluded.name, color = excluded.color, zone = excluded.zone, access = excluded.access,
-           refresh = coalesce(excluded.refresh, refresh)
+           refresh = coalesce(excluded.refresh, refresh), video = excluded.video
          RETURNING id",
-        params![account, source, c.remote_id, c.name, c.color, c.zone, c.access, c.primary, busy_by_default, c.refresh],
+        params![account, source, c.remote_id, c.name, c.color, c.zone, c.access, c.primary, busy_by_default, c.refresh, video],
         |r| r.get(0),
     )?)
 }
@@ -789,6 +799,7 @@ mod tests {
             access: Access::Owner,
             primary,
             refresh: None,
+            video: None,
         }
     }
 
@@ -1081,6 +1092,18 @@ mod tests {
         assert_eq!(again.len(), 1, "the calendar gone from the server is deleted");
         assert_eq!((again[0].id, again[0].shown, again[0].color.as_deref()), (shared, true, Some("#ff0000")));
         assert_eq!(again[0].name, "Shared, renamed");
+    }
+
+    #[test]
+    fn a_relisted_calendar_takes_the_video_calls_its_server_allows() {
+        let s = store("video");
+        let allowed = |video| RemoteCalendar { video, ..remote("/cal/home/", true) };
+        let first = s.write(|tx| sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &[allowed(None)])).unwrap();
+        assert_eq!(first[0].video, None);
+        let again = s.write(|tx| sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &[allowed(Some(vec![MeetingProvider::Teams]))])).unwrap();
+        assert_eq!(again[0].video, Some(vec![MeetingProvider::Teams]));
+        let none = s.write(|tx| sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &[allowed(Some(Vec::new()))])).unwrap();
+        assert_eq!(none[0].video, Some(Vec::new()), "a list that allows none is kept apart from one that says nothing");
     }
 
     #[test]

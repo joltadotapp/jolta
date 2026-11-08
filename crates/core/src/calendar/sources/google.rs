@@ -23,7 +23,7 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, MeetingProvider, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
@@ -58,6 +58,14 @@ struct ListEntry {
     primary: bool,
     #[serde(default)]
     deleted: bool,
+    conference_properties: Option<ConferenceProperties>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConferenceProperties {
+    #[serde(default)]
+    allowed_conference_solution_types: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -541,6 +549,11 @@ fn remote_calendar(c: ListEntry) -> RemoteCalendar {
         },
         primary: c.primary,
         refresh: None,
+        // `eventHangout` and `eventNamedHangout` are the classic Hangouts
+        // of consumer and old G Suite accounts, which Jolta doesn't make.
+        video: c.conference_properties.map(|p| {
+            p.allowed_conference_solution_types.iter().filter(|t| *t == "hangoutsMeet").map(|_| MeetingProvider::Meet).collect()
+        }),
     }
 }
 
@@ -818,6 +831,20 @@ mod tests {
             [Change::Upsert { events, .. }] => events[0].clone(),
             other => panic!("expected one upsert, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn calendar_list_says_which_video_calls_a_calendar_allows() {
+        let entry = |properties: Value| -> RemoteCalendar {
+            let mut c = json!({ "id": "me@example.com", "summary": "Me", "accessRole": "owner", "primary": true });
+            if !properties.is_null() {
+                c["conferenceProperties"] = properties;
+            }
+            remote_calendar(serde_json::from_value(c).unwrap())
+        };
+        assert_eq!(entry(json!({ "allowedConferenceSolutionTypes": ["hangoutsMeet"] })).video, Some(vec![MeetingProvider::Meet]));
+        assert_eq!(entry(json!({ "allowedConferenceSolutionTypes": ["eventHangout"] })).video, Some(Vec::new()), "classic Hangouts isn't Meet");
+        assert_eq!(entry(Value::Null).video, None);
     }
 
     #[test]

@@ -962,7 +962,7 @@ mod tests {
             .store
             .write(|tx| {
                 tx.execute("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'imap', 'other@example.com', 'o', 'a2', 0, 1)", [])?;
-                let remote = crate::store::RemoteCalendar { remote_id: "/cal/other/".into(), name: "Other".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                let remote = crate::store::RemoteCalendar { remote_id: "/cal/other/".into(), name: "Other".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
                 let other = crate::store::sync_calendar_list(tx, AccountId(2), CalendarSource::CalDav, &[remote])?[0].id;
                 tx.execute("DELETE FROM event", [])?;
                 crate::store::apply_item(tx, other, "s1", Some("1"), &events, None, &horizon)?;
@@ -1094,7 +1094,7 @@ mod tests {
                 let graph = jolta
                     .store
                     .write(|tx| {
-                        let remote = crate::store::RemoteCalendar { remote_id: "graph".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                        let remote = crate::store::RemoteCalendar { remote_id: "graph".into(), name: "Calendar".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
                         Ok(crate::store::sync_calendar_list(tx, AccountId(1), CalendarSource::Graph, &[remote])?[0].id)
                     })
                     .unwrap();
@@ -1283,7 +1283,7 @@ mod tests {
                 let shared = jolta
                     .store
                     .write(|tx| {
-                        let remote = |remote_id: &str, access| crate::store::RemoteCalendar { remote_id: remote_id.into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None };
+                        let remote = |remote_id: &str, access| crate::store::RemoteCalendar { remote_id: remote_id.into(), name: "Calendar".into(), color: None, zone: None, access, primary: true, refresh: None, video: None };
                         let list = match source {
                             CalendarSource::CalDav => vec![remote("/cal/work/", Owner), remote(remote_id, access)],
                             _ => vec![remote(remote_id, access)],
@@ -1348,7 +1348,7 @@ mod tests {
             .store
             .write(|tx| {
                 tx.execute("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'imap', 'other@example.com', 'o', 'a2', 0, 1)", [])?;
-                let remote = crate::store::RemoteCalendar { remote_id: "/cal/other/".into(), name: "Other".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+                let remote = crate::store::RemoteCalendar { remote_id: "/cal/other/".into(), name: "Other".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
                 let other = crate::store::sync_calendar_list(tx, AccountId(2), CalendarSource::CalDav, &[remote])?[0].id;
                 crate::store::apply_item(tx, other, "s9", Some("1"), &[theirs], None, &Horizon::around(now(), chrono_tz::Europe::Brussels)).map(|_| ())
             })

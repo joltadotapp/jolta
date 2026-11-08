@@ -55,6 +55,7 @@ fn removing_an_account_leaves_nothing_behind() {
                 access: Access::Owner,
                 primary: true,
                 refresh: None,
+                video: None,
             };
             let calendar = store::sync_calendar_list(tx, gone.id, CalendarSource::CalDav, &[home])?[0].id;
             let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();

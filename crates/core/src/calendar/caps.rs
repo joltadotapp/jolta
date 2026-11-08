@@ -80,10 +80,26 @@ pub struct Capabilities {
     pub sends_itself: bool,
 }
 
+/// The video call Jolta asks the server of a calendar from `source` to
+/// make on save: Teams on Microsoft 365, Meet on Google.
+pub fn own_video(source: CalendarSource) -> Option<MeetingProvider> {
+    match source {
+        CalendarSource::Graph => Some(MeetingProvider::Teams),
+        CalendarSource::Google => Some(MeetingProvider::Meet),
+        CalendarSource::CalDav | CalendarSource::Local | CalendarSource::Webcal | CalendarSource::EventKit => None,
+    }
+}
+
+/// The source's own video call, unless the calendar list says the server
+/// doesn't allow it there. A calendar listed before Jolta read the allowed
+/// providers counts as allowing it until the next list.
+fn video(calendar: &Calendar) -> Vec<MeetingProvider> {
+    own_video(calendar.source).filter(|own| calendar.video.as_ref().is_none_or(|allowed| allowed.contains(own))).into_iter().collect()
+}
+
 /// The capabilities of `calendar`. CalDAV counts as a server with
 /// scheduling, as iCloud and Fastmail are, until Jolta reads the
-/// `calendar-auto-schedule` token per calendar. Video lists the provider's
-/// own meeting until Jolta reads the calendar's allowed providers.
+/// `calendar-auto-schedule` token per calendar.
 pub fn of(calendar: &Calendar) -> Capabilities {
     let writable = matches!(calendar.access, Access::Owner | Access::Write)
         && !matches!(calendar.source, CalendarSource::Webcal | CalendarSource::EventKit);
@@ -115,7 +131,7 @@ pub fn of(calendar: &Calendar) -> Capabilities {
             new_people_only: true,
             repeat: RepeatLimits { hourly: false, ..RepeatLimits::ALL },
             move_within: MoveRule::Native,
-            video: vec![MeetingProvider::Meet],
+            video: video(calendar),
             options: OrganizerOptions { hide_guest_list: true, guests_can_invite: true, guests_can_modify: true, ..Default::default() },
             show_as: vec![ShowAs::Free, ShowAs::Busy],
             sends_itself: true,
@@ -127,7 +143,7 @@ pub fn of(calendar: &Calendar) -> Capabilities {
             cancel_message: true,
             repeat: RepeatLimits { hourly: false, set_pos: false, several_months: false },
             move_within: MoveRule::CopyDelete,
-            video: vec![MeetingProvider::Teams],
+            video: video(calendar),
             remove_video: false,
             options: OrganizerOptions { request_responses: true, allow_new_time_proposals: true, hide_guest_list: true, ..Default::default() },
             show_as: all_show_as,
@@ -194,6 +210,7 @@ mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         }
     }
 
@@ -228,6 +245,11 @@ mod tests {
         let icloud = of(&Calendar { remote_id: "https://p01-caldav.icloud.com/1/calendars/home/".into(), ..calendar(CalendarSource::CalDav, Access::Owner) });
         assert!(icloud.new_people_only, "iCloud mails only the people added or removed");
         assert!(i.video.is_empty());
+
+        let no_teams = of(&Calendar { video: Some(Vec::new()), ..calendar(CalendarSource::Graph, Access::Owner) });
+        assert!(no_teams.video.is_empty(), "a calendar whose list allows no Teams meetings");
+        let no_meet = of(&Calendar { video: Some(vec![MeetingProvider::Teams]), ..calendar(CalendarSource::Google, Access::Owner) });
+        assert!(no_meet.video.is_empty(), "only Meet counts on Google");
 
         let l = of(&calendar(CalendarSource::Local, Access::Owner));
         assert_eq!((l.hold_update, l.new_people_only, l.cancel_message, l.sends_itself), (Hold::Always, true, true, false));

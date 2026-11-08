@@ -1330,6 +1330,7 @@ mod tests {
             cursor: None,
             refresh: None,
             synced: None,
+            video: None,
         }
     }
 
@@ -1567,7 +1568,7 @@ mod tests {
     #[test]
     fn a_new_event_without_a_reminder_tells_the_provider() {
         let (s, _) = setup("reminder");
-        let remote = store::RemoteCalendar { remote_id: "me@example.com".into(), name: "Work".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None };
+        let remote = store::RemoteCalendar { remote_id: "me@example.com".into(), name: "Work".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
         let google = s.write(|tx| store::add_calendar(tx, CalendarSource::Google, &remote)).unwrap().id;
         let now = Utc.timestamp_opt(NOW, 0).unwrap();
         let queued = |reminder: Reminder| {

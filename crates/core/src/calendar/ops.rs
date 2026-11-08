@@ -1420,6 +1420,7 @@ pub fn new_local_calendar(conn: &Connection, name: &str, color: Option<&str>) ->
         access: super::Access::Owner,
         primary: true,
         refresh: None,
+        video: None,
     };
     store::add_calendar(conn, CalendarSource::Local, &remote)
 }
@@ -1751,7 +1752,7 @@ mod tests {
 
     fn remote_calendar(s: &Store, source: CalendarSource, access: Access) -> CalendarId {
         s.write(|tx| {
-            store::add_calendar(tx, source, &RemoteCalendar { remote_id: format!("{source}-{access}"), name: format!("{source}"), color: None, zone: None, access, primary: true, refresh: None })
+            store::add_calendar(tx, source, &RemoteCalendar { remote_id: format!("{source}-{access}"), name: format!("{source}"), color: None, zone: None, access, primary: true, refresh: None, video: None })
         })
         .unwrap()
         .id
