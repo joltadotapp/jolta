@@ -342,6 +342,16 @@ fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held:
     let account = store::calendar_address(conn, calendar)?.unwrap_or_default();
     let caps = caps::of(calendar);
     let title = write.event().map_or("the event", |e| e.title.as_str());
+    // A calendar on this Mac has no server to make the call, and keeps
+    // what the store holds.
+    let asks = match write {
+        Write::Create(events) => events.iter().find_map(|e| e.video),
+        Write::Update { base, event, .. } if event.video != base.video => event.video,
+        _ => None,
+    };
+    if asks.is_some_and(|v| !caps.video.contains(&v)) {
+        return Err(Error::Other(format!("{} can't have this video call", calendar.name)));
+    }
     let mails = match write {
         Write::Create(events) => events.iter().any(|e| !super::draft::guests(calendar, &account, e).is_empty()),
         Write::Update { base, event, .. } => {
@@ -1471,6 +1481,19 @@ mod tests {
 
     fn q(s: &Store, cal: CalendarId, change: Change) -> Option<CalendarOpId> {
         s.write(|tx| queue(tx, &Edit::quiet(cal, change), NOW, &horizon())).unwrap()
+    }
+
+    /// A calendar on this Mac has no server to make a video call, so the
+    /// queue refuses one before the store changes, on a create or an edit.
+    #[test]
+    fn a_calendar_without_video_calls_refuses_one() {
+        let (s, cal) = setup("no-video");
+        let call = EventData { video: Some(crate::calendar::MeetingProvider::Teams), ..event("u8", "Review", "2026-11-24 14:00") };
+        let refused = s.write(|tx| queue(tx, &Edit::quiet(cal, Change::Create(vec![call.clone()])), NOW, &horizon()));
+        assert!(refused.unwrap_err().to_string().contains("can't have this video call"));
+        q(&s, cal, Change::Create(vec![event("u8", "Review", "2026-11-24 14:00")]));
+        assert!(s.write(|tx| queue(tx, &Edit::quiet(cal, Change::Update(call)), NOW, &horizon())).is_err());
+        assert_eq!(shown(&s), pairs(&[("24 14:00", "Review")]));
     }
 
     /// (start, title) of every occurrence in November 2026.

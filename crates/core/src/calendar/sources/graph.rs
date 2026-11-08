@@ -846,6 +846,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
             hide_guests: g.hide_attendees,
             ..MeetingOptions::default()
         },
+        video: None,
     })
 }
 

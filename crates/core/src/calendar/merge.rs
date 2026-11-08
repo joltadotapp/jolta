@@ -39,6 +39,11 @@ pub fn three_way(base: &EventData, mine: &EventData, theirs: &EventData) -> Merg
 /// Whether the user's value wins: only the user changed the field. When
 /// both changed it to different values, the field goes into `lost`.
 fn pick(field: Field, base: &EventData, mine: &EventData, theirs: &EventData, lost: &mut Vec<Field>) -> bool {
+    // A video call asked for is made once: a meeting on the server now,
+    // such as the one an earlier try of this edit made, is it.
+    if field == Field::MeetingLink && mine.video.is_some() && theirs.meeting.is_some() {
+        return false;
+    }
     let (i_changed, they_changed) = (field.differs(base, mine), field.differs(base, theirs));
     if i_changed && they_changed && field.differs(mine, theirs) {
         lost.push(field);
@@ -224,5 +229,20 @@ mod tests {
         let mut upper = b.clone();
         upper.attendees[2].person.address = "CY@example.com".into();
         assert!(three_way(&b, &b, &upper).lost.is_empty(), "addresses compare without case");
+    }
+
+    /// Check 4: a video call asked for, which an earlier try of the edit
+    /// already made, merges as made; a change elsewhere to another field
+    /// keeps the request.
+    #[test]
+    fn a_requested_video_call_is_made_once() {
+        let base = EventData::new("u1", Span::Timed { start: at("2026-11-24 09:00"), end: at("2026-11-24 09:30") });
+        let mine = EventData { video: Some(MeetingProvider::Teams), ..base.clone() };
+        let made = Meeting { provider: MeetingProvider::Teams, join_url: "https://teams.microsoft.com/l/meetup-join/x".into(), meeting_id: None, passcode: None, phones: vec![], other_links: vec![] };
+        let theirs = EventData { meeting: Some(made), ..base.clone() };
+        assert_eq!(three_way(&base, &mine, &theirs), Merged { event: theirs, lost: Vec::new() });
+        let renamed = EventData { title: "Renamed".into(), ..base.clone() };
+        let merged = three_way(&base, &mine, &renamed);
+        assert_eq!((merged.event.video, merged.event.title.as_str(), merged.lost), (Some(MeetingProvider::Teams), "Renamed", Vec::new()));
     }
 }

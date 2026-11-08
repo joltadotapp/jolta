@@ -12,7 +12,7 @@ use super::{BASE, Google, GoogleEvent, Reminder, event, failure};
 use crate::calendar::change::Field;
 use crate::calendar::ical_edit::Prop;
 use crate::calendar::ops::Notify;
-use crate::calendar::{Alarm, AlarmTrigger, Calendar, EventData, EventStatus, Moment, Response, Role, ShowAs, Visibility, tz};
+use crate::calendar::{Alarm, AlarmTrigger, Calendar, EventData, EventStatus, MeetingProvider, Moment, Response, Role, ShowAs, Visibility, tz};
 use crate::{Error, Result};
 
 const GOOGLE: &str = "Google Calendar";
@@ -22,6 +22,8 @@ pub(super) trait Http {
     async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)>;
     /// The account's address, the user's entry among the guests.
     fn me(&self) -> &str;
+    /// Waits between reads of a Meet still being made.
+    async fn pause(&self, time: std::time::Duration);
 }
 
 impl Http for Google {
@@ -31,6 +33,10 @@ impl Http for Google {
 
     fn me(&self) -> &str {
         &self.account.address
+    }
+
+    async fn pause(&self, time: std::time::Duration) {
+        tokio::time::sleep(time).await;
     }
 }
 
@@ -61,12 +67,12 @@ pub(crate) fn event_id(uid: &str) -> String {
 
 pub(crate) fn writable(write: &OpWrite<'_>, here: Tz) -> Result<()> {
     match write {
-        OpWrite::Create { events, extra, .. } => {
+        OpWrite::Create { events, key, extra } => {
             let (master, changed) = split_series(events)?;
-            insert_body(std::slice::from_ref(master), *extra, here)?;
+            insert_body(std::slice::from_ref(master), *extra, key, here)?;
             changed.iter().try_for_each(|e| occurrence_body(master, e, here).map(drop))
         }
-        OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => patch_body(base, event, *extra, here).map(drop),
+        OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => patch_body(base, event, *extra, "", here).map(drop),
         OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
     }
 }
@@ -95,7 +101,7 @@ fn occurrence_body(master: &EventData, changed: &EventData, here: Tz) -> Result<
     }
     let rid = changed.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "change an occurrence without its start"))?;
     let base = crate::calendar::series::occurrence(std::slice::from_ref(master), rid, here).ok_or_else(|| cannot(GOOGLE, "move an all-day occurrence to a time"))?;
-    patch_body(&base, changed, None, here).map(Some)
+    patch_body(&base, changed, None, "", here).map(Some)
 }
 
 /// Google's `sendUpdates` for the op's notify. Google mails only the guests
@@ -113,9 +119,9 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
     let events_url = format!("{BASE}/calendars/{}/events", encode(&calendar.remote_id));
     let updates = send_updates(tell.notify);
     match *write {
-        OpWrite::Create { events, extra, .. } => {
+        OpWrite::Create { events, key, extra } => {
             let (master, changed) = split_series(events)?;
-            let mut written = create(google, calendar, master, extra, &events_url, updates, here).await?;
+            let mut written = create(google, calendar, master, extra, key, &events_url, updates, here).await?;
             // The series' changed occurrences follow as writes of their
             // instances. A retry finds the series made and leaves the
             // instances the first try wrote alone, as each write may mail
@@ -152,11 +158,12 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
         OpWrite::Occurrence { series, base, event, extra } => {
             let Some(etag) = series.etag.as_deref() else { return Ok(Written::Stale) };
             let rid = event.recurrence_id.as_ref().ok_or_else(|| cannot(GOOGLE, "change an occurrence without its start"))?;
-            let body = patch_body(base, event, extra, here)?;
-            let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&instance_id(&series.remote_id, rid, here)));
+            let id = instance_id(&series.remote_id, rid, here);
+            let body = patch_body(base, event, extra, &request_id(&id, etag), here)?;
+            let url = format!("{events_url}/{}?sendUpdates={updates}{}", encode(&id), conference_version(&body));
             let (status, reply) = google.request(reqwest::Method::PATCH, &url, Some(&body), Some(etag)).await?;
             match status {
-                200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, &event.alarms)?))),
+                200..300 => Ok(Written::Saved(Some(version(google, calendar, &settled(google, calendar, &body, reply).await?, &event.alarms)?))),
                 412 => Ok(Written::Stale),
                 404 | 410 => Ok(Written::Gone),
                 _ => Err(failure(status, &reply)),
@@ -177,11 +184,11 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
         }
         OpWrite::Update { held, base, event, extra, .. } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
-            let body = patch_body(base, event, extra, here)?;
-            let url = format!("{events_url}/{}?sendUpdates={updates}", encode(&held.remote_id));
+            let body = patch_body(base, event, extra, &request_id(&held.remote_id, etag), here)?;
+            let url = format!("{events_url}/{}?sendUpdates={updates}{}", encode(&held.remote_id), conference_version(&body));
             let (status, reply) = google.request(reqwest::Method::PATCH, &url, Some(&body), Some(etag)).await?;
             match status {
-                200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, &event.alarms)?))),
+                200..300 => Ok(Written::Saved(Some(version(google, calendar, &settled(google, calendar, &body, reply).await?, &event.alarms)?))),
                 412 => Ok(Written::Stale),
                 404 | 410 => Ok(Written::Gone),
                 _ => Err(failure(status, &reply)),
@@ -202,12 +209,14 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
 }
 
 /// `events.insert` of a series or single event, with the UID Google keeps.
-async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, extra: Option<&crate::calendar::ops::Extra>, events_url: &str, updates: &str, here: Tz) -> Result<Written> {
-    let body = insert_body(std::slice::from_ref(master), extra, here)?;
+#[allow(clippy::too_many_arguments)]
+async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, extra: Option<&crate::calendar::ops::Extra>, key: &str, events_url: &str, updates: &str, here: Tz) -> Result<Written> {
+    let body = insert_body(std::slice::from_ref(master), extra, key, here)?;
     let (uid, alarms) = (&master.uid, &master.alarms);
-    let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates={updates}"), Some(&body), None).await?;
+    let meet = conference_version(&body);
+    let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}?sendUpdates={updates}{meet}"), Some(&body), None).await?;
     match status {
-        200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
+        200..300 => Ok(Written::Saved(Some(version(google, calendar, &settled(google, calendar, &body, reply).await?, alarms)?))),
         // Google holds the UID already: a retry whose first try
         // reached it keeps that event as it is now; one deleted
         // before, as for Undo of a delete, comes back through
@@ -216,9 +225,9 @@ async fn create(google: &impl Http, calendar: &Calendar, master: &EventData, ext
         409 => match by_uid(google, calendar, uid, alarms).await? {
             Some((v, false)) => Ok(Written::Saved(Some(v))),
             Some((_, true)) => {
-                let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}/import"), Some(&body), None).await?;
+                let (status, reply) = google.request(reqwest::Method::POST, &format!("{events_url}/import{}", meet.replacen('&', "?", 1)), Some(&body), None).await?;
                 match status {
-                    200..300 => Ok(Written::Saved(Some(version(google, calendar, &reply, alarms)?))),
+                    200..300 => Ok(Written::Saved(Some(version(google, calendar, &settled(google, calendar, &body, reply).await?, alarms)?))),
                     _ => Err(failure(status, &reply)),
                 }
             }
@@ -281,21 +290,21 @@ fn version(google: &impl Http, calendar: &Calendar, reply: &[u8], alarms: &[Alar
 /// refuses an id of Jolta's next to the UID ("Invalid resource id value",
 /// seen on the Google test account, 2026-11-07), so it picks the id. A
 /// series' changed occurrences are writes of their own.
-pub(crate) fn insert_body(events: &[EventData], extra: Option<&crate::calendar::ops::Extra>, here: Tz) -> Result<Value> {
+pub(crate) fn insert_body(events: &[EventData], extra: Option<&crate::calendar::ops::Extra>, request: &str, here: Tz) -> Result<Value> {
     let [e] = events else { return Err(cannot(GOOGLE, "take a repeating event with changed occurrences from Jolta yet")) };
     let mut v = json!({ "iCalUID": e.uid });
     for field in created_fields(e) {
-        set(&mut v, field, e, here, true)?;
+        set(&mut v, field, e, request, here, true)?;
     }
     merge_json(&mut v, extra, GOOGLE)?;
     Ok(v)
 }
 
 /// `events.patch`'s body: only the fields that changed from `base`.
-pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&crate::calendar::ops::Extra>, here: Tz) -> Result<Value> {
+pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&crate::calendar::ops::Extra>, request: &str, here: Tz) -> Result<Value> {
     let mut v = json!({});
     for field in changed_fields(base, e) {
-        set(&mut v, field, e, here, false)?;
+        set(&mut v, field, e, request, here, false)?;
     }
     merge_json(&mut v, extra, GOOGLE)?;
     Ok(v)
@@ -325,8 +334,44 @@ fn attendee(a: &crate::calendar::Attendee) -> Value {
     v
 }
 
-/// Puts `field` of `e` into the body the way Google takes it.
-fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> Result<()> {
+/// The id of the conference request a write of the object `id` at the
+/// version `etag` makes: every try of one op sends the same, so Google
+/// makes one Meet, and a later request on the same event is a new one.
+fn request_id(id: &str, etag: &str) -> String {
+    format!("{id}-{}", etag.chars().filter(char::is_ascii_alphanumeric).collect::<String>())
+}
+
+/// The query Google needs to read `conferenceData` in a request body; a
+/// body without it leaves the event's conference as it is.
+fn conference_version(body: &Value) -> &'static str {
+    if body.get("conferenceData").is_some() { "&conferenceDataVersion=1" } else { "" }
+}
+
+/// Google's answer once the Meet a request asked for is made. Google may
+/// answer `pending`; the event is then read again every 2 seconds for up
+/// to 20 seconds, and a Meet still pending after that comes with a later
+/// sync. The test accounts answered `success` at once (C3 spec, section 2).
+async fn settled(google: &impl Http, calendar: &Calendar, body: &Value, mut reply: Vec<u8>) -> Result<Vec<u8>> {
+    if body.get("conferenceData").is_none() {
+        return Ok(reply);
+    }
+    for _ in 0..10 {
+        let now: Value = serde_json::from_slice(&reply).unwrap_or_default();
+        let (Some("pending"), Some(id)) = (now.pointer("/conferenceData/createRequest/status/statusCode").and_then(Value::as_str), now["id"].as_str()) else { break };
+        google.pause(std::time::Duration::from_secs(2)).await;
+        let url = format!("{BASE}/calendars/{}/events/{}", encode(&calendar.remote_id), encode(id));
+        let (status, again) = google.request(reqwest::Method::GET, &url, None, None).await?;
+        if !(200..300).contains(&status) {
+            break;
+        }
+        reply = again;
+    }
+    Ok(reply)
+}
+
+/// Puts `field` of `e` into the body the way Google takes it; a Meet asked
+/// for goes with `request` as its request id.
+fn set(v: &mut Value, field: Field, e: &EventData, request: &str, here: Tz, creating: bool) -> Result<()> {
     match field {
         Field::Time => {
             v["start"] = when(&e.span, true, here);
@@ -401,10 +446,15 @@ fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> 
             v["guestsCanInviteOthers"] = json!(e.options.guests_invite);
             v["guestsCanModify"] = json!(e.options.guests_modify);
         }
-        // A new event's meeting stays in its description; making one is for
-        // Add video call.
-        Field::MeetingLink if creating => {}
-        Field::MeetingLink => return Err(cannot(GOOGLE, "change the video call from Jolta yet")),
+        Field::MeetingLink => match (e.video, &e.meeting) {
+            (Some(MeetingProvider::Meet), None) => {
+                v["conferenceData"] = json!({ "createRequest": { "requestId": request, "conferenceSolutionKey": { "type": "hangoutsMeet" } } })
+            }
+            (Some(_), None) => return Err(cannot(GOOGLE, "make this video call; only Google Meet")),
+            // A new event's meeting stays in its description.
+            _ if creating => {}
+            _ => return Err(cannot(GOOGLE, "change or remove a video call from Jolta yet")),
+        },
     }
     Ok(())
 }
@@ -438,7 +488,7 @@ mod tests {
     #[test]
     fn a_create_sends_the_uid_and_what_the_event_sets() {
         let e = EventData { location: "Room 1".into(), show_as: ShowAs::Free, ..standup() };
-        let body = insert_body(std::slice::from_ref(&e), None, Brussels).unwrap();
+        let body = insert_body(std::slice::from_ref(&e), None, "r", Brussels).unwrap();
         assert_eq!(
             body,
             json!({
@@ -456,7 +506,7 @@ mod tests {
     fn a_patch_sends_only_the_changed_fields() {
         let base = standup();
         let moved = EventData { title: "Daily".into(), span: Span::Timed { start: at("2026-11-24 10:00"), end: at("2026-11-24 10:15") }, ..base.clone() };
-        let body = patch_body(&base, &moved, None, Brussels).unwrap();
+        let body = patch_body(&base, &moved, None, "r", Brussels).unwrap();
         assert_eq!(
             body,
             json!({
@@ -466,9 +516,9 @@ mod tests {
             })
         );
         let alerted = EventData { alarms: vec![Alarm { trigger: AlarmTrigger::MinutesBefore(10), email: false }], ..base.clone() };
-        assert_eq!(patch_body(&base, &alerted, None, Brussels).unwrap(), json!({ "reminders": { "useDefault": false, "overrides": [{ "method": "popup", "minutes": 10 }] } }));
-        assert!(patch_body(&base, &EventData { show_as: ShowAs::OutOfOffice, ..base.clone() }, None, Brussels).is_err(), "Google shows free or busy");
-        assert!(patch_body(&base, &EventData { categories: vec!["Work".into()], ..base.clone() }, None, Brussels).is_err());
+        assert_eq!(patch_body(&base, &alerted, None, "r", Brussels).unwrap(), json!({ "reminders": { "useDefault": false, "overrides": [{ "method": "popup", "minutes": 10 }] } }));
+        assert!(patch_body(&base, &EventData { show_as: ShowAs::OutOfOffice, ..base.clone() }, None, "r", Brussels).is_err(), "Google shows free or busy");
+        assert!(patch_body(&base, &EventData { categories: vec!["Work".into()], ..base.clone() }, None, "r", Brussels).is_err());
     }
 
     /// C4 creates out of office through `extra`; the fields Jolta models
@@ -487,20 +537,28 @@ mod tests {
             .clone(),
         );
         let e = EventData { title: "Out of office".into(), show_as: ShowAs::OutOfOffice, ..standup() };
-        let body = insert_body(std::slice::from_ref(&e), Some(&extra), Brussels).unwrap();
+        let body = insert_body(std::slice::from_ref(&e), Some(&extra), "r", Brussels).unwrap();
         assert_eq!(body["eventType"], "outOfOffice");
         assert_eq!(body["outOfOfficeProperties"]["declineMessage"], "Away", "passed through untouched");
         assert_eq!((body["summary"].as_str(), body["transparency"].as_str()), (Some("Out of office"), Some("opaque")), "the title and show as are Jolta's");
-        assert!(insert_body(std::slice::from_ref(&e), Some(&Extra::Lines(vec!["X-A:1".into()])), Brussels).is_err());
+        assert!(insert_body(std::slice::from_ref(&e), Some(&Extra::Lines(vec!["X-A:1".into()])), "r", Brussels).is_err());
     }
 
     struct Fake {
         replies: Mutex<VecDeque<(u16, Value)>>,
         seen: Mutex<Vec<String>>,
+        bodies: Mutex<Vec<Value>>,
+    }
+
+    impl Fake {
+        fn new(replies: Vec<(u16, Value)>) -> Fake {
+            Fake { replies: Mutex::new(replies.into()), seen: Mutex::new(Vec::new()), bodies: Mutex::new(Vec::new()) }
+        }
     }
 
     impl Http for Fake {
-        async fn request(&self, method: reqwest::Method, url: &str, _: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
+        async fn request(&self, method: reqwest::Method, url: &str, body: Option<&Value>, if_match: Option<&str>) -> Result<(u16, Vec<u8>)> {
+            self.bodies.lock().unwrap().extend(body.cloned());
             let path = url.trim_start_matches(BASE);
             self.seen.lock().unwrap().push(format!("{method} {path}{}", if_match.map(|e| format!(" If-Match {e}")).unwrap_or_default()));
             let (status, body) = self.replies.lock().unwrap().pop_front().expect("a reply");
@@ -509,6 +567,10 @@ mod tests {
 
         fn me(&self) -> &str {
             "me@example.com"
+        }
+
+        async fn pause(&self, time: std::time::Duration) {
+            self.seen.lock().unwrap().push(format!("WAIT {}s", time.as_secs()));
         }
     }
 
@@ -545,7 +607,7 @@ mod tests {
     }
 
     async fn told(write: OpWrite<'_>, tell: Tell<'_>, replies: Vec<(u16, Value)>) -> (Result<Written>, Vec<String>) {
-        let fake = Fake { replies: Mutex::new(replies.into()), seen: Mutex::new(Vec::new()) };
+        let fake = Fake::new(replies);
         let done = send(&fake, &calendar(), &write, tell, Brussels).await;
         (done, fake.seen.into_inner().unwrap())
     }
@@ -572,6 +634,69 @@ mod tests {
         assert!(done.is_err(), "a UID Google won't show is never taken as this event");
     }
 
+    fn with_meet(event: Value, status: &str) -> Value {
+        let mut v = event;
+        v["conferenceData"] = json!({
+            "createRequest": { "requestId": "any", "conferenceSolutionKey": { "type": "hangoutsMeet" }, "status": { "statusCode": status } },
+            "entryPoints": if status == "success" { json!([{ "entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij" }]) } else { json!([]) },
+        });
+        v
+    }
+
+    /// Add video call on Google: the insert asks for a Meet under the op's
+    /// key, and a retry asks under the same key, so Google makes one
+    /// conference (check 4). A Meet still pending is read again.
+    #[tokio::test]
+    async fn a_meet_is_asked_for_once_per_op() {
+        let e = EventData { video: Some(MeetingProvider::Meet), ..standup() };
+        let id = event_id("u1@jolta.app");
+        let create = OpWrite::Create { events: std::slice::from_ref(&e), key: &id, extra: None };
+        let ask = |fake: &Fake| fake.bodies.lock().unwrap()[0]["conferenceData"].clone();
+        let first = Fake::new(vec![(500, json!({}))]);
+        assert!(send(&first, &calendar(), &create, Tell::NOBODY, Brussels).await.is_err(), "the first try's answer is lost");
+        let again = Fake::new(vec![(200, with_meet(google(&id, "\"5\"", "u1@jolta.app", "confirmed"), "success"))]);
+        let Written::Saved(Some(v)) = send(&again, &calendar(), &create, Tell::NOBODY, Brussels).await.unwrap() else { panic!("saved") };
+        assert_eq!(ask(&first), json!({ "createRequest": { "requestId": id, "conferenceSolutionKey": { "type": "hangoutsMeet" } } }));
+        assert_eq!(ask(&first), ask(&again), "the retry asks under the same request id");
+        assert_eq!(again.seen.lock().unwrap()[0], "POST /calendars/primary/events?sendUpdates=none&conferenceDataVersion=1");
+        assert_eq!(v.events[0].meeting.as_ref().map(|m| m.join_url.as_str()), Some("https://meet.google.com/abc-defg-hij"), "the join link Jolta reads back");
+        assert_eq!(v.events[0].video, None, "the answer replaces the request");
+
+        let made = with_meet(google(&id, "\"6\"", "u1@jolta.app", "confirmed"), "success");
+        let (done, seen) = sent(create, vec![(200, with_meet(google(&id, "\"5\"", "u1@jolta.app", "confirmed"), "pending")), (200, made)]).await;
+        assert!(matches!(done.unwrap(), Written::Saved(Some(Version { etag: Some(e), .. })) if e == "\"6\""));
+        assert_eq!(&seen[1..], ["WAIT 2s".to_string(), format!("GET /calendars/primary/events/{id}")], "a pending Meet is read again");
+
+        let pending = || with_meet(google(&id, "\"5\"", "u1@jolta.app", "confirmed"), "pending");
+        let (done, seen) = sent(create, std::iter::repeat_with(|| (200, pending())).take(11).collect()).await;
+        assert!(done.is_ok() && seen.iter().filter(|s| s.starts_with("WAIT")).count() == 10, "it waits 20 seconds at most");
+
+        let plain = Fake::new(vec![(200, google(&id, "\"5\"", "u1@jolta.app", "confirmed"))]);
+        send(&plain, &calendar(), &OpWrite::Create { events: &[standup()], key: &id, extra: None }, Tell::NOBODY, Brussels).await.unwrap();
+        assert_eq!(plain.seen.lock().unwrap()[0], "POST /calendars/primary/events?sendUpdates=none", "no conference version without a call");
+    }
+
+    /// A Meet added to an event already on Google: its request id comes
+    /// from the version the PATCH writes over, so adding one again later is
+    /// a new request.
+    #[tokio::test]
+    async fn a_meet_added_later_is_asked_for_against_the_held_version() {
+        async fn ask(etag: &str) -> (Value, String) {
+            let base = standup();
+            let mine = EventData { video: Some(MeetingProvider::Meet), ..base.clone() };
+            let held = Stored { id: EventId(1), remote_id: "abc".into(), etag: Some(etag.into()), raw: None, data: base.clone() };
+            let fake = Fake::new(vec![(412, json!({}))]);
+            send(&fake, &calendar(), &OpWrite::Update { held: &held, base: &base, event: &mine, extra: None, dropped: &[] }, Tell::NOBODY, Brussels).await.unwrap();
+            let line = fake.seen.lock().unwrap()[0].clone();
+            (fake.bodies.lock().unwrap()[0].clone(), line)
+        }
+        let (body, line) = ask("\"3\"").await;
+        assert_eq!(body["conferenceData"]["createRequest"]["requestId"], "abc-3");
+        assert_eq!(line, "PATCH /calendars/primary/events/abc?sendUpdates=none&conferenceDataVersion=1 If-Match \"3\"");
+        assert_ne!(ask("\"7\"").await.0, body, "another version, another request");
+        assert!(insert_body(&[EventData { video: Some(MeetingProvider::Teams), ..standup() }], None, "r", Brussels).is_err(), "Google makes Meet only");
+    }
+
     #[tokio::test]
     async fn every_patch_and_delete_carries_the_held_etag() {
         let base = standup();
@@ -596,7 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_deleted_event_fetches_as_gone() {
-        let fake = Fake { replies: Mutex::new(vec![(200, google("abc", "\"9\"", "u1@jolta.app", "cancelled"))].into()), seen: Mutex::new(Vec::new()) };
+        let fake = Fake::new(vec![(200, google("abc", "\"9\"", "u1@jolta.app", "cancelled"))]);
         assert_eq!(fetch(&fake, &calendar(), "abc", &[]).await.unwrap(), None);
     }
     /// The op's notify picks `sendUpdates`, and a patch of the guests sends
@@ -614,7 +739,7 @@ mod tests {
         let mut e = base.clone();
         e.attendees = vec![guest("ann@example.com", Role::Optional, Response::Accepted), guest("room@example.com", Role::Room, Response::NeedsAction)];
         e.options.guests_invite = false;
-        let body = patch_body(&base, &e, None, Brussels).unwrap();
+        let body = patch_body(&base, &e, None, "r", Brussels).unwrap();
         assert_eq!(
             body["attendees"],
             json!([

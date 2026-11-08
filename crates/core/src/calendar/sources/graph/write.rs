@@ -12,7 +12,7 @@ use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
 use super::{Api, FIELDS, GraphCalendar, GraphEvent, event, get_ok, instance};
 use crate::calendar::change::Field;
 use crate::calendar::ops::{Extra, Notify};
-use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, Role, ShowAs, Span, Visibility, tz};
+use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, MeetingProvider, Role, ShowAs, Span, Visibility, tz};
 use crate::{Error, Result};
 
 const MICROSOFT: &str = "Microsoft 365";
@@ -376,8 +376,18 @@ fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> 
             v["allowNewTimeProposals"] = json!(e.options.allow_new_times);
             v["hideAttendees"] = json!(e.options.hide_guests);
         }
-        Field::MeetingLink if creating => {}
-        Field::MeetingLink => return Err(cannot(MICROSOFT, "change the video call from Jolta yet")),
+        // Exchange makes the Teams meeting and puts its block in the body;
+        // the meeting can't be taken off again (C3 spec, section 2).
+        Field::MeetingLink => match (e.video, &e.meeting) {
+            (Some(MeetingProvider::Teams), None) => {
+                v["isOnlineMeeting"] = json!(true);
+                v["onlineMeetingProvider"] = json!("teamsForBusiness");
+            }
+            (Some(_), None) => return Err(cannot(MICROSOFT, "make this video call; only Teams")),
+            // A new event's meeting stays in its description.
+            _ if creating => {}
+            _ => return Err(cannot(MICROSOFT, "change or remove a video call")),
+        },
     }
     Ok(())
 }
@@ -401,6 +411,32 @@ mod tests {
 
     fn standup() -> EventData {
         EventData { title: "Standup".into(), ..EventData::new("u1@jolta.app", Span::Timed { start: at("2026-11-24 09:00"), end: at("2026-11-24 09:30") }) }
+    }
+
+    /// Add video call on Microsoft 365: Exchange makes the Teams meeting
+    /// from these two fields, on a create or on a PATCH of an event without
+    /// one, and nothing takes it off again.
+    #[test]
+    fn a_teams_meeting_is_asked_for_on_create_and_patch() {
+        let teams = EventData { video: Some(MeetingProvider::Teams), ..standup() };
+        let body = create_body(std::slice::from_ref(&teams), "tx1", None, Brussels).unwrap();
+        assert_eq!((&body["isOnlineMeeting"], &body["onlineMeetingProvider"]), (&json!(true), &json!("teamsForBusiness")));
+        let patch = patch_body(&standup(), &teams, None, Brussels).unwrap();
+        assert_eq!(patch, json!({ "isOnlineMeeting": true, "onlineMeetingProvider": "teamsForBusiness" }), "the PATCH carries the call alone");
+        assert!(create_body(&[standup()], "tx1", None, Brussels).unwrap().get("isOnlineMeeting").is_none(), "no call unless asked");
+
+        let meet = EventData { video: Some(MeetingProvider::Meet), ..standup() };
+        assert!(create_body(std::slice::from_ref(&meet), "tx1", None, Brussels).is_err(), "Exchange makes Teams meetings only");
+        let made = crate::calendar::Meeting {
+            provider: MeetingProvider::Teams,
+            join_url: "https://teams.microsoft.com/l/meetup-join/19%3ameeting_x%40thread.v2/0".into(),
+            meeting_id: None,
+            passcode: None,
+            phones: Vec::new(),
+            other_links: Vec::new(),
+        };
+        let with_meeting = EventData { meeting: Some(made), ..standup() };
+        assert!(patch_body(&with_meeting, &standup(), None, Brussels).is_err(), "a Teams meeting can't be taken off");
     }
 
     #[test]

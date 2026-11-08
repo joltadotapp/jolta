@@ -655,6 +655,7 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
             guests_modify: g.guests_can_modify,
             ..MeetingOptions::default()
         },
+        video: None,
     })
 }
 

@@ -240,6 +240,11 @@ pub struct EventData {
     /// addresses, which iCloud rewrites to the Apple ID's preferred one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub organizer_is_me: bool,
+    /// A video call the next write asks the server to make: Add video call
+    /// sets it, and the server's answer, which carries the meeting in
+    /// `meeting`, replaces the event. No source reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<MeetingProvider>,
 }
 
 impl EventData {
@@ -269,6 +274,7 @@ impl EventData {
             master_id: None,
             options: MeetingOptions::default(),
             organizer_is_me: false,
+            video: None,
         }
     }
 

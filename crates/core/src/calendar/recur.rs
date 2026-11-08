@@ -924,6 +924,7 @@ mod tests {
             master_id: None,
             options: Default::default(),
             organizer_is_me: false,
+            video: None,
         }
     }
 
