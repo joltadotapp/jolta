@@ -32,9 +32,10 @@ pub fn three_way(base: &EventData, mine: &EventData, theirs: &EventData) -> Merg
     if people_lost {
         lost.push(Field::People);
     }
-    // Out of office's reply and declines go out in the edit's extra fields,
-    // which a retry sends only when the merge differs from the server's.
-    if mine.kind != base.kind && theirs.kind == base.kind {
+    // Out of office's reply and declines are the user's latest choice in
+    // the sheet, sent in the edit's extra fields, which a retry sends only
+    // when the merge differs from the server's: the user's new ones win.
+    if mine.kind != base.kind {
         event.kind = mine.kind.clone();
     }
     lost.sort();
@@ -165,7 +166,8 @@ mod tests {
         let merged = three_way(&base, &mine, &theirs);
         assert_eq!((merged.event.kind, merged.event.title.as_str()), (away("Back Tuesday"), "Away"));
         let both = EventData { kind: away("Back Friday"), ..base.clone() };
-        assert_eq!(three_way(&base, &mine, &both).event.kind, away("Back Friday"), "the server's stays when both changed it");
+        assert_eq!(three_way(&base, &mine, &both).event.kind, away("Back Tuesday"), "the reply just set wins over one changed on the server");
+        assert_eq!(three_way(&base, &base, &both).event.kind, away("Back Friday"), "an edit that left it alone keeps the server's");
     }
 
     #[test]
