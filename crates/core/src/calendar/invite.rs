@@ -81,11 +81,12 @@ fn encode(id: &str) -> String {
 }
 
 /// The account's calendar for new meetings: the default calendar when it is
-/// the account's, else its own shown calendar that takes new events.
+/// the account's, else its own shown calendar that takes new events, else a
+/// hidden one, before any other account's.
 fn account_calendar(conn: &Connection, account: AccountId) -> Result<Option<Calendar>> {
     let address = store::account(conn, account)?.address;
     let writable: Vec<Calendar> = store::account_calendars(conn, account)?.into_iter().filter(|c| caps::of(c).writable && c.is_own(&address)).collect();
-    Ok(writable.iter().find(|c| c.is_default).or_else(|| writable.iter().find(|c| c.shown)).cloned())
+    Ok(writable.iter().find(|c| c.is_default).or_else(|| writable.iter().find(|c| c.shown)).or(writable.first()).cloned())
 }
 
 #[cfg(test)]
@@ -170,6 +171,9 @@ mod tests {
         let google = j.store.read(|c| prefill(c, &picked(AccountId(2)))).unwrap();
         assert_eq!((google.calendar, google.video), (Some(team), Some(MeetingProvider::Meet)), "its own primary calendar, not the one shared with it, and Meet");
         assert_eq!((google.title.as_str(), google.description.as_str()), ("", ""), "no conversation, no title or link");
+        j.store.write(|tx| Ok(tx.execute("UPDATE calendar SET shown = 0 WHERE id = ?1", [team])?)).unwrap();
+        j.store.write(|tx| crate::store::set_default_calendar(tx, Some(work))).unwrap();
+        assert_eq!(j.store.read(|c| prefill(c, &picked(AccountId(2)))).unwrap().calendar, Some(team), "hidden, it still beats another account's default");
 
         j.store.write(|tx| tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (3, 'imap', 'me@home.example', 'me', 'a3', 0, 0);").map_err(Into::into)).unwrap();
         j.store.write(|tx| crate::store::set_default_calendar(tx, Some(work))).unwrap();

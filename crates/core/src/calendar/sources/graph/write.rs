@@ -301,6 +301,10 @@ pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&Extra>,
     for field in changed_fields(base, e) {
         set(&mut v, field, e, here, false)?;
     }
+    // A room added where the location already says its name.
+    if v.get("location").is_none() && location(base) != location(e) {
+        v["location"] = location(e);
+    }
     merge_json(&mut v, extra, MICROSOFT)?;
     Ok(v)
 }
@@ -686,6 +690,8 @@ mod tests {
         assert_eq!(patch_body(&base, &by_address, None, Brussels).unwrap()["location"]["locationEmailAddress"], "bruegel@rooms.example");
         let elsewhere = EventData { location: "The café downstairs".into(), ..booked.clone() };
         assert_eq!(patch_body(&base, &elsewhere, None, Brussels).unwrap()["location"], json!({ "displayName": "The café downstairs" }));
+        let named = EventData { location: "Bruegel".into(), attendees: vec![person("ann@example.com", Role::Required, false)], ..base.clone() };
+        assert_eq!(patch_body(&named, &booked, None, Brussels).unwrap()["location"]["locationEmailAddress"], "bruegel@rooms.example", "a room added where the location already named it");
         let no_room = EventData { attendees: vec![person("ann@example.com", Role::Required, false)], ..booked };
         assert_eq!(patch_body(&base, &no_room, None, Brussels).unwrap()["location"], json!({ "displayName": "Bruegel" }), "a guest named like the room isn't one");
     }
