@@ -132,7 +132,21 @@ impl CalDav {
             200..300 => return Ok(Written::Stale),
             status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
         }
-        let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag)];
+        let text = unforced(&text);
+        // iCloud keeps the mark and mails only for a PUT that adds it, so a
+        // copy that has it goes back without it first, which mails nobody.
+        let mut etag = etag.to_string();
+        if force_send.is_some() && marked(&now.body) {
+            let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag.as_str())];
+            let reply = self.exchange("PUT", &url, &headers, &unforced(&now.body)).await?;
+            match (reply.status, reply.etag) {
+                (200..300, Some(next)) => etag = next,
+                (200..300, None) | (412, _) => return Ok(Written::Stale),
+                (404 | 410, _) => return Ok(Written::Gone),
+                (status, _) => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
+            }
+        }
+        let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag.as_str())];
         let body = force_send.map_or_else(|| text.clone(), |uid| forced(&text, uid));
         let reply = self.exchange("PUT", &url, &headers, &body).await?;
         match reply.status {
@@ -349,6 +363,25 @@ fn forced(text: &str, uid: &str) -> String {
     for component in obj.events_mut(uid) {
         let Some(organizer) = organizer_addresses(component) else { continue };
         component.update("ATTENDEE", |p| !is_one_of(p, &organizer), |p| p.set_param("SCHEDULE-FORCE-SEND", "REQUEST"));
+    }
+    obj.to_string()
+}
+
+fn marked(text: &str) -> bool {
+    text.replace("\r\n ", "").replace("\n ", "").contains("SCHEDULE-FORCE-SEND")
+}
+
+/// `text` without any SCHEDULE-FORCE-SEND mark, which iCloud keeps.
+fn unforced(text: &str) -> String {
+    if !marked(text) {
+        return text.to_string();
+    }
+    let mut obj = Object::parse(text);
+    let uids: Vec<String> = ical::read(text, &[]).map(|events| events.into_iter().map(|e| e.uid).collect()).unwrap_or_default();
+    for uid in uids {
+        for component in obj.events_mut(&uid) {
+            component.update("ATTENDEE", |p| p.param("SCHEDULE-FORCE-SEND").is_some(), |p| p.remove_param("SCHEDULE-FORCE-SEND"));
+        }
     }
     obj.to_string()
 }
@@ -603,6 +636,25 @@ mod tests {
             assert_eq!(server.await.unwrap(), ["GET /cal/m.ics".to_string(), put], "{notify:?}");
             assert!(!String::from_utf8_lossy(v.raw.as_deref().unwrap()).contains("SCHEDULE-FORCE-SEND"), "the copy kept");
         }
+
+        // iCloud keeps the mark, and mails only for a PUT that adds it
+        // (iCloud test account, 2026-11-08): a copy that has it is put back
+        // without it first, which mails nobody, then the change goes forced.
+        let marked = icloud.replace("ATTENDEE;CN=Ann;", "ATTENDEE;SCHEDULE-FORCE-SEND=REQUEST;CN=Ann;");
+        let marked_held = Stored { raw: Some(marked.as_bytes().to_vec()), ..stored.clone() };
+        let update = OpWrite::Update { held: &marked_held, base: &base, event: &renamed, extra: None, dropped: &[] };
+        let (dav, calendar, server) = caldav_server(vec![
+            ("200 OK", Some("\"1\""), Some(marked.clone())),
+            ("204 No Content", Some("\"2\""), None),
+            ("204 No Content", Some("\"3\""), None),
+        ])
+        .await;
+        let Written::Saved(Some(v)) = dav.write(&calendar, &update, Tell { notify: Notify::All, message: None }).await.unwrap() else { panic!("saved") };
+        assert_eq!(server.await.unwrap(), ["GET /cal/m.ics", "PUT /cal/m.ics If-Match \"1\"", "PUT /cal/m.ics If-Match \"2\" forces a send"]);
+        assert_eq!(v.etag.as_deref(), Some("\"3\""));
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(marked)), ("204 No Content", Some("\"2\""), None)]).await;
+        dav.write(&calendar, &update, Tell { notify: Notify::Changed, message: None }).await.unwrap();
+        assert_eq!(server.await.unwrap(), ["GET /cal/m.ics", "PUT /cal/m.ics If-Match \"1\""], "without Send the mark goes, which mails nobody");
     }
 
     /// A meeting the server schedules takes its guests' answers from the
