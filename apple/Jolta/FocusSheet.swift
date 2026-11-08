@@ -51,7 +51,7 @@ struct FocusSheet: View {
 
     private var calendars: [CalendarInfo] {
         let list = model.calendar.list
-        return (list.accounts.flatMap(\.calendars) + list.otherCalendars).filter { $0.writable && $0.shown }
+        return (list.accounts.flatMap(\.calendars) + list.otherCalendars).filter { $0.writable && ($0.shown || $0.id == calendarId) }
     }
 
     var body: some View {
