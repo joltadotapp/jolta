@@ -695,6 +695,55 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(app.textFields.matching(NSPredicate(format: "value == 'Starred'")).firstMatch.exists, "the saved section stays on the page")
     }
 
+    /// Quick create: Q opens the field, a line shows the event it makes,
+    /// Return opens the editor on it and ⌘↩ saves it. A name nobody was
+    /// written to waits as a chip and Save stays off. G goes to a typed day.
+    func testQuickCreateAndGoToDate() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        let calendarTitle = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(calendarTitle.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+
+        app.typeKey("q", modifierFlags: [])
+        let field = app.textFields["quick-create-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "Q opens quick create")
+        field.typeText("Journey lunch tomorrow 12:30 at Mok")
+        let preview = app.descendants(matching: .any).matching(identifier: "quick-create-preview").firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "the line shows the event it would make")
+        app.typeKey(.return, modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10), "Return opens the editor")
+        XCTAssertEqual(title.value as? String, "Journey lunch")
+        XCTAssertEqual(app.textFields["editor-start"].value as? String, "12:30")
+        XCTAssertEqual(app.textFields["editor-end"].value as? String, "13:00", "30 minutes, the default length")
+        XCTAssertEqual(app.textFields["editor-location"].value as? String, "Mok")
+        app.typeKey(.return, modifierFlags: .command)
+        let saved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Journey lunch, 12:30 to 13:00")).firstMatch
+        XCTAssertTrue(saved.waitForExistence(timeout: 5), "⌘↩ saves it into the week")
+
+        app.typeKey("q", modifierFlags: [])
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Sync with Nobody tomorrow 9am")
+        app.typeKey(.return, modifierFlags: [])
+        let chip = app.descendants(matching: .any).matching(identifier: "unresolved-chip").firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 10), "a name nobody was written to waits as a chip")
+        XCTAssertFalse(app.buttons["editor-save"].isEnabled, "and nothing saves until it is picked or removed")
+        app.typeKey(.escape, modifierFlags: [])
+        let discard = app.buttons["Discard"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 5))
+        discard.click()
+        XCTAssertTrue(chip.waitForNonExistence(timeout: 5))
+
+        app.typeKey("g", modifierFlags: [])
+        let day = app.textFields["go-to-date-field"]
+        XCTAssertTrue(day.waitForExistence(timeout: 5), "G opens go to date")
+        day.typeText("2027-01-04")
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "go-to-date-day").firstMatch.waitForExistence(timeout: 5), "it reads the day")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil { calendarTitle.label.hasPrefix("January 2027") }, "Return shows that week: \(calendarTitle.label)")
+    }
+
     /// Y, N and ⇧M answer the invitation selected in the week (decision 8:
     /// M stays Month). The fixture's Google calendar has no server, so each
     /// answer goes to Google and stops at the missing sign-in; the toast
