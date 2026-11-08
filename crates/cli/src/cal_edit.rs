@@ -738,6 +738,90 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Args)]
+pub struct QuickArgs {
+    text: Vec<String>,
+    /// Read as if it were this time on this Mac's clock, "2026-11-07 15:00".
+    #[arg(long)]
+    now: Option<String>,
+    /// Let the AI provider read what the parser leaves, as Return in the app does.
+    #[arg(long)]
+    ai: bool,
+    /// The language that wins a tie, "en", "nl" or "fr".
+    #[arg(long, default_value = "en")]
+    lang: String,
+}
+
+fn moment(text: Option<&str>) -> Result<chrono::DateTime<Utc>> {
+    let here = tz::here();
+    Ok(match text {
+        Some(t) => tz::instant(NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M").context("--now takes \"2026-11-07 15:00\"")?, here),
+        None => Utc::now(),
+    })
+}
+
+pub async fn quick(jolta: &Jolta, a: QuickArgs) -> Result<()> {
+    use jolta_core::ai;
+    use jolta_core::calendar::quick::{self, Lang, Prefs};
+
+    let text = a.text.join(" ");
+    let here = tz::here();
+    let now = moment(a.now.as_deref())?;
+    let minutes = jolta.store.read(store::default_event_minutes)?;
+    let prefs = Prefs::new(minutes, &Lang::of(&a.lang).into_iter().collect::<Vec<_>>());
+    let started = std::time::Instant::now();
+    let parsed = quick::parse(&text, now.with_timezone(&here), &prefs);
+    let took = started.elapsed();
+    println!("{text}");
+    println!("  read as {:?} in {:.0} µs", parsed.language, took.as_secs_f64() * 1e6);
+    for (range, part) in &parsed.parts {
+        println!("  {part:?}: {}", &text[range.clone()]);
+    }
+    if !parsed.leftover.is_empty() {
+        println!("  left over: {}", parsed.leftover.join(", "));
+    }
+    let people = jolta.store.read(|c| jolta_core::people::People::build(c, now.timestamp(), &[]))?;
+    let (d, by_ai, dropped) = if a.ai {
+        let helper = std::env::var_os("JOLTA_AI_HELPER")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("jolta-ai"));
+        let engine = ai::Ai::new(&jolta.data_dir, helper);
+        let started = std::time::Instant::now();
+        let q = ai::quick::draft(jolta, &engine, &people, &text, now, here, &prefs, &ai::Cancel::default()).await?;
+        println!("  asked the AI: {} ({:.1} s)", ai::quick::wanted(&text, &parsed), started.elapsed().as_secs_f64());
+        (q.draft, q.by_ai, q.dropped)
+    } else {
+        (jolta.store.read(|c| quick::draft(c, &people, &parsed, now, here))?, false, Vec::new())
+    };
+    if by_ai {
+        println!("  Read by AI");
+    }
+    for why in dropped {
+        println!("  dropped: {why}");
+    }
+    println!("  {}", quick::when_text(&d.span, now.with_timezone(&here).date_naive(), here));
+    for u in &d.unresolved {
+        let choices: Vec<&str> = u.choices.iter().map(|p| p.address.as_str()).collect();
+        println!("  unresolved: {} ({})", u.typed, if choices.is_empty() { "nobody you wrote to".into() } else { choices.join(", ") });
+    }
+    let problems = jolta.store.read(|c| draft::check_draft(c, &d, here))?;
+    print_draft(&d, &problems);
+    Ok(())
+}
+
+pub fn go(text: &str, today: Option<&str>) -> Result<()> {
+    use jolta_core::calendar::quick::{self, Prefs};
+    let today = match today {
+        Some(t) => NaiveDate::parse_from_str(t, "%Y-%m-%d").context("--today takes 2026-11-07")?,
+        None => Utc::now().with_timezone(&tz::here()).date_naive(),
+    };
+    match quick::go_to_date(text, today, &Prefs::new(30, &[])) {
+        Some(d) => println!("{}", d.format("%a %-d %b %Y")),
+        None => bail!("{text:?} isn't a day"),
+    }
+    Ok(())
+}
+
 fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
     let when = match d.span {
         Span::Timed { start, end } => format!("{} to {} ({:?})", start.wall.format("%a %-d %b %H:%M"), end.wall.format("%H:%M"), start.zone),

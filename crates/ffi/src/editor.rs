@@ -69,6 +69,14 @@ pub struct DraftPerson {
     pub is_me: bool,
 }
 
+/// A name quick create couldn't tie to one person the user wrote to, and
+/// who it could be. Saving waits until the user picks one or removes it.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedPerson {
+    pub typed: String,
+    pub choices: Vec<PersonRecord>,
+}
+
 /// What a meeting's organizer lets its guests do. The calendar's
 /// `capabilities` say which of these it has.
 #[derive(uniffi::Record, Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,6 +254,8 @@ pub struct EventDraft {
     /// isn't the Mac's.
     pub zone_text: Option<String>,
     pub people: Vec<DraftPerson>,
+    /// Names from quick create still to pick or remove.
+    pub unresolved: Vec<UnresolvedPerson>,
     pub options: MeetingOptions,
     pub room: String,
     pub location: String,
@@ -475,6 +485,11 @@ impl From<draft::EventDraft> for EventDraft {
                     is_me: a.is_me,
                 })
                 .collect(),
+            unresolved: d
+                .unresolved
+                .into_iter()
+                .map(|u| UnresolvedPerson { typed: u.typed, choices: u.choices.into_iter().map(|p| PersonRecord { name: p.name, address: p.address }).collect() })
+                .collect(),
             options: d.options.into(),
             room: d.room,
             location: d.location,
@@ -543,6 +558,11 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
                     comment: p.comment.clone(),
                     is_me: p.is_me,
                 })
+                .collect(),
+            unresolved: d
+                .unresolved
+                .iter()
+                .map(|u| draft::Unresolved { typed: u.typed.clone(), choices: u.choices.iter().map(person).collect() })
                 .collect(),
             options: d.options.into(),
             room: d.room.clone(),

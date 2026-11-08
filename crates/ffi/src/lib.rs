@@ -19,6 +19,7 @@ mod ai;
 pub mod calendar;
 pub mod editor;
 mod find_time;
+pub mod quick;
 pub mod repeat;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]

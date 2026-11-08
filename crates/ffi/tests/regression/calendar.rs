@@ -599,6 +599,7 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         rule: d.rule.clone(),
         rule_was: d.rule_was.clone(),
         people: d.people.clone(),
+        unresolved: d.unresolved.clone(),
         options: d.options,
         responses: d.responses.clone(),
         show_as_note: d.show_as_note.clone(),
@@ -616,4 +617,56 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         repeat: d.repeat.clone(),
         description_note: d.description_note.clone(),
     }
+}
+
+/// Quick create through the bridge: the preview marks what became which
+/// field, the draft names the one Jan the user wrote to, holds the unclear
+/// Els, and saves only once Els is picked. G reads a day.
+#[test]
+fn quick_create_saves_only_once_every_name_is_clear() {
+    use jolta_ffi::editor::{DraftField, DraftPerson};
+    use jolta_ffi::quick::QuickPartKind;
+
+    let app = App::new();
+    let me = app.account("me@example.net");
+    app.deliver(&me, MailboxRole::Sent, &Mail::new("me@example.net", "Jan Peeters <jan@example.com>, Els Maes <els@example.com>, Els Claes <claes@example.com>", "Plans", "See you."));
+    app.core.new_calendar_here("Personal".into(), None).unwrap();
+    let en = vec!["en".to_string()];
+
+    let text = "Lunch with Jan and Els tomorrow 12:30 at Mok";
+    let preview = app.core.quick_parse(text.into(), en.clone()).unwrap();
+    assert_eq!(preview.title, "Lunch with Jan and Els");
+    assert!(preview.has_time && preview.when.ends_with(", 12:30 to 13:00"), "{}", preview.when);
+    assert_eq!(preview.location.as_deref(), Some("Mok"));
+    assert_eq!(preview.people.iter().map(|p| (p.typed.as_str(), p.person.as_ref().map(|p| p.address.as_str()))).collect::<Vec<_>>(), [("Jan", Some("jan@example.com")), ("Els", None)]);
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    let marked = |kind| preview.parts.iter().filter(|p| p.kind == kind).map(|p| String::from_utf16(&utf16[p.start as usize..p.end as usize]).unwrap()).collect::<Vec<_>>();
+    assert_eq!(marked(QuickPartKind::Person), ["Jan", "Els"]);
+    assert_eq!(marked(QuickPartKind::When), ["tomorrow", "12:30"]);
+    assert_eq!(marked(QuickPartKind::Place), ["at Mok"]);
+    assert!(!preview.asks_ai, "AI is off");
+
+    let q = block_on(app.core.quick_draft(text.into(), en.clone())).unwrap();
+    assert!(!q.read_by_ai && !q.focus_time);
+    let mut draft = q.draft;
+    assert_eq!(draft.people.iter().map(|p| p.address.as_str()).collect::<Vec<_>>(), ["jan@example.com"]);
+    assert_eq!(draft.unresolved.len(), 1);
+    assert_eq!(draft.unresolved[0].typed, "Els");
+    let problems = app.core.check_draft(draft_copy(&draft)).unwrap();
+    assert!(problems.iter().any(|p| p.blocking && p.field == Some(DraftField::People)), "{problems:?}");
+    assert!(app.core.save_event(draft_copy(&draft), None, None, None).is_err(), "nothing is saved while Els is unclear");
+
+    let els = draft.unresolved.remove(0).choices.into_iter().find(|p| p.address == "els@example.com").unwrap();
+    draft.people.push(DraftPerson { name: els.name, address: els.address, role: draft.people[0].role, response: draft.people[0].response, comment: String::new(), is_me: false });
+    assert!(app.core.check_draft(draft_copy(&draft)).unwrap().iter().all(|p| !p.blocking));
+    assert!(app.core.plan_save(draft_copy(&draft)).unwrap().dialog.is_some(), "a meeting with guests asks Send invitations? first");
+
+    let q = block_on(app.core.quick_draft("Read chapter 12".into(), en.clone())).unwrap();
+    assert!(q.focus_time, "no day or time: the editor puts the focus on the time");
+
+    let here = tz::here();
+    let tomorrow = (Utc::now().with_timezone(&here).date_naive() + chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+    assert_eq!(app.core.go_to_date("morgen".into(), en.clone()).unwrap(), Some(tomorrow.clone()));
+    assert_eq!(app.core.go_to_date("demain".into(), en.clone()).unwrap(), Some(tomorrow));
+    assert_eq!(app.core.go_to_date("lunch".into(), en).unwrap(), None);
 }

@@ -181,7 +181,7 @@ pub enum EventTime {
     },
 }
 
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct PersonRecord {
     pub name: String,
     pub address: String,

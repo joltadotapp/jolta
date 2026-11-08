@@ -199,6 +199,27 @@ pub fn draft(conn: &Connection, people: &People, parsed: &Parsed, now: DateTime<
     Ok(d)
 }
 
+/// A draft's time on one line: "Fri 13 Nov, 12:30 to 13:00", "Tue 22 Dec
+/// to Wed 23 Dec, all day", "Sat 14 Nov, 07:15 to 07:45 Lisbon (08:15 to
+/// 08:45 here)". The year shows when it isn't this one.
+pub fn when_text(span: &Span, today: NaiveDate, here: Tz) -> String {
+    let day = |d: NaiveDate| if d.year() == today.year() { d.format("%a %-d %b").to_string() } else { d.format("%a %-d %b %Y").to_string() };
+    match span {
+        Span::AllDay { start, end } => {
+            let last = (*end - Duration::days(1)).max(*start);
+            if last == *start { format!("{}, all day", day(*start)) } else { format!("{} to {}, all day", day(*start), day(last)) }
+        }
+        Span::Timed { start, end } => {
+            let text = match super::detail::when(span, span.bounds(here), here) {
+                super::detail::When::Timed { text, .. } => text,
+                super::detail::When::AllDay { .. } => String::new(),
+            };
+            let one_day = end.wall.date() == start.wall.date() || *end == Local { wall: (start.wall.date() + Duration::days(1)).and_time(NaiveTime::MIN), ..*start };
+            if one_day { format!("{}, {text}", day(start.wall.date())) } else { text }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Words
 
