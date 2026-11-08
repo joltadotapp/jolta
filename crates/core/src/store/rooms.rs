@@ -36,17 +36,19 @@ pub fn set_rooms_access(conn: &Connection, account: AccountId, access: &Access) 
     conn.execute("UPDATE account SET rooms = ?2 WHERE id = ?1", params![account, answer])?;
     if *access != Access::Granted {
         conn.execute("DELETE FROM room WHERE account_id = ?1", [account])?;
+        conn.execute("UPDATE account SET rooms_fetched = NULL WHERE id = ?1", [account])?;
     }
     Ok(())
 }
 
 /// Replaces the account's listed rooms with what the room lists said at
-/// `fetched`.
+/// `fetched`, which is kept even when they listed none.
 pub fn save_rooms(conn: &Connection, account: AccountId, rooms: &[Room], fetched: DateTime<Utc>) -> Result<()> {
     conn.execute("DELETE FROM room WHERE account_id = ?1", [account])?;
+    conn.execute("UPDATE account SET rooms_fetched = ?2 WHERE id = ?1", params![account, fetched.timestamp()])?;
     let mut insert = conn.prepare_cached(
-        "INSERT OR REPLACE INTO room (account_id, address, name, capacity, building, floor, list, accessible, video, display, fetched)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT OR REPLACE INTO room (account_id, address, name, capacity, building, floor, list, accessible, video, display)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?;
     for r in rooms {
         insert.execute(params![
@@ -59,8 +61,7 @@ pub fn save_rooms(conn: &Connection, account: AccountId, rooms: &[Room], fetched
             r.list,
             r.accessible,
             r.video,
-            r.display,
-            fetched.timestamp()
+            r.display
         ])?;
     }
     Ok(())
@@ -89,7 +90,7 @@ pub fn listed_rooms(conn: &Connection, account: AccountId) -> Result<(Vec<Room>,
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let fetched: Option<i64> =
-        conn.query_row("SELECT min(fetched) FROM room WHERE account_id = ?1", [account], |r| r.get(0)).optional()?.flatten();
+        conn.query_row("SELECT rooms_fetched FROM account WHERE id = ?1", [account], |r| r.get(0)).optional()?.flatten();
     Ok((rooms, fetched.and_then(|t| DateTime::from_timestamp(t, 0))))
 }
 

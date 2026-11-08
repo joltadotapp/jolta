@@ -351,6 +351,10 @@ mod tests {
         let read = || j.store.read(|c| store::rooms_access(c, account)).unwrap();
         assert_eq!(read(), Access::NotAsked);
         j.store.write(|tx| store::set_rooms_access(tx, account, &Access::Granted)).unwrap();
+        j.store.write(|tx| store::save_rooms(tx, account, &[], at(8) - Duration::hours(1))).unwrap();
+        let empty = j.store.read(|c| known(c, account, at(8))).unwrap();
+        assert_eq!(empty.fetched, Some(at(8) - Duration::hours(1)), "a read that listed no room is still a read");
+        assert!(empty.none_listed() && !empty.stale(at(8)), "so the picker says so and doesn't ask again for a day");
         let listed = Room { list: Some("HQ".into()), capacity: Some(8), ..Room::named("Bruegel@rooms.example", "Bruegel", RoomSource::Directory) };
         j.store.write(|tx| store::save_rooms(tx, account, &[listed], at(8))).unwrap();
         let now = j.store.read(|c| known(c, account, at(8))).unwrap();
@@ -358,7 +362,7 @@ mod tests {
         assert_eq!(now.rooms[0].address, "bruegel@rooms.example");
         j.store.write(|tx| store::set_rooms_access(tx, account, &Access::Refused("Need admin approval".into()))).unwrap();
         let later = j.store.read(|c| known(c, account, at(8))).unwrap();
-        assert_eq!((later.access, later.rooms.len()), (Access::Refused("Need admin approval".into()), 0));
+        assert_eq!((later.access, later.rooms.len(), later.fetched), (Access::Refused("Need admin approval".into()), 0, None));
         j.store.write(|tx| Ok(tx.execute("UPDATE account SET kind = 'gmail' WHERE id = ?1", [account])?)).unwrap();
         assert_eq!(read(), Access::NotOffered, "Google has no room lists Jolta reads");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
