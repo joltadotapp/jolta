@@ -213,6 +213,9 @@ pub enum CalCommand {
         minutes: i64,
         #[arg(long, default_value_t = 5)]
         days: u32,
+        /// Also suggest times outside other people's working hours.
+        #[arg(long)]
+        any_hours: bool,
     },
     /// Check one provider fact from the calendar plan against an account.
     Fact {
@@ -335,13 +338,15 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Freebusy { account, addresses, days } => {
             let found = find_time_lookup(jolta, &account, &addresses, days).await?;
             let here = tz::here();
-            let h = &found.hours;
-            let weekdays: Vec<String> = std::iter::successors(Some(chrono::Weekday::Mon), |d| Some(d.succ()))
-                .take(7)
-                .filter(|d| h.days.has(*d))
-                .map(|d| format!("{d}"))
-                .collect();
-            println!("Working hours: {} {} to {} ({})", weekdays.join(" "), h.start.format("%H:%M"), h.end.format("%H:%M"), h.zone);
+            let hours_text = |h: &availability::WorkingHours| {
+                let weekdays: Vec<String> = std::iter::successors(Some(chrono::Weekday::Mon), |d| Some(d.succ()))
+                    .take(7)
+                    .filter(|d| h.days.has(*d))
+                    .map(|d| format!("{d}"))
+                    .collect();
+                format!("{} {} to {} ({})", weekdays.join(" "), h.start.format("%H:%M"), h.end.format("%H:%M"), h.zone)
+            };
+            println!("Working hours: {}", hours_text(&found.hours));
             let block = |b: &Busy| {
                 let (s, e) = (b.start.with_timezone(&here), b.end.with_timezone(&here));
                 let end = if e.date_naive() == s.date_naive() { e.format("%H:%M").to_string() } else { e.format("%a %-d %b %H:%M").to_string() };
@@ -353,6 +358,11 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 match &s.availability {
                     Availability::Known(busy) => {
                         println!("{} ({} blocks)", s.person, busy.len());
+                        let hours = s.hours.as_ref().map_or_else(|| "not known".to_string(), hours_text);
+                        println!("  working hours: {hours}");
+                        if let Some(note) = availability::note(s, &found.windows, &found.hours) {
+                            println!("  {note}");
+                        }
                         busy.iter().for_each(|b| println!("{}", block(b)));
                     }
                     Availability::Unknown(why) => println!("{}: unknown, {} ({why:?})", s.person, why.reason()),
@@ -360,10 +370,11 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             }
             Ok(())
         }
-        CalCommand::FindTime { account, addresses, minutes, days } => {
+        CalCommand::FindTime { account, addresses, minutes, days, any_hours } => {
             let found = find_time_lookup(jolta, &account, &addresses, days).await?;
             let here = tz::here();
-            let slots = availability::suggest(&found.own, &found.others, &found.hours, Duration::minutes(minutes), Utc::now(), days);
+            let options = availability::SuggestOptions { respect_others_hours: !any_hours };
+            let slots = availability::suggest(&found.own, &found.others, &found.hours, Duration::minutes(minutes), Utc::now(), days, options);
             if slots.is_empty() {
                 println!("No time in the next {days} working days suits everyone known.");
             }

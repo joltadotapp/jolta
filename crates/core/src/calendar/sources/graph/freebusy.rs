@@ -1,5 +1,6 @@
-//! Other people's busy times on Microsoft 365 (`getSchedule`) and the
-//! user's working hours (`mailboxSettings.workingHours`).
+//! Other people's busy times and working hours on Microsoft 365
+//! (`getSchedule`), and the user's working hours
+//! (`mailboxSettings.workingHours`).
 
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use serde_json::{Value, json};
@@ -35,24 +36,25 @@ impl GraphCalendar {
         if status != 200 {
             return Err(Api::failure(self, status, &reply));
         }
-        Ok(working_hours(&reply, Api::zone(self)))
+        Ok(working_hours(&reply, Some(Api::zone(self))))
     }
 }
 
-/// Graph answers in the order asked, each schedule with its `scheduleId`.
+/// Graph answers in the order asked, each schedule with its `scheduleId`
+/// and the person's `workingHours`.
 fn schedules(reply: &Value, people: &[String]) -> Vec<Schedule> {
     let answers = reply["value"].as_array().map(Vec::as_slice).unwrap_or_default();
     people
         .iter()
         .map(|person| {
             let found = answers.iter().find(|s| s["scheduleId"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(person)));
-            let availability = match found {
-                None => Availability::Unknown(Unknown::Failed("Microsoft gave no answer".into())),
-                Some(s) if s["error"].is_object() => Availability::Unknown(unknown(&s["error"])),
-                Some(s) if no_data(s) => Availability::Unknown(Unknown::Failed("Microsoft 365 has no free/busy for them".into())),
-                Some(s) => Availability::Known(s["scheduleItems"].as_array().into_iter().flatten().filter_map(busy).collect()),
+            let (availability, hours) = match found {
+                None => (Availability::Unknown(Unknown::Failed("Microsoft gave no answer".into())), None),
+                Some(s) if s["error"].is_object() => (Availability::Unknown(unknown(&s["error"])), None),
+                Some(s) if no_data(s) => (Availability::Unknown(Unknown::Failed("Microsoft 365 has no free/busy for them".into())), None),
+                Some(s) => (Availability::Known(s["scheduleItems"].as_array().into_iter().flatten().filter_map(busy).collect()), working_hours(&s["workingHours"], None)),
             };
-            Schedule { person: person.clone(), availability }
+            Schedule { person: person.clone(), availability, hours }
         })
         .collect()
 }
@@ -88,12 +90,15 @@ fn busy(item: &Value) -> Option<Busy> {
     Some(Busy { start: when(&item["start"])?, end: when(&item["end"])?, kind })
 }
 
-/// `here` stands in for a zone Graph names in a way Jolta can't map.
-fn working_hours(v: &Value, here: chrono_tz::Tz) -> Option<WorkingHours> {
+/// `here` stands in for a zone Graph names in a way Jolta can't map; without
+/// it such hours are none. Hours that end before they start, or have no day,
+/// are none too.
+fn working_hours(v: &Value, here: Option<chrono_tz::Tz>) -> Option<WorkingHours> {
     let time = |k: &str| v[k].as_str().and_then(|t| NaiveTime::parse_from_str(t.get(..8)?, "%H:%M:%S").ok());
-    let days = v["daysOfWeek"].as_array()?.iter().filter_map(|d| d.as_str()?.parse::<Weekday>().ok());
-    let zone = v["timeZone"]["name"].as_str().and_then(tz::zone).unwrap_or(here);
-    Some(WorkingHours { days: Weekdays::of(days), start: time("startTime")?, end: time("endTime")?, zone })
+    let days = Weekdays::of(v["daysOfWeek"].as_array()?.iter().filter_map(|d| d.as_str()?.parse::<Weekday>().ok()));
+    let zone = v["timeZone"]["name"].as_str().and_then(tz::zone).or(here)?;
+    let (start, end) = (time("startTime")?, time("endTime")?);
+    (start < end && days.0 != 0).then_some(WorkingHours { days, start, end, zone })
 }
 
 #[cfg(test)]
@@ -174,12 +179,33 @@ mod tests {
     fn working_hours_from_mailbox_settings() {
         let v = json!({"daysOfWeek": ["monday", "tuesday", "wednesday", "thursday"], "startTime": "08:30:00.0000000",
                        "endTime": "16:00:00.0000000", "timeZone": {"name": "Romance Standard Time"}});
-        let h = working_hours(&v, chrono_tz::UTC).unwrap();
+        let h = working_hours(&v, Some(chrono_tz::UTC)).unwrap();
         assert_eq!(h.days, Weekdays::of([Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu]));
         assert_eq!((h.start, h.end), (NaiveTime::from_hms_opt(8, 30, 0).unwrap(), NaiveTime::from_hms_opt(16, 0, 0).unwrap()));
         assert_eq!(h.zone, Europe::Paris, "where CLDR places Romance Standard Time");
         let custom = json!({"daysOfWeek": ["friday"], "startTime": "09:00:00.0000000", "endTime": "12:00:00.0000000",
                             "timeZone": {"@odata.type": "#microsoft.graph.customTimeZone", "name": "Customized Time Zone"}});
-        assert_eq!(working_hours(&custom, Europe::Brussels).unwrap().zone, Europe::Brussels);
+        assert_eq!(working_hours(&custom, Some(Europe::Brussels)).unwrap().zone, Europe::Brussels);
+        assert_eq!(working_hours(&custom, None), None, "someone else's hours on a clock Jolta can't place constrain nothing");
+        let overnight = json!({"daysOfWeek": ["friday"], "startTime": "22:00:00.0000000", "endTime": "06:00:00.0000000", "timeZone": {"name": "UTC"}});
+        assert_eq!(working_hours(&overnight, None), None);
+    }
+
+    #[test]
+    fn each_schedule_carries_the_persons_working_hours() {
+        let reply = json!({"value": [
+            {"scheduleId": "ann@example.com", "availabilityView": "00", "scheduleItems": [],
+             "workingHours": {"daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"], "startTime": "09:00:00.0000000",
+                              "endTime": "15:00:00.0000000", "timeZone": {"name": "Pacific Standard Time"}}},
+            {"scheduleId": "bo@example.com", "availabilityView": "00", "scheduleItems": []},
+            {"scheduleId": "outside@example.org", "error": {"message": "Unable to resolve e-mail address.", "responseCode": "5009"}}
+        ]});
+        let asked: Vec<String> = ["ann@example.com", "bo@example.com", "outside@example.org"].map(String::from).into();
+        let got = schedules(&reply, &asked);
+        let ann = got[0].hours.expect("Ann's hours");
+        assert_eq!(ann.zone, chrono_tz::America::Los_Angeles);
+        assert_eq!((ann.start, ann.end, ann.days), (NaiveTime::from_hms_opt(9, 0, 0).unwrap(), NaiveTime::from_hms_opt(15, 0, 0).unwrap(), Weekdays::MONDAY_TO_FRIDAY));
+        assert_eq!(got[1].hours, None, "a schedule without workingHours");
+        assert_eq!((&got[2].availability, got[2].hours), (&Availability::Unknown(Unknown::NotFound), None));
     }
 }

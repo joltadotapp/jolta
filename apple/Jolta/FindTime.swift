@@ -40,8 +40,9 @@ extension AppModel {
 /// One panel for every Find a time: a row per person (the user first)
 /// over the next working days, busy blocks drawn as the calendar draws
 /// events, people whose times aren't known hatched, suggested times
-/// highlighted. ←→ or j k move between suggestions, − and + change the
-/// length, Return picks, Esc closes.
+/// highlighted, time outside a person's working hours shaded. ←→ or j k
+/// move between suggestions, − and + change the length, O turns their
+/// working hours on and off, Return picks, Esc closes.
 struct FindTimePanel: View {
     @Bindable var model: AppModel
     let request: FindTimeRequest
@@ -58,6 +59,8 @@ struct FindTimePanel: View {
     @State private var selected = 0
     @State private var minutes: Int64 = 30
     @State private var turningOn = false
+    /// Suggest only times inside each known person's working hours.
+    @State private var theirHours = true
     @State private var keys = ""
     @FocusState private var focused: Bool
 
@@ -107,6 +110,7 @@ struct FindTimePanel: View {
             await load()
         }
         .onChange(of: minutes) { suggest() }
+        .onChange(of: theirHours) { suggest() }
     }
 
     /// Takes the keyboard from the list and the message being written.
@@ -124,6 +128,11 @@ struct FindTimePanel: View {
             .onKeyPress(keys: [.leftArrow, .upArrow, KeyEquivalent("k")]) { _ in move(-1); return .handled }
             .onKeyPress(keys: [KeyEquivalent("-"), KeyEquivalent("_")]) { _ in length(-1); return .handled }
             .onKeyPress(keys: [KeyEquivalent("+"), KeyEquivalent("=")]) { _ in length(1); return .handled }
+            .onKeyPress(keys: [KeyEquivalent("o")]) { _ in
+                guard showsHoursToggle else { return .ignored }
+                theirHours.toggle()
+                return .handled
+            }
             .accessibilityIdentifier("find-time-keys")
     }
 
@@ -132,6 +141,19 @@ struct FindTimePanel: View {
             Image(systemName: "calendar.badge.clock").foregroundStyle(Color(Theme.text3))
             Text(title).font(.system(size: 13, weight: .semibold))
             Spacer()
+            if showsHoursToggle {
+                HStack(spacing: 6) {
+                    Toggle("Their working hours", isOn: $theirHours)
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                        .accessibilityIdentifier("find-time-their-hours")
+                    Text("Their working hours").font(.system(size: 12)).foregroundStyle(Color(Theme.text2))
+                    KeyCap(key: "O")
+                }
+                .help("Suggest only times inside everyone's working hours (O)")
+                .padding(.trailing, 4)
+            }
             HStack(spacing: 2) {
                 Button { length(-1) } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
                 Text(lengthText(minutes))
@@ -211,13 +233,13 @@ struct FindTimePanel: View {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(person.name).font(.system(size: 12.5, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
-                        if let why = person.unknown {
-                            Text(why).font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                        if let line = person.unknown ?? person.note {
+                            Text(line).font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                         }
                     }
                     .frame(width: nameWidth - 8, alignment: .leading)
                     .padding(.trailing, 8)
-                    .help(person.unknown.map { "\(person.address): \($0)" } ?? person.address)
+                    .help((person.unknown ?? person.note).map { "\(person.address): \($0)" } ?? person.address)
                     FindTimeRow(person: person, days: info.days)
                         .frame(height: rowHeight)
                         .help(person.unknown ?? "")
@@ -306,9 +328,17 @@ struct FindTimePanel: View {
         }
     }
 
+    /// Only when someone's working hours are known, and only for meetings.
+    private var showsHoursToggle: Bool {
+        guard !forAvailability, case .ready(let info) = phase else { return false }
+        return info.people.contains { $0.hours != nil }
+    }
+
     private func suggest() {
         guard case .ready(let info) = phase else { return }
-        slots = (forAvailability ? try? model.core.freeTimes(info: info, minutes: minutes) : try? model.core.findTimeSlots(info: info, minutes: minutes)) ?? []
+        slots = (forAvailability
+            ? try? model.core.freeTimes(info: info, minutes: minutes)
+            : try? model.core.findTimeSlots(info: info, minutes: minutes, respectOthersHours: theirHours)) ?? []
         selected = slots.isEmpty ? 0 : min(selected, slots.count - 1)
     }
 
@@ -386,7 +416,8 @@ struct FindTimePanel: View {
 }
 
 /// One person's working days side by side: busy blocks in the calendar
-/// grid's look, and a hatched band when their times aren't known.
+/// grid's look, time outside their working hours shaded, and a hatched band
+/// when their times aren't known.
 struct FindTimeRow: View {
     let person: PersonRow
     let days: [WorkingDay]
@@ -399,6 +430,9 @@ struct FindTimeRow: View {
                 context.fill(Path(roundedRect: column, cornerRadius: 5), with: .color(Color(Theme.bg)))
                 if person.unknown != nil {
                     hatch(column, in: &context)
+                }
+                for off in person.outsideHours {
+                    if let r = FindTimeSlots.span(off.start, off.end, day: day, column: column) { shade(r, column: column, in: &context) }
                 }
                 for b in person.busy {
                     if let r = FindTimeSlots.span(b.start, b.end, day: day, column: column) { block(r, kind: b.kind, in: &context) }
@@ -422,6 +456,23 @@ struct FindTimeRow: View {
             if kind == .tentative { stripes(r, color: Color(Theme.bg), width: 3.5, in: &clipped) }
             clipped.fill(Path(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height)), with: .color(bar))
         }
+    }
+
+    /// Outside working hours: a flat band with fine lines the other way from
+    /// the unknown hatch, so the two never read alike.
+    private func shade(_ r: CGRect, column: CGRect, in context: inout GraphicsContext) {
+        var clipped = context
+        clipped.clip(to: Path(roundedRect: column, cornerRadius: 5))
+        clipped.fill(Path(r), with: .color(Color(Theme.fill)))
+        var path = Path()
+        var x = r.minX - r.height
+        while x < r.maxX {
+            path.move(to: CGPoint(x: x, y: r.minY))
+            path.addLine(to: CGPoint(x: x + r.height, y: r.maxY))
+            x += 7
+        }
+        clipped.clip(to: Path(r))
+        clipped.stroke(path, with: .color(Color(Theme.line2)), lineWidth: 1)
     }
 
     private func hatch(_ r: CGRect, in context: inout GraphicsContext) {
