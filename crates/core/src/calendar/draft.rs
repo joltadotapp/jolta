@@ -323,6 +323,63 @@ pub fn draft_for_event(conn: &Connection, event: EventId, at: Option<Bounds>, he
     Ok(draft)
 }
 
+/// A new event like the occurrence `at` of `event`, at its time: ⌘D and
+/// ⌥-drag. It keeps the title, the place, the description and the user's
+/// own settings, and leaves out the people, the repeat and the meeting: a
+/// copy never carries the original's call, since Google warns against
+/// reusing conference data and a Teams link belongs to its meeting. It goes
+/// in the same calendar when the user can write there, else the default one.
+pub fn draft_for_copy(conn: &Connection, event: EventId, at: Option<Bounds>, now: DateTime<Utc>, here: Tz) -> Result<EventDraft> {
+    let source = draft_for_event(conn, event, at, here)?;
+    let writable = caps::of(&store::calendar(conn, source.calendar)?).writable;
+    let mut copy = draft_for_new(conn, writable.then_some(source.calendar), Some(source.span), now, here)?;
+    let (location, description) = match &source.meeting {
+        Some(m) => (
+            source.location.replace(&m.join_url, "").trim_matches(|c: char| c.is_whitespace() || ",;·|-".contains(c)).to_owned(),
+            without_meeting(&source.description, m),
+        ),
+        None => (source.location, source.description),
+    };
+    copy.title = source.title;
+    copy.location = location;
+    copy.room = source.room;
+    copy.description = description;
+    copy.show_as = source.show_as;
+    copy.visibility = source.visibility;
+    if let Reminder::Before(_) = source.reminder {
+        copy.reminder = source.reminder;
+    }
+    Ok(copy)
+}
+
+/// `text` without its lines that name `meeting`: the link, the ID, the
+/// passcode or a dial-in number, and with the blank lines that leaves
+/// folded into one.
+fn without_meeting(text: &str, meeting: &Meeting) -> String {
+    let digits = |s: &str| s.chars().filter(char::is_ascii_digit).collect::<String>();
+    let numbers: Vec<String> = meeting
+        .meeting_id
+        .iter()
+        .map(|id| digits(id))
+        .chain(meeting.phones.iter().map(|p| digits(p.split(',').next().unwrap_or(p))))
+        .filter(|n| n.len() >= 6)
+        .collect();
+    let names = |line: &str| {
+        line.contains(&meeting.join_url)
+            || meeting.meeting_id.as_deref().is_some_and(|id| line.contains(id))
+            || meeting.passcode.as_deref().is_some_and(|code| line.contains(code))
+            || numbers.iter().any(|n| digits(line).contains(n.as_str()))
+    };
+    let mut out: Vec<&str> = Vec::new();
+    for line in text.lines().filter(|l| !names(l)) {
+        if line.trim().is_empty() && out.last().is_none_or(|l| l.trim().is_empty()) {
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_owned()
+}
+
 /// The draft fields of a stored event, nothing locked.
 fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
     let parts = description::split(&e.description, e.description_html);
@@ -1589,6 +1646,63 @@ mod tests {
         d.description = "New notes".into();
         s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
         assert_eq!(s.read(|c| ops::stored(c, cal, "d1", None)).unwrap().unwrap().event.description, format!("New notes{block}"));
+    }
+
+    /// ⌘D and ⌥-drag: a new single event, without the people or the meeting.
+    #[test]
+    fn a_copy_leaves_out_the_people_the_repeat_and_the_meeting() {
+        let (s, cal) = setup("copy");
+        let join = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ZjE2%40thread.v2/0?context=%7b%7d";
+        let e = EventData {
+            title: "Design review".into(),
+            location: format!("Room 4, {join}"),
+            description: format!(
+                "Weekly look at the designs.\n\nJoin on your computer: {join}\nMeeting ID: 349 112 803 75\nPasscode: kX7pQ2\n\nCall in: +32 2 588 63 12,,34911280375#"
+            ),
+            organizer: Some(person(ME, "")),
+            attendees: vec![attendee(ME, true, Role::Chair), attendee("els@example.com", false, Role::Required)],
+            recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY".into()], ..Default::default() }),
+            meeting: Some(Meeting {
+                provider: MeetingProvider::Teams,
+                join_url: join.into(),
+                meeting_id: Some("349 112 803 75".into()),
+                passcode: Some("kX7pQ2".into()),
+                phones: vec!["tel:+3225886312,,34911280375#".into()],
+                other_links: Vec::new(),
+            }),
+            show_as: ShowAs::Free,
+            ..EventData::new("c1", span("2026-11-24 09:00", "2026-11-24 10:00"))
+        };
+        s.write(|tx| ops::queue(tx, &Edit::quiet(cal, Change::Create(vec![e])), NOW, &horizon())).unwrap();
+        let now = Utc.timestamp_opt(NOW, 0).unwrap();
+        let next = Bounds::Utc { start: Utc.with_ymd_and_hms(2026, 12, 1, 8, 0, 0).unwrap(), end: Utc.with_ymd_and_hms(2026, 12, 1, 9, 0, 0).unwrap() };
+        let copy = s.read(|c| draft_for_copy(c, event_id(&s, cal, "c1"), Some(next), now, Brussels)).unwrap();
+        assert!(copy.base.is_none() && copy.uid != "c1", "a new event with a UID of its own");
+        assert_eq!((copy.calendar, copy.title.as_str(), copy.span, copy.show_as), (cal, "Design review", span("2026-12-01 09:00", "2026-12-01 10:00"), ShowAs::Free),
+                   "the occurrence's time, title and the user's own settings");
+        assert!(copy.people.is_empty() && copy.rule.is_none() && copy.meeting.is_none() && copy.video.is_none(), "no guests, repeat or call");
+        assert_eq!(copy.location, "Room 4", "the place stays, the link goes");
+        assert_eq!(copy.description, "Weekly look at the designs.", "the notes stay, the joining lines go");
+        assert!(s.read(|c| plan_save(c, &copy, Brussels)).unwrap().dialog.is_none(), "saving a copy mails nobody");
+
+        let meet = "https://meet.google.com/abc-defg-hij";
+        let e = EventData {
+            title: "1:1".into(),
+            location: meet.into(),
+            description: format!("Agenda first.\n\nJoin: {meet}\nOr call +32 2 588 63 12 (PIN 418 207#)\n\nBring the prints."),
+            meeting: Some(Meeting {
+                provider: MeetingProvider::Meet,
+                join_url: meet.into(),
+                meeting_id: None,
+                passcode: None,
+                phones: vec!["tel:+3225886312,,418207#".into()],
+                other_links: Vec::new(),
+            }),
+            ..EventData::new("c2", span("2026-11-25 11:00", "2026-11-25 12:00"))
+        };
+        s.write(|tx| ops::queue(tx, &Edit::quiet(cal, Change::Create(vec![e])), NOW, &horizon())).unwrap();
+        let copy = s.read(|c| draft_for_copy(c, event_id(&s, cal, "c2"), None, now, Brussels)).unwrap();
+        assert_eq!((copy.location.as_str(), copy.description.as_str()), ("", "Agenda first.\n\nBring the prints."), "a link in the user's own text goes too");
     }
 
     #[test]

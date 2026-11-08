@@ -497,6 +497,114 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(meeting.exists, "and the meeting stays")
     }
 
+    /// Editing on the grid. A drag over empty time opens the editor on that
+    /// range; dragging the event moves it an hour and dragging its bottom
+    /// edge makes it 30 minutes longer. Three ⌥↓ presses save once, so one Z
+    /// takes all three back, and ⌥↑ moves it 15 minutes earlier. ⌥-drag
+    /// copies an event without its meeting link. Dragging a meeting with
+    /// guests asks which events, then Send an update?, where Return sends.
+    func testGridDragAndKeys() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        // The view is remembered per test folder, and this journey ends in month view.
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        let standup = event("Standup, 9:30 to 9:45")
+        XCTAssertTrue(standup.waitForExistence(timeout: 5), "Monday's standup marks the column and the hours")
+        // The top of an event's box is a point below its start's line.
+        let nineThirty = standup.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: -1))
+        let at = { (hour: Double, plus: Double) in nineThirty.withOffset(CGVector(dx: 0, dy: (hour - 9.5) * 48 + plus)) }
+
+        at(10, 2).click(forDuration: 0.1, thenDragTo: at(11, 2))
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "a drag over empty time opens the editor")
+        XCTAssertEqual(app.textFields["editor-start"].value as? String, "10:00", "on the range dragged")
+        XCTAssertEqual(app.textFields["editor-end"].value as? String, "11:00")
+        title.typeText("Grid check")
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(event("Grid check, 10:00 to 11:00").waitForExistence(timeout: 5), "⌘↩ saves it")
+
+        at(10.5, 0).click(forDuration: 0.1, thenDragTo: at(11.5, 0))
+        XCTAssertTrue(event("Grid check, 11:00 to 12:00").waitForExistence(timeout: 5), "dragging it moves it an hour")
+        XCTAssertTrue(text(app, "Saved Grid check").waitForExistence(timeout: 5), "with Undo in the toast")
+
+        at(12, -2.5).click(forDuration: 0.1, thenDragTo: at(12.5, -2.5))
+        let longer = event("Grid check, 11:00 to 12:30")
+        XCTAssertTrue(longer.waitForExistence(timeout: 5), "dragging its bottom edge makes it 30 minutes longer")
+
+        longer.click()
+        for _ in 0..<3 { app.typeKey(.downArrow, modifierFlags: .option) }
+        XCTAssertTrue(event("Grid check, 11:45 to 13:15").waitForExistence(timeout: 5), "three ⌥↓ move it 45 minutes")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(longer.waitForExistence(timeout: 5), "and were one save: one Z takes all three back")
+
+        longer.click()
+        app.typeKey(.upArrow, modifierFlags: .option)
+        let earlier = event("Grid check, 10:45 to 12:15")
+        XCTAssertTrue(earlier.waitForExistence(timeout: 5), "⌥↑ moves it 15 minutes earlier")
+
+        earlier.click()
+        app.typeKey(.downArrow, modifierFlags: .shift)
+        app.typeKey(.downArrow, modifierFlags: .shift)
+        XCTAssertTrue(event("Grid check, 10:45 to 12:45").waitForExistence(timeout: 5), "two ⇧↓ make it 30 minutes longer")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(earlier.waitForExistence(timeout: 5))
+        earlier.click()
+        app.typeKey(.downArrow, modifierFlags: [])
+        RunLoop.current.run(until: Date() + 1.5)
+        XCTAssertTrue(earlier.exists, "↓ moves the selection, never the event")
+
+        let call = event("1:1 Els, 11:00 to 12:00")
+        XCTAssertTrue(call.waitForExistence(timeout: 5))
+        XCTAssertTrue(call.label.contains("Google Meet"), "the original has a meeting link: \(call.label)")
+        let from = call.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        XCUIElement.perform(withKeyModifiers: .option) {
+            from.click(forDuration: 0.1, thenDragTo: from.withOffset(CGVector(dx: 0, dy: 4 * 48)))
+        }
+        let copy = event("1:1 Els, 15:00 to 16:00")
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), "⌥-drag copies it four hours later")
+        XCTAssertFalse(copy.label.contains("Google Meet"), "without the meeting link: \(copy.label)")
+        XCTAssertTrue(call.exists, "and the original stays")
+
+        let sync = event("Team sync,")
+        XCTAssertTrue(sync.waitForExistence(timeout: 5), "the daily meeting with guests is in the week")
+        let held = sync.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        held.click(forDuration: 0.1, thenDragTo: held.withOffset(CGVector(dx: 0, dy: 48)))
+        let prompt = app.descendants(matching: .any).matching(identifier: "scope-prompt").firstMatch
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "a dragged occurrence asks which events first")
+        app.typeKey("1", modifierFlags: [])
+        let dialog = app.descendants(matching: .any).matching(identifier: "send-dialog").firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5), "then Send an update?, never a toast alone")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Return sends")
+        XCTAssertTrue(text(app, "Update sent to 2 people").waitForExistence(timeout: 5), "the toast offers Undo while the update waits")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(text(app, "Undone").waitForExistence(timeout: 5), "Z takes it back before it goes")
+
+        let birthday = event("Birthday: Mum")
+        XCTAssertTrue(birthday.waitForExistence(timeout: 5), "Sunday's all-day event is in the row above the hours")
+        let sunday = birthday.frame
+        let lane = birthday.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        lane.click(forDuration: 0.1, thenDragTo: lane.withOffset(CGVector(dx: -sunday.width - 6, dy: 0)))
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5), "an occurrence of a series asks which events")
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(text(app, "Saved Birthday: Mum").waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil { birthday.frame.minX < sunday.minX - 50 }, "dragging it a column left moves it to Saturday")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(waitUntil { abs(birthday.frame.minX - sunday.minX) < 2 }, "Z puts it back")
+
+        app.typeKey("m", modifierFlags: [])
+        let line = event("Birthday: Mum")
+        XCTAssertTrue(line.waitForExistence(timeout: 5), "month view lists it")
+        let day = line.frame
+        let cell = line.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        cell.click(forDuration: 0.1, thenDragTo: cell.withOffset(CGVector(dx: -day.width, dy: 0)))
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(waitUntil { line.frame.minX < day.minX - 50 }, "month view moves it a day earlier too")
+    }
+
     /// A meeting in a calendar on this Mac, whose invitations Jolta mails
     /// itself: the first save asks once which account sends them, Return
     /// takes the first, and Send invitations? names it and has a message

@@ -194,7 +194,8 @@ extension AppModel {
 
 /// Calendar mode's keys, in one table for the key handler and the help sheet.
 enum CalendarCommand: String, CaseIterable, Identifiable {
-    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, newEvent, edit, duplicate, delete, undo, dayPanel, mail, calendar, joinNext
+    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, newEvent, edit, duplicate, delete
+    case nudge, resize, accept, maybe, decline, undo, dayPanel, mail, calendar, joinNext
 
     var id: String { rawValue }
 
@@ -216,6 +217,11 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case .edit: "e"
         case .duplicate: "⌘D"
         case .delete: "⌫"
+        case .nudge: "⌥↑↓"
+        case .resize: "⇧↑↓"
+        case .accept: "y"
+        case .maybe: "⇧M"
+        case .decline: "n"
         case .undo: "z"
         case .dayPanel: "⇧C"
         case .mail: "⌘1"
@@ -242,6 +248,11 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case .edit: "Edit event"
         case .duplicate: "Duplicate event"
         case .delete: "Delete event"
+        case .nudge: "Move event 15 minutes"
+        case .resize: "Shorten or lengthen by 15 minutes"
+        case .accept: "Accept invitation"
+        case .maybe: "Maybe"
+        case .decline: "Decline invitation"
         case .undo: "Undo"
         case .dayPanel: "Today beside mail"
         case .mail: "Mail"
@@ -253,6 +264,8 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
     /// The command a key typed in calendar mode runs.
     static func forKey(_ event: NSEvent) -> CalendarCommand? {
         switch event.keyCode {
+        case 125 where event.modifierFlags.contains(.option), 126 where event.modifierFlags.contains(.option): return .nudge
+        case 125 where event.modifierFlags.contains(.shift), 126 where event.modifierFlags.contains(.shift): return .resize
         case 123, 124, 125, 126: return .move
         case 36, 76: return .open
         case 53: return .close
@@ -262,6 +275,8 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         if digit(event) != nil { return .toggleCalendar }
         guard let typed = event.charactersIgnoringModifiers?.lowercased(), typed.count == 1 else { return nil }
         if typed == "c", event.modifierFlags.contains(.shift) { return .dayPanel }
+        // M is Month; Maybe takes ⇧M.
+        if typed == "m", event.modifierFlags.contains(.shift) { return .maybe }
         return allCases.first { $0.keys == typed }
     }
 

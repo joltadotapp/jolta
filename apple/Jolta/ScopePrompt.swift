@@ -8,6 +8,8 @@ struct ScopePrompt: Identifiable {
     /// "You moved Standup to 10:00."
     let line: String?
     let choices: [ScopeChoice]
+    /// Cancel or Esc: nothing is saved.
+    var cancel: () -> Void = {}
     let perform: (EditScope) -> Void
 
     var id: String { title }
@@ -17,7 +19,10 @@ extension View {
     /// Shows `request` as a sheet until a row is picked or it is cancelled.
     func scopePrompt(_ request: Binding<ScopePrompt?>) -> some View {
         sheet(item: request) { prompt in
-            ScopePromptView(prompt: prompt) { request.wrappedValue = nil }
+            ScopePromptView(prompt: prompt, dismiss: { request.wrappedValue = nil }) {
+                request.wrappedValue = nil
+                prompt.cancel()
+            }
         }
     }
 }
@@ -26,6 +31,7 @@ extension View {
 private struct ScopePromptView: View {
     let prompt: ScopePrompt
     let dismiss: () -> Void
+    let cancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -47,7 +53,7 @@ private struct ScopePromptView: View {
             .padding(.top, 12)
             HStack {
                 Spacer()
-                EditorButton(title: "Cancel", key: "Esc", action: dismiss)
+                EditorButton(title: "Cancel", key: "Esc", action: cancel)
                     .keyboardShortcut(.cancelAction)
             }
             .background {
@@ -62,7 +68,7 @@ private struct ScopePromptView: View {
         .padding(.vertical, 20)
         .frame(width: 380)
         .presentationBackground(Color(Theme.raise))
-        .onExitCommand(perform: dismiss)
+        .onExitCommand(perform: cancel)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("scope-prompt")
     }
