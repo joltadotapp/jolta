@@ -243,6 +243,28 @@ pub fn set_calendar_op_lost(conn: &Connection, id: CalendarOpId, lost: &[Field])
     Ok(())
 }
 
+/// Links an op to the outbox rows of the invitations it mailed.
+pub fn set_calendar_op_outbox(conn: &Connection, id: CalendarOpId, outbox: &[i64]) -> Result<()> {
+    let list: Vec<String> = outbox.iter().map(i64::to_string).collect();
+    conn.execute("UPDATE calendar_op SET outbox = ?2 WHERE id = ?1", params![id.0, list.join(",")])?;
+    Ok(())
+}
+
+/// The outbox rows of the invitations an op mailed, with their state and
+/// recipients.
+pub fn calendar_op_outbox(conn: &Connection, id: CalendarOpId) -> Result<Vec<(i64, String, String)>> {
+    let list: Option<String> = conn.query_row("SELECT outbox FROM calendar_op WHERE id = ?1", [id.0], |r| r.get(0))?;
+    let ids: Vec<i64> = list.unwrap_or_default().split(',').filter_map(|s| s.parse().ok()).collect();
+    let mut stmt = conn.prepare_cached("SELECT state, recipients FROM outbox WHERE id = ?1")?;
+    let mut out = Vec::new();
+    for id in ids {
+        if let Some((state, to)) = stmt.query_row([id], |r| Ok((r.get(0)?, r.get(1)?))).optional()? {
+            out.push((id, state, to));
+        }
+    }
+    Ok(out)
+}
+
 /// Rewrites an op's `base` and `target` columns from the op.
 pub fn rewrite_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<()> {
     let (base, target) = written(op)?;

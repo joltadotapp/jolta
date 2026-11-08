@@ -104,6 +104,12 @@ impl Engine {
     pub fn start(jolta: Jolta, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
         let calendars = Scheduler::start(jolta.clone(), sink.clone(), &runtime);
         let engine = Arc::new(Engine { jolta, sink, runtime, wakes: Mutex::new(HashMap::new()), calendars });
+        let weak = Arc::downgrade(&engine);
+        engine.calendars.on_mail(Box::new(move |account| {
+            if let Some(engine) = weak.upgrade() {
+                engine.wake(account);
+            }
+        }));
         for account in engine.jolta.store.read(store::accounts)? {
             engine.spawn(account);
         }

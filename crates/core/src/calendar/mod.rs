@@ -18,6 +18,7 @@ pub mod meeting;
 pub mod merge;
 mod model;
 pub mod ops;
+pub mod organizer;
 pub mod proposal;
 pub mod quick;
 pub mod recur;

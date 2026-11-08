@@ -686,19 +686,19 @@ fn itip(method: &str, event: Component, zones: &[Component]) -> String {
 
 /// An iMIP mail from `from` to the one person `to` names, as "Name" and
 /// address: the text, and the iTIP object as its calendar part.
-struct Mail<'a> {
-    from: &'a str,
-    to: (Option<String>, String),
-    subject: String,
-    text: String,
-    method: &'a str,
-    ics: String,
+pub(super) struct Mail<'a> {
+    pub(super) from: &'a str,
+    pub(super) to: (Option<String>, String),
+    pub(super) subject: String,
+    pub(super) text: String,
+    pub(super) method: &'a str,
+    pub(super) ics: String,
     /// Made from what the mail says, so the same mail built twice has the
     /// same id; None for one of its own.
-    same_as: Option<String>,
+    pub(super) same_as: Option<String>,
 }
 
-fn imip_mail(m: Mail) -> Result<Built> {
+pub(super) fn imip_mail(m: Mail) -> Result<Built> {
     let seed = m.same_as.unwrap_or_else(|| format!("{}{}", SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos()), m.ics));
     let domain = m.from.rsplit('@').next().unwrap_or("jolta.invalid");
     let message_id = format!("{}@{domain}", &hex::encode(Sha256::digest(seed))[..24]);

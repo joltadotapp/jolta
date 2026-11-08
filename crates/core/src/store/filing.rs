@@ -64,6 +64,25 @@ pub fn unsettled_replies(conn: &Connection, account: AccountId, since: i64) -> R
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The account's mail carrying an iTIP REPLY for an event of a calendar
+/// on this Mac, not yet read: guests' answers to meetings Jolta sends
+/// itself. Only mail whose body is stored has `invitation` rows.
+pub fn unread_local_replies(conn: &Connection, account: AccountId) -> Result<Vec<UnsettledReply>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT m.id, m.message_id, m.from_addr, m.from_name, m.date, m.blob FROM message m
+         WHERE m.account_id = ?1
+           AND coalesce(m.message_id, '') != '' AND coalesce(m.blob, '') != '' AND m.blob NOT LIKE 'synth:%'
+           AND EXISTS (SELECT 1 FROM invitation i JOIN event e ON e.uid = i.uid JOIN calendar c ON c.id = e.calendar_id AND c.source = 'local'
+                       WHERE i.message_id = m.id AND i.method = 'REPLY')
+           AND NOT EXISTS (SELECT 1 FROM reply_read r WHERE r.account_id = m.account_id AND r.message_id = m.message_id)
+         ORDER BY m.date, m.id",
+    )?;
+    let rows = stmt.query_map(params![account], |r| {
+        Ok(UnsettledReply { id: r.get(0)?, message_id: r.get(1)?, from_addr: r.get(2)?, from_name: r.get(3)?, date: r.get(4)?, blob: r.get(5)? })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Settles a reply by its Message-ID. False when it was settled already.
 pub fn settle_reply(conn: &Connection, account: AccountId, message_id: &str) -> Result<bool> {
     Ok(conn.execute("INSERT OR IGNORE INTO settled_reply (account_id, message_id) VALUES (?1, ?2)", params![account, message_id])? == 1)

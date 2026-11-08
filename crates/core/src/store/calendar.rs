@@ -188,6 +188,51 @@ pub fn set_calendar_color(conn: &Connection, id: CalendarId, color: Option<&str>
     Ok(())
 }
 
+/// The account a calendar of no account sends its invitations from.
+pub fn calendar_send_from(conn: &Connection, id: CalendarId) -> Result<Option<AccountId>> {
+    Ok(conn.query_row("SELECT send_from FROM calendar WHERE id = ?1", [id], |r| r.get(0))?)
+}
+
+pub fn set_calendar_send_from(conn: &Connection, id: CalendarId, account: Option<AccountId>) -> Result<()> {
+    conn.execute("UPDATE calendar SET send_from = ?2 WHERE id = ?1", params![id, account])?;
+    Ok(())
+}
+
+/// The address that is the user in `calendar`: its account's, or for a
+/// calendar of no account, the account's it sends invitations from.
+pub fn calendar_address(conn: &Connection, calendar: &Calendar) -> Result<Option<String>> {
+    match calendar.account_id.map_or(calendar_send_from(conn, calendar.id), |a| Ok(Some(a)))? {
+        Some(a) => Ok(Some(super::account(conn, a)?.address)),
+        None => Ok(None),
+    }
+}
+
+/// Marks a reply mail read. False when it was read already.
+pub fn read_reply(conn: &Connection, account: AccountId, message_id: &str) -> Result<bool> {
+    Ok(conn.execute("INSERT OR IGNORE INTO reply_read (account_id, message_id) VALUES (?1, ?2)", params![account, message_id])? == 1)
+}
+
+/// The DTSTAMP of the newest reply taken from `guest` for this occurrence
+/// (`occurrence` as `reply_key` writes it), if any.
+pub fn guest_reply_stamp(conn: &Connection, calendar: CalendarId, uid: &str, occurrence: &str, guest: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT stamp FROM guest_reply WHERE calendar_id = ?1 AND uid = ?2 AND recurrence_id = ?3 AND guest = ?4",
+            params![calendar, uid, occurrence, guest.to_lowercase()],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+pub fn set_guest_reply_stamp(conn: &Connection, calendar: CalendarId, uid: &str, occurrence: &str, guest: &str, stamp: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO guest_reply (calendar_id, uid, recurrence_id, guest, stamp) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT DO UPDATE SET stamp = excluded.stamp",
+        params![calendar, uid, occurrence, guest.to_lowercase(), stamp],
+    )?;
+    Ok(())
+}
+
 /// Saves where the next sync starts, together with the changes it covers.
 pub fn set_calendar_cursor(conn: &Connection, id: CalendarId, cursor: Option<&str>, refresh: Option<i64>) -> Result<()> {
     conn.execute(
