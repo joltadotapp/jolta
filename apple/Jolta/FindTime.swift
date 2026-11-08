@@ -66,8 +66,8 @@ struct FindTimePanel: View {
     /// Rooms added with + Room, each a row after the people.
     @State private var rooms: [PersonRow] = []
     @State private var pickingRoom = false
-    /// A room's times are on their way; picking waits for them.
-    @State private var addingRoom = false
+    /// Rooms whose times are on their way; picking waits for them.
+    @State private var pendingRooms = 0
     @FocusState private var focused: Bool
 
     private static let lengths: [Int64] = [15, 30, 45, 60, 90]
@@ -183,14 +183,14 @@ struct FindTimePanel: View {
         closeRoomPicker()
         guard !rooms.contains(where: { $0.address.caseInsensitiveCompare(address) == .orderedSame }),
               let first = info.days.first, let last = info.days.last else { return }
-        addingRoom = true
+        pendingRooms += 1
         Task {
             do {
                 rooms += try await model.core.roomAvailability(accountId: info.accountId, addresses: [address], from: first.start, to: last.end)
             } catch {
                 model.notify("\(error)")
             }
-            addingRoom = false
+            pendingRooms -= 1
         }
     }
 
@@ -384,7 +384,7 @@ struct FindTimePanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(slots.isEmpty || addingRoom)
+            .disabled(slots.isEmpty || pendingRooms > 0)
             .accessibilityIdentifier("find-time-pick")
         }
         .font(.system(size: 12))
@@ -452,7 +452,7 @@ struct FindTimePanel: View {
     }
 
     private func pick() {
-        guard case .ready(let info) = phase, !slots.isEmpty, !addingRoom else { return }
+        guard case .ready(let info) = phase, !slots.isEmpty, pendingRooms == 0 else { return }
         let slot = slots[min(selected, slots.count - 1)]
         switch request.purpose {
         case .reply(let thread):
