@@ -90,6 +90,7 @@ impl Provider {
         let extra: &[&[&str]] = match ask {
             Ask::Account => &[self.mail_scopes()],
             Ask::Calendar => &[self.mail_scopes(), self.calendar_scopes()],
+            Ask::Rooms => &[ROOMS_SCOPES],
         };
         [&[self.identity_scopes()], extra].concat().concat().join(" ")
     }
@@ -108,6 +109,14 @@ impl Provider {
         }
     }
 
+    /// The `scope` of the refresh that gets the room lists' token. It is a
+    /// refresh of its own: Microsoft refuses a whole refresh when one scope
+    /// it asks for lost its consent, so an admin taking room lists back must
+    /// not stop mail and calendar.
+    fn rooms_refresh_scopes(self) -> Option<String> {
+        (self == Provider::Microsoft).then(|| ["offline_access"].iter().chain(ROOMS_SCOPES).copied().collect::<Vec<_>>().join(" "))
+    }
+
     /// Scopes the reply must grant, where the user can refuse one and still
     /// finish signing in: Google's consent screen shows each as a checkbox,
     /// and Gmail answers a login without mail access with AUTHENTICATIONFAILED.
@@ -118,6 +127,7 @@ impl Provider {
             (Provider::Google, Ask::Calendar) => [self.mail_scopes(), self.calendar_scopes()].concat(),
             (Provider::Microsoft, Ask::Account) => Vec::new(),
             (Provider::Microsoft, Ask::Calendar) => self.calendar_scopes().to_vec(),
+            (_, Ask::Rooms) => ROOMS_SCOPES.to_vec(),
         }
     }
 
@@ -192,12 +202,35 @@ fn form(pairs: &[(&str, &str)]) -> String {
     pairs.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&")
 }
 
-/// What a sign-in is for: adding the account (mail), or adding calendar
-/// access to an account Jolta already has.
+/// Microsoft 365's room lists, with each room's size and building. A
+/// tenant admin has to consent to it, so Jolta asks only when the room
+/// picker first opens.
+const ROOMS_SCOPES: &[&str] = &["https://graph.microsoft.com/Place.Read.All"];
+
+/// What a sign-in is for: adding the account (mail), adding calendar
+/// access to an account Jolta already has, or reading its organization's
+/// room lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {
     Account,
     Calendar,
+    Rooms,
+}
+
+/// The access token an API call needs: the account's own, which covers
+/// mail and calendar, or the one for Microsoft 365's room lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grant {
+    Account,
+    Rooms,
+}
+
+/// How a consent ended: granted, or refused in the browser with
+/// Microsoft's reason, such as a tenant that lets only an admin consent.
+#[derive(Debug)]
+pub enum Consent {
+    Granted(SignedIn),
+    Refused(String),
 }
 
 /// A sign-in in progress: the browser URL to open and the listener that
@@ -240,6 +273,15 @@ pub async fn begin_calendar(account: &Account, client: Client, port: u16) -> Res
     start(provider, client, port, Ask::Calendar, Some(account.address.clone())).await
 }
 
+/// Starts the consent to Microsoft 365's room lists for `account`. Finish
+/// it with `Pending::finish_consent`; the account keeps its refresh token.
+pub async fn begin_rooms(account: &Account, client: Client, port: u16) -> Result<Pending> {
+    if account.kind != AccountKind::Graph {
+        return Err(Error::Auth(format!("{} has no room lists to ask for", account.address)));
+    }
+    start(Provider::Microsoft, client, port, Ask::Rooms, Some(account.address.clone())).await
+}
+
 async fn start(provider: Provider, client: Client, port: u16, ask: Ask, address: Option<String>) -> Result<Pending> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let port = listener.local_addr()?.port();
@@ -280,7 +322,7 @@ fn authorize_url(
         // Ask for a refresh token every time, so re-adding an account works.
         (Provider::Google, _) => params.extend([("access_type", "offline"), ("prompt", "consent")]),
         (Provider::Microsoft, Ask::Account) => params.push(("prompt", "select_account")),
-        (Provider::Microsoft, Ask::Calendar) => {}
+        (Provider::Microsoft, Ask::Calendar | Ask::Rooms) => {}
     }
     // Signing in to Google again keeps calendar access granted earlier.
     if provider == Provider::Google {
@@ -307,7 +349,16 @@ impl Pending {
     /// for when the browser runs on another machine and 127.0.0.1 cannot
     /// reach this one.
     pub async fn finish_or_paste(self, pasted: impl std::future::Future<Output = Option<String>>) -> Result<SignedIn> {
-        let code = tokio::time::timeout(Duration::from_secs(600), async {
+        match self.finish_consent(pasted).await? {
+            Consent::Granted(signed) => Ok(signed),
+            Consent::Refused(reason) => Err(Error::Auth(reason)),
+        }
+    }
+
+    /// Like `finish_or_paste`, but a refusal in the browser, or a reply
+    /// without the room lists, is an answer rather than an error.
+    pub async fn finish_consent(self, pasted: impl std::future::Future<Output = Option<String>>) -> Result<Consent> {
+        let reply = tokio::time::timeout(Duration::from_secs(600), async {
             tokio::select! {
                 code = self.receive_code() => code,
                 Some(url) = pasted => self.code_from_query(&query_of(&url)),
@@ -315,6 +366,10 @@ impl Pending {
         })
         .await
         .map_err(|_| Error::Auth("sign-in timed out after ten minutes".into()))??;
+        let code = match reply {
+            Redirect::Code(code) => code,
+            Redirect::Refused(reason) => return Ok(Consent::Refused(reason)),
+        };
         let mut params = vec![
             ("client_id", self.client.id.as_str()),
             ("code", code.as_str()),
@@ -330,23 +385,8 @@ impl Pending {
             .as_str()
             .ok_or_else(|| Error::Auth("the provider sent no refresh token".into()))?
             .to_string();
-        if let Some(granted) = tokens["scope"].as_str() {
-            let missing: Vec<&str> =
-                self.provider.required_scopes(self.ask).into_iter().filter(|w| !has_scope(granted, w)).collect();
-            if missing.iter().any(|m| self.provider.mail_scopes().contains(m)) {
-                return Err(Error::Auth(
-                    "you didn't give Jolta access to your mail. Sign in again and tick the box that lets Jolta \
-                     read, compose and send your email."
-                        .into(),
-                ));
-            }
-            if !missing.is_empty() {
-                return Err(Error::Auth(
-                    "you didn't give Jolta access to your calendar. Turn calendar on again and tick every \
-                     calendar box on the consent screen."
-                        .into(),
-                ));
-            }
+        if let Some(reason) = refused_scopes(self.provider, self.ask, tokens["scope"].as_str())? {
+            return Ok(Consent::Refused(reason));
         }
         let access_token = tokens["access_token"].as_str().unwrap_or_default().to_string();
         let claims = tokens["id_token"].as_str().and_then(jwt_claims).unwrap_or(Value::Null);
@@ -358,20 +398,19 @@ impl Pending {
         if let Some(address) = &self.address
             && !email.eq_ignore_ascii_case(address)
         {
-            return Err(Error::Auth(format!(
-                "you signed in as {email}, but calendar was being turned on for {address}. Sign in as {address}."
-            )));
+            let what = if self.ask == Ask::Rooms { "room lists were being asked" } else { "calendar was being turned on" };
+            return Err(Error::Auth(format!("you signed in as {email}, but {what} for {address}. Sign in as {address}.")));
         }
-        Ok(SignedIn {
+        Ok(Consent::Granted(SignedIn {
             name: claims["name"].as_str().unwrap_or_default().to_string(),
             email,
             refresh_token,
             access_token,
             expires_in: tokens["expires_in"].as_u64().unwrap_or(3600),
-        })
+        }))
     }
 
-    async fn receive_code(&self) -> Result<String> {
+    async fn receive_code(&self) -> Result<Redirect> {
         loop {
             let (mut stream, _) = self.listener.accept().await?;
             // The request line can arrive in pieces (through an SSH tunnel, say);
@@ -402,16 +441,75 @@ impl Pending {
         }
     }
 
-    fn code_from_query(&self, query: &HashMap<String, String>) -> Result<String> {
+    fn code_from_query(&self, query: &HashMap<String, String>) -> Result<Redirect> {
         if query.get("state") != Some(&self.state) {
             return Err(Error::Auth("the sign-in reply did not match this request".into()));
         }
         if let Some(err) = query.get("error") {
             let detail = query.get("error_description").cloned().unwrap_or_default();
-            return Err(Error::Auth(format!("{err} {detail}").trim().to_string()));
+            return Ok(Redirect::Refused(format!("{err} {detail}").trim().to_string()));
         }
-        query.get("code").cloned().ok_or_else(|| Error::Auth("the sign-in reply had no code".into()))
+        query.get("code").cloned().map(Redirect::Code).ok_or_else(|| Error::Auth("the sign-in reply had no code".into()))
     }
+}
+
+/// Whether a token reply's `scope` grants what `ask` must have: an error
+/// when mail or calendar is missing, the reason when the room lists are.
+/// A reply without `scope` grants everything asked, as OAuth 2 says,
+/// except the room lists, which Jolta must see granted.
+fn refused_scopes(provider: Provider, ask: Ask, granted: Option<&str>) -> Result<Option<String>> {
+    let granted = match (granted, ask) {
+        (Some(granted), _) => granted,
+        (None, Ask::Rooms) => "",
+        (None, _) => return Ok(None),
+    };
+    let missing: Vec<&str> = provider.required_scopes(ask).into_iter().filter(|w| !has_scope(granted, w)).collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    if ask == Ask::Rooms {
+        return Ok(Some("Microsoft didn't give Jolta your organization's room lists.".into()));
+    }
+    if missing.iter().any(|m| provider.mail_scopes().contains(m)) {
+        return Err(Error::Auth(
+            "you didn't give Jolta access to your mail. Sign in again and tick the box that lets Jolta \
+             read, compose and send your email."
+                .into(),
+        ));
+    }
+    Err(Error::Auth(
+        "you didn't give Jolta access to your calendar. Turn calendar on again and tick every \
+         calendar box on the consent screen."
+            .into(),
+    ))
+}
+
+/// What the browser came back with.
+enum Redirect {
+    Code(String),
+    /// The provider's `error` and `error_description`.
+    Refused(String),
+}
+
+/// The reason Microsoft gives for refusing a consent or a token, without
+/// its error code and the trace lines after it: "access_denied AADSTS65004:
+/// User declined to consent to access the app.\r\nTrace ID: …" becomes
+/// "User declined to consent to access the app." A token refused because
+/// nobody consented (AADSTS65001) says so in Jolta's words.
+pub fn refusal_reason(reply: &str) -> String {
+    if reply.contains("AADSTS65001") {
+        return "Nobody has allowed Jolta to read your organization's room lists yet.".into();
+    }
+    let first = reply.lines().next().unwrap_or_default();
+    let first = first.split(" Trace ID:").next().unwrap_or_default().trim();
+    let first = ["microsoft said:", "access_denied", "consent_required", "interaction_required"]
+        .iter()
+        .fold(first, |text, prefix| text.strip_prefix(prefix).map_or(text, str::trim));
+    let reason = match first.split_once(": ") {
+        Some((code, rest)) if code.starts_with("AADSTS") => rest,
+        _ => first,
+    };
+    if reason.is_empty() { "Microsoft refused without saying why.".into() } else { reason.trim().to_string() }
 }
 
 /// Whether a token reply's space-separated `scope` holds `wanted`.
@@ -522,9 +620,17 @@ pub fn data_dir() -> std::path::PathBuf {
 /// A valid access token for an OAuth account, refreshed when needed.
 /// Providers that rotate refresh tokens get the new one stored.
 pub async fn access_token(account: &Account) -> Result<String> {
+    token(account, Grant::Account).await
+}
+
+/// The token for `grant`. The room lists' token is cached apart from the
+/// account's and refreshed with its own scope; it never replaces the
+/// stored refresh token.
+pub async fn token(account: &Account, grant: Grant) -> Result<String> {
     let data_dir = data_dir();
     let provider = Provider::for_kind(account.kind).ok_or_else(|| Error::Auth("not an OAuth account".into()))?;
-    if let Some(c) = TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&account.secret_ref)) {
+    let key = cache_key(account, grant);
+    if let Some(c) = TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&key)) {
         if c.until > Instant::now() {
             return Ok(c.token.clone());
         }
@@ -539,19 +645,35 @@ pub async fn access_token(account: &Account) -> Result<String> {
     if let Some(secret) = &client.secret {
         params.push(("client_secret", secret));
     }
-    let scope = provider.refresh_scopes(account.calendar);
+    let scope = match grant {
+        Grant::Account => provider.refresh_scopes(account.calendar),
+        Grant::Rooms => Some(provider.rooms_refresh_scopes().ok_or_else(|| Error::Auth(format!("{} has no room lists", account.address)))?),
+    };
     if let Some(scope) = &scope {
         params.push(("scope", scope));
     }
     let tokens = post_token(provider, &params).await?;
     let token = tokens["access_token"].as_str().ok_or_else(|| Error::Auth("no access token in the refresh reply".into()))?;
-    if let Some(rotated) = tokens["refresh_token"].as_str() {
-        if rotated != refresh {
-            secrets::set_password(&account.secret_ref, rotated)?;
-        }
+    if let Some(rotated) = tokens["refresh_token"].as_str()
+        && grant == Grant::Account
+        && rotated != refresh
+    {
+        secrets::set_password(&account.secret_ref, rotated)?;
     }
-    remember(&account.secret_ref, token, tokens["expires_in"].as_u64().unwrap_or(3600));
+    remember(&key, token, tokens["expires_in"].as_u64().unwrap_or(3600));
     Ok(token.to_string())
+}
+
+fn cache_key(account: &Account, grant: Grant) -> String {
+    match grant {
+        Grant::Account => account.secret_ref.clone(),
+        Grant::Rooms => format!("{}#rooms", account.secret_ref),
+    }
+}
+
+/// Keeps the token a granted room-lists consent came back with.
+pub fn remember_rooms(account: &Account, signed: &SignedIn) {
+    remember(&cache_key(account, Grant::Rooms), &signed.access_token, signed.expires_in);
 }
 
 /// The SASL XOAUTH2 string for IMAP and SMTP.
@@ -608,6 +730,83 @@ mod tests {
             )
         );
         assert_eq!(Provider::Google.refresh_scopes(true), None, "Google's refresh returns every granted scope");
+    }
+
+    #[test]
+    fn room_lists_ask_microsoft_for_places_alone_and_refresh_apart() {
+        let p = params(&authorize_url(Provider::Microsoft, "cid", "http://localhost:8765/", "v", "st", Ask::Rooms, Some("me@example.com")));
+        assert_eq!(p["scope"], "openid email profile offline_access https://graph.microsoft.com/Place.Read.All");
+        assert_eq!(p["login_hint"], "me@example.com");
+        assert!(!p.contains_key("prompt"));
+        assert_eq!(Provider::Microsoft.required_scopes(Ask::Rooms), ["https://graph.microsoft.com/Place.Read.All"]);
+        assert_eq!(Provider::Microsoft.rooms_refresh_scopes().as_deref(), Some("offline_access https://graph.microsoft.com/Place.Read.All"));
+        assert_eq!(Provider::Google.rooms_refresh_scopes(), None);
+        for calendar in [false, true] {
+            assert!(
+                !Provider::Microsoft.refresh_scopes(calendar).unwrap().contains("Place"),
+                "a granted account's mail and calendar refresh stays as it was, so a withdrawn consent can't stop mail"
+            );
+        }
+    }
+
+    #[test]
+    fn a_room_lists_reply_counts_only_with_places_in_its_scope() {
+        let granted = "Place.Read.All openid profile email";
+        assert_eq!(refused_scopes(Provider::Microsoft, Ask::Rooms, Some(granted)).unwrap(), None);
+        assert!(refused_scopes(Provider::Microsoft, Ask::Rooms, Some("openid profile User.Read")).unwrap().is_some());
+        assert!(refused_scopes(Provider::Microsoft, Ask::Rooms, None).unwrap().is_some(), "room lists must be seen granted");
+        assert_eq!(refused_scopes(Provider::Microsoft, Ask::Calendar, None).unwrap(), None, "a reply without scope grants what was asked");
+        assert!(refused_scopes(Provider::Microsoft, Ask::Calendar, Some("Mail.ReadWrite openid")).is_err());
+        assert!(refused_scopes(Provider::Google, Ask::Account, Some("openid email")).is_err(), "Google without mail");
+    }
+
+    #[test]
+    fn a_refused_consent_keeps_microsofts_reason_without_codes_and_traces() {
+        assert_eq!(
+            refusal_reason("access_denied AADSTS65004: User declined to consent to access the app.\r\nTrace ID: 1f\r\nCorrelation ID: 2a"),
+            "User declined to consent to access the app."
+        );
+        assert_eq!(refusal_reason("access_denied Need admin approval"), "Need admin approval");
+        assert_eq!(refusal_reason("access_denied"), "Microsoft refused without saying why.");
+        assert_eq!(
+            refusal_reason("microsoft said: AADSTS65001: The user or administrator has not consented to use the application. Trace ID: 80 Correlation ID: dd"),
+            "Nobody has allowed Jolta to read your organization's room lists yet.",
+            "the refresh of a room lists token nobody consented to (Microsoft 365 test account, 2026-11-08)"
+        );
+        assert_eq!(refusal_reason("microsoft said: AADSTS700082: The refresh token has expired. Trace ID: 1"), "The refresh token has expired.");
+    }
+
+    #[tokio::test]
+    async fn the_browser_coming_back_refused_is_an_answer_and_a_code_still_a_sign_in() {
+        let account = Account {
+            id: crate::AccountId(1),
+            kind: AccountKind::Graph,
+            address: "me@example.com".into(),
+            display_name: String::new(),
+            username: String::new(),
+            imap_host: String::new(),
+            imap_port: 0,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            secret_ref: "test".into(),
+            imap_security: crate::model::Security::Tls,
+            smtp_security: crate::model::Security::Tls,
+            smtp_auth: crate::model::SmtpAuth::SameAsIncoming,
+            smtp_username: String::new(),
+            verify_certs: true,
+            signature: String::new(),
+            calendar: true,
+        };
+        let pending = begin_rooms(&account, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let state = pending.state.clone();
+        let refused = format!("http://localhost/?error=access_denied&error_description=AADSTS65004%3A+User+declined.%0D%0ATrace+ID%3A+1&state={state}");
+        let Consent::Refused(reason) = pending.finish_consent(async { Some(refused) }).await.unwrap() else { panic!("refused") };
+        assert_eq!(refusal_reason(&reason), "User declined.");
+        let pending = begin_rooms(&account, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let wrong = "http://localhost/?error=access_denied&state=other".to_string();
+        assert!(pending.finish_consent(async { Some(wrong) }).await.is_err(), "a reply to another request is no answer");
+        let google = Account { kind: AccountKind::Gmail, ..account };
+        assert!(begin_rooms(&google, Client { id: "cid".into(), secret: None }, 0).await.is_err());
     }
 
     fn params(url: &str) -> HashMap<String, String> {
