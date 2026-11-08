@@ -23,8 +23,8 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, MeetingProvider, Moment, Person,
-    Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
+    Access, Alarm, AlarmTrigger, Attendee, AutoDecline, Calendar, EventData, EventKind, EventStatus, Local, MeetingOptions, MeetingProvider,
+    Moment, Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Workplace, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, Error, Result, oauth};
@@ -99,6 +99,9 @@ struct GoogleEvent {
     transparency: Option<String>,
     visibility: Option<String>,
     event_type: Option<String>,
+    out_of_office_properties: Option<StatusProperties>,
+    focus_time_properties: Option<StatusProperties>,
+    working_location_properties: Option<WorkingLocation>,
     organizer: Option<Who>,
     attendees: Vec<GoogleAttendee>,
     reminders: Option<Reminders>,
@@ -110,6 +113,38 @@ struct GoogleEvent {
     guests_can_invite_others: Option<bool>,
     guests_can_see_other_guests: Option<bool>,
     guests_can_modify: bool,
+}
+
+/// `outOfOfficeProperties` and `focusTimeProperties`; only focus time
+/// has a chat status.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct StatusProperties {
+    auto_decline_mode: Option<String>,
+    decline_message: String,
+    chat_status: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct WorkingLocation {
+    #[serde(rename = "type")]
+    kind: String,
+    office_location: Option<OfficeLocation>,
+    custom_location: Option<Label>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct OfficeLocation {
+    building_id: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct Label {
+    label: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -671,7 +706,42 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
         // A Meet Google is still making counts as asked for, so a retry
         // that meets it asks for no second one.
         video: pending_meet(g).then_some(MeetingProvider::Meet),
+        kind: kind(g),
     })
+}
+
+/// What a status event says beyond busy or free (Google's status events
+/// guide). Focus time stays busy, as Google's free/busy shows it.
+fn kind(g: &GoogleEvent) -> EventKind {
+    let props = |p: &Option<StatusProperties>| p.clone().unwrap_or_default();
+    let declines = |p: &StatusProperties| match p.auto_decline_mode.as_deref() {
+        Some("declineAllConflictingInvitations") => AutoDecline::All,
+        Some("declineOnlyNewConflictingInvitations") => AutoDecline::New,
+        _ => AutoDecline::None,
+    };
+    match g.event_type.as_deref() {
+        Some("outOfOffice") => {
+            let p = props(&g.out_of_office_properties);
+            EventKind::OutOfOffice { declines: declines(&p), message: p.decline_message }
+        }
+        Some("focusTime") => {
+            let p = props(&g.focus_time_properties);
+            EventKind::Focus { declines: declines(&p), do_not_disturb: p.chat_status.as_deref() == Some("doNotDisturb"), message: p.decline_message }
+        }
+        Some("workingLocation") => {
+            let w = g.working_location_properties.clone().unwrap_or_default();
+            EventKind::WorkingLocation(match w.kind.as_str() {
+                "homeOffice" => Workplace::Home,
+                "officeLocation" => {
+                    let o = w.office_location.unwrap_or_default();
+                    Workplace::Office(if o.label.is_empty() { o.building_id } else { o.label })
+                }
+                _ => Workplace::Other(w.custom_location.map(|c| c.label).unwrap_or_default()),
+            })
+        }
+        Some("birthday") => EventKind::Birthday,
+        _ => EventKind::Default,
+    }
 }
 
 /// A start, end or original start: a date, or a time on the wall clock of
@@ -986,12 +1056,47 @@ mod tests {
         }));
         assert_eq!(e.span, Span::AllDay { start: day("2026-12-24"), end: day("2026-12-27") });
         assert_eq!(e.show_as, ShowAs::OutOfOffice);
+        assert_eq!(e.kind, EventKind::OutOfOffice { declines: AutoDecline::None, message: String::new() }, "no properties: Google declines nothing");
         assert_eq!(e.alarms, [Alarm { trigger: AlarmTrigger::MinutesBefore(1440), email: true }]);
-        let wl = mapped(json!({"id": "wl", "iCalUID": "wl", "eventType": "workingLocation", "start": {"date": "2026-11-12"}, "end": {"date": "2026-11-13"}}));
-        assert_eq!(wl.show_as, ShowAs::Free);
+        let away = mapped(json!({
+            "id": "ooo2", "iCalUID": "ooo2", "eventType": "outOfOffice",
+            "start": {"dateTime": "2026-11-16T00:00:00+01:00"}, "end": {"dateTime": "2026-11-17T00:00:00+01:00"},
+            "outOfOfficeProperties": {"autoDeclineMode": "declineOnlyNewConflictingInvitations", "declineMessage": "Back on Tuesday"}
+        }));
+        assert_eq!(away.kind, EventKind::OutOfOffice { declines: AutoDecline::New, message: "Back on Tuesday".into() });
+        let wl = |properties: Value| {
+            mapped(json!({"id": "wl", "iCalUID": "wl", "eventType": "workingLocation", "start": {"date": "2026-11-12"}, "end": {"date": "2026-11-13"}, "workingLocationProperties": properties}))
+        };
+        let home = wl(json!({"type": "homeOffice", "homeOffice": {}}));
+        assert_eq!((home.show_as, home.kind), (ShowAs::Free, EventKind::WorkingLocation(Workplace::Home)));
+        let office = wl(json!({"type": "officeLocation", "officeLocation": {"buildingId": "b2", "label": "Building 2"}}));
+        assert_eq!(office.kind, EventKind::WorkingLocation(Workplace::Office("Building 2".into())));
+        assert_eq!(wl(json!({"type": "officeLocation", "officeLocation": {"buildingId": "b2"}})).kind, EventKind::WorkingLocation(Workplace::Office("b2".into())));
+        assert_eq!(wl(json!({"type": "customLocation", "customLocation": {"label": "Ghent station"}})).kind, EventKind::WorkingLocation(Workplace::Other("Ghent station".into())));
         let free = mapped(json!({"id": "f", "iCalUID": "f", "transparency": "transparent", "start": {"date": "2026-11-12"}, "end": {"date": "2026-11-13"}}));
-        assert_eq!(free.show_as, ShowAs::Free);
+        assert_eq!((free.show_as, free.kind), (ShowAs::Free, EventKind::Default), "an event without eventType");
         assert!(!free.description_html);
+        let birthday = mapped(json!({"id": "bd", "iCalUID": "bd", "eventType": "birthday", "start": {"date": "2026-11-12"}, "end": {"date": "2026-11-13"}}));
+        assert_eq!((birthday.show_as, birthday.kind), (ShowAs::Free, EventKind::Birthday));
+    }
+
+    #[test]
+    fn focus_time_stays_busy_and_keeps_what_it_declines() {
+        let focus = mapped(json!({
+            "id": "ft", "iCalUID": "ft", "summary": "Focus time", "eventType": "focusTime",
+            "start": {"dateTime": "2026-11-18T14:00:00+01:00"}, "end": {"dateTime": "2026-11-18T16:00:00+01:00"},
+            "focusTimeProperties": {"autoDeclineMode": "declineAllConflictingInvitations", "declineMessage": "Writing", "chatStatus": "doNotDisturb"}
+        }));
+        assert_eq!(focus.show_as, ShowAs::Busy);
+        assert_eq!(focus.kind, EventKind::Focus { declines: AutoDecline::All, do_not_disturb: true, message: "Writing".into() });
+        assert_eq!(focus.kind.line().as_deref(), Some("Focus time · declines new and existing meetings · Do not disturb in Chat"));
+        let open = mapped(json!({
+            "id": "ft2", "iCalUID": "ft2", "eventType": "focusTime",
+            "start": {"dateTime": "2026-11-18T14:00:00+01:00"}, "end": {"dateTime": "2026-11-18T16:00:00+01:00"},
+            "focusTimeProperties": {"autoDeclineMode": "declineNone", "chatStatus": "available"}
+        }));
+        assert_eq!(open.kind, EventKind::Focus { declines: AutoDecline::None, do_not_disturb: false, message: String::new() });
+        assert_eq!(open.kind.line().as_deref(), Some("Focus time"));
     }
 
     #[test]

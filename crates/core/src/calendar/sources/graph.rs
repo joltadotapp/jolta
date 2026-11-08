@@ -31,8 +31,8 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, MeetingProvider, Moment, Person,
-    Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventKind, EventStatus, Local, MeetingOptions, MeetingProvider, Moment,
+    Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
 use crate::{Account, Error, Result, oauth};
@@ -799,6 +799,13 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
     };
     let location = g.location.as_ref().map(|l| l.display_name.clone()).unwrap_or_default();
     let meeting = meeting::detect(&entries(g), None, &location, &description);
+    let show_as = match g.show_as.as_deref() {
+        Some("free") => ShowAs::Free,
+        Some("tentative") => ShowAs::Tentative,
+        Some("oof") => ShowAs::OutOfOffice,
+        Some("workingElsewhere") => ShowAs::Elsewhere,
+        _ => ShowAs::Busy,
+    };
     Some(EventData {
         uid,
         recurrence_id,
@@ -811,13 +818,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         description_html,
         url: None,
         status: if g.is_cancelled { EventStatus::Cancelled } else { EventStatus::Confirmed },
-        show_as: match g.show_as.as_deref() {
-            Some("free") => ShowAs::Free,
-            Some("tentative") => ShowAs::Tentative,
-            Some("oof") => ShowAs::OutOfOffice,
-            Some("workingElsewhere") => ShowAs::Elsewhere,
-            _ => ShowAs::Busy,
-        },
+        show_as,
         visibility: match g.sensitivity.as_deref() {
             Some("personal") | Some("private") => Visibility::Private,
             Some("confidential") => Visibility::Confidential,
@@ -847,6 +848,7 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
             ..MeetingOptions::default()
         },
         video: None,
+        kind: EventKind::Default,
     })
 }
 
@@ -1527,7 +1529,18 @@ mod tests {
         }));
         let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         assert_eq!(e.span, Span::AllDay { start: day("2026-11-11"), end: day("2026-11-12") });
-        assert_eq!(e.show_as, ShowAs::Free);
+        assert_eq!((e.show_as, e.kind), (ShowAs::Free, EventKind::Default));
+        let away = mapped(json!({
+            "id": "A2", "type": "singleInstance", "iCalUId": "a2", "subject": "Away", "isAllDay": true,
+            "start": {"dateTime": "2026-11-10T23:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-11T23:00:00.0000000", "timeZone": "UTC"},
+            "originalStartTimeZone": "Romance Standard Time", "showAs": "oof"
+        }));
+        assert_eq!(
+            away.kind.shown(away.show_as),
+            EventKind::OutOfOffice { declines: crate::calendar::AutoDecline::None, message: String::new() },
+            "shown as Google's out of office is; Graph says nothing about what it declines"
+        );
     }
 
     #[test]

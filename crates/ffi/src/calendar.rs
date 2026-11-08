@@ -156,6 +156,7 @@ pub struct OccurrenceRecord {
     pub time: OccurrenceTime,
     pub status: EventStatus,
     pub show_as: ShowAs,
+    pub kind: OccurrenceKind,
     pub my_response: Option<EventResponse>,
     pub meeting_provider: Option<MeetingProvider>,
     pub join_url: Option<String>,
@@ -166,6 +167,43 @@ pub struct OccurrenceRecord {
     pub copies: u32,
     /// An edit of it waits to reach the server: the "not synced yet" mark.
     pub not_synced: bool,
+}
+
+/// How the week view draws an occurrence beyond its show as: out of office
+/// as a solid band, focus time with a moon, a working location as a label
+/// in the all-day strip.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum OccurrenceKind {
+    Default,
+    OutOfOffice,
+    Focus,
+    /// `place` is the label: "Home", "Office · Building 2".
+    WorkingLocation { place: String, at: Workplace },
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Workplace {
+    Home,
+    Office,
+    Other,
+}
+
+impl From<cal::EventKind> for OccurrenceKind {
+    fn from(k: cal::EventKind) -> Self {
+        match k {
+            cal::EventKind::OutOfOffice { .. } => OccurrenceKind::OutOfOffice,
+            cal::EventKind::Focus { .. } => OccurrenceKind::Focus,
+            cal::EventKind::WorkingLocation(place) => OccurrenceKind::WorkingLocation {
+                place: place.label(),
+                at: match place {
+                    cal::Workplace::Home => Workplace::Home,
+                    cal::Workplace::Office(_) => Workplace::Office,
+                    cal::Workplace::Other(_) => Workplace::Other,
+                },
+            },
+            cal::EventKind::Default | cal::EventKind::Birthday => OccurrenceKind::Default,
+        }
+    }
 }
 
 #[derive(uniffi::Enum, Debug)]
@@ -238,6 +276,8 @@ pub struct EventDetail {
     pub description_html: String,
     pub status: EventStatus,
     pub show_as: ShowAs,
+    /// "Out of office · declines new invitations", "Working from home".
+    pub kind_line: Option<String>,
     pub visibility: EventVisibility,
     pub my_response: Option<EventResponse>,
     /// Accept, Maybe and Decline apply: an invitation from someone else in a
@@ -742,6 +782,7 @@ impl Core {
                 time: o.bounds.into(),
                 status: o.status.into(),
                 show_as: o.show_as.into(),
+                kind: o.kind.into(),
                 my_response: o.my_response.map(Into::into),
                 meeting_provider: o.meeting.as_ref().map(|m| m.provider.into()),
                 join_url: o.meeting.map(|m| m.url),
@@ -793,6 +834,7 @@ impl Core {
             description_html: d.description_html,
             status: e.status.into(),
             show_as: e.show_as.into(),
+            kind_line: e.kind.shown(e.show_as).line(),
             visibility: e.visibility.into(),
             my_response: e.attendees.iter().find(|a| a.is_me).map(|a| a.response.into()),
             can_answer,

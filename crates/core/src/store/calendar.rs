@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::calendar::recur::Source;
 use crate::calendar::series::{self, Horizon};
 use crate::calendar::{
-    Access, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, MeetingProvider, Moment,
+    Access, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, EventKind, EventStatus, MeetingProvider, Moment,
     Response, ShowAs, Zone, tz,
 };
 use crate::{AccountId, Error, Result};
@@ -601,6 +601,9 @@ pub struct OccurrenceRow {
     pub bounds: Bounds,
     pub status: EventStatus,
     pub show_as: ShowAs,
+    /// Out of office, focus time or a working location, as `EventKind::shown`
+    /// gives it.
+    pub kind: EventKind,
     pub my_response: Option<Response>,
     pub meeting: Option<JoinLink>,
     pub has_attendees: bool,
@@ -623,7 +626,7 @@ impl OccurrenceRow {
 const OCCURRENCE_COLS: &str = "o.event_id, o.calendar_id, coalesce(c.user_color, c.color), e.title, e.location,
      o.start_utc, o.end_utc, o.start_day, o.end_day, e.status, e.show_as, e.my_response, e.meeting_provider,
      e.join_url, e.has_attendees, o.busy AND c.counts_as_busy, e.uid, c.source, c.is_default, e.changed_locally,
-     ifnull(json_extract(e.data, '$.organizer_is_me'), 0)";
+     ifnull(json_extract(e.data, '$.organizer_is_me'), 0), json_extract(e.data, '$.kind')";
 
 fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
     let bounds = match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
@@ -634,6 +637,7 @@ fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
         (Some(provider), Some(url)) => Some(JoinLink { provider, url }),
         _ => None,
     };
+    let show_as = r.get(10)?;
     Ok(OccurrenceRow {
         event_id: r.get(0)?,
         calendar_id: r.get(1)?,
@@ -643,7 +647,12 @@ fn occurrence_row(r: &Row) -> rusqlite::Result<OccurrenceRow> {
         location: r.get(4)?,
         bounds,
         status: r.get(9)?,
-        show_as: r.get(10)?,
+        show_as,
+        kind: r
+            .get::<_, Option<String>>(21)?
+            .and_then(|k| serde_json::from_str::<EventKind>(&k).ok())
+            .unwrap_or_default()
+            .shown(show_as),
         my_response: r.get(11)?,
         meeting,
         has_attendees: r.get(14)?,

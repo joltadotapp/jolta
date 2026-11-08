@@ -201,6 +201,100 @@ pub struct Meeting {
     pub other_links: Vec<String>,
 }
 
+/// What a provider's status event says beyond busy or free: Google's
+/// `eventType` with its properties. Other sources say only "out of office"
+/// in `show_as`, which `shown` turns into a kind where the views read it,
+/// so an edit of Show as never leaves a stale kind behind.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventKind {
+    #[default]
+    Default,
+    OutOfOffice {
+        declines: AutoDecline,
+        message: String,
+    },
+    Focus {
+        declines: AutoDecline,
+        do_not_disturb: bool,
+        message: String,
+    },
+    WorkingLocation(Workplace),
+    Birthday,
+}
+
+/// Which invitations over a status event the provider declines for the
+/// user. New invitations only is Google Calendar's own default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoDecline {
+    None,
+    #[default]
+    New,
+    All,
+}
+
+/// Where a working location event says the user works, with the label the
+/// provider shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Workplace {
+    Home,
+    Office(String),
+    Other(String),
+}
+
+impl EventKind {
+    pub fn is_default(&self) -> bool {
+        *self == EventKind::Default
+    }
+
+    /// The kind an event shows as: its own, or out of office, declining
+    /// nothing, for an event shown as out of office without one.
+    pub fn shown(&self, show_as: ShowAs) -> EventKind {
+        match self {
+            EventKind::Default if show_as == ShowAs::OutOfOffice => EventKind::OutOfOffice { declines: AutoDecline::None, message: String::new() },
+            kind => kind.clone(),
+        }
+    }
+
+    /// The event detail's line: "Out of office · declines new invitations".
+    pub fn line(&self) -> Option<String> {
+        let declines = |d: &AutoDecline| match d {
+            AutoDecline::None => None,
+            AutoDecline::New => Some("declines new invitations"),
+            AutoDecline::All => Some("declines new and existing meetings"),
+        };
+        let parts: Vec<&str> = match self {
+            EventKind::Default | EventKind::Birthday => return None,
+            EventKind::OutOfOffice { declines: d, .. } => ["Out of office"].into_iter().chain(declines(d)).collect(),
+            EventKind::Focus { declines: d, do_not_disturb, .. } => {
+                ["Focus time"].into_iter().chain(declines(d)).chain(do_not_disturb.then_some("Do not disturb in Chat")).collect()
+            }
+            EventKind::WorkingLocation(place) => {
+                return Some(match place {
+                    Workplace::Home => "Working from home".into(),
+                    Workplace::Office(label) if label.is_empty() => "Working from the office".into(),
+                    Workplace::Office(label) => format!("Working from the office · {label}"),
+                    Workplace::Other(label) if label.is_empty() => "Working elsewhere".into(),
+                    Workplace::Other(label) => format!("Working from {label}"),
+                });
+            }
+        };
+        Some(parts.join(" · "))
+    }
+}
+
+impl Workplace {
+    /// The label the week view's all-day strip shows: "Home", "Office · Building 2".
+    pub fn label(&self) -> String {
+        match self {
+            Workplace::Home => "Home".into(),
+            Workplace::Office(label) if label.is_empty() => "Office".into(),
+            Workplace::Office(label) => format!("Office · {label}"),
+            Workplace::Other(label) if label.is_empty() => "Elsewhere".into(),
+            Workplace::Other(label) => label.clone(),
+        }
+    }
+}
+
 /// One event as every source delivers it: a single event, the master of a
 /// series, or an override of one occurrence (`recurrence_id` set). Masters
 /// and overrides share a `uid`.
@@ -246,6 +340,8 @@ pub struct EventData {
     /// Google is still making.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<MeetingProvider>,
+    #[serde(default, skip_serializing_if = "EventKind::is_default")]
+    pub kind: EventKind,
 }
 
 impl EventData {
@@ -276,6 +372,7 @@ impl EventData {
             options: MeetingOptions::default(),
             organizer_is_me: false,
             video: None,
+            kind: EventKind::Default,
         }
     }
 
@@ -325,5 +422,37 @@ impl Calendar {
     /// calendar counts, whose id is the account's address.
     pub fn is_own(&self, account: &str) -> bool {
         self.access == Access::Owner && (self.source != CalendarSource::Google || self.remote_id.eq_ignore_ascii_case(account))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_events_from_before_kinds_read_as_default() {
+        let e = EventData::new("u", Span::AllDay { start: NaiveDate::from_ymd_opt(2026, 11, 9).unwrap(), end: NaiveDate::from_ymd_opt(2026, 11, 10).unwrap() });
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("\"kind\""), "a default kind isn't written: {json}");
+        let read: EventData = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.kind, EventKind::Default);
+        let away = EventData { kind: EventKind::OutOfOffice { declines: AutoDecline::New, message: "Back Monday".into() }, ..e };
+        assert_eq!(serde_json::from_str::<EventData>(&serde_json::to_string(&away).unwrap()).unwrap(), away);
+    }
+
+    #[test]
+    fn the_detail_line_and_the_strip_label() {
+        let shown = EventKind::Default.shown(ShowAs::OutOfOffice);
+        assert_eq!(shown.line().as_deref(), Some("Out of office"));
+        assert_eq!(EventKind::Default.shown(ShowAs::Busy), EventKind::Default);
+        let google = EventKind::OutOfOffice { declines: AutoDecline::New, message: String::new() };
+        assert_eq!(google.shown(ShowAs::Busy), google, "a provider's own kind wins");
+        assert_eq!(google.line().as_deref(), Some("Out of office · declines new invitations"));
+        assert_eq!(EventKind::Focus { declines: AutoDecline::None, do_not_disturb: true, message: String::new() }.line().as_deref(), Some("Focus time · Do not disturb in Chat"));
+        assert_eq!(EventKind::WorkingLocation(Workplace::Home).line().as_deref(), Some("Working from home"));
+        assert_eq!(EventKind::Default.line(), None);
+        assert_eq!(Workplace::Office("Building 2".into()).label(), "Office · Building 2");
+        assert_eq!(Workplace::Other(String::new()).label(), "Elsewhere");
+        assert_eq!(AutoDecline::default(), AutoDecline::New, "Google Calendar's default, and Koen's");
     }
 }

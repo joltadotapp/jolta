@@ -1182,6 +1182,7 @@ mod tests {
             options: Default::default(),
             organizer_is_me: false,
             video: None,
+            kind: Default::default(),
         }
     }
 

@@ -91,15 +91,26 @@ pub async fn look_up(jolta: &Jolta, account: AccountId, people: &[String], from:
     let mine = answers.iter().position(|s| s.person == a.address).map(|i| answers.remove(i));
 
     let here = tz::here();
-    let mut own: Vec<Busy> = jolta
+    let (mut own, of_account): (Vec<Busy>, Vec<Busy>) = jolta
         .store
         .read_async(move |c| {
             let (first_day, last_day) = (start.with_timezone(&here).date_naive(), end.with_timezone(&here).date_naive() + Duration::days(1));
-            Ok(store::occurrences(c, first_day, last_day, here)?.iter().filter_map(|o| stored_busy(o, here)).collect())
+            let calendars: Vec<_> = store::calendars(c)?.into_iter().filter(|cal| cal.account_id == Some(account)).map(|cal| cal.id).collect();
+            let mut own = Vec::new();
+            let mut of_account = Vec::new();
+            for o in store::occurrences(c, first_day, last_day, here)? {
+                if let Some(b) = stored_busy(&o, here) {
+                    if calendars.contains(&o.calendar_id) {
+                        of_account.push(b);
+                    }
+                    own.push(b);
+                }
+            }
+            Ok((own, of_account))
         })
         .await?;
     if let Some(Schedule { availability: Availability::Known(busy), .. }) = mine {
-        own.extend(busy);
+        own.extend(uncovered(busy, of_account));
     }
     own.retain(|b| b.end > start && b.start < end);
     own.sort_by_key(|b| (b.start, b.end));
@@ -117,6 +128,29 @@ fn recorded(dir: &Path) -> Result<Option<Recorded>> {
 fn recorded_answer(r: &Recorded, person: &str) -> Schedule {
     let found = r.people.iter().find(|(p, _)| p.eq_ignore_ascii_case(person)).map(|(_, a)| a.clone());
     Schedule { person: person.to_string(), availability: found.unwrap_or(Availability::Unknown(Unknown::NotFound)) }
+}
+
+/// The provider's busy blocks for the account's own address that the
+/// account's stored blocking occurrences don't cover completely. Google's
+/// free/busy gives an out-of-office event as a plain busy block, so the
+/// stored occurrence's kind wins; a block nothing stored covers comes from a
+/// calendar Jolta doesn't show, and stays.
+fn uncovered(provider: Vec<Busy>, mut stored: Vec<Busy>) -> Vec<Busy> {
+    stored.sort_by_key(|b| b.start);
+    let covered = |b: &Busy| {
+        let mut reached = b.start;
+        for s in &stored {
+            if s.start > reached {
+                break;
+            }
+            reached = reached.max(s.end);
+            if reached >= b.end {
+                return true;
+            }
+        }
+        false
+    };
+    provider.into_iter().filter(|b| !covered(b)).collect()
 }
 
 /// An occurrence that blocks the user's time, as a busy block. An all-day
@@ -290,6 +324,53 @@ mod tests {
         j.store.write(|tx| Ok(tx.execute("UPDATE account SET calendar = 0 WHERE id = ?1", [account])?)).unwrap();
         assert!(matches!(rt.block_on(look_up(&j, account, &people, from, 1)).unwrap(), Lookup::CalendarOff { .. }));
         assert!(matches!(rt.block_on(look_up(&j, account, &[], from, 1)).unwrap(), Lookup::Found(_)), "the user's own times need no calendar sign-in");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Google's free/busy answers the user's own out of office as plain
+    /// busy; the stored occurrence says what it is (C4 U1).
+    #[test]
+    fn the_stored_out_of_office_wins_over_the_providers_busy_block() {
+        let (j, calendar) = jolta("find-time-away");
+        let horizon = crate::calendar::series::Horizon::around(Utc.with_ymd_and_hms(2026, 11, 10, 7, 0, 0).unwrap(), Brussels);
+        let local = j
+            .store
+            .write(|tx| {
+                let c = crate::store::RemoteCalendar { remote_id: "here".into(), name: "Here".into(), color: None, zone: None, access: crate::calendar::Access::Owner, primary: true, refresh: None, video: None };
+                store::add_calendar(tx, crate::calendar::CalendarSource::Local, &c)
+            })
+            .unwrap()
+            .id;
+        for (cal, uid, start, end, status) in [(calendar, "away", "080000", "120000", "OOF"), (calendar, "talk", "120000", "130000", "BUSY"), (local, "gym", "150000", "160000", "BUSY")] {
+            let ics = format!(
+                "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART:20261110T{start}Z\r\nDTEND:20261110T{end}Z\r\nSUMMARY:{uid}\r\nX-MICROSOFT-CDO-BUSYSTATUS:{status}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            );
+            let events = crate::calendar::ical::read(&ics, &[ME.to_string()]).unwrap();
+            j.store.write(|tx| store::apply_item(tx, cal, uid, None, &events, None, &horizon)).unwrap();
+        }
+        let block = |start: &str, end: &str| serde_json::json!({"start": format!("2026-11-10T{start}:00Z"), "end": format!("2026-11-10T{end}:00Z"), "kind": "busy"});
+        let file = serde_json::json!({
+            "workingHours": availability::WorkingHours { days: Weekdays::MONDAY_TO_FRIDAY, start: chrono::NaiveTime::from_hms_opt(7, 0, 0).unwrap(), end: chrono::NaiveTime::from_hms_opt(19, 0, 0).unwrap(), ..WorkingHours::standard(Brussels) },
+            "people": { ME: {"known": [block("07:00", "07:30"), block("08:00", "13:00"), block("15:00", "16:00"), block("16:30", "17:00")]} }
+        });
+        std::fs::write(j.data_dir.join("free-busy.json"), file.to_string()).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let from = Utc.with_ymd_and_hms(2026, 11, 10, 5, 0, 0).unwrap();
+        let Lookup::Found(found) = rt.block_on(look_up(&j, AccountId(1), &[], from, 1)).unwrap() else { panic!("calendar is on") };
+        let blocks: Vec<(String, String, BusyKind)> = found.own.iter().map(|b| (b.start.format("%H:%M").to_string(), b.end.format("%H:%M").to_string(), b.kind)).collect();
+        let want = |list: &[(&str, &str, BusyKind)]| list.iter().map(|(s, e, k)| (s.to_string(), e.to_string(), *k)).collect::<Vec<_>>();
+        assert_eq!(
+            blocks,
+            want(&[
+                ("07:00", "07:30", BusyKind::Busy),
+                ("08:00", "12:00", BusyKind::OutOfOffice),
+                ("12:00", "13:00", BusyKind::Busy),
+                ("15:00", "16:00", BusyKind::Busy),
+                ("15:00", "16:00", BusyKind::Busy),
+                ("16:30", "17:00", BusyKind::Busy),
+            ]),
+            "Google's 08:00 to 13:00 is the stored out of office and talk together, so it goes; the gym is on another calendar than the account's, and 07:00 and 16:30 come from calendars Jolta doesn't show"
+        );
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 }
