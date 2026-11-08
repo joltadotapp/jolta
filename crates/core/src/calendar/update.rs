@@ -65,6 +65,16 @@ pub fn holds(answered: &[EventData], source: Option<CalendarSource>, message: &[
     event && occurrence
 }
 
+/// Whether two versions place the whole event, or with `rid` that
+/// occurrence, at the same time (`same_time`).
+fn same_place(a: &[EventData], b: &[EventData], rid: Option<&Moment>, here: Tz) -> bool {
+    let pick = |events: &[EventData]| match rid {
+        None => events.iter().find(|e| e.recurrence_id.is_none()).cloned(),
+        Some(rid) => series::occurrence(events, rid, here),
+    };
+    matches!((pick(a), pick(b)), (Some(a), Some(b)) if same_time(&a, &b, here))
+}
+
 /// The same start, end and repeat rule. EXDATEs don't count: an
 /// occurrence cancelled doesn't move the others.
 pub fn same_time(a: &EventData, b: &EventData, here: Tz) -> bool {
@@ -160,18 +170,29 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         return Ok(History { not_from_guest: true, ..History::default() });
     }
 
-    let mut versions = mails(seen, organizer.as_deref(), uid, rid.as_ref(), this)?;
+    // A proposal is set against the time of every later version, so all are read.
+    let read_up_to = if sent.method == Method::Counter { Version { sequence: i64::MAX, stamp: None } } else { this };
+    let mut versions = mails(seen, organizer.as_deref(), uid, rid.as_ref(), read_up_to)?;
     if rid.is_some() {
         let series = mails(seen, organizer.as_deref(), uid, None, this)?;
         versions.extend(series.into_iter().filter(|(method, ..)| *method == Method::Cancel));
     }
-    let mut newest: Option<(Version, Method)> = None;
     let mut before: Option<(Version, Vec<EventData>)> = None;
+    for (method, events, version) in &versions {
+        if *version < this && *method != Method::Cancel && before.as_ref().is_none_or(|(v, _)| version > v) {
+            before = Some((*version, events.clone()));
+        }
+    }
+    // A proposal answers the time the guest saw: a later version that kept
+    // it, such as one that only changed the guest list, leaves it open.
+    let kept_time = |events: &[EventData]| {
+        sent.method == Method::Counter && before.as_ref().is_some_and(|(_, saw)| same_place(saw, events, rid.as_ref(), seen.here))
+    };
+    let mut newest: Option<(Version, Method)> = None;
     for (method, events, version) in versions {
-        if version > this && newest.is_none_or(|(v, _)| version > v) {
+        let moved = method == Method::Cancel || !kept_time(&events);
+        if version > this && moved && newest.is_none_or(|(v, _)| version > v) {
             newest = Some((version, method));
-        } else if version < this && method != Method::Cancel && before.as_ref().is_none_or(|(v, _)| version > *v) {
-            before = Some((version, events));
         }
     }
 
@@ -188,7 +209,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         let newer_copy = match source {
             _ if cancelled && sent.method == Method::Cancel => false,
             CalendarSource::Graph => cancelled,
-            _ => copy.event.sequence > this.sequence || cancels(copy, this.sequence),
+            _ => (copy.event.sequence > this.sequence && !kept_time(std::slice::from_ref(&copy.event))) || cancels(copy, this.sequence),
         };
         if newer_copy {
             let version = Version { sequence: copy.event.sequence, stamp: None };

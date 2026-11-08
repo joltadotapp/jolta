@@ -112,9 +112,16 @@ pub struct StoredEvent {
 /// mail and never decides who organizes the meeting.
 const NOT_ADDED: &str = "NOT EXISTS (SELECT 1 FROM added_copy a WHERE a.calendar_id = e.calendar_id AND (a.uid = e.uid OR a.remote_id = e.remote_id))";
 
+/// The calendars `c` of the account bound to `param`: its own, and the ones
+/// on this Mac that send their meetings' invitations from it, whose
+/// meetings are the account's as a meeting in its own calendar is.
+fn of_account(param: &str) -> String {
+    format!("(c.account_id = {param} OR (c.source = 'local' AND c.send_from = {param}))")
+}
+
 /// The event with this UID and recurrence id in a shown calendar, of
-/// `account` only when one is given, and then never a copy the user added
-/// (`NOT_ADDED`). A recurrence id matches the same moment written in
+/// `account` only when one is given (`of_account`), and then never a copy
+/// the user added (`NOT_ADDED`). A recurrence id matches the same moment written in
 /// another zone, as `Moment::names` decides. A meeting in several calendars
 /// gives the copy the views show.
 pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, account: Option<AccountId>, here: Tz) -> Result<Option<StoredEvent>> {
@@ -133,7 +140,8 @@ pub fn stored_event_in(
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR (c.account_id = ?3 AND {NOT_ADDED}))"
+         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR ({} AND {NOT_ADDED}))",
+        of_account("?3")
     ))?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account], |r| {
         let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
@@ -161,7 +169,8 @@ pub fn stored_series(conn: &Connection, uid: &str, account: Option<AccountId>) -
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR (c.account_id = ?2 AND {NOT_ADDED}))"
+         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR ({} AND {NOT_ADDED}))",
+        of_account("?2")
     ))?;
     let rows = stmt
         .query_map(params![uid, account], |r| {

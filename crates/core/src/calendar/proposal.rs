@@ -518,6 +518,58 @@ mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// A meeting in a calendar on this Mac that sends its invitations from
+    /// the account is the account's own to change (C3 U11, R4 A14).
+    #[test]
+    fn a_proposal_for_a_meeting_sent_from_this_mac_is_accepted_there() {
+        let (j, _) = jolta("proposal-local");
+        let here = j.store.write(|tx| crate::calendar::ops::new_local_calendar(tx, "Here", None)).unwrap().id;
+        j.store.write(|tx| store::set_calendar_send_from(tx, here, Some(AccountId(1)))).unwrap();
+        my_meeting(&j, here);
+        let raw = counter("l1", "bo@example.com", ME, "bo@example.com", "20261113T140000Z");
+        let message = import(&j, raw.as_bytes());
+        let p = card_of(&j, message, &raw).proposal.expect("Bo's proposal");
+        assert_eq!((p.accepting, p.declining), (Some(message), Some(message)));
+        let a = run(accept_draft(&j, message)).unwrap();
+        assert_eq!(a.draft.calendar, here, "the copy on this Mac");
+        save(&j, &a.draft).expect("one update queued");
+        assert!(card_of(&j, message, &raw).proposal.is_some_and(|p| p.accepted), "and it reads accepted after");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A version after the one the guest proposed against that only changed
+    /// the guest list keeps the proposal open; one that moved the meeting
+    /// makes it outdated (C3 U11, R2 A14: Exchange raised the SEQUENCE twice
+    /// for another guest taken off and added again).
+    #[test]
+    fn a_proposal_stays_open_until_the_meeting_moves() {
+        let (j, calendar) = jolta("proposal-kept-time");
+        my_meeting(&j, calendar);
+        let mine = |id: &str, seq: i64, stamp: &str, start: &str, guests: &str| {
+            format!(
+                "From: {ME}\r\nTo: bo@example.com\r\nSubject: Planning\r\nMessage-ID: <{id}@example.com>\r\n\
+                 Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:{seq}\r\n\
+                 DTSTAMP:{stamp}\r\nDTSTART:{start}\r\nDTEND:{}\r\nSUMMARY:Planning\r\nORGANIZER;CN=Me:mailto:{ME}\r\n{guests}END:VEVENT\r\nEND:VCALENDAR\r\n",
+                start.replace("T15", "T16")
+            )
+        };
+        let bo = "ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\n";
+        let with_eve = format!("{bo}ATTENDEE:mailto:eve@example.com\r\n");
+        import(&j, mine("s1", 1, "20261104T080000Z", "20261112T150000Z", bo).as_bytes());
+        import(&j, mine("s3", 3, "20261104T110000Z", "20261112T150000Z", &with_eve).as_bytes());
+        let raw = counter("k1", "bo@example.com", ME, "bo@example.com", "20261113T140000Z");
+        let message = import(&j, raw.as_bytes());
+        let c = card_of(&j, message, &raw);
+        assert!(!c.outdated, "Eve added: the meeting is where Bo saw it, {:?}", notes(&c));
+        assert_eq!(c.proposal.and_then(|p| p.accepting), Some(message));
+
+        import(&j, mine("s4", 4, "20261104T120000Z", "20261112T170000Z", &with_eve).as_bytes());
+        let c = card_of(&j, message, &raw);
+        assert!(c.outdated, "the meeting moved since Bo proposed");
+        assert_eq!(c.proposal.and_then(|p| p.accepting), None);
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// A guest's proposal for a meeting someone else organizes, copied to
     /// the user, shows but offers no Decline: only the organizer answers it.
     #[test]
