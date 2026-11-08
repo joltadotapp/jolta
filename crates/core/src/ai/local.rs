@@ -96,6 +96,23 @@ pub struct Local {
     reaper: Mutex<bool>,
 }
 
+/// The helper while a request runs. A request dropped before its answer,
+/// as a timeout drops it, leaves the helper writing that answer, which the
+/// next request would read as its own; the helper goes instead (it is
+/// killed on drop) and the next request starts a fresh one.
+struct Midway<'a> {
+    slot: tokio::sync::MutexGuard<'a, Option<Helper>>,
+    finished: bool,
+}
+
+impl Drop for Midway<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.slot.take();
+        }
+    }
+}
+
 impl Local {
     pub fn new(path: PathBuf) -> Local {
         Local {
@@ -156,12 +173,13 @@ impl Local {
         on: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<Finish> {
         self.start_reaper();
-        let mut slot = self.helper.lock().await;
-        let result = self.run(&mut slot, model, path, request, cancel, on).await;
+        let mut slot = Midway { slot: self.helper.lock().await, finished: false };
+        let result = self.run(&mut slot.slot, model, path, request, cancel, on).await;
+        slot.finished = true;
         *self.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
         if result.is_err() {
             // A helper that failed mid-request may be in any state; start fresh next time.
-            if let Some(mut h) = slot.take() {
+            if let Some(mut h) = slot.slot.take() {
                 let _ = h.child.kill().await;
             }
         }
@@ -225,5 +243,49 @@ impl Local {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A helper that answers each request with its own last line, after a
+    /// pause when the request says "slow".
+    const FAKE: &str = r#"import json, sys, time
+for line in sys.stdin:
+    r = json.loads(line)
+    if r["op"] == "load":
+        print(json.dumps({"event": "loaded", "seconds": 0}), flush=True)
+    elif r["op"] == "generate":
+        ask = r["prompt"].split("<|turn>user\n")[1].split("<turn|>")[0]
+        if "slow" in ask:
+            time.sleep(1.5)
+        print(json.dumps({"event": "text", "text": "answer to " + ask}), flush=True)
+        print(json.dumps({"event": "done", "cancelled": False}), flush=True)
+"#;
+
+    fn ask(user: &str) -> Request {
+        Request { system: String::new(), user: user.into(), max_tokens: 10, temperature: 0.0, grammar: None }
+    }
+
+    /// Sol found it in review: after quick create's 5-second limit dropped a
+    /// request, the next one got its answer.
+    #[tokio::test]
+    async fn a_dropped_request_never_answers_the_next() {
+        let dir = std::env::temp_dir().join(format!("jolta-fake-helper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("helper.py");
+        std::fs::write(&script, FAKE).unwrap();
+        let helper = dir.join("helper.sh");
+        std::fs::write(&helper, format!("#!/bin/sh\nexec python3 -I {}\n", script.display())).unwrap();
+        std::fs::set_permissions(&helper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let local = Local::new(helper);
+        let (model, path) = (&MODELS[0], dir.join("model.gguf"));
+        let slow = tokio::time::timeout(Duration::from_millis(300), local.generate(model, &path, &ask("slow drinks"), &Cancel::default(), &mut |_| {})).await;
+        assert!(slow.is_err(), "the slow request times out");
+        let next = local.generate(model, &path, &ask("dinner"), &Cancel::default(), &mut |_| {}).await.unwrap();
+        assert_eq!(next, Finish::Done("answer to dinner".into()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

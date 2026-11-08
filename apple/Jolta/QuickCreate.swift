@@ -13,6 +13,8 @@ struct QuickCreateView: View {
     @State private var day: Date?
     /// Waiting for the AI after Return, at most 5 seconds.
     @State private var reading = false
+    /// The draft being made after Return; closing the panel drops it.
+    @State private var pending: Task<Void, Never>?
     @FocusState private var focused: Bool
 
     /// The app's language first, then the Mac's: a tie between readings goes to the first.
@@ -26,7 +28,7 @@ struct QuickCreateView: View {
                 Image(systemName: creating ? "calendar.badge.plus" : "calendar")
                     .font(.system(size: 15))
                     .foregroundStyle(Color(Theme.text3))
-                TextField(creating ? "Lunch with Jan fri 12:30 at Mok" : "Go to… fri, 14 dec, morgen, next week", text: $text)
+                TextField(creating ? "Lunch with Jan fri 12:30 at Mok" : "Go to… fri, 14 dec, morgen, mardi prochain", text: $text)
                     .textFieldStyle(.plain)
                     .font(.system(size: 16))
                     .focused($focused)
@@ -68,6 +70,7 @@ struct QuickCreateView: View {
             DispatchQueue.main.async { focused = true }
         }
         .onExitCommand { close() }
+        .onDisappear { pending?.cancel() }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(creating ? "quick-create" : "go-to-date")
     }
@@ -213,14 +216,17 @@ struct QuickCreateView: View {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         reading = true
         let line = text
-        Task {
+        pending = Task {
             do {
                 let q = try await model.core.quickDraft(text: line, languages: Self.languages)
+                // Closed while the AI read: the draft goes nowhere.
+                guard !Task.isCancelled else { return }
                 reading = false
                 model.palette = nil
                 model.mode = .calendar
                 model.calendar.openQuick(q)
             } catch {
+                guard !Task.isCancelled else { return }
                 reading = false
                 model.notify("\(error)")
             }
