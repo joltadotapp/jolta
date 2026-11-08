@@ -184,13 +184,18 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         }
     }
     // A proposal answers the time the guest saw: a later version that kept
-    // it, such as one that only changed the guest list, leaves it open.
-    let kept_time = |events: &[EventData]| {
-        sent.method == Method::Counter && before.as_ref().is_some_and(|(_, saw)| same_place(saw, events, rid.as_ref(), seen.here))
+    // it, such as one that only changed the guest list, leaves it open, and
+    // so does the cancellation that took another guest off.
+    let counter = sent.method == Method::Counter;
+    let kept_time = |events: &[EventData]| counter && before.as_ref().is_some_and(|(_, saw)| same_place(saw, events, rid.as_ref(), seen.here));
+    let proposer = proposer(&sent.event, seen.sender).map(|a| a.person.address.clone());
+    let ends_it = |events: &[EventData]| {
+        !counter
+            || events.iter().any(|e| e.attendees.is_empty() || e.attendees.iter().any(|a| proposer.as_ref().is_some_and(|p| a.person.address.eq_ignore_ascii_case(p))))
     };
     let mut newest: Option<(Version, Method)> = None;
     for (method, events, version) in versions {
-        let moved = method == Method::Cancel || !kept_time(&events);
+        let moved = if method == Method::Cancel { ends_it(&events) } else { !kept_time(&events) };
         if version > this && moved && newest.is_none_or(|(v, _)| version > v) {
             newest = Some((version, method));
         }

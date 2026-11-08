@@ -545,28 +545,41 @@ mod tests {
     fn a_proposal_stays_open_until_the_meeting_moves() {
         let (j, calendar) = jolta("proposal-kept-time");
         my_meeting(&j, calendar);
-        let mine = |id: &str, seq: i64, stamp: &str, start: &str, guests: &str| {
+        let sent = |method: &str, id: &str, seq: i64, stamp: &str, start: &str, guests: &str| {
             format!(
                 "From: {ME}\r\nTo: bo@example.com\r\nSubject: Planning\r\nMessage-ID: <{id}@example.com>\r\n\
-                 Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:{seq}\r\n\
+                 Content-Type: text/calendar; method={method}\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:plan\r\nSEQUENCE:{seq}\r\n\
                  DTSTAMP:{stamp}\r\nDTSTART:{start}\r\nDTEND:{}\r\nSUMMARY:Planning\r\nORGANIZER;CN=Me:mailto:{ME}\r\n{guests}END:VEVENT\r\nEND:VCALENDAR\r\n",
-                start.replace("T15", "T16")
+                start.replace("T15", "T16").replace("T17", "T18")
             )
         };
+        let mine = |id: &str, seq: i64, stamp: &str, start: &str, guests: &str| sent("REQUEST", id, seq, stamp, start, guests);
         let bo = "ATTENDEE;CN=Bo Nilsson:mailto:bo@example.com\r\n";
-        let with_eve = format!("{bo}ATTENDEE:mailto:eve@example.com\r\n");
+        let eve = "ATTENDEE:mailto:eve@example.com\r\n";
+        let with_eve = format!("{bo}{eve}");
         import(&j, mine("s1", 1, "20261104T080000Z", "20261112T150000Z", bo).as_bytes());
-        import(&j, mine("s3", 3, "20261104T110000Z", "20261112T150000Z", &with_eve).as_bytes());
+        import(&j, mine("s2", 2, "20261104T083000Z", "20261112T150000Z", &with_eve).as_bytes());
+        import(&j, sent("CANCEL", "c3", 3, "20261104T090000Z", "20261112T150000Z", eve).as_bytes());
+        import(&j, mine("s3", 4, "20261104T110000Z", "20261112T150000Z", &with_eve).as_bytes());
         let raw = counter("k1", "bo@example.com", ME, "bo@example.com", "20261113T140000Z");
         let message = import(&j, raw.as_bytes());
         let c = card_of(&j, message, &raw);
-        assert!(!c.outdated, "Eve added: the meeting is where Bo saw it, {:?}", notes(&c));
+        assert!(!c.outdated, "Eve added, taken off and added again: the meeting is where Bo saw it, {:?}", notes(&c));
         assert_eq!(c.proposal.and_then(|p| p.accepting), Some(message));
 
-        import(&j, mine("s4", 4, "20261104T120000Z", "20261112T170000Z", &with_eve).as_bytes());
+        import(&j, mine("s4", 5, "20261104T120000Z", "20261112T170000Z", &with_eve).as_bytes());
         let c = card_of(&j, message, &raw);
         assert!(c.outdated, "the meeting moved since Bo proposed");
         assert_eq!(c.proposal.and_then(|p| p.accepting), None);
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+
+        let (j, calendar) = jolta("proposal-cancelled");
+        my_meeting(&j, calendar);
+        import(&j, mine("t1", 1, "20261104T080000Z", "20261112T150000Z", bo).as_bytes());
+        import(&j, sent("CANCEL", "t2", 2, "20261104T110000Z", "20261112T150000Z", bo).as_bytes());
+        let message = import(&j, raw.as_bytes());
+        let c = card_of(&j, message, &raw);
+        assert!(c.outdated && notes(&c).iter().any(|n| n.contains("cancelled")), "a cancellation naming Bo ends it: {:?}", notes(&c));
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
