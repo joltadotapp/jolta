@@ -753,6 +753,9 @@ pub struct DraftArgs {
     /// otherwise takes its calendar's default.
     #[arg(long)]
     no_reminder: bool,
+    /// Move the event to this calendar, as the editor's calendar picker does.
+    #[arg(long, requires = "event")]
+    move_to: Option<i64>,
     /// Save the draft as the editor's Save does.
     #[arg(long, conflicts_with = "delete")]
     save: bool,
@@ -781,6 +784,7 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     if a.no_reminder {
         d.reminder = draft::Reminder::Off;
     }
+    d.move_to = a.move_to.map(CalendarId);
     if let Some(span) = a.when.span(Some(&d.span))? {
         d.span = span;
     }
