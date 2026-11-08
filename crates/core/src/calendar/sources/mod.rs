@@ -338,7 +338,13 @@ fn changed_fields(base: &EventData, e: &EventData) -> Vec<Field> {
 fn already_written(master: &EventData, changed: &EventData, current: &EventData, here: chrono_tz::Tz) -> bool {
     let Some(rid) = changed.recurrence_id.as_ref() else { return false };
     let Some(base) = crate::calendar::series::occurrence(std::slice::from_ref(master), rid, here) else { return false };
-    changed_fields(&base, changed).into_iter().all(|f| !f.differs(current, changed))
+    // Google and Graph hold a room as a resource and read it back as one.
+    let resource = |e: &EventData| EventData {
+        attendees: e.attendees.iter().map(|a| super::Attendee { role: if a.role == super::Role::Room { super::Role::Resource } else { a.role }, ..a.clone() }).collect(),
+        ..e.clone()
+    };
+    let (current, changed) = (resource(current), resource(changed));
+    changed_fields(&base, &changed).into_iter().all(|f| !f.differs(&current, &changed))
 }
 
 /// The error for a change the provider can't hold.
@@ -520,6 +526,16 @@ mod tests {
         assert!(!already_written(&master, &moved, &plain, Brussels), "the first try writes it");
         let as_written = EventData { description: "Graph's own body".into(), ..moved.clone() };
         assert!(already_written(&master, &moved, &as_written, Brussels), "a retry finds it written and leaves it");
+        let room = |role| crate::calendar::Attendee {
+            person: crate::calendar::Person { address: "room@example.com".into(), name: String::new() },
+            role,
+            response: crate::calendar::Response::NeedsAction,
+            comment: String::new(),
+            is_me: false,
+        };
+        let booked = EventData { attendees: vec![room(crate::calendar::Role::Room)], ..moved.clone() };
+        let read_back = EventData { attendees: vec![room(crate::calendar::Role::Resource)], ..moved };
+        assert!(already_written(&master, &booked, &read_back, Brussels), "a room comes back as a resource");
     }
 
     #[test]

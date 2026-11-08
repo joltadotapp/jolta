@@ -498,17 +498,20 @@ impl Core {
         let here = tz::here();
         // A CalDAV answer stores the resource again, under new row ids, so
         // the copy is found again by its UID for the removal.
-        let (calendar, uid, rid) = self.jolta.store.read(|c| {
-            let (calendar, uid): (CalendarId, String) = c.query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (calendar, uid, own_rid, rid) = self.jolta.store.read(|c| {
+            let (calendar, uid, data): (CalendarId, String, String) =
+                c.query_row("SELECT calendar_id, uid, data FROM event WHERE id = ?1", [event_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            // An invitation to one occurrence may be stored without its series.
+            let own_rid = serde_json::from_str::<cal::EventData>(&data).ok().and_then(|e| e.recurrence_id);
             let rid = at.filter(|_| occurrence_only).map(|at| rsvp::occurrence_at(c, EventId(event_id), at, here)).transpose()?;
-            Ok((calendar, uid, rid))
+            Ok((calendar, uid, own_rid, rid))
         })?;
         let options = AnswerOptions { note: String::new(), notify: tell, occurrence_only };
         let declined = self.respond(respond::Subject::Event { id: EventId(event_id), at }, InvitationAnswer::Decline, options, None).await?;
         let now = self.jolta.store.read(|c| {
             let row = match cal::ops::stored(c, calendar, &uid, None)? {
                 Some(series) => Some(series),
-                None => cal::ops::stored(c, calendar, &uid, rid.as_ref())?,
+                None => cal::ops::stored(c, calendar, &uid, rid.or(own_rid).as_ref())?,
             };
             Ok(row.map(|r| r.id))
         })?;
