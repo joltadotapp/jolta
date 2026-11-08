@@ -7,7 +7,7 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json};
+use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json, already_written};
 use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
 use super::{Api, FIELDS, GraphCalendar, GraphEvent, event, get_ok, instance};
 use crate::calendar::change::Field;
@@ -116,8 +116,9 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
             }
             // Graph's pattern holds no EXDATE, and the series' changed
             // occurrences are writes of their own; a retry gets the series
-            // the first try made back for its transactionId and writes them
-            // again, which changes nothing more.
+            // the first try made back for its transactionId and leaves the
+            // occurrences the first try wrote alone, as each write mails
+            // the guests.
             let series = crate::calendar::rsvp::Stored {
                 id: crate::calendar::EventId(0),
                 remote_id: reply["id"].as_str().unwrap_or_default().to_string(),
@@ -138,6 +139,11 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
             for e in changed {
                 let (Some(body), Some(rid)) = (occurrence_body(master, e, here)?, e.recurrence_id.as_ref()) else { continue };
                 if let Some(id) = instance_at(api, &series, rid).await? {
+                    let now = version(api, get_ok(api, &format!("/me/events/{}?$select={FIELDS}", encode(&id))).await?, &master.uid, me, here).await?;
+                    if now.events.first().is_some_and(|current| already_written(master, e, current, here)) {
+                        instances.push(now);
+                        continue;
+                    }
                     let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[]).await?;
                     if !(200..300).contains(&status) {
                         return Err(api.failure(status, &reply));

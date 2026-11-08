@@ -332,6 +332,15 @@ fn changed_fields(base: &EventData, e: &EventData) -> Vec<Field> {
     FIELDS.into_iter().filter(|f| f.differs(base, e)).collect()
 }
 
+/// Whether the instance `current` already has every field the changed
+/// occurrence `changed` of the new series `master` sets: a create retried
+/// after the first try wrote it.
+fn already_written(master: &EventData, changed: &EventData, current: &EventData, here: chrono_tz::Tz) -> bool {
+    let Some(rid) = changed.recurrence_id.as_ref() else { return false };
+    let Some(base) = crate::calendar::series::occurrence(std::slice::from_ref(master), rid, here) else { return false };
+    changed_fields(&base, changed).into_iter().all(|f| !f.differs(current, changed))
+}
+
 /// The error for a change the provider can't hold.
 fn cannot(provider: &str, what: &str) -> Error {
     Error::Other(format!("{provider} can't {what}"))
@@ -491,6 +500,27 @@ fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check 4: a create retried after its first try wrote a changed
+    /// occurrence of the new series leaves that occurrence alone, as each
+    /// write mails the guests again.
+    #[test]
+    fn a_retried_create_knows_the_occurrences_it_wrote() {
+        use chrono_tz::Europe::Brussels;
+        use crate::calendar::{Local, Moment, Recurrence, Span, Zone};
+        let at = |s: &str| Local { wall: chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) };
+        let master = EventData {
+            title: "Standup".into(),
+            recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=4".into()], ..Recurrence::default() }),
+            ..EventData::new("u1", Span::Timed { start: at("2026-12-01 09:00"), end: at("2026-12-01 09:30") })
+        };
+        let rid = Moment::Time(at("2026-12-08 09:00"));
+        let plain = crate::calendar::series::occurrence(std::slice::from_ref(&master), &rid, Brussels).unwrap();
+        let moved = EventData { span: Span::Timed { start: at("2026-12-08 11:00"), end: at("2026-12-08 11:30") }, ..plain.clone() };
+        assert!(!already_written(&master, &moved, &plain, Brussels), "the first try writes it");
+        let as_written = EventData { description: "Graph's own body".into(), ..moved.clone() };
+        assert!(already_written(&master, &moved, &as_written, Brussels), "a retry finds it written and leaves it");
+    }
 
     #[test]
     fn a_token_goes_only_to_its_providers_https_api() {

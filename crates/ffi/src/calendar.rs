@@ -495,17 +495,31 @@ impl Core {
     /// `time`. Returns the words for the toast.
     pub async fn decline_and_remove(&self, event_id: i64, time: Option<OccurrenceTime>, occurrence_only: bool, tell: bool) -> Result<String> {
         let at = time.map(Bounds::try_from).transpose()?;
+        let here = tz::here();
+        // A CalDAV answer stores the resource again, under new row ids, so
+        // the copy is found again by its UID for the removal.
+        let (calendar, uid, rid) = self.jolta.store.read(|c| {
+            let (calendar, uid): (CalendarId, String) = c.query_row("SELECT calendar_id, uid FROM event WHERE id = ?1", [event_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let rid = at.filter(|_| occurrence_only).map(|at| rsvp::occurrence_at(c, EventId(event_id), at, here)).transpose()?;
+            Ok((calendar, uid, rid))
+        })?;
         let options = AnswerOptions { note: String::new(), notify: tell, occurrence_only };
         let declined = self.respond(respond::Subject::Event { id: EventId(event_id), at }, InvitationAnswer::Decline, options, None).await?;
-        let here = tz::here();
-        let rid = match at.filter(|_| occurrence_only) {
-            Some(at) => Some(self.jolta.store.read(|c| rsvp::occurrence_at(c, EventId(event_id), at, here))?),
-            None => None,
+        let now = self.jolta.store.read(|c| {
+            let row = match cal::ops::stored(c, calendar, &uid, None)? {
+                Some(series) => Some(series),
+                None => cal::ops::stored(c, calendar, &uid, rid.as_ref())?,
+            };
+            Ok(row.map(|r| r.id))
+        })?;
+        let Some(event) = now else {
+            self.calendar_changed([calendar]);
+            return Ok(declined);
         };
         let jolta = self.jolta.clone();
         let removed = self
             .runtime
-            .spawn(async move { remove::remove_copy(&jolta, EventId(event_id), rid).await })
+            .spawn(async move { remove::remove_copy(&jolta, event, rid).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         self.calendar_changed([removed.calendar]);

@@ -6,7 +6,7 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json};
+use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json, already_written};
 use super::add::when;
 use super::{BASE, Google, GoogleEvent, Reminder, event, failure};
 use crate::calendar::change::Field;
@@ -117,8 +117,9 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
             let (master, changed) = split_series(events)?;
             let mut written = create(google, calendar, master, extra, &events_url, updates, here).await?;
             // The series' changed occurrences follow as writes of their
-            // instances. A retry finds the series made and writes them
-            // again, which changes nothing more.
+            // instances. A retry finds the series made and leaves the
+            // instances the first try wrote alone, as each write may mail
+            // the guests.
             if let Written::Saved(Some(series)) = &mut written {
                 for e in changed {
                     let id = instance_id(&series.remote_id, e.recurrence_id.as_ref().expect("a changed occurrence"), here);
@@ -127,6 +128,16 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
                         Some(body) => (reqwest::Method::PATCH, Some(body)),
                         None => (reqwest::Method::DELETE, None),
                     };
+                    let now = fetch(google, calendar, &id, &e.alarms).await?;
+                    let done = match (&now, &body) {
+                        (None, None) => true,
+                        (Some(v), Some(_)) => v.events.first().is_some_and(|current| already_written(master, e, current, here)),
+                        _ => false,
+                    };
+                    if done {
+                        series.instances.extend(now.filter(|_| body.is_some()));
+                        continue;
+                    }
                     let (status, reply) = google.request(method.clone(), &url, body.as_ref(), None).await?;
                     if !matches!(status, 200..300 | 404 | 410) {
                         return Err(failure(status, &reply));
