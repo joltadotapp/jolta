@@ -797,8 +797,40 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while replies are on")
         XCTAssertTrue(text(app, "Automatic replies are on").exists)
         strip.buttons["Turn off"].click()
-        XCTAssertTrue(text(app, "Automatic replies are off.").waitForExistence(timeout: 5), "the toast says so")
+        XCTAssertTrue(text(app, "Out of office is off for me@test.invalid.").waitForExistence(timeout: 5), "the toast says so")
         XCTAssertTrue(strip.waitForNonExistence(timeout: 5), "and the strip goes")
+    }
+
+    /// The palette's Out of office… opens the sheet, which says what each
+    /// account gets; ⌘↩ turns it on, and the account's row then offers Turn
+    /// off. The Work calendar stands in for a Google account's primary one.
+    func testSetOutOfOffice() throws {
+        let app = try launch()
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
+        app.typeText("Out of office")
+        let row = paletteRow(app, "Out of office")
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the palette offers Out of office…")
+        app.typeKey(.return, modifierFlags: [])
+        let sheet = app.descendants(matching: .any).matching(identifier: "away-sheet").firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the sheet opens")
+        XCTAssertTrue(text(app, "An out-of-office event that declines new invitations").exists, "the Google row says what it gets")
+        let message = app.textViews.firstMatch
+        message.click()
+        app.typeText("Back on Monday.")
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(text(app, "Out of office is set for me@test.invalid.").waitForExistence(timeout: 5), "the toast says so")
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), "and the sheet closes")
+
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("Out of office")
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Out of office on").waitForExistence(timeout: 5), "the row says out of office is set")
+        app.buttons["Turn off"].firstMatch.click()
+        XCTAssertTrue(text(app, "Out of office is off for me@test.invalid.").waitForExistence(timeout: 5), "Turn off ends it")
+        XCTAssertTrue(text(app, "Out of office on").waitForNonExistence(timeout: 5), "and the row no longer offers it")
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     /// Return in a new section's query field saves it. The page used to read

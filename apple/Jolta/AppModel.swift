@@ -125,6 +125,8 @@ final class AppModel {
     var proposedSlot: TimeSlot?
     /// Find a time, while its panel is up.
     var findTime: FindTimeRequest?
+    /// The Out of office sheet, while it is up over the main window.
+    var awaySheet: AwaySheetRequest?
     /// The note field, the scope menu, the calendar menu or the propose
     /// panel under the open card, when one is up.
     var rsvpPanel: RsvpPanel?

@@ -17,6 +17,9 @@ struct ContentView: View {
         .sheet(isPresented: Binding(get: { model.showsCalendarIntro }, set: { if !$0 { model.finishCalendarIntro() } })) {
             CalendarIntroSheet(model: model)
         }
+        .sheet(item: Binding(get: { model.awaySheet }, set: { model.awaySheet = $0 })) { request in
+            AwaySheet(model: model, request: request) { model.awaySheet = nil }
+        }
         .overlay(alignment: .trailing) {
             // Over the list and reader; the list stays underneath for the keys.
             if model.isInboxZero, model.mode == .mail {
