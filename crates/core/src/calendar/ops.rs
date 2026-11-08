@@ -1675,22 +1675,16 @@ async fn deliver(remote: &impl Remote, op: &CalendarOp, raw: Option<Vec<u8>>) ->
 /// event in `to` at the op's key, so a retry finds the event its first try
 /// made, and only then deletes it from `from`, held to that version. Either
 /// way, a change made to the event meanwhile leaves it where it was, and
-/// the copy made is deleted again, as is one of an event deleted meanwhile.
+/// the copy made is deleted again. An original already gone counts as
+/// deleted by the move: an earlier try may have deleted it and lost the
+/// answer, so the copy stays.
 async fn deliver_move<R: Remote>(from: Option<&R>, to: Option<&R>, to_calendar: &Calendar, op: &CalendarOp) -> Result<Delivered> {
     let Write::Move { how, rows, events, .. } = &op.write else { return Err(Error::Other("not a move".into())) };
     let Some(first) = rows.iter().map(|r| &r.event).find(|e| e.recurrence_id.is_none()).or(rows.first().map(|r| &r.event)) else {
         return Err(Error::Other("a move without its event".into()));
     };
     let held_as = |held: &Held| rsvp::Stored { id: EventId(0), remote_id: held.remote_id.clone(), etag: held.etag.clone(), raw: None, data: first.clone() };
-    // The event as the server has it, when a change made meanwhile leaves
-    // it where it is: None while only its version changed.
-    let changed = |now: &Version| -> Option<Option<Version>> {
-        match now.events.iter().find(|e| same_row(e, first)) {
-            None => Some(None),
-            Some(theirs) if FIELDS.into_iter().any(|f| f.differs(first, theirs)) => Some(Some(now.clone())),
-            Some(_) => None,
-        }
-    };
+    let changed = |now: &Version| changed_since(rows, first, now);
     match how {
         How::Native => {
             let (Some(remote), Some(held)) = (from, &op.held) else { return Ok(Delivered::Done { version: None, merged: false }) };
@@ -1723,28 +1717,17 @@ async fn deliver_move<R: Remote>(from: Option<&R>, to: Option<&R>, to_calendar: 
             let mut held = held_as(held);
             for _ in 0..MERGE_ROUNDS {
                 match f.write(&OpWrite::Delete { held: &held }, Tell::NOBODY).await? {
-                    Written::Saved(_) => return Ok(Delivered::Done { version: made, merged: false }),
-                    Written::Gone => {
-                        take_back_copy(to, made.as_ref()).await?;
-                        return Ok(Delivered::Gone);
-                    }
+                    Written::Saved(_) | Written::Gone => return Ok(Delivered::Done { version: made, merged: false }),
                     Written::Stale => {
-                        let now = f.fetch(&held.remote_id, &first.uid, &first.alarms).await?;
-                        let left = match &now {
-                            None => Some(None),
-                            Some(now) => changed(now),
+                        let Some(now) = f.fetch(&held.remote_id, &first.uid, &first.alarms).await? else {
+                            return Ok(Delivered::Done { version: made, merged: false });
                         };
-                        match left {
-                            None => {
-                                let now = now.expect("a version that only changed its ETag");
-                                held = held_as(&Held { remote_id: now.remote_id, etag: now.etag });
-                            }
-                            Some(theirs) => {
+                        match changed(&now) {
+                            None => held = held_as(&Held { remote_id: now.remote_id, etag: now.etag }),
+                            Some(None) => return Ok(Delivered::Done { version: made, merged: false }),
+                            Some(Some(theirs)) => {
                                 take_back_copy(to, made.as_ref()).await?;
-                                return Ok(match theirs {
-                                    Some(theirs) => Delivered::Stayed { version: Some(theirs) },
-                                    None => Delivered::Gone,
-                                });
+                                return Ok(Delivered::Stayed { version: Some(theirs) });
                             }
                         }
                     }
@@ -1753,6 +1736,24 @@ async fn deliver_move<R: Remote>(from: Option<&R>, to: Option<&R>, to_calendar: 
             Err(Error::Other("it kept changing on the server".into()))
         }
     }
+}
+
+/// What a move finds in the object it leaves, `now`, against the rows it
+/// took from there: None while only its version changed; `Some(None)` once
+/// the series is gone from it; else the object as it is, when any of its
+/// rows changed, or the server has an occurrence the rows don't, which
+/// leaves the event where it is. A CalDAV resource holds a series' changed
+/// occurrences too, so each is compared.
+fn changed_since(rows: &[Row], first: &EventData, now: &Version) -> Option<Option<Version>> {
+    if !now.events.iter().any(|e| same_row(e, first)) {
+        return Some(None);
+    }
+    let mine: Vec<&EventData> = rows.iter().filter(|r| r.remote_id == now.remote_id).map(|r| &r.event).chain(std::iter::once(first)).collect();
+    let differs = now.events.iter().any(|theirs| match mine.iter().find(|m| same_row(m, theirs)) {
+        Some(m) => FIELDS.into_iter().any(|f| f.differs(m, theirs)),
+        None => true,
+    }) || mine.iter().any(|m| !now.events.iter().any(|t| same_row(t, m)));
+    differs.then(|| Some(now.clone()))
 }
 
 /// Deletes the copy a move made, which nobody heard of, at the version the
@@ -2941,13 +2942,44 @@ mod tests {
         assert_eq!(rows_where(&s), at_(&[(a, "Daily", "g1")]));
         assert_eq!(state(&s, moved).0, OpState::Failed);
 
-        let (s, a, b, from) = two("move-gone", CalendarSource::Graph);
+    }
+
+    /// Sol S1, check 4: the original's delete reached the server and its
+    /// answer was lost, or the app stopped before it was recorded. The retry
+    /// finds the original gone and keeps the copy: the event is moved, once.
+    #[test]
+    fn a_copy_whose_delete_answer_was_lost_keeps_the_event() {
+        let (s, a, b, from) = two("move-lost-delete", CalendarSource::Graph);
         let to = Server { names_itself: true, ..Server::default() };
-        moving(&s, a, "u1", b);
-        from.objects.lock().unwrap().clear();
+        let moved = moving(&s, a, "u1", b);
+        *from.lose_answers.lock().unwrap() = 1;
         let settled = run_on(&s, &[(a, &from), (b, &to)]);
-        assert_eq!(settled[0].failure.as_ref().unwrap().message, "Standup was deleted in Outlook while you moved it.");
-        assert!(to.objects.lock().unwrap().is_empty() && rows_where(&s).is_empty(), "an event deleted meanwhile is never made again");
+        assert!(settled[0].failure.is_none() && from.get("g1").is_none(), "the delete went, its answer didn't");
+        s.write(|tx| Ok(tx.execute("UPDATE calendar_op SET send_after = 0", [])?)).unwrap();
+        let settled = run_on(&s, &[(a, &from), (b, &to)]);
+        assert!(settled[0].failure.is_none());
+        assert_eq!(state(&s, moved).0, OpState::Done);
+        assert_eq!(to.objects.lock().unwrap().len(), 1, "the copy stays, made once");
+        assert_eq!(rows_where(&s).len(), 1);
+        assert_eq!(rows_where(&s)[0].0, b.0);
+    }
+
+    /// Sol S2: a CalDAV resource holds the series and its changed
+    /// occurrences, and a change to any of them leaves the event where it is.
+    #[test]
+    fn a_change_to_any_row_of_the_object_counts() {
+        let master = event("u1", "Standup", "2026-11-24 09:00");
+        let moved = EventData { recurrence_id: Some(Moment::Time(at("2026-11-25 09:00"))), ..event("u1", "Standup", "2026-11-25 10:00") };
+        let row = |e: &EventData| Row { remote_id: "/cal/u1.ics".into(), etag: Some("1".into()), blob: None, event: e.clone() };
+        let rows = [row(&master), row(&moved)];
+        let now = |events: Vec<EventData>| Version { remote_id: "/cal/u1.ics".into(), etag: Some("2".into()), events, raw: None, instances: Vec::new() };
+        assert_eq!(changed_since(&rows, &master, &now(vec![master.clone(), moved.clone()])), None, "only the ETag changed");
+        let edited = EventData { location: "Room 9".into(), ..moved.clone() };
+        assert!(matches!(changed_since(&rows, &master, &now(vec![master.clone(), edited])), Some(Some(_))), "an occurrence changed");
+        assert!(matches!(changed_since(&rows, &master, &now(vec![master.clone()])), Some(Some(_))), "an occurrence went back to its series");
+        let added = EventData { recurrence_id: Some(Moment::Time(at("2026-11-26 09:00"))), ..event("u1", "Standup", "2026-11-26 11:00") };
+        assert!(matches!(changed_since(&rows, &master, &now(vec![master.clone(), moved, added])), Some(Some(_))), "an occurrence was moved elsewhere");
+        assert_eq!(changed_since(&rows, &master, &now(Vec::new())), Some(None), "gone");
     }
 
     /// A native move keeps the server's object, lands its new version in the

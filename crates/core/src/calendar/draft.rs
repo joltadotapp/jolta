@@ -1102,8 +1102,32 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
 #[allow(clippy::too_many_arguments)]
 fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: CalendarId, scope: Option<Scope>, notify: Option<ops::Notify>, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
     let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
+    let touched = changed(draft, base);
     let moved = ops::queue(conn, &Edit::quiet(draft.calendar, Change::Move { uid: base.uid.clone(), to }), now, horizon)?.ok_or_else(|| Error::Other(format!("{title} is there already")))?;
-    let there = EventDraft { calendar: to, move_to: None, ..draft.clone() };
+    let mut there = EventDraft { calendar: to, move_to: None, ..draft.clone() };
+    // A copy lands without what belonged to the old calendar, such as a
+    // Teams block: the user's changes go onto the event as it landed, so
+    // that cleanup is no change of theirs to merge against.
+    if let Some(landed) = stored_now(conn, &there, base)?.filter(|e| e != base) {
+        let mut fresh = EventDraft { rule: draft.rule.clone(), rule_was: draft.rule_was.clone(), unresolved: draft.unresolved.clone(), ..opened(&landed, to) };
+        for field in touched {
+            match field {
+                DraftField::Title => fresh.title.clone_from(&draft.title),
+                DraftField::Time => fresh.span = draft.span,
+                DraftField::People => fresh.people.clone_from(&draft.people),
+                DraftField::Options => fresh.options = draft.options,
+                DraftField::Room => fresh.room.clone_from(&draft.room),
+                DraftField::Location => fresh.location.clone_from(&draft.location),
+                DraftField::Video => fresh.video = draft.video,
+                DraftField::Description => fresh.description.clone_from(&draft.description),
+                DraftField::ShowAs => fresh.show_as = draft.show_as,
+                DraftField::Reminder => fresh.reminder = draft.reminder,
+                DraftField::Visibility => fresh.visibility = draft.visibility,
+                DraftField::Repeat | DraftField::Calendar => {}
+            }
+        }
+        there = fresh;
+    }
     let name = store::calendar(conn, to)?.name;
     let saved = save_here(conn, &there, scope, notify, message, Some(moved), now, horizon, here)?;
     // The toast still says whom the edit mails, or what of it wasn't saved.
@@ -1621,6 +1645,32 @@ mod tests {
         let problems = s.read(|c| check_draft(c, &editing, Brussels)).unwrap();
         assert_eq!(problems, [Problem { field: Some(DraftField::Calendar), text: "Holidays is read-only.".into(), blocking: true }]);
         assert!(s.write(|tx| save_draft(tx, &editing, None, None, None, NOW, &horizon(), Brussels)).is_err());
+    }
+
+    /// Sol S3: a Teams meeting moved off Microsoft 365 with new notes keeps
+    /// the notes; the block the copy leaves behind is no change of theirs.
+    #[test]
+    fn notes_saved_with_a_move_that_drops_the_teams_block_stay() {
+        const TEAMS: &str = include_str!("../../tests/fixtures/descriptions/teams-graph.html");
+        let (s, here) = setup("move-teams-notes");
+        let graph = provider_calendar(&s, CalendarSource::Graph, None);
+        let event = EventData {
+            title: "Design review".into(),
+            description: TEAMS.into(),
+            description_html: true,
+            meeting: meeting::detect(&[], None, "", TEAMS),
+            ..EventData::new("u9-teams", span("2026-11-24 14:00", "2026-11-24 15:00"))
+        };
+        s.write(|tx| store::apply_item(tx, graph, "AAMk1", Some("ck1"), std::slice::from_ref(&event), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, graph, "u9-teams"), None, Brussels)).unwrap();
+        d.description = "Walk through the new event editor.".into();
+        d.move_to = Some(here);
+        let problems = s.read(|c| check_draft(c, &d, Brussels)).unwrap();
+        assert_eq!(problems.iter().map(|p| (p.text.as_str(), p.blocking)).collect::<Vec<_>>(), [("Design review's Teams meeting stays behind: this Mac's calendars can't have one.", false)]);
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        assert_eq!(saved.message, "Moved Design review to Test");
+        let now = s.read(|c| ops::stored(c, here, "u9-teams", None)).unwrap().unwrap().event;
+        assert_eq!((now.description.as_str(), now.meeting), ("Walk through the new event editor.", None));
     }
 
     #[test]
