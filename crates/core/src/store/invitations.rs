@@ -39,6 +39,20 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
             timing(i),
         ])?;
     }
+    // A cancellation of the whole event, newer than every invitation to it on
+    // the account, ends the answer given: an invitation after it, such as
+    // the organizer adding the user again, asks for a new one.
+    let mut forget = conn.prepare_cached(
+        "DELETE FROM invitation_answer
+         WHERE account_id = (SELECT account_id FROM message WHERE id = ?1) AND uid = ?2
+           AND NOT EXISTS (
+             SELECT 1 FROM invitation i JOIN message m ON m.id = i.message_id, message c
+             WHERE c.id = ?1 AND i.uid = ?2 AND i.method IN ('REQUEST', 'ADD') AND m.account_id = c.account_id
+               AND (m.date, m.id) > (c.date, c.id))",
+    )?;
+    for i in invitations.iter().filter(|i| i.method == Method::Cancel && i.event.recurrence_id.is_none()) {
+        forget.execute(params![id, i.event.uid])?;
+    }
     Ok(())
 }
 
