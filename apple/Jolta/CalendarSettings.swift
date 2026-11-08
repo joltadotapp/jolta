@@ -374,6 +374,23 @@ struct CalendarSettingsRow: View {
                 Text(summary).font(.system(size: 12)).foregroundStyle(Color(info.syncError == nil ? Theme.text3 : .systemRed)).lineLimit(2)
             }
             Spacer(minLength: 8)
+            if info.kind == .local {
+                let accounts = cal.list.accounts.map(\.account)
+                let from = accounts.first { $0.id == info.sendFrom }
+                Menu {
+                    ForEach(accounts, id: \.id) { a in
+                        Button(a.address) { change { try core.setSendFrom(calendarId: id, accountId: a.id) } }
+                    }
+                } label: {
+                    Text(from.map { "Invitations from \($0.address)" } ?? "Invitations from…").font(.system(size: 12))
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .foregroundStyle(Color(Theme.text2))
+                .fixedSize()
+                .help("The account Jolta emails this calendar's guests from")
+                .accessibilityIdentifier("send-from-menu")
+            }
             toggle("Show", info.shown) { on in try core.setCalendarShown(calendarId: id, shown: on) }
             toggle("Busy", info.countsAsBusy) { on in try core.setCalendarBusy(calendarId: id, busy: on) }
                 .help("Counts as busy: its events block time")

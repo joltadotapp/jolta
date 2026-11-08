@@ -31,7 +31,8 @@ struct CalendarModeView: View {
             .scopePrompt(Binding(get: { cal.scopePrompt }, set: { cal.scopePrompt = $0 }))
             .meetingDialogs(send: Binding(get: { cal.sendPrompt }, set: { cal.sendPrompt = $0 }),
                             cancel: Binding(get: { cal.cancelPrompt }, set: { cal.cancelPrompt = $0 }),
-                            decline: Binding(get: { cal.declinePrompt }, set: { cal.declinePrompt = $0 }))
+                            decline: Binding(get: { cal.declinePrompt }, set: { cal.declinePrompt = $0 }),
+                            sender: Binding(get: { cal.senderPrompt }, set: { cal.senderPrompt = $0 }))
             .coordinateSpace(.named(CalendarSpace.main))
             .overlayPreferenceValue(SelectedFrame.self) { frame in
                 GeometryReader { geo in

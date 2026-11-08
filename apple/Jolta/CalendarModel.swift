@@ -221,6 +221,8 @@ final class CalendarModel {
     var sendPrompt: SendPrompt?
     var cancelPrompt: CancelPrompt?
     var declinePrompt: DeclinePrompt?
+    /// Send invitations from, before a calendar on this Mac first mails guests.
+    var senderPrompt: SenderPrompt?
     /// Shows a toast, with the token Undo takes back.
     @ObservationIgnored var toast: ((String, Int64?) -> Void)?
     private(set) var list = CalendarList(accounts: [], otherCalendars: [])
@@ -770,10 +772,16 @@ final class CalendarModel {
         do {
             let plan = try core.planSave(draft: editor.draft)
             if plan.unchanged { return dropEditor() }
+            if !plan.senders.isEmpty {
+                return askSender(plan.senders, calendar: editor.draft.calendarId) { [weak self] in
+                    guard let self, self.editor === editor else { return }
+                    self.saveEditor()
+                }
+            }
             let send = { [weak self] (scope: EditScope?, prompted: Bool) in
                 guard let self else { return }
-                guard let dialog = plan.dialog else { return self.save(editor, scope: scope, notify: nil) }
-                self.after(prompted) { self.sendPrompt = SendPrompt(dialog: dialog) { [weak self] notify in self?.save(editor, scope: scope, notify: notify) } }
+                guard let dialog = plan.dialog else { return self.save(editor, scope: scope, notify: nil, message: nil) }
+                self.after(prompted) { self.sendPrompt = SendPrompt(dialog: dialog) { [weak self] notify, message in self?.save(editor, scope: scope, notify: notify, message: message) } }
             }
             guard !plan.scopes.isEmpty else { return send(nil, false) }
             scopePrompt = ScopePrompt(title: "Change a repeating event", line: plan.prompt, choices: plan.scopes) { send($0, true) }
@@ -792,10 +800,25 @@ final class CalendarModel {
         }
     }
 
-    private func save(_ editor: EventEditorModel, scope: EditScope?, notify: NotifyChoice?) {
+    /// Send invitations from, then `next` once the calendar has its account.
+    private func askSender(_ senders: [SenderInfo], calendar id: Int64, next: @escaping () -> Void) {
+        let name = calendarInfo(id)?.name ?? "this calendar"
+        senderPrompt = SenderPrompt(calendar: name, senders: senders) { [weak self] sender in
+            guard let self else { return }
+            do {
+                try self.core.setSendFrom(calendarId: id, accountId: sender.accountId)
+                self.reloadCalendars()
+                self.after(true, next)
+            } catch {
+                self.toast?("\(error)", nil)
+            }
+        }
+    }
+
+    private func save(_ editor: EventEditorModel, scope: EditScope?, notify: NotifyChoice?, message: String?) {
         guard self.editor === editor else { return }
         do {
-            let saved = try core.saveEvent(draft: editor.draft, scope: scope, notify: notify, message: nil)
+            let saved = try core.saveEvent(draft: editor.draft, scope: scope, notify: notify, message: message)
             let (uid, calendarID, time) = (saved.uid, editor.draft.calendarId, editor.draft.time)
             dropEditor()
             refresh()
@@ -819,6 +842,9 @@ final class CalendarModel {
             let draft = editor.draft
             let plan = try core.planDeleteDraft(draft: draft)
             if let refusal = plan.refusal { return editor.failure = refusal }
+            if !plan.senders.isEmpty {
+                return askSender(plan.senders, calendar: draft.calendarId) { [weak self] in self?.deleteFromEditor() }
+            }
             confirmDelete(plan, event: editor.event) { [weak self] scope, message in
                 guard let self, self.editor === editor else { return }
                 do {
@@ -876,6 +902,9 @@ final class CalendarModel {
         do {
             let plan = try core.planDelete(eventId: event.record.eventId, time: event.record.time)
             if let refusal = plan.refusal { return toast?(refusal, nil) ?? () }
+            if !plan.senders.isEmpty {
+                return askSender(plan.senders, calendar: event.record.calendarId) { [weak self] in self?.delete(event) }
+            }
             let draft = plan.scopes.isEmpty ? nil : try core.draftForEvent(eventId: event.record.eventId, time: event.record.time)
             confirmDelete(plan, event: event) { [weak self] scope, message in
                 guard let self else { return }
