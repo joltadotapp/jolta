@@ -1103,12 +1103,19 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
 fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: CalendarId, scope: Option<Scope>, notify: Option<ops::Notify>, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
     let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
     // A field changed elsewhere since the editor opened keeps the stored
-    // value, as a save without a move does.
-    let lost = match stored_now(conn, draft, base)? {
-        Some(now) if now != *base => merge::three_way(base, &event_of(draft), &now).lost,
-        _ => Vec::new(),
+    // value, as a save without a move does. People merge one by one: a guest
+    // added elsewhere stays beside one the user added.
+    let (lost, merged) = match stored_now(conn, draft, base)? {
+        Some(now) if now != *base => {
+            let m = merge::three_way(base, &event_of(draft), &now);
+            (m.lost, Some(m.event))
+        }
+        _ => (Vec::new(), None),
     };
-    let kept = reset(draft, base, &lost);
+    let mut kept = reset(draft, base, &lost.iter().copied().filter(|f| *f != Field::People).collect::<Vec<_>>());
+    if let Some(m) = &merged {
+        kept.people = m.attendees.iter().filter(|a| !is_room(a)).cloned().collect();
+    }
     let draft = &kept;
     let touched = changed(draft, base);
     let moved = ops::queue(conn, &Edit::quiet(draft.calendar, Change::Move { uid: base.uid.clone(), to }), now, horizon)?.ok_or_else(|| Error::Other(format!("{title} is there already")))?;
@@ -1727,6 +1734,42 @@ mod tests {
         s.write(|tx| save_draft(tx, &d, None, Some(ops::Notify::Changed), None, NOW, &horizon(), Brussels)).unwrap();
         let now = s.read(|c| ops::stored(c, other, "u9-guest", None)).unwrap().unwrap().event;
         assert_eq!(now.attendees.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), ["ann@example.com"], "the new guest, without the old account's entry");
+    }
+
+    /// Sol S4: people saved with a move merge one by one with a change made
+    /// elsewhere: the guest added there stays beside the one the user added.
+    #[test]
+    fn people_saved_with_a_move_merge_with_people_added_elsewhere() {
+        let (s, _) = setup("move-people");
+        let account: i64 = s
+            .write(|tx| {
+                tx.execute("INSERT INTO account (kind, address, username, secret_ref, created) VALUES ('imap', ?1, ?1, 'r', 0)", [ME])?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        let [a, b] = ["Home", "Work"].map(|name| {
+            s.write(|tx| {
+                let c = store::add_calendar(tx, CalendarSource::CalDav, &store::RemoteCalendar { remote_id: format!("https://p01-caldav.icloud.com/1/calendars/{name}/"), name: name.into(), color: None, zone: None, access: Access::Owner, primary: false, refresh: None, video: None })?;
+                tx.execute("UPDATE calendar SET account_id = ?2 WHERE id = ?1", rusqlite::params![c.id, account])?;
+                Ok(c.id)
+            })
+            .unwrap()
+        });
+        let mut event = EventData { title: "Review".into(), organizer: Some(person(ME, "")), organizer_is_me: true, ..EventData::new("u9-people", span("2026-11-24 09:00", "2026-11-24 09:30")) };
+        event.attendees = vec![attendee("ann@example.com", false, Role::Required)];
+        s.write(|tx| store::apply_item(tx, a, "/1/calendars/Home/r.ics", Some("e1"), std::slice::from_ref(&event), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, a, "u9-people"), None, Brussels)).unwrap();
+        let mut elsewhere = event.clone();
+        elsewhere.attendees.push(attendee("cy@example.com", false, Role::Required));
+        s.write(|tx| store::apply_item(tx, a, "/1/calendars/Home/r.ics", Some("e2"), std::slice::from_ref(&elsewhere), None, &horizon())).unwrap();
+        d.people.push(attendee("bo@example.com", false, Role::Required));
+        d.move_to = Some(b);
+        let saved = s.write(|tx| save_draft(tx, &d, None, Some(ops::Notify::Changed), None, NOW, &horizon(), Brussels)).unwrap();
+        assert!(!saved.message.contains("wasn't saved"), "{}", saved.message);
+        let now = s.read(|c| ops::stored(c, b, "u9-people", None)).unwrap().unwrap().event;
+        let mut guests: Vec<&str> = now.attendees.iter().map(|g| g.person.address.as_str()).collect();
+        guests.sort();
+        assert_eq!(guests, ["ann@example.com", "bo@example.com", "cy@example.com"]);
     }
 
     #[test]
