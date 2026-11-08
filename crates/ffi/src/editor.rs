@@ -619,6 +619,13 @@ impl Core {
         Ok(self.jolta.store.read(|c| draft::draft_for_event(c, EventId(event_id), at, tz::here()))?.into())
     }
 
+    /// A new event like the occurrence `time` of a stored event, at its
+    /// time, without its people, repeat or meeting: ⌘D and ⌥-drag.
+    pub fn copy_draft(&self, event_id: i64, time: Option<OccurrenceTime>) -> Result<EventDraft> {
+        let at = time.map(cal::Bounds::try_from).transpose()?;
+        Ok(self.jolta.store.read(|c| draft::draft_for_copy(c, EventId(event_id), at, Utc::now(), tz::here()))?.into())
+    }
+
     /// Everything wrong with the draft for its calendar; run on every change.
     pub fn check_draft(&self, draft: EventDraft) -> Result<Vec<DraftProblem>> {
         let d = draft::EventDraft::try_from(&draft)?;
