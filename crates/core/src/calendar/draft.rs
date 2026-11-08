@@ -582,11 +582,15 @@ fn event_of(draft: &EventDraft) -> EventData {
         Some(base) => (base.clone(), changed(draft, base)),
         None => (EventData::new(draft.uid.clone(), draft.span), EVERY_FIELD.to_vec()),
     };
+    // People and Room rebuild the attendees together, once, from the room
+    // the event had.
+    let mut attendees_done = false;
     for &field in &fields {
         match field {
             DraftField::Title => e.title = draft.title.trim().to_string(),
             DraftField::Time => e.span = draft.span,
-            DraftField::People | DraftField::Room => {
+            DraftField::People | DraftField::Room if !attendees_done => {
+                attendees_done = true;
                 let room = draft.room.trim();
                 let was_room = room_of(&e).map(|a| a.person.address.clone());
                 let kept_room = room_of(&e).filter(|a| a.person.address.eq_ignore_ascii_case(room)).cloned();
@@ -608,6 +612,7 @@ fn event_of(draft: &EventDraft) -> EventData {
                 }
                 e.attendees = attendees;
             }
+            DraftField::People | DraftField::Room => {}
             DraftField::Options => e.options = draft.options,
             DraftField::Location => {}
             DraftField::Description => {
@@ -1924,6 +1929,14 @@ mod tests {
         let saved = event_of(&d);
         assert_eq!(saved.attendees.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), ["ann@example.com", "ensor@rooms.example"], "the old room goes, once");
         assert_eq!(saved.location, "Ensor");
+
+        let mut projector = stored.clone();
+        projector.attendees.push(Attendee { person: Person { address: "beamer@rooms.example".into(), name: "Beamer".into() }, role: Role::Resource, response: Response::Accepted, comment: String::new(), is_me: false });
+        let mut d = opened(&projector, CalendarId(1));
+        d.people.push(Attendee { person: Person { address: "bo@example.com".into(), name: String::new() }, role: Role::Required, response: Response::NeedsAction, comment: String::new(), is_me: false });
+        (d.room, d.room_name) = (String::new(), String::new());
+        let saved = event_of(&d);
+        assert_eq!(saved.attendees.iter().map(|a| a.person.address.as_str()).collect::<Vec<_>>(), ["ann@example.com", "bo@example.com", "beamer@rooms.example"], "only the room goes; other resources stay");
     }
 
     #[test]
