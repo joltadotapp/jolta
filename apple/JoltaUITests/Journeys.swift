@@ -695,6 +695,37 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(app.textFields.matching(NSPredicate(format: "value == 'Starred'")).firstMatch.exists, "the saved section stays on the page")
     }
 
+    /// Y, N and ⇧M answer the invitation selected in the week (decision 8:
+    /// M stays Month). The fixture's Google calendar has no server, so each
+    /// answer goes to Google and stops at the missing sign-in; the toast
+    /// that says so shows the key reached the answer. Keys on an event
+    /// that isn't an invitation answer nothing.
+    func testAnswerInvitationInCalendar() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        let refused = app.staticTexts.matching(NSPredicate(format: "value CONTAINS %@ OR label CONTAINS %@", "credential", "credential")).firstMatch
+
+        let climbing = event("Climbing,")
+        XCTAssertTrue(climbing.waitForExistence(timeout: 5), "the week shows the user's own Climbing")
+        climbing.click()
+        app.typeKey("y", modifierFlags: [])
+        XCTAssertFalse(refused.waitForExistence(timeout: 2), "Y on an event that isn't an invitation answers nothing")
+
+        let review = event("Design review,")
+        XCTAssertTrue(review.waitForExistence(timeout: 5), "the week shows Els's Design review")
+        review.click()
+        for (key, flags, name) in [("n", XCUIElement.KeyModifierFlags(), "N"), ("m", .shift, "⇧M"), ("y", [], "Y")] {
+            app.typeKey(key, modifierFlags: flags)
+            XCTAssertTrue(refused.waitForExistence(timeout: 5), "\(name) answers the selected invitation through Google")
+            XCTAssertTrue(refused.waitForNonExistence(timeout: 15), "the toast goes")
+        }
+        XCTAssertTrue(title.label.contains("Week"), "⇧M doesn't switch to Month: \(title.label)")
+    }
+
     private func waitUntil(_ done: () -> Bool) -> Bool {
         let deadline = Date() + 5
         while Date() < deadline {
