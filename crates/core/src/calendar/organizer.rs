@@ -118,8 +118,7 @@ pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify, here
             stamp(event, sender);
             if [&*base, &*event].iter().any(|e| e.organizer.is_some() && !e.attendees.is_empty()) {
                 next_sequence(base, event);
-                let asks_again = Field::Time.differs(base, event) || (Field::Repeat.differs(base, event) && !fewer_occurrences(base, event, here));
-                if notify != Notify::Nobody && asks_again {
+                if notify != Notify::Nobody && asks_again(base, event, here) {
                     for a in event.attendees.iter_mut().filter(|a| !a.is_me && !sender.is_some_and(|s| s.address.eq_ignore_ascii_case(&a.person.address))) {
                         a.response = super::Response::NeedsAction;
                         a.comment.clear();
@@ -130,6 +129,12 @@ pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify, here
         Write::Cancel { series, .. } => series.sequence += 1,
         Write::Delete(_) | Write::Move { .. } | Write::Answer { .. } => {}
     }
+}
+
+/// Whether a meeting's change asks its guests to answer again: a new time,
+/// or a repeat rule with an occurrence the old one didn't have.
+pub fn asks_again(base: &EventData, event: &EventData, here: Tz) -> bool {
+    Field::Time.differs(base, event) || (Field::Repeat.differs(base, event) && !fewer_occurrences(base, event, here))
 }
 
 /// Whether every occurrence of the series `event` is one `base` has at the

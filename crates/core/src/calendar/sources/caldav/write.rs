@@ -12,7 +12,7 @@ use super::{CalDav, href_key, join, path_escape};
 use crate::calendar::change::Field;
 use crate::calendar::ical_edit::{Component, Object, Prop, utc_stamp, vevent, write_event, write_field};
 use crate::calendar::ops::Extra;
-use crate::calendar::{Calendar, EventData, Person, ical, rsvp, tz};
+use crate::calendar::{Calendar, EventData, Person, ical, organizer, rsvp, tz};
 use crate::{Error, Result};
 
 const PRODID: &str = concat!("-//Jolta//Jolta ", env!("CARGO_PKG_VERSION"), "//EN");
@@ -309,12 +309,18 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
                 editable(f)?;
                 write_field(component, f, &carried);
             }
+            if organizer::asks_again(&o, &carried, here) {
+                ask_again(component, carried.options.request_responses);
+            }
         }
     }
     let component = obj.event_mut(&event.uid, rid.as_deref()).ok_or_else(|| Error::Other("The calendar's copy no longer has this event.".into()))?;
     for &field in &fields {
         editable(field)?;
         write_field(component, field, event);
+    }
+    if organizer::asks_again(base, event, here) {
+        ask_again(component, event.options.request_responses);
     }
     if fields.iter().any(|f| matches!(f, Field::Time | Field::Repeat | Field::Status)) {
         let sequence = component.prop("SEQUENCE").and_then(|p| p.value().trim().parse::<i64>().ok()).unwrap_or(0);
@@ -327,6 +333,23 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
     }
     add_lines(component, extra)?;
     Ok(obj.to_string())
+}
+
+/// Every guest's answer back to NEEDS-ACTION, as the organizer's client
+/// does for a server that schedules (RFC 6638): the server mails what the
+/// copy says. The organizer's own line stays.
+fn ask_again(component: &mut Component, rsvp: bool) {
+    let organizer = component.prop("ORGANIZER").and_then(|p| p.address()).map(str::to_ascii_lowercase);
+    component.update(
+        "ATTENDEE",
+        |p| p.address().map(str::to_ascii_lowercase) != organizer,
+        |p| {
+            p.set_param("PARTSTAT", "NEEDS-ACTION");
+            if rsvp {
+                p.set_param("RSVP", "TRUE");
+            }
+        },
+    );
 }
 
 #[cfg(test)]
@@ -524,6 +547,31 @@ mod tests {
         assert_eq!(dav.write(&calendar, &OpWrite::Delete { held: &stored }).await.unwrap(), Written::Saved(None));
         assert_eq!(server.await.unwrap(), ["DELETE /cal/standup.ics If-Match \"1\""]);
     }
+    /// A meeting the server schedules takes its guests' answers from the
+    /// organizer's copy: a new time asks them again, as Apple's Calendar
+    /// does, and iCloud kept "accepted" for a guest who never saw the new
+    /// time (C3 U11, R3 A4). A new place keeps the answers, and so does a
+    /// series that only ends sooner; the organizer's own line stays.
+    #[test]
+    fn a_new_time_asks_the_guests_again() {
+        let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m@example.com\r\nDTSTAMP:20261101T120000Z\r\n\
+            DTSTART:20261124T090000Z\r\nDTEND:20261124T093000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:Review\r\nORGANIZER:mailto:me@icloud.com\r\n\
+            ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@icloud.com\r\n\
+            ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;SCHEDULE-STATUS=2.0:mailto:ann@example.com\r\nSEQUENCE:1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let base = read(text).remove(0);
+        let ann = |out: &str| out.replace("\r\n ", "").lines().find(|l| l.contains("ann@example.com")).unwrap().to_string();
+        let placed = EventData { location: "Room 4".into(), ..base.clone() };
+        assert!(ann(&edited_text(text, &base, &placed, None, &[], Brussels).unwrap()).contains("PARTSTAT=ACCEPTED"), "a new place");
+        let shorter = EventData { recurrence: Some(crate::calendar::Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=2".into()], ..Default::default() }), ..base.clone() };
+        assert!(ann(&edited_text(text, &base, &shorter, None, &[], Brussels).unwrap()).contains("PARTSTAT=ACCEPTED"), "fewer occurrences");
+        let mut moved = base.clone();
+        let utc = |s: &str| Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(chrono_tz::UTC) };
+        moved.span = Span::Timed { start: utc("2026-11-24 11:00"), end: utc("2026-11-24 11:30") };
+        let out = edited_text(text, &base, &moved, None, &[], Brussels).unwrap();
+        assert!(ann(&out).contains("PARTSTAT=NEEDS-ACTION") && ann(&out).contains("RSVP=TRUE"), "{}", ann(&out));
+        assert!(out.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@icloud.com\r\n"), "the organizer's own line: {out}");
+    }
+
     /// A meeting iCloud scheduled: a guest who stays keeps their line with
     /// what the server added, a new one gets RSVP from Request responses, a
     /// removed one goes, and only the user organizes.
