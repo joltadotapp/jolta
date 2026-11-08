@@ -11,6 +11,8 @@ struct FindTimeRequest: Hashable {
         case propose(message: Int64, organizer: String)
         /// From compose: the user's free times go into the message.
         case availability(account: Int64)
+        /// From the event editor: the time goes back into the editor it came from.
+        case editor(account: Int64, people: [PersonRecord], room: String, editor: ObjectIdentifier)
     }
 
     let purpose: Purpose
@@ -43,7 +45,7 @@ extension AppModel {
 /// highlighted, time outside a person's working hours shaded. ←→ or j k
 /// move between suggestions, − and + change the length, O turns their
 /// working hours on and off, R adds a room as one more row, Return picks,
-/// Esc closes.
+/// ⌘Return invites everyone from a conversation, Esc closes.
 struct FindTimePanel: View {
     @Bindable var model: AppModel
     let request: FindTimeRequest
@@ -84,6 +86,7 @@ struct FindTimePanel: View {
         case .reply: "Find a time"
         case .propose(_, let organizer): organizer.isEmpty ? "Find a new time" : "Find a new time for \(organizer)"
         case .availability: "Insert my availability"
+        case .editor: "Find a time"
         }
     }
 
@@ -92,7 +95,13 @@ struct FindTimePanel: View {
         case .reply: "Reply with this time"
         case .propose: "Use this time"
         case .availability: "Insert these times"
+        case .editor: "Use this time"
         }
+    }
+
+    /// Invite (⌘Return) opens the editor with everyone, from a conversation.
+    private var invites: Bool {
+        if case .reply = request.purpose { true } else { false }
     }
 
     var body: some View {
@@ -119,7 +128,7 @@ struct FindTimePanel: View {
                     fallbackStart: info.days.first?.start ?? Int64(Date().timeIntervalSince1970),
                     people: info.people.count,
                     taken: Set(rooms.map { $0.address.lowercased() }),
-                    add: { address in addRoom(address, info: info) },
+                    add: { room in addRoom(room.address, info: info) },
                     close: closeRoomPicker
                 )
                 .padding(.top, 40)
@@ -152,7 +161,10 @@ struct FindTimePanel: View {
                 pickingRoom = true
                 return .handled
             }
-            .onKeyPress(.return) { pick(); return .handled }
+            .onKeyPress(.return, phases: .down) { press in
+                if press.modifiers.contains(.command) { invite() } else { pick() }
+                return .handled
+            }
             .onKeyPress(keys: [.rightArrow, .downArrow, KeyEquivalent("j")]) { _ in move(1); return .handled }
             .onKeyPress(keys: [.leftArrow, .upArrow, KeyEquivalent("k")]) { _ in move(-1); return .handled }
             .onKeyPress(keys: [KeyEquivalent("-"), KeyEquivalent("_")]) { _ in length(-1); return .handled }
@@ -386,6 +398,25 @@ struct FindTimePanel: View {
             .buttonStyle(.plain)
             .disabled(slots.isEmpty || pendingRooms > 0)
             .accessibilityIdentifier("find-time-pick")
+            if invites {
+                Button { invite() } label: {
+                    HStack(spacing: 5) {
+                        Text("Invite")
+                        Text("⌘↩").opacity(0.75)
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(Theme.raise))
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.accent)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(slots.isEmpty || pendingRooms > 0)
+                .help("Open the event editor with this time, everyone here and the room (⌘↩)")
+                .accessibilityIdentifier("find-time-invite")
+            }
         }
         .font(.system(size: 12))
         .padding(.horizontal, 16)
@@ -411,9 +442,16 @@ struct FindTimePanel: View {
             case .reply(let thread): try await model.core.findTimeForThread(threadId: thread, days: Self.days)
             case .propose(let message, _): try await model.core.findTimeForInvitation(messageId: message, days: Self.days)
             case .availability(let account): try await model.core.findTimeForMe(accountId: account, days: Self.days)
+            case .editor(let account, let people, let room, _):
+                try await model.core.findTimeForPeople(accountId: account, people: people, rooms: room.isEmpty ? [] : [room], days: Self.days)
             }
             switch outcome {
-            case .ready(let info): phase = .ready(info); suggest()
+            case .ready(var info):
+                // The editor's room is a row like one added with R, so it can be removed the same way.
+                rooms = info.people.filter(\.isRoom)
+                info.people.removeAll(where: \.isRoom)
+                phase = .ready(info)
+                suggest()
             case .calendarOff(let id, let address, let needsConsent): phase = .calendarOff(accountId: id, address: address, needsConsent: needsConsent)
             }
         } catch {
@@ -466,6 +504,25 @@ struct FindTimePanel: View {
             guard let text = try? model.core.availabilityText(info: info, minutes: minutes) else { return }
             close()
             model.insertIntoCompose(text)
+        case .editor(_, _, _, let editor):
+            close()
+            model.calendar.useFoundTime(in: editor, start: slot.start, end: slot.end, room: rooms.first)
+        }
+    }
+
+    /// ⌘Return: the event editor with the time, everyone on the rows as
+    /// Required and the first room, titled after the conversation.
+    private func invite() {
+        guard invites, case .reply(let thread) = request.purpose, case .ready(let info) = phase, !slots.isEmpty, pendingRooms == 0 else { return }
+        let slot = slots[min(selected, slots.count - 1)]
+        let record = { (row: PersonRow) in PersonRecord(name: row.name, address: row.address) }
+        do {
+            let draft = try model.core.inviteDraft(accountId: info.accountId, threadId: thread, people: info.people.filter { !$0.isMe && !$0.isRoom }.map(record),
+                                                   rooms: rooms.map(record), start: slot.start, end: slot.end)
+            close()
+            model.openInvite(draft)
+        } catch {
+            model.notify("\(error)")
         }
     }
 

@@ -708,6 +708,22 @@ final class CalendarModel {
         open(editor)
     }
 
+    /// A new event another feature filled in, such as Invite from Find a time.
+    func openNew(_ draft: EventDraft) {
+        guard confirmLeaving({ self.openNew(draft) }) else { return }
+        open(EventEditorModel(core: core, draft: draft, event: nil))
+    }
+
+    /// Find a time from the editor picked a time: it goes into that editor,
+    /// with the room added there when the editor had none.
+    func useFoundTime(in id: ObjectIdentifier, start: Int64, end: Int64, room: PersonRow?) {
+        guard let editor, ObjectIdentifier(editor) == id else { return }
+        editor.setTimes(start: start, end: end)
+        if let room, editor.draft.room.isEmpty, !editor.locked(.room) {
+            editor.setRoom(address: room.address, name: room.name == room.address ? "" : room.name)
+        }
+    }
+
     /// Accept proposal: the meeting at the time a guest proposed, with the
     /// proposal named above the fields.
     func openProposal(_ p: ProposalDraft) {
