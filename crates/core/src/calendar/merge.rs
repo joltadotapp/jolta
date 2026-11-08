@@ -32,6 +32,11 @@ pub fn three_way(base: &EventData, mine: &EventData, theirs: &EventData) -> Merg
     if people_lost {
         lost.push(Field::People);
     }
+    // Out of office's reply and declines go out in the edit's extra fields,
+    // which a retry sends only when the merge differs from the server's.
+    if mine.kind != base.kind && theirs.kind == base.kind {
+        event.kind = mine.kind.clone();
+    }
     lost.sort();
     Merged { event, lost }
 }
@@ -148,6 +153,19 @@ mod tests {
                 })
             }),
         ]
+    }
+
+    #[test]
+    fn a_new_out_of_office_reply_survives_a_change_elsewhere() {
+        use crate::calendar::{AutoDecline, EventKind};
+        let away = |message: &str| EventKind::OutOfOffice { declines: AutoDecline::New, message: message.into() };
+        let base = EventData { kind: away("Back Monday"), ..base() };
+        let mine = EventData { kind: away("Back Tuesday"), ..base.clone() };
+        let theirs = EventData { title: "Away".into(), ..base.clone() };
+        let merged = three_way(&base, &mine, &theirs);
+        assert_eq!((merged.event.kind, merged.event.title.as_str()), (away("Back Tuesday"), "Away"));
+        let both = EventData { kind: away("Back Friday"), ..base.clone() };
+        assert_eq!(three_way(&base, &mine, &both).event.kind, away("Back Friday"), "the server's stays when both changed it");
     }
 
     #[test]
