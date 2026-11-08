@@ -257,16 +257,16 @@ pub fn apply_reply(conn: &Connection, account: &Account, sender: &str, reply: &I
     let uid = &reply.event.uid;
     let here = horizon.here;
     for calendar in store::calendars(conn)?.into_iter().filter(|c| sends_itself(c) && c.is_own(&account.address)) {
+        // Judged against the meeting as it is once the user's edits are
+        // sent or taken back, a delete's too.
+        if store::calendar_op_waiting(conn, calendar.id, uid)? {
+            return Ok(Read::Wait);
+        }
         let Some(master) = super::ops::stored(conn, calendar.id, uid, None)? else { continue };
         let organizes = master.event.organizer.as_ref().is_some_and(|o| same(&o.address, &account.address));
         let invited = |e: &EventData| e.attendees.iter().any(|a| !a.is_me && same(&a.person.address, &answer.person.address));
         if !organizes {
             continue;
-        }
-        // Judged against the meeting as it is once the user's edits are
-        // sent or taken back.
-        if store::calendar_op_waiting(conn, calendar.id, uid)? {
-            return Ok(Read::Wait);
         }
         // The rows the answer lands on: the occurrence's own, one made from
         // the series for an occurrence without one, or the series and the
@@ -1265,6 +1265,26 @@ mod tests {
             assert!(read(&j).is_empty(), "it waits");
             j.store.write(|tx| ops::undo(tx, op, now, &horizon())).unwrap();
             assert_eq!(read(&j), [cal], "the time it answered is the meeting's again");
+            assert_eq!(answers(&j, cal, None)[0].1, Accepted);
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// Sol S5, round 2: a reply waits out a delete Undo takes back.
+        #[test]
+        fn a_reply_waits_out_a_delete_that_undo_takes_back() {
+            use crate::calendar::Response::Accepted;
+            let (j, cal) = local("u5b-s5b", true);
+            sent_meeting(&j, cal, false);
+            let now = Utc::now().timestamp();
+            let op = j.store.write(|tx| ops::queue(tx, &told(cal, Change::Delete { uid: "p1@jolta.app".into() }, Notify::All, None), now, &horizon())).unwrap().unwrap();
+            // The delete lands after the reader listed the reply.
+            let raw = reply("ann@example.com", "ann@example.com", "ACCEPTED", None, "20261116T100000Z", "");
+            let answer = crate::calendar::invitation::find(&raw, &[]).remove(0);
+            let account = j.store.read(|c| store::account(c, AccountId(1))).unwrap();
+            assert_eq!(j.store.write(|tx| apply_reply(tx, &account, "ann@example.com", &answer, &horizon())).unwrap(), Read::Wait, "it waits");
+            j.store.write(|tx| ops::undo(tx, op, now, &horizon())).unwrap();
+            import(&j, &raw);
+            assert_eq!(read(&j), [cal], "the meeting is back, and so is the answer");
             assert_eq!(answers(&j, cal, None)[0].1, Accepted);
             std::fs::remove_dir_all(&j.data_dir).ok();
         }
