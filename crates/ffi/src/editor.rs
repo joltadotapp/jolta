@@ -604,6 +604,16 @@ fn horizon() -> Horizon {
     Horizon::around(Utc::now(), tz::here())
 }
 
+/// One entry of the editor's Add video call menu.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct VideoChoice {
+    pub provider: MeetingProvider,
+    /// "Teams meeting", "Google Meet".
+    pub label: String,
+    /// Why this calendar can't have it, shown greyed; None when it can.
+    pub refusal: Option<String>,
+}
+
 #[uniffi::export]
 impl Core {
     /// A draft for a new event at `time` (the next half hour for the
@@ -743,6 +753,17 @@ impl Core {
         })?;
         self.calendar_changed([id]);
         Ok(())
+    }
+
+    /// The Add video call menu for a calendar: the calls it can have, its
+    /// account's own first, then the others with why not. Empty when it can
+    /// have none, and the editor leaves the button out.
+    pub fn video_choices(&self, calendar_id: i64) -> Result<Vec<VideoChoice>> {
+        let calendar = self.jolta.store.read(|c| store::calendar(c, CalendarId(calendar_id)))?;
+        Ok(cal::meeting::video_choices(&calendar)
+            .into_iter()
+            .map(|v| VideoChoice { provider: v.provider.into(), label: v.label.to_string(), refusal: v.refusal })
+            .collect())
     }
 
     /// The calendar new events go to, if any calendar takes them.
