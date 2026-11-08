@@ -105,7 +105,7 @@ struct RecipientField: View {
     }
 }
 
-private struct SuggestionRow: View {
+struct SuggestionRow: View {
     let person: PersonInfo
     let on: Bool
     let choose: () -> Void

@@ -564,7 +564,7 @@ fn an_event_draft_round_trips_through_the_bridge() {
     assert_eq!((draft.calendar_id, draft.time.clone(), draft.reminder, draft.zone.as_str()), (info.id, slot, DraftReminder::Default, here.name()));
     draft.title = "Design review".into();
     assert!(app.core.check_draft(draft_copy(&draft)).unwrap().is_empty());
-    let saved = app.core.save_event(draft, None).unwrap();
+    let saved = app.core.save_event(draft, None, None, None).unwrap();
     assert_eq!(saved.message, "Added Design review");
     let row = week(&app, monday, here).into_iter().find(|o| o.title == "Design review").expect("shown at once");
 
@@ -576,12 +576,12 @@ fn an_event_draft_round_trips_through_the_bridge() {
     draft.time = OccurrenceTime::Timed { start: at(monday, "15:30", here).timestamp(), end: at(monday, "16:30", here).timestamp() };
     draft.reminder = DraftReminder::Before { minutes: 10 };
     draft.locks = vec![DraftField::Title];
-    assert_eq!(app.core.save_event(draft, None).unwrap().message, "Saved Design review", "locks handed back are the core's to decide");
+    assert_eq!(app.core.save_event(draft, None, None, None).unwrap().message, "Saved Design review", "locks handed back are the core's to decide");
     assert_eq!(start_of(&week(&app, monday, here), "Design review"), at(monday, "15:30", here).timestamp());
 
     let row = week(&app, monday, here).into_iter().find(|o| o.title == "Design review").unwrap();
     assert_eq!(app.core.plan_delete(row.event_id, None).unwrap().refusal, None);
-    let deleted = app.core.delete_event(row.event_id).unwrap();
+    let deleted = app.core.delete_event(row.event_id, None).unwrap();
     assert!(week(&app, monday, here).is_empty());
     app.core.undo_calendar(deleted.token.unwrap()).unwrap();
     assert_eq!(titles(&week(&app, monday, here)), ["Design review"], "Undo brings it back");
@@ -599,6 +599,9 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         rule: d.rule.clone(),
         rule_was: d.rule_was.clone(),
         people: d.people.clone(),
+        options: d.options,
+        responses: d.responses.clone(),
+        show_as_note: d.show_as_note.clone(),
         room: d.room.clone(),
         location: d.location.clone(),
         description: d.description.clone(),

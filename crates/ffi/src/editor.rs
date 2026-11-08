@@ -19,6 +19,7 @@ pub enum DraftField {
     Time,
     Repeat,
     People,
+    Options,
     Room,
     Location,
     Video,
@@ -37,6 +38,7 @@ impl From<draft::DraftField> for DraftField {
             F::Time => DraftField::Time,
             F::Repeat => DraftField::Repeat,
             F::People => DraftField::People,
+            F::Options => DraftField::Options,
             F::Room => DraftField::Room,
             F::Location => DraftField::Location,
             F::Video => DraftField::Video,
@@ -67,6 +69,151 @@ pub struct DraftPerson {
     pub is_me: bool,
 }
 
+/// What a meeting's organizer lets its guests do. The calendar's
+/// `capabilities` say which of these it has.
+#[derive(uniffi::Record, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeetingOptions {
+    pub request_responses: bool,
+    pub allow_new_times: bool,
+    pub hide_guests: bool,
+    pub guests_invite: bool,
+    pub guests_modify: bool,
+}
+
+impl From<cal::MeetingOptions> for MeetingOptions {
+    fn from(o: cal::MeetingOptions) -> Self {
+        MeetingOptions {
+            request_responses: o.request_responses,
+            allow_new_times: o.allow_new_times,
+            hide_guests: o.hide_guests,
+            guests_invite: o.guests_invite,
+            guests_modify: o.guests_modify,
+        }
+    }
+}
+
+impl From<MeetingOptions> for cal::MeetingOptions {
+    fn from(o: MeetingOptions) -> Self {
+        cal::MeetingOptions {
+            request_responses: o.request_responses,
+            allow_new_times: o.allow_new_times,
+            hide_guests: o.hide_guests,
+            guests_invite: o.guests_invite,
+            guests_modify: o.guests_modify,
+        }
+    }
+}
+
+/// Whom a save or delete tells, from the dialog's choice.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyChoice {
+    All,
+    /// Google's "Only guests who don't use Google Calendar".
+    Outside,
+    /// Only the people added or removed.
+    NewOnly,
+    None,
+}
+
+impl From<cal::ops::Notify> for NotifyChoice {
+    fn from(n: cal::ops::Notify) -> Self {
+        match n {
+            cal::ops::Notify::All => NotifyChoice::All,
+            cal::ops::Notify::Outside => NotifyChoice::Outside,
+            cal::ops::Notify::Changed => NotifyChoice::NewOnly,
+            cal::ops::Notify::Nobody => NotifyChoice::None,
+        }
+    }
+}
+
+impl From<NotifyChoice> for cal::ops::Notify {
+    fn from(n: NotifyChoice) -> Self {
+        match n {
+            NotifyChoice::All => cal::ops::Notify::All,
+            NotifyChoice::Outside => cal::ops::Notify::Outside,
+            NotifyChoice::NewOnly => cal::ops::Notify::Changed,
+            NotifyChoice::None => cal::ops::Notify::Nobody,
+        }
+    }
+}
+
+/// Where a dialog's button sits and which key takes it.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceStyle {
+    /// Return.
+    Primary,
+    /// Esc: back to the editor.
+    Back,
+    /// Apart on the left, as "Don't save" in macOS.
+    Apart,
+    /// A small link under the buttons.
+    Link,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct SendChoice {
+    pub label: String,
+    /// What saving with it tells the guests; None for Keep editing.
+    pub notify: Option<NotifyChoice>,
+    pub style: ChoiceStyle,
+}
+
+/// Send an update?, its words all from the core.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct UpdateDialogInfo {
+    pub title: String,
+    pub body: String,
+    /// Where a message field would be: "To add a note, use Email guests after saving."
+    pub note: Option<String>,
+    pub choices: Vec<SendChoice>,
+}
+
+impl From<cal::change::UpdateDialog> for UpdateDialogInfo {
+    fn from(d: cal::change::UpdateDialog) -> Self {
+        use cal::change::ChoiceStyle as S;
+        UpdateDialogInfo {
+            title: d.title,
+            body: d.body,
+            note: d.note,
+            choices: d
+                .choices
+                .into_iter()
+                .map(|c| SendChoice {
+                    label: c.label,
+                    notify: c.notify.map(Into::into),
+                    style: match c.style {
+                        S::Primary => ChoiceStyle::Primary,
+                        S::Back => ChoiceStyle::Back,
+                        S::Apart => ChoiceStyle::Apart,
+                        S::Link => ChoiceStyle::Link,
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+/// "Cancel the meeting for 6 people?": Return and Esc keep it, ⌘⌫ cancels it.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct CancelDialogInfo {
+    /// The scope it is for, after the scope prompt; All for an event that doesn't repeat.
+    pub scope: EditScope,
+    pub title: String,
+    pub body: String,
+    /// Shows a message field: the cancellation carries the user's words.
+    pub message: bool,
+    pub note: Option<String>,
+}
+
+/// "Decline and remove?" for a meeting someone else organizes.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct DeclineInfo {
+    pub title: String,
+    pub body: String,
+    /// For "Tell Jan Peeters", ticked by default.
+    pub organizer: String,
+}
+
 /// The event as the editor holds it. Pass it back whole: `base` and `zone`
 /// are for the core.
 #[derive(uniffi::Record)]
@@ -84,6 +231,7 @@ pub struct EventDraft {
     /// isn't the Mac's.
     pub zone_text: Option<String>,
     pub people: Vec<DraftPerson>,
+    pub options: MeetingOptions,
     pub room: String,
     pub location: String,
     /// The user's own text; a meeting block stays out of it and is kept on save.
@@ -107,6 +255,10 @@ pub struct EventDraft {
     /// The series' repeat as the editor opened it, for the core: pass it back.
     pub rule_was: Option<String>,
     pub description_note: Option<String>,
+    /// "4 accepted, 1 maybe, 2 no answer"; empty without guests.
+    pub responses: String,
+    /// Under Show as: "Your guests see this with the next update."
+    pub show_as_note: Option<String>,
 }
 
 /// What another feature fills in when it opens the editor.
@@ -142,6 +294,9 @@ pub struct SavePlan {
     pub scopes: Vec<ScopeChoice>,
     /// The prompt's line: "You moved Standup to 10:00."
     pub prompt: Option<String>,
+    /// Send an update?, after the scope prompt; saving then passes the
+    /// chosen button's notify to `save_event`.
+    pub dialog: Option<UpdateDialogInfo>,
 }
 
 /// Which events of a series a change or delete is for.
@@ -206,6 +361,27 @@ pub struct DeletePlan {
     pub scopes: Vec<ScopeChoice>,
     /// The prompt's line: "You're deleting Standup on Tue 24 Nov."
     pub prompt: Option<String>,
+    /// For a meeting the user organizes, the cancel dialog per scope.
+    pub cancel: Vec<CancelDialogInfo>,
+    /// For a meeting someone else organizes, in place of a delete.
+    pub decline: Option<DeclineInfo>,
+}
+
+impl From<draft::DeletePlan> for DeletePlan {
+    fn from(plan: draft::DeletePlan) -> Self {
+        DeletePlan {
+            refusal: plan.refusal,
+            title: plan.title,
+            scopes: choices(plan.scopes),
+            prompt: plan.prompt,
+            cancel: plan
+                .cancel
+                .into_iter()
+                .map(|(scope, d)| CancelDialogInfo { scope: scope.into(), title: d.title, body: d.body, message: d.message, note: d.note })
+                .collect(),
+            decline: plan.decline.map(|d| DeclineInfo { title: d.title, body: d.body, organizer: d.organizer }),
+        }
+    }
 }
 
 fn failed(e: impl std::fmt::Display) -> CoreError {
@@ -278,6 +454,7 @@ impl From<draft::EventDraft> for EventDraft {
                     is_me: a.is_me,
                 })
                 .collect(),
+            options: d.options.into(),
             room: d.room,
             location: d.location,
             description: d.description,
@@ -300,6 +477,8 @@ impl From<draft::EventDraft> for EventDraft {
             rule: d.rule.as_ref().map(|r| r.rules.join("\n")),
             rule_was: d.rule_was.as_ref().and_then(|r| serde_json::to_string(r).ok()),
             description_note: d.description_note,
+            responses: d.responses,
+            show_as_note: d.show_as_note,
         }
     }
 }
@@ -344,6 +523,7 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
                     is_me: p.is_me,
                 })
                 .collect(),
+            options: d.options.into(),
             room: d.room.clone(),
             location: d.location.clone(),
             description: d.description.clone(),
@@ -363,6 +543,8 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
             rule,
             rule_was,
             description_note: None,
+            responses: String::new(),
+            show_as_note: None,
         })
     }
 }
@@ -427,15 +609,17 @@ impl Core {
     pub fn plan_save(&self, draft: EventDraft) -> Result<SavePlan> {
         let d = draft::EventDraft::try_from(&draft)?;
         let plan = self.jolta.store.read(|c| draft::plan_save(c, &d, tz::here()))?;
-        Ok(SavePlan { unchanged: plan.unchanged, scopes: choices(plan.scopes), prompt: plan.prompt })
+        Ok(SavePlan { unchanged: plan.unchanged, scopes: choices(plan.scopes), prompt: plan.prompt, dialog: plan.dialog.map(Into::into) })
     }
 
-    /// Saves the draft, telling nobody, for `scope` when `plan_save` asked
-    /// for one. The returned token undoes it.
-    pub fn save_event(&self, draft: EventDraft, scope: Option<EditScope>) -> Result<SavedEdit> {
+    /// Saves the draft for `scope` when `plan_save` asked for one, telling
+    /// the guests what `notify` says when it showed Send an update? (the
+    /// chosen button's), else nobody. One that mails waits the undo window.
+    /// The returned token undoes it.
+    pub fn save_event(&self, draft: EventDraft, scope: Option<EditScope>, notify: Option<NotifyChoice>, message: Option<String>) -> Result<SavedEdit> {
         let d = draft::EventDraft::try_from(&draft)?;
         let h = horizon();
-        let saved = self.jolta.store.write(|tx| draft::save_draft(tx, &d, scope.map(Into::into), Utc::now().timestamp(), &h, tz::here()))?;
+        let saved = self.jolta.store.write(|tx| draft::save_draft(tx, &d, scope.map(Into::into), notify.map(Into::into), message, Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
         Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
@@ -444,22 +628,22 @@ impl Core {
     /// series, the scope prompt's choices.
     pub fn plan_delete(&self, event_id: i64, time: Option<OccurrenceTime>) -> Result<DeletePlan> {
         let at = time.map(cal::Bounds::try_from).transpose()?;
-        let plan = self.jolta.store.read(|c| draft::plan_delete(c, EventId(event_id), at, tz::here()))?;
-        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
+        Ok(self.jolta.store.read(|c| draft::plan_delete(c, EventId(event_id), at, tz::here()))?.into())
     }
 
     /// `plan_delete` for the stored event a draft opened, found again by its
     /// UID and occurrence, as `delete_draft` deletes it.
     pub fn plan_delete_draft(&self, draft: EventDraft) -> Result<DeletePlan> {
         let d = draft::EventDraft::try_from(&draft)?;
-        let plan = self.jolta.store.read(|c| draft::plan_delete_drafted(c, &d, tz::here()))?;
-        Ok(DeletePlan { refusal: plan.refusal, title: plan.title, scopes: choices(plan.scopes), prompt: plan.prompt })
+        Ok(self.jolta.store.read(|c| draft::plan_delete_drafted(c, &d, tz::here()))?.into())
     }
 
-    /// Deletes an event without guests, telling nobody. The returned token undoes it.
-    pub fn delete_event(&self, event_id: i64) -> Result<SavedEdit> {
+    /// Deletes an event, or cancels a meeting the user organizes for its
+    /// guests with `message` where the cancellation carries one. The
+    /// returned token undoes it until the cancellation goes out.
+    pub fn delete_event(&self, event_id: i64, message: Option<String>) -> Result<SavedEdit> {
         let h = horizon();
-        let saved = self.jolta.store.write(|tx| draft::delete_event(tx, EventId(event_id), Utc::now().timestamp(), &h, tz::here()))?;
+        let saved = self.jolta.store.write(|tx| draft::delete_event(tx, EventId(event_id), message, Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
         Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
@@ -467,10 +651,10 @@ impl Core {
     /// Deletes the stored event a draft opened, found again by its UID, as
     /// the editor's Delete does; one occurrence of a series for `scope`.
     /// The returned token undoes it.
-    pub fn delete_draft(&self, draft: EventDraft, scope: Option<EditScope>) -> Result<SavedEdit> {
+    pub fn delete_draft(&self, draft: EventDraft, scope: Option<EditScope>, message: Option<String>) -> Result<SavedEdit> {
         let d = draft::EventDraft::try_from(&draft)?;
         let h = horizon();
-        let saved = self.jolta.store.write(|tx| draft::delete_drafted(tx, &d, scope.map(Into::into), Utc::now().timestamp(), &h, tz::here()))?;
+        let saved = self.jolta.store.write(|tx| draft::delete_drafted(tx, &d, scope.map(Into::into), message, Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
         Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }

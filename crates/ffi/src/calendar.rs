@@ -489,6 +489,46 @@ impl Core {
         self.respond(respond::Subject::Event { id: EventId(event_id), at }, answer, options, None).await
     }
 
+    /// Decline and remove, for a meeting someone else organizes: declines
+    /// it, telling the organizer when `tell`, then takes the user's copy out
+    /// of the calendar. `occurrence_only` does both for the occurrence at
+    /// `time`. Returns the words for the toast.
+    pub async fn decline_and_remove(&self, event_id: i64, time: Option<OccurrenceTime>, occurrence_only: bool, tell: bool) -> Result<String> {
+        let at = time.map(Bounds::try_from).transpose()?;
+        let here = tz::here();
+        // A CalDAV answer stores the resource again, under new row ids, so
+        // the copy is found again by its UID for the removal.
+        let (calendar, uid, own_rid, rid) = self.jolta.store.read(|c| {
+            let (calendar, uid, data): (CalendarId, String, String) =
+                c.query_row("SELECT calendar_id, uid, data FROM event WHERE id = ?1", [event_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            // An invitation to one occurrence may be stored without its series.
+            let own_rid = serde_json::from_str::<cal::EventData>(&data).ok().and_then(|e| e.recurrence_id);
+            let rid = at.filter(|_| occurrence_only).map(|at| rsvp::occurrence_at(c, EventId(event_id), at, here)).transpose()?;
+            Ok((calendar, uid, own_rid, rid))
+        })?;
+        let options = AnswerOptions { note: String::new(), notify: tell, occurrence_only };
+        let declined = self.respond(respond::Subject::Event { id: EventId(event_id), at }, InvitationAnswer::Decline, options, None).await?;
+        let now = self.jolta.store.read(|c| {
+            let row = match cal::ops::stored(c, calendar, &uid, None)? {
+                Some(series) => Some(series),
+                None => cal::ops::stored(c, calendar, &uid, rid.or(own_rid).as_ref())?,
+            };
+            Ok(row.map(|r| r.id))
+        })?;
+        let Some(event) = now else {
+            self.calendar_changed([calendar]);
+            return Ok(declined);
+        };
+        let jolta = self.jolta.clone();
+        let removed = self
+            .runtime
+            .spawn(async move { remove::remove_copy(&jolta, event, rid).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.calendar_changed([removed.calendar]);
+        Ok(format!("{declined} {}", removed.text))
+    }
+
     /// Every account with its calendar switch and calendars, then the
     /// calendars of no account.
     pub fn calendars(&self) -> Result<CalendarList> {

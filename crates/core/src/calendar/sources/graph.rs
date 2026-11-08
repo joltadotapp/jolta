@@ -31,7 +31,7 @@ use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, pro
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
-    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, Moment, Person,
+    Access, Alarm, AlarmTrigger, Attendee, Calendar, EventData, EventStatus, Local, MeetingOptions, Moment, Person,
     Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, tz,
 };
 use crate::store::{RemoteCalendar, Removal};
@@ -41,7 +41,8 @@ const BASE: &str = "https://graph.microsoft.com/v1.0";
 const PREFER: &str = r#"outlook.timezone="UTC", IdType="ImmutableId", odata.maxpagesize=200"#;
 const FIELDS: &str = "id,changeKey,type,seriesMasterId,iCalUId,subject,body,location,start,end,isAllDay,originalStart,\
 originalStartTimeZone,originalEndTimeZone,recurrence,showAs,sensitivity,responseStatus,attendees,organizer,isOrganizer,\
-isReminderOn,reminderMinutesBeforeStart,onlineMeeting,categories,isCancelled,allowNewTimeProposals";
+isReminderOn,reminderMinutesBeforeStart,onlineMeeting,categories,isCancelled,allowNewTimeProposals,responseRequested,\
+hideAttendees";
 /// Requests per JSON batch, Graph's limit.
 const BATCH: usize = 20;
 
@@ -102,6 +103,9 @@ struct GraphEvent {
     categories: Vec<String>,
     is_cancelled: bool,
     cancelled_occurrences: Vec<String>,
+    allow_new_time_proposals: Option<bool>,
+    response_requested: Option<bool>,
+    hide_attendees: bool,
     #[serde(rename = "@removed")]
     removed: Option<Value>,
 }
@@ -825,6 +829,13 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         categories: g.categories.clone(),
         color: None,
         master_id: g.series_master_id.clone(),
+        organizer_is_me: g.is_organizer,
+        options: MeetingOptions {
+            request_responses: g.response_requested != Some(false),
+            allow_new_times: g.allow_new_time_proposals != Some(false),
+            hide_guests: g.hide_attendees,
+            ..MeetingOptions::default()
+        },
     })
 }
 

@@ -8,7 +8,7 @@ use clap::Args;
 use jolta_core::Jolta;
 use jolta_core::calendar::ops::{self, CalendarOp, CalendarOpId, Change, Edit, Extra, OpState, Scope, Undone};
 use jolta_core::calendar::series::Horizon;
-use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, Local, Recurrence, Span, Zone, caps, draft, tz};
+use jolta_core::calendar::{Attendee, Bounds, CalendarId, EventData, EventId, Local, Person, Recurrence, Response, Role, Span, Zone, caps, change, draft, tz};
 use jolta_core::store;
 
 use crate::truncate;
@@ -47,8 +47,55 @@ pub struct CreateArgs {
     /// Repeat by this RRULE, such as "FREQ=WEEKLY;BYDAY=TU;COUNT=6".
     #[arg(long)]
     repeat: Option<String>,
+    /// Guests, "ann@example.com,bo@example.com:optional": a meeting the
+    /// calendar's server invites them to, as the editor's Save and send.
+    #[arg(long, value_delimiter = ',')]
+    with: Vec<String>,
+    #[command(flatten)]
+    people: Guests,
     #[command(flatten)]
     send: Send,
+}
+
+/// Who hears of a change to a meeting, as the Send an update? dialog asks.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum NotifyArg {
+    All,
+    /// Google's "Only guests who don't use Google Calendar".
+    Outside,
+    /// Only the people added or removed.
+    New,
+    None,
+}
+
+impl From<NotifyArg> for ops::Notify {
+    fn from(n: NotifyArg) -> ops::Notify {
+        match n {
+            NotifyArg::All => ops::Notify::All,
+            NotifyArg::Outside => ops::Notify::Outside,
+            NotifyArg::New => ops::Notify::Changed,
+            NotifyArg::None => ops::Notify::Nobody,
+        }
+    }
+}
+
+/// The dialog's choice and the organizer options, for a meeting.
+#[derive(Args)]
+pub struct Guests {
+    /// The Send an update? dialog's choice; the command prints the dialog
+    /// and stops without one when the change needs it.
+    #[arg(long, value_enum)]
+    notify: Option<NotifyArg>,
+    /// Hide the guest list.
+    #[arg(long)]
+    hide_guests: bool,
+    /// Don't allow new time proposals.
+    #[arg(long)]
+    no_proposals: bool,
+    /// Queue the same save a second time right after, as a double click
+    /// would: the second changes nothing (check 4).
+    #[arg(long)]
+    repeat_op: bool,
 }
 
 /// Which events of a series, as the editor's scope prompt asks.
@@ -104,6 +151,14 @@ pub struct EditArgs {
     /// Repeat by this RRULE, or "none" for no repeat.
     #[arg(long)]
     repeat: Option<String>,
+    /// Guests to add, "addr" or "addr:optional".
+    #[arg(long, value_delimiter = ',')]
+    add: Vec<String>,
+    /// Guests to remove, by address.
+    #[arg(long, value_delimiter = ',')]
+    remove: Vec<String>,
+    #[command(flatten)]
+    people: Guests,
     #[command(flatten)]
     occurrence: Occurrence,
     #[command(flatten)]
@@ -113,10 +168,66 @@ pub struct EditArgs {
 #[derive(Args)]
 pub struct DeleteArgs {
     event: i64,
+    /// Words that go with the cancellation of a meeting, where its server
+    /// takes them (Microsoft 365).
+    #[arg(long)]
+    message: Option<String>,
     #[command(flatten)]
     occurrence: Occurrence,
     #[command(flatten)]
     send: Send,
+}
+
+/// "ann@example.com" or "ann@example.com:optional" as a guest.
+fn guest(spec: &str) -> Attendee {
+    let (address, role) = match spec.trim().rsplit_once(':') {
+        Some((a, r)) if r.eq_ignore_ascii_case("optional") => (a, Role::Optional),
+        Some((a, r)) if r.eq_ignore_ascii_case("room") => (a, Role::Room),
+        _ => (spec.trim(), Role::Required),
+    };
+    Attendee { person: Person { address: address.trim().to_string(), name: String::new() }, role, response: Response::NeedsAction, comment: String::new(), is_me: false }
+}
+
+fn print_dialog(d: &change::UpdateDialog) {
+    println!("{}", d.title);
+    println!("  {}", d.body);
+    if let Some(note) = &d.note {
+        println!("  {note}");
+    }
+    for c in &d.choices {
+        let flag = match c.notify {
+            Some(ops::Notify::All) => "--notify all",
+            Some(ops::Notify::Outside) => "--notify outside",
+            Some(ops::Notify::Changed) => "--notify new",
+            Some(ops::Notify::Nobody) => "--notify none",
+            None => "",
+        };
+        println!("  [{}] {flag}", c.label);
+    }
+}
+
+/// Saves a draft as the editor's Save does after Send an update?, with the
+/// dialog printed first; with --repeat-op the same save again.
+async fn save_with_guests(jolta: &Jolta, d: &draft::EventDraft, scope: Option<Scope>, g: &Guests, send: &Send) -> Result<()> {
+    let here = tz::here();
+    let problems = jolta.store.read(|c| draft::check_draft(c, d, here))?;
+    print_draft(d, &problems);
+    let plan = jolta.store.read(|c| draft::plan_save(c, d, here))?;
+    if let Some(prompt) = &plan.prompt {
+        println!("{prompt}");
+        print_scopes(&plan.scopes);
+    }
+    if let Some(dialog) = &plan.dialog {
+        print_dialog(dialog);
+    }
+    let h = horizon();
+    let notify = g.notify.map(Into::into);
+    let saved = jolta.store.write(|tx| draft::save_draft(tx, d, scope, notify, None, Utc::now().timestamp(), &h, here))?;
+    if g.repeat_op {
+        let again = jolta.store.write(|tx| draft::save_draft(tx, d, scope, notify, None, Utc::now().timestamp(), &h, here))?;
+        println!("The same save again: {}", again.op.map_or("no op queued".to_string(), |o| format!("op {} queued", o.0)));
+    }
+    finish(jolta, saved, send).await
 }
 
 fn horizon() -> Horizon {
@@ -234,6 +345,18 @@ fn stored_event(jolta: &Jolta, id: i64) -> Result<(CalendarId, String, EventData
 
 pub async fn create(jolta: &Jolta, a: CreateArgs) -> Result<()> {
     let span = a.when.span(None)?.context("--start is needed")?;
+    if !a.with.is_empty() {
+        let here = tz::here();
+        let mut d = jolta.store.read(|c| draft::draft_for_new(c, Some(CalendarId(a.calendar)), Some(span), Utc::now(), here))?;
+        d.title = a.title;
+        d.location = a.location.unwrap_or_default();
+        d.people = a.with.iter().map(|s| guest(s)).collect();
+        d.options.hide_guests = a.people.hide_guests;
+        d.options.allow_new_times = !a.people.no_proposals;
+        d.reminder = draft::Reminder::Off;
+        d.rule = a.repeat.map(|r| Recurrence { rules: vec![r.trim_start_matches("RRULE:").to_string()], ..Recurrence::default() });
+        return save_with_guests(jolta, &d, None, &a.people, &a.send).await;
+    }
     let recurrence = a.repeat.map(|r| Recurrence { rules: vec![r.trim_start_matches("RRULE:").to_string()], ..Recurrence::default() });
     let event = EventData { title: a.title, location: a.location.unwrap_or_default(), recurrence, ..EventData::new(ops::new_uid()?, span) };
     let extra = match (a.extra, a.line) {
@@ -293,7 +416,8 @@ fn print_scopes(plan: &[draft::ScopeChoice]) {
 }
 
 pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
-    if a.occurrence.occurrence.is_some() || a.repeat.is_some() {
+    let meeting = !a.add.is_empty() || !a.remove.is_empty() || a.people.notify.is_some() || a.people.hide_guests || a.people.no_proposals;
+    if a.occurrence.occurrence.is_some() || a.repeat.is_some() || meeting {
         let here = tz::here();
         let mut d = drafted(jolta, a.event, a.occurrence.occurrence.as_deref())?;
         if let Some(title) = a.title {
@@ -311,6 +435,17 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
                 r => Some(Recurrence { rules: vec![r.trim_start_matches("RRULE:").to_string()], ..d.rule_was.clone().unwrap_or_default() }),
             };
         }
+        d.people.retain(|p| !a.remove.iter().any(|r| r.trim().eq_ignore_ascii_case(&p.person.address)));
+        d.people.extend(a.add.iter().map(|s| guest(s)));
+        if a.people.hide_guests {
+            d.options.hide_guests = true;
+        }
+        if a.people.no_proposals {
+            d.options.allow_new_times = false;
+        }
+        if meeting {
+            return save_with_guests(jolta, &d, a.occurrence.scope.map(Into::into), &a.people, &a.send).await;
+        }
         let problems = jolta.store.read(|c| draft::check_draft(c, &d, here))?;
         print_draft(&d, &problems);
         let plan = jolta.store.read(|c| draft::plan_save(c, &d, here))?;
@@ -319,10 +454,13 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
             print_scopes(&plan.scopes);
         }
         let h = horizon();
-        let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, a.occurrence.scope.map(Into::into), Utc::now().timestamp(), &h, here))?;
+        let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, a.occurrence.scope.map(Into::into), None, None, Utc::now().timestamp(), &h, here))?;
         return finish(jolta, saved, &a.send).await;
     }
     let (calendar, _, mut event) = stored_event(jolta, a.event)?;
+    if event.attendees.iter().any(|x| !x.is_me) {
+        bail!("#{} is a meeting; change it with --notify (or --occurrence), as the editor's Send an update? does", a.event);
+    }
     if let Some(title) = a.title {
         event.title = title;
     }
@@ -335,22 +473,41 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
     submit(jolta, Edit::quiet(calendar, Change::Update(event)), &a.send).await
 }
 
+fn print_delete_plan(plan: &draft::DeletePlan) {
+    print_scopes(&plan.scopes);
+    for (scope, c) in &plan.cancel {
+        println!("{} ({scope})", c.title);
+        println!("  {}", c.body);
+        match (&c.note, c.message) {
+            (_, true) => println!("  --message carries your words"),
+            (Some(note), false) => println!("  {note}"),
+            (None, false) => {}
+        }
+    }
+    if let Some(d) = &plan.decline {
+        println!("{} {}", d.title, d.body);
+    }
+}
+
 pub async fn delete(jolta: &Jolta, a: DeleteArgs) -> Result<()> {
+    let here = tz::here();
+    let h = horizon();
     if let Some(day) = a.occurrence.occurrence.as_deref() {
-        let here = tz::here();
         let d = drafted(jolta, a.event, Some(day))?;
         let at = occurrence_on(jolta, a.event, day)?;
         let plan = jolta.store.read(|c| draft::plan_delete(c, EventId(a.event), Some(at), here))?;
-        print_scopes(&plan.scopes);
-        let h = horizon();
-        let saved = jolta.store.write(|tx| draft::delete_drafted(tx, &d, a.occurrence.scope.map(Into::into), Utc::now().timestamp(), &h, here))?;
+        print_delete_plan(&plan);
+        let saved = jolta.store.write(|tx| draft::delete_drafted(tx, &d, a.occurrence.scope.map(Into::into), a.message.clone(), Utc::now().timestamp(), &h, here))?;
         return finish(jolta, saved, &a.send).await;
     }
-    let (calendar, rid, event) = stored_event(jolta, a.event)?;
+    let (_, rid, _) = stored_event(jolta, a.event)?;
     if !rid.is_empty() {
         bail!("#{} is one changed occurrence; delete it with --occurrence and --scope", a.event);
     }
-    submit(jolta, Edit::quiet(calendar, Change::Delete { uid: event.uid }), &a.send).await
+    let plan = jolta.store.read(|c| draft::plan_delete(c, EventId(a.event), None, here))?;
+    print_delete_plan(&plan);
+    let saved = jolta.store.write(|tx| draft::delete_event(tx, EventId(a.event), a.message.clone(), Utc::now().timestamp(), &h, here))?;
+    finish(jolta, saved, &a.send).await
 }
 
 pub async fn apply_mine(jolta: &Jolta, op: i64, wait: bool) -> Result<()> {
@@ -479,8 +636,8 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     let h = horizon();
     let now = Utc::now().timestamp();
     let saved = match (a.save, a.delete, a.event) {
-        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, now, &h, here))?,
-        (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), now, &h, here))?,
+        (true, _, _) => jolta.store.write(|tx| draft::save_draft(tx, &d, None, None, None, now, &h, here))?,
+        (_, true, Some(id)) => jolta.store.write(|tx| draft::delete_event(tx, EventId(id), None, now, &h, here))?,
         _ => return Ok(()),
     };
     println!("{}", saved.message);
@@ -513,6 +670,9 @@ fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
     }
     for p in &d.people {
         println!("  person: {} ({:?}, {:?}){}", p.person.address, p.role, p.response, if p.is_me { ", you" } else { "" });
+    }
+    if !d.options.is_default() {
+        println!("  options: {:?}", d.options);
     }
     for (label, value) in [("room", &d.room), ("location", &d.location), ("description", &d.description)] {
         if !value.is_empty() {

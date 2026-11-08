@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 
 use super::availability::{Availability, Schedule, Unknown, WorkingHours};
 use super::change::{FIELDS, Field};
-use super::ops::Extra;
+use super::ops::{Extra, Notify};
 use super::rsvp::{Rsvp, Stored, Target};
 use super::{Calendar, CalendarSource, EventData};
 use crate::store::{RemoteCalendar, Removal};
@@ -184,12 +184,13 @@ impl Source {
 impl Source {
     /// Sends one calendar op's write. Every update and delete is guarded by
     /// the version Jolta holds; a create lands on the object `key` names, so
-    /// a retry after a lost answer finds the first try's event.
-    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>) -> Result<Written> {
+    /// a retry after a lost answer finds the first try's event. `tell` says
+    /// whom the server mails about it.
+    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
         match self {
             Source::CalDav(s) => s.write(calendar, write).await,
-            Source::Google(s) => s.write(calendar, write).await,
-            Source::Graph(s) => s.write(calendar, write).await,
+            Source::Google(s) => s.write(calendar, write, tell).await,
+            Source::Graph(s) => s.write(calendar, write, tell).await,
             Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),
         }
     }
@@ -232,6 +233,19 @@ pub fn writable(source: CalendarSource, write: &OpWrite<'_>) -> Result<()> {
         CalendarSource::Local => Ok(()),
         CalendarSource::Webcal | CalendarSource::EventKit => Err(Error::Other("This calendar is read-only.".into())),
     }
+}
+
+/// Whom the server mails about one write of a calendar op, and the user's
+/// words with a cancellation. A CalDAV server with scheduling mails the
+/// guests of every change itself, so only Google and Microsoft 365 read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tell<'a> {
+    pub notify: Notify,
+    pub message: Option<&'a str>,
+}
+
+impl Tell<'_> {
+    pub const NOBODY: Tell<'static> = Tell { notify: Notify::Nobody, message: None };
 }
 
 /// One write of a calendar op.
@@ -316,6 +330,21 @@ fn created_fields(e: &EventData) -> Vec<Field> {
 /// The fields `e` changed from `base`.
 fn changed_fields(base: &EventData, e: &EventData) -> Vec<Field> {
     FIELDS.into_iter().filter(|f| f.differs(base, e)).collect()
+}
+
+/// Whether the instance `current` already has every field the changed
+/// occurrence `changed` of the new series `master` sets: a create retried
+/// after the first try wrote it.
+fn already_written(master: &EventData, changed: &EventData, current: &EventData, here: chrono_tz::Tz) -> bool {
+    let Some(rid) = changed.recurrence_id.as_ref() else { return false };
+    let Some(base) = crate::calendar::series::occurrence(std::slice::from_ref(master), rid, here) else { return false };
+    // Google and Graph hold a room as a resource and read it back as one.
+    let resource = |e: &EventData| EventData {
+        attendees: e.attendees.iter().map(|a| super::Attendee { role: if a.role == super::Role::Room { super::Role::Resource } else { a.role }, ..a.clone() }).collect(),
+        ..e.clone()
+    };
+    let (current, changed) = (resource(current), resource(changed));
+    changed_fields(&base, &changed).into_iter().all(|f| !f.differs(&current, &changed))
 }
 
 /// The error for a change the provider can't hold.
@@ -477,6 +506,37 @@ fn encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check 4: a create retried after its first try wrote a changed
+    /// occurrence of the new series leaves that occurrence alone, as each
+    /// write mails the guests again.
+    #[test]
+    fn a_retried_create_knows_the_occurrences_it_wrote() {
+        use chrono_tz::Europe::Brussels;
+        use crate::calendar::{Local, Moment, Recurrence, Span, Zone};
+        let at = |s: &str| Local { wall: chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) };
+        let master = EventData {
+            title: "Standup".into(),
+            recurrence: Some(Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=4".into()], ..Recurrence::default() }),
+            ..EventData::new("u1", Span::Timed { start: at("2026-12-01 09:00"), end: at("2026-12-01 09:30") })
+        };
+        let rid = Moment::Time(at("2026-12-08 09:00"));
+        let plain = crate::calendar::series::occurrence(std::slice::from_ref(&master), &rid, Brussels).unwrap();
+        let moved = EventData { span: Span::Timed { start: at("2026-12-08 11:00"), end: at("2026-12-08 11:30") }, ..plain.clone() };
+        assert!(!already_written(&master, &moved, &plain, Brussels), "the first try writes it");
+        let as_written = EventData { description: "Graph's own body".into(), ..moved.clone() };
+        assert!(already_written(&master, &moved, &as_written, Brussels), "a retry finds it written and leaves it");
+        let room = |role| crate::calendar::Attendee {
+            person: crate::calendar::Person { address: "room@example.com".into(), name: String::new() },
+            role,
+            response: crate::calendar::Response::NeedsAction,
+            comment: String::new(),
+            is_me: false,
+        };
+        let booked = EventData { attendees: vec![room(crate::calendar::Role::Room)], ..moved.clone() };
+        let read_back = EventData { attendees: vec![room(crate::calendar::Role::Resource)], ..moved };
+        assert!(already_written(&master, &booked, &read_back, Brussels), "a room comes back as a resource");
+    }
 
     #[test]
     fn a_token_goes_only_to_its_providers_https_api() {

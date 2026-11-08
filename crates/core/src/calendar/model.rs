@@ -158,6 +158,36 @@ pub struct Alarm {
     pub email: bool,
 }
 
+/// What a meeting's organizer lets its guests do (C3 spec, section 8). A
+/// source holds only some of these; the others keep their default, which
+/// is what every provider does when nothing is said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MeetingOptions {
+    /// Graph `responseRequested`, iCalendar `RSVP`.
+    pub request_responses: bool,
+    /// Graph `allowNewTimeProposals`, Outlook's `X-MICROSOFT-DISALLOW-COUNTER`.
+    pub allow_new_times: bool,
+    /// Graph `hideAttendees`, Google `guestsCanSeeOtherGuests: false`.
+    pub hide_guests: bool,
+    /// Google `guestsCanInviteOthers`.
+    pub guests_invite: bool,
+    /// Google `guestsCanModify`.
+    pub guests_modify: bool,
+}
+
+impl Default for MeetingOptions {
+    fn default() -> Self {
+        MeetingOptions { request_responses: true, allow_new_times: true, hide_guests: false, guests_invite: true, guests_modify: false }
+    }
+}
+
+impl MeetingOptions {
+    pub fn is_default(&self) -> bool {
+        *self == MeetingOptions::default()
+    }
+}
+
 /// How to join an online meeting, found by `meeting::detect`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meeting {
@@ -203,6 +233,13 @@ pub struct EventData {
     /// `seriesMasterId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master_id: Option<String>,
+    #[serde(default, skip_serializing_if = "MeetingOptions::is_default")]
+    pub options: MeetingOptions,
+    /// The source says the organizer is the user: Google's `organizer.self`,
+    /// Graph's `isOrganizer`, a CalDAV ORGANIZER among the principal's
+    /// addresses, which iCloud rewrites to the Apple ID's preferred one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub organizer_is_me: bool,
 }
 
 impl EventData {
@@ -230,6 +267,8 @@ impl EventData {
             categories: Vec::new(),
             color: None,
             master_id: None,
+            options: MeetingOptions::default(),
+            organizer_is_me: false,
         }
     }
 

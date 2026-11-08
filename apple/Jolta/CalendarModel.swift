@@ -216,6 +216,11 @@ final class CalendarModel {
     var discard: Confirmation?
     /// Which events of a series a save or delete is for, before any other dialog.
     var scopePrompt: ScopePrompt?
+    /// Send an update?, Cancel the meeting? and Decline and remove?, each
+    /// after the scope prompt when there is one.
+    var sendPrompt: SendPrompt?
+    var cancelPrompt: CancelPrompt?
+    var declinePrompt: DeclinePrompt?
     /// Shows a toast, with the token Undo takes back.
     @ObservationIgnored var toast: ((String, Int64?) -> Void)?
     private(set) var list = CalendarList(accounts: [], otherCalendars: [])
@@ -757,26 +762,40 @@ final class CalendarModel {
     }
 
     /// ⌘↩: saves through the op queue and closes; Undo takes it back. A
-    /// change to one occurrence of a series asks for which events first.
+    /// change to one occurrence of a series asks for which events first, and
+    /// one the guests of a meeting hear about whether to send it.
     func saveEditor() {
         guard let editor else { return }
         if editor.isReadOnly { return dropEditor() }
         do {
             let plan = try core.planSave(draft: editor.draft)
             if plan.unchanged { return dropEditor() }
-            guard !plan.scopes.isEmpty else { return save(editor, scope: nil) }
-            scopePrompt = ScopePrompt(title: "Change a repeating event", line: plan.prompt, choices: plan.scopes) { [weak self] scope in
-                self?.save(editor, scope: scope)
+            let send = { [weak self] (scope: EditScope?, prompted: Bool) in
+                guard let self else { return }
+                guard let dialog = plan.dialog else { return self.save(editor, scope: scope, notify: nil) }
+                self.after(prompted) { self.sendPrompt = SendPrompt(dialog: dialog) { [weak self] notify in self?.save(editor, scope: scope, notify: notify) } }
             }
+            guard !plan.scopes.isEmpty else { return send(nil, false) }
+            scopePrompt = ScopePrompt(title: "Change a repeating event", line: plan.prompt, choices: plan.scopes) { send($0, true) }
         } catch {
             editor.failure = "\(error)"
         }
     }
 
-    private func save(_ editor: EventEditorModel, scope: EditScope?) {
+    /// Runs `show`, after the scope prompt has gone when it was `prompted`:
+    /// SwiftUI shows no second sheet while the first is still closing.
+    private func after(_ prompted: Bool, _ show: @escaping () -> Void) {
+        if prompted {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: show)
+        } else {
+            show()
+        }
+    }
+
+    private func save(_ editor: EventEditorModel, scope: EditScope?, notify: NotifyChoice?) {
         guard self.editor === editor else { return }
         do {
-            let saved = try core.saveEvent(draft: editor.draft, scope: scope)
+            let saved = try core.saveEvent(draft: editor.draft, scope: scope, notify: notify, message: nil)
             let (uid, calendarID, time) = (saved.uid, editor.draft.calendarId, editor.draft.time)
             dropEditor()
             refresh()
@@ -792,24 +811,59 @@ final class CalendarModel {
 
     /// ⌘⌫ in the editor: deletes the event it edits, wherever the week is
     /// now; for one occurrence of a series, after asking for which events.
+    /// A meeting the user organizes is cancelled for its guests after asking,
+    /// one someone else organizes is declined and removed.
     func deleteFromEditor() {
         guard let editor, !editor.isNew else { return }
         do {
             let draft = editor.draft
             let plan = try core.planDeleteDraft(draft: draft)
             if let refusal = plan.refusal { return editor.failure = refusal }
-            let remove = { [weak self] (scope: EditScope?) in
+            confirmDelete(plan, event: editor.event) { [weak self] scope, message in
                 guard let self, self.editor === editor else { return }
                 do {
-                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope))
+                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope, message: message))
                 } catch {
                     editor.failure = "\(error)"
                 }
             }
-            guard !plan.scopes.isEmpty else { return remove(nil) }
-            scopePrompt = deletePrompt(plan) { remove($0) }
         } catch {
             editor.failure = "\(error)"
+        }
+    }
+
+    /// The scope prompt for one occurrence of a series, then Cancel the
+    /// meeting? or Decline and remove? when the event is a meeting.
+    private func confirmDelete(_ plan: DeletePlan, event: CalEvent?, perform: @escaping (EditScope?, String?) -> Void) {
+        let next = { [weak self] (scope: EditScope?, prompted: Bool) in
+            guard let self else { return }
+            if let decline = plan.decline {
+                guard let event else { return self.toast?("Open the meeting in the calendar to decline it.", nil) ?? () }
+                self.after(prompted) { self.declinePrompt = DeclinePrompt(info: decline) { [weak self] tell in self?.declineAndRemove(event, occurrenceOnly: scope == .this, tell: tell) } }
+            } else if let cancel = plan.cancel.first(where: { $0.scope == (scope ?? .all) }) {
+                self.after(prompted) { self.cancelPrompt = CancelPrompt(dialog: cancel) { message in perform(scope, message) } }
+            } else {
+                perform(scope, nil)
+            }
+        }
+        guard !plan.scopes.isEmpty else { return next(nil, false) }
+        scopePrompt = deletePrompt(plan) { next($0, true) }
+    }
+
+    private func declineAndRemove(_ event: CalEvent, occurrenceOnly: Bool, tell: Bool) {
+        let (id, time) = (event.record.eventId, event.record.time)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let text = try await self.core.declineAndRemove(eventId: id, time: time, occurrenceOnly: occurrenceOnly, tell: tell)
+                if self.editor != nil { self.dropEditor() }
+                self.closeDetail()
+                self.selectedID = nil
+                self.refresh()
+                self.toast?(text, nil)
+            } catch {
+                self.toast?("\(error)", nil)
+            }
         }
     }
 
@@ -822,12 +876,15 @@ final class CalendarModel {
         do {
             let plan = try core.planDelete(eventId: event.record.eventId, time: event.record.time)
             if let refusal = plan.refusal { return toast?(refusal, nil) ?? () }
-            guard !plan.scopes.isEmpty else { return deleted(try core.deleteEvent(eventId: event.record.eventId)) }
-            let draft = try core.draftForEvent(eventId: event.record.eventId, time: event.record.time)
-            scopePrompt = deletePrompt(plan) { [weak self] scope in
+            let draft = plan.scopes.isEmpty ? nil : try core.draftForEvent(eventId: event.record.eventId, time: event.record.time)
+            confirmDelete(plan, event: event) { [weak self] scope, message in
                 guard let self else { return }
                 do {
-                    self.deleted(try self.core.deleteDraft(draft: draft, scope: scope))
+                    if let draft {
+                        self.deleted(try self.core.deleteDraft(draft: draft, scope: scope, message: message))
+                    } else {
+                        self.deleted(try self.core.deleteEvent(eventId: event.record.eventId, message: message))
+                    }
                 } catch {
                     self.toast?("\(error)", nil)
                 }

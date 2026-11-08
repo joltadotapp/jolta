@@ -7,19 +7,19 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{OpWrite, Version, Written, cannot, changed_fields, created_fields, encode, merge_json};
+use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json, already_written};
 use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
 use super::{Api, FIELDS, GraphCalendar, GraphEvent, event, get_ok, instance};
 use crate::calendar::change::Field;
-use crate::calendar::ops::Extra;
-use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, ShowAs, Span, Visibility, tz};
+use crate::calendar::ops::{Extra, Notify};
+use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, Role, ShowAs, Span, Visibility, tz};
 use crate::{Error, Result};
 
 const MICROSOFT: &str = "Microsoft 365";
 
 impl GraphCalendar {
-    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>) -> Result<Written> {
-        send(self, calendar, write, &self.account.address, tz::here()).await
+    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
+        send(self, calendar, write, tell, &self.account.address, tz::here()).await
     }
 
     pub async fn fetch(&self, remote_id: &str, uid: &str) -> Result<Option<Version>> {
@@ -73,7 +73,39 @@ async fn instance_at(api: &impl Api, series: &crate::calendar::rsvp::Stored, rid
     }
 }
 
-async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str, here: Tz) -> Result<Written> {
+/// Whether deleting `event` cancels a meeting: it has guests and the op
+/// tells them. Exchange mails every guest a cancellation for a plain
+/// DELETE too; `/cancel` adds the user's words.
+fn cancels(event: &EventData, tell: Tell<'_>) -> bool {
+    tell.notify != Notify::Nobody && event.attendees.iter().any(|a| !a.is_me)
+}
+
+/// `POST /cancel` of the event or instance `id`, with the user's words.
+async fn cancel(api: &impl Api, id: &str, tell: Tell<'_>) -> Result<Written> {
+    let body = json!({ "comment": tell.message.unwrap_or_default() });
+    let (status, reply) = api.request("POST", &format!("/me/events/{}/cancel", encode(id)), Some(&body), &[]).await?;
+    match status {
+        200..300 => Ok(Written::Saved(None)),
+        404 | 410 => Ok(Written::Gone),
+        _ => Err(api.failure(status, &reply)),
+    }
+}
+
+/// Whether the object `id` still has the change key `etag`. Exchange
+/// deletes an instance whatever change key If-Match names (Microsoft 365
+/// test account, 2026-11-07), and `/cancel` takes no If-Match, so the key
+/// is compared first.
+async fn still(api: &impl Api, id: &str, etag: &str) -> Result<Option<Written>> {
+    let (status, now) = api.request("GET", &format!("/me/events/{}?$select=changeKey", encode(id)), None, &[]).await?;
+    match status {
+        200..300 if now["changeKey"].as_str() == Some(etag) => Ok(None),
+        200..300 => Ok(Some(Written::Stale)),
+        404 | 410 => Ok(Some(Written::Gone)),
+        _ => Err(api.failure(status, &now)),
+    }
+}
+
+async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>, me: &str, here: Tz) -> Result<Written> {
     match *write {
         OpWrite::Create { events, key, extra } => {
             let (master, changed) = split_series(events)?;
@@ -84,8 +116,9 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
             }
             // Graph's pattern holds no EXDATE, and the series' changed
             // occurrences are writes of their own; a retry gets the series
-            // the first try made back for its transactionId and writes them
-            // again, which changes nothing more.
+            // the first try made back for its transactionId and leaves the
+            // occurrences the first try wrote alone, as each write mails
+            // the guests.
             let series = crate::calendar::rsvp::Stored {
                 id: crate::calendar::EventId(0),
                 remote_id: reply["id"].as_str().unwrap_or_default().to_string(),
@@ -106,6 +139,11 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
             for e in changed {
                 let (Some(body), Some(rid)) = (occurrence_body(master, e, here)?, e.recurrence_id.as_ref()) else { continue };
                 if let Some(id) = instance_at(api, &series, rid).await? {
+                    let now = version(api, get_ok(api, &format!("/me/events/{}?$select={FIELDS}", encode(&id))).await?, &master.uid, me, here).await?;
+                    if now.events.first().is_some_and(|current| already_written(master, e, current, here)) {
+                        instances.push(now);
+                        continue;
+                    }
                     let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[]).await?;
                     if !(200..300).contains(&status) {
                         return Err(api.failure(status, &reply));
@@ -131,15 +169,8 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
         }
         OpWrite::Cancel { held, occurrence, changed } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
-            // Exchange deletes an instance whatever change key If-Match
-            // names (Microsoft 365 test account, 2026-11-07), so the key is
-            // compared first.
-            let (status, now) = api.request("GET", &format!("/me/events/{}?$select=changeKey", encode(&held.remote_id)), None, &[]).await?;
-            match status {
-                200..300 if now["changeKey"].as_str() == Some(etag) => {}
-                200..300 => return Ok(Written::Stale),
-                404 | 410 => return Ok(Written::Gone),
-                _ => return Err(api.failure(status, &now)),
+            if let Some(not) = still(api, &held.remote_id, etag).await? {
+                return Ok(not);
             }
             let rid = occurrence.recurrence_id.as_ref().ok_or_else(|| cannot(MICROSOFT, "delete an occurrence without its start"))?;
             let id = match changed {
@@ -149,6 +180,9 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
                     None => return Ok(Written::Gone),
                 },
             };
+            if cancels(occurrence, tell) {
+                return cancel(api, &id, tell).await;
+            }
             let guard = if_match(etag);
             let (status, reply) = api.request("DELETE", &format!("/me/events/{}", encode(&id)), None, &[("If-Match", &guard)]).await?;
             match status {
@@ -173,6 +207,12 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, me: &str
         }
         OpWrite::Delete { held } => {
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
+            if cancels(&held.data, tell) {
+                return match still(api, &held.remote_id, etag).await? {
+                    Some(not) => Ok(not),
+                    None => cancel(api, &held.remote_id, tell).await,
+                };
+            }
             let guard = if_match(etag);
             let (status, reply) = api.request("DELETE", &format!("/me/events/{}", encode(&held.remote_id)), None, &[("If-Match", &guard)]).await?;
             match status {
@@ -315,7 +355,27 @@ fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> 
                 Visibility::Confidential => "confidential",
             })
         }
-        Field::People => return Err(cannot(MICROSOFT, "change guests from Jolta yet")),
+        // The organizer is no attendee on Graph; rooms are resources.
+        Field::People => {
+            v["attendees"] = json!(e
+                .attendees
+                .iter()
+                .filter(|a| !a.is_me)
+                .map(|a| json!({
+                    "emailAddress": { "address": a.person.address, "name": a.person.name },
+                    "type": match a.role {
+                        Role::Optional => "optional",
+                        Role::Room | Role::Resource => "resource",
+                        Role::Required | Role::Chair | Role::Fyi => "required",
+                    },
+                }))
+                .collect::<Vec<_>>())
+        }
+        Field::Options => {
+            v["responseRequested"] = json!(e.options.request_responses);
+            v["allowNewTimeProposals"] = json!(e.options.allow_new_times);
+            v["hideAttendees"] = json!(e.options.hide_guests);
+        }
         Field::MeetingLink if creating => {}
         Field::MeetingLink => return Err(cannot(MICROSOFT, "change the video call from Jolta yet")),
     }
@@ -333,6 +393,7 @@ mod tests {
     use super::*;
     use crate::calendar::rsvp::Stored;
     use crate::calendar::{Access, Alarm, CalendarId, CalendarSource, EventId, Local, Recurrence, Zone};
+    use crate::calendar::ops::Notify;
 
     fn at(s: &str) -> Local {
         Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(Brussels) }
@@ -441,8 +502,12 @@ mod tests {
     }
 
     async fn sent(write: OpWrite<'_>, replies: Vec<(u16, Value)>) -> (Result<Written>, Vec<String>) {
+        told(write, Tell::NOBODY, replies).await
+    }
+
+    async fn told(write: OpWrite<'_>, tell: Tell<'_>, replies: Vec<(u16, Value)>) -> (Result<Written>, Vec<String>) {
         let fake = Fake { replies: Mutex::new(replies.into()), seen: Mutex::new(Vec::new()) };
-        let done = send(&fake, &calendar(), &write, "me@example.com", Brussels).await;
+        let done = send(&fake, &calendar(), &write, tell, "me@example.com", Brussels).await;
         (done, fake.seen.into_inner().unwrap())
     }
 
@@ -522,4 +587,51 @@ mod tests {
         assert_eq!(seen[1], "GET /me/events/AAMk1-x", "read back with the fields that name it: {seen:?}");
         assert!(v.events[0].recurrence_id.as_ref().is_some_and(|r| r.names(base.recurrence_id.as_ref().unwrap(), Brussels)), "{:?}", v.events[0].recurrence_id);
     }
+    fn person(address: &str, role: Role, is_me: bool) -> crate::calendar::Attendee {
+        crate::calendar::Attendee {
+            person: crate::calendar::Person { address: address.into(), name: String::new() },
+            role,
+            response: crate::calendar::Response::NeedsAction,
+            comment: String::new(),
+            is_me,
+        }
+    }
+
+    /// The organizer is no attendee on Graph, a room is a resource, and the
+    /// options are the meeting's own fields.
+    #[test]
+    fn guests_and_options_go_as_graph_takes_them() {
+        let base = EventData { title: "Review".into(), ..EventData::new("u1", Span::AllDay { start: chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(), end: chrono::NaiveDate::from_ymd_opt(2026, 11, 25).unwrap() }) };
+        let mut e = base.clone();
+        e.attendees = vec![person("me@example.com", Role::Required, true), person("ann@example.com", Role::Optional, false), person("room@example.com", Role::Room, false)];
+        e.options.hide_guests = true;
+        let body = patch_body(&base, &e, None, Brussels).unwrap();
+        assert_eq!(
+            body["attendees"],
+            json!([
+                { "emailAddress": { "address": "ann@example.com", "name": "" }, "type": "optional" },
+                { "emailAddress": { "address": "room@example.com", "name": "" }, "type": "resource" },
+            ])
+        );
+        assert_eq!((body["hideAttendees"].as_bool(), body["responseRequested"].as_bool()), (Some(true), Some(true)));
+    }
+
+    /// Cancelling a meeting goes through `/cancel` with the user's words,
+    /// only while the change key is the one Jolta read: `/cancel` takes no
+    /// If-Match.
+    #[tokio::test]
+    async fn a_meeting_is_cancelled_with_the_message_while_its_key_holds() {
+        let mut meeting = standup();
+        meeting.attendees = vec![person("ann@example.com", Role::Required, false)];
+        let held = Stored { id: EventId(1), remote_id: "AAMk1".into(), etag: Some("ck1".into()), raw: None, data: meeting.clone() };
+        let tell = Tell { notify: Notify::All, message: Some("Moved to next week") };
+        let (done, seen) = told(OpWrite::Delete { held: &held }, tell, vec![(200, json!({ "changeKey": "ck1" })), (202, Value::Null)]).await;
+        assert_eq!((done.unwrap(), seen), (Written::Saved(None), vec!["GET /me/events/AAMk1".to_string(), "POST /me/events/AAMk1/cancel".to_string()]));
+        let (done, seen) = told(OpWrite::Delete { held: &held }, tell, vec![(200, json!({ "changeKey": "ck2" }))]).await;
+        assert_eq!((done.unwrap(), seen.len()), (Written::Stale, 1), "changed since: nothing is cancelled");
+        let alone = Stored { data: standup(), ..held.clone() };
+        let (_, seen) = told(OpWrite::Delete { held: &alone }, tell, vec![(204, Value::Null)]).await;
+        assert_eq!(seen, ["DELETE /me/events/AAMk1 If-Match W/\"ck1\""], "an event without guests is deleted");
+    }
+
 }

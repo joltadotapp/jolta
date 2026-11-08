@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::caps::{Capabilities, Hold};
+use super::ops::Notify;
 use super::{Attendee, EventData, Person};
 
 /// A part of an event the user can change.
@@ -16,6 +18,9 @@ pub enum Field {
     Description,
     Status,
     People,
+    /// What the organizer lets guests do: answer, propose times, see each
+    /// other, invite others, edit.
+    Options,
     Alarms,
     Color,
     Categories,
@@ -42,6 +47,7 @@ impl Field {
             Field::Description => (&a.description, a.description_html) != (&b.description, b.description_html),
             Field::Status => a.status != b.status,
             Field::People => roles(&a.attendees) != roles(&b.attendees),
+            Field::Options => a.options != b.options,
             Field::Alarms => a.alarms != b.alarms,
             Field::Color => a.color != b.color,
             Field::Categories => a.categories != b.categories,
@@ -64,6 +70,7 @@ impl Field {
             }
             Field::Status => to.status = from.status,
             Field::People => to.attendees.clone_from(&from.attendees),
+            Field::Options => to.options = from.options,
             Field::Alarms => to.alarms.clone_from(&from.alarms),
             Field::Color => to.color.clone_from(&from.color),
             Field::Categories => to.categories.clone_from(&from.categories),
@@ -83,6 +90,7 @@ impl Field {
             Field::Description => "description",
             Field::Status => "status",
             Field::People => "guests",
+            Field::Options => "guest options",
             Field::Alarms => "alerts",
             Field::Color => "color",
             Field::Categories => "categories",
@@ -92,7 +100,7 @@ impl Field {
     }
 }
 
-pub const FIELDS: [Field; 13] = [
+pub const FIELDS: [Field; 14] = [
     Field::Time,
     Field::Repeat,
     Field::Location,
@@ -101,6 +109,7 @@ pub const FIELDS: [Field; 13] = [
     Field::Description,
     Field::Status,
     Field::People,
+    Field::Options,
     Field::Alarms,
     Field::Color,
     Field::Categories,
@@ -111,13 +120,18 @@ pub const FIELDS: [Field; 13] = [
 /// A changed occurrence after its series went from `base` to `event`: each
 /// field the series changed that the occurrence still had the series' old
 /// value for takes the new one. Its own time stays, as does every field it
-/// changed itself.
+/// changed itself. A guest who stays keeps the answer given to this
+/// occurrence alone (check 2).
 pub fn carried(base: &EventData, event: &EventData, occurrence: &EventData) -> EventData {
     let mut out = occurrence.clone();
     for f in FIELDS.into_iter().filter(|f| !matches!(f, Field::Time | Field::Repeat)) {
         if f.differs(base, event) && !f.differs(base, occurrence) {
             f.copy(&mut out, event);
         }
+    }
+    if Field::People.differs(base, event) && !Field::People.differs(base, occurrence) {
+        let own = |a: &Attendee| occurrence.attendees.iter().find(|o| o.person.address.eq_ignore_ascii_case(&a.person.address));
+        out.attendees = event.attendees.iter().map(|a| own(a).map_or_else(|| a.clone(), |o| Attendee { role: a.role, ..o.clone() })).collect();
     }
     out
 }
@@ -170,6 +184,183 @@ pub fn classify(before: &EventData, after: &EventData, me: &[String]) -> Classif
         out.meeting.push(Field::People);
     }
     out
+}
+
+/// The Send an update? dialog (C3 spec, section 5), its words all built
+/// here so the app only lays them out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateDialog {
+    /// "Send an update to 6 people?"
+    pub title: String,
+    /// Who gets what: "4 get the new time. Jan Peeters is new and gets an
+    /// invitation."
+    pub body: String,
+    /// Under the body, where a message field would be: "To add a note, use
+    /// Email guests after saving."
+    pub note: Option<String>,
+    /// The buttons, each with what it sends.
+    pub choices: Vec<SendChoice>,
+}
+
+/// One button of a dialog that sends mail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendChoice {
+    pub label: String,
+    /// What saving with it tells the guests; None for Keep editing.
+    pub notify: Option<Notify>,
+    pub style: ChoiceStyle,
+}
+
+/// Where a choice sits and which key takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceStyle {
+    /// Return.
+    Primary,
+    /// Esc: back to the editor.
+    Back,
+    /// Apart on the left, as "Don't save" in macOS.
+    Apart,
+    /// A small link under the buttons.
+    Link,
+}
+
+/// The dialog for saving `c`, a change to a meeting the user organizes, on
+/// a calendar with `caps` whose server `mailer` mails the guests. None when
+/// nobody else would hear of it, and on calendars whose invitations Jolta
+/// sends itself, which U5b adds.
+pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, creating: bool) -> Option<UpdateDialog> {
+    if c.is_own_only() || !caps.sends_itself {
+        return None;
+    }
+    let people_only = c.meeting.is_empty();
+    let told = if people_only && caps.new_people_only { 0 } else { c.kept.len() } + c.added.len() + c.removed.len();
+    if told == 0 {
+        return None;
+    }
+    let back = SendChoice { label: "Keep editing".into(), notify: None, style: ChoiceStyle::Back };
+    let hold = caps.hold_update == Hold::Always;
+    let note = Some("To add a note, use Email guests after saving.".to_string());
+    let mut choices = Vec::new();
+    if hold {
+        choices.push(SendChoice { label: "Don't send".into(), notify: Some(Notify::Nobody), style: ChoiceStyle::Apart });
+    }
+    choices.push(back);
+    if creating {
+        choices.push(SendChoice { label: "Send".into(), notify: Some(Notify::All), style: ChoiceStyle::Primary });
+        if caps.outside_only {
+            choices.push(SendChoice { label: "Only guests who don't use Google Calendar".into(), notify: Some(Notify::Outside), style: ChoiceStyle::Link });
+        }
+        let body = gets(&c.added, "an invitation").trim_end().to_string();
+        let (title, body) = match hold {
+            true => (format!("Send invitations to {}?", count(told, "person", "people")), body),
+            false => (format!("{mailer} will email {}", count(told, "person", "people")), format!("{body} {mailer} sends the invitations as soon as Jolta saves the meeting.")),
+        };
+        return Some(UpdateDialog { title, body, note, choices });
+    }
+    if people_only && caps.new_people_only {
+        let others = match c.kept.len() {
+            0 => String::new(),
+            1 => " The other guest gets nothing.".into(),
+            n => format!(" The {n} others get nothing."),
+        };
+        let title = match (c.added.len(), c.removed.len()) {
+            (n, 0) => format!("Invite {}?", count(n, "new person", "new people")),
+            (0, n) => format!("Send {}?", count(n, "cancellation", "cancellations")),
+            (a, r) => format!("Send {} and {}?", count(a, "invitation", "invitations"), count(r, "cancellation", "cancellations")),
+        };
+        let body = format!("{}{others}", [gets(&c.added, "an invitation"), gets(&c.removed, "a cancellation")].concat().trim_end());
+        choices.push(SendChoice { label: "Send".into(), notify: Some(Notify::Changed), style: ChoiceStyle::Primary });
+        if caps.outside_only {
+            choices.push(SendChoice { label: "Only guests who don't use Google Calendar".into(), notify: Some(Notify::Outside), style: ChoiceStyle::Link });
+        }
+        return Some(UpdateDialog { title, body, note, choices });
+    }
+    choices.push(SendChoice { label: "Send".into(), notify: Some(Notify::All), style: ChoiceStyle::Primary });
+    if caps.outside_only {
+        choices.push(SendChoice { label: "Only guests who don't use Google Calendar".into(), notify: Some(Notify::Outside), style: ChoiceStyle::Link });
+    }
+    let (title, body) = if hold {
+        let what = match c.meeting.as_slice() {
+            [Field::Time] | [Field::Time, Field::Repeat] => "the new time",
+            [Field::Repeat] => "the new repeat",
+            [Field::Location] => "the new place",
+            [Field::Title] => "the new title",
+            [Field::Description] => "the new description",
+            _ => "the update",
+        };
+        let kept = match c.kept.as_slice() {
+            [] => String::new(),
+            [one] => format!("{} gets {what}. ", name(one)),
+            [a, b] => format!("{} and {} get {what}. ", name(a), name(b)),
+            many => format!("{} get {what}. ", many.len()),
+        };
+        let body = format!("{kept}{}{}", new_or_gone(&c.added, "new", "an invitation"), new_or_gone(&c.removed, "removed", "a cancellation"));
+        (format!("Send an update to {}?", count(told, "person", "people")), body.trim_end().to_string())
+    } else {
+        let body = format!("{mailer} sends every change to a meeting's time, title, place or description to its guests. Jolta can't save this change without emailing them.");
+        (format!("{mailer} will email {}", count(told, "person", "people")), body)
+    };
+    Some(UpdateDialog { title, body, note, choices })
+}
+
+/// The dialog for deleting a meeting the user organizes, for `people`
+/// guests (C3 spec, section 5): Return and Esc keep it, ⌘⌫ cancels it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelDialog {
+    /// "Cancel the meeting for 6 people?"
+    pub title: String,
+    /// "Everyone gets a cancellation from Microsoft 365."
+    pub body: String,
+    /// A message field, where the cancellation carries the user's words.
+    pub message: bool,
+    /// Where the message field would be: "To add a note, use Email guests
+    /// after cancelling."
+    pub note: Option<String>,
+    /// The guests it tells.
+    pub people: usize,
+}
+
+/// What the cancel dialog says for one of the scopes of a delete.
+pub fn cancel_dialog(people: usize, caps: &Capabilities, mailer: &str, scope: super::ops::Scope) -> CancelDialog {
+    use super::ops::Scope;
+    let n = count(people, "person", "people");
+    let (title, body) = match scope {
+        Scope::All => (format!("Cancel the meeting for {n}?"), format!("Everyone gets a cancellation from {mailer}.")),
+        Scope::This => (format!("Cancel this occurrence for {n}?"), format!("Everyone gets a cancellation of this occurrence from {mailer}.")),
+        Scope::Following => (format!("Cancel this and the following occurrences for {n}?"), format!("Everyone gets an update from {mailer} that ends the series before this occurrence.")),
+    };
+    let message = caps.cancel_message && scope != Scope::Following;
+    let note = (!message).then(|| "To add a note, use Email guests after cancelling.".to_string());
+    CancelDialog { title, body, message, note, people }
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+}
+
+/// A person by name, else address.
+pub fn name(p: &Person) -> &str {
+    if p.name.trim().is_empty() { &p.address } else { p.name.trim() }
+}
+
+/// "Jan Peeters gets an invitation. ", or two names, or a count.
+fn gets(people: &[Person], what: &str) -> String {
+    match people {
+        [] => String::new(),
+        [one] => format!("{} gets {what}. ", name(one)),
+        [a, b] => format!("{} and {} get {what}. ", name(a), name(b)),
+        many => format!("{} people get {what}. ", many.len()),
+    }
+}
+
+/// "Jan Peeters is new and gets an invitation. "
+fn new_or_gone(people: &[Person], state: &str, what: &str) -> String {
+    match people {
+        [] => String::new(),
+        [one] => format!("{} is {state} and gets {what}. ", name(one)),
+        [a, b] => format!("{} and {} are {state} and get {what}. ", name(a), name(b)),
+        many => format!("{} people are {state} and get {what}. ", many.len()),
+    }
 }
 
 #[cfg(test)]
@@ -283,4 +474,135 @@ mod tests {
         renamed_case.attendees[1].person.address = "Ann@Example.com".into();
         assert!(classify(&before, &renamed_case, &[]).added.is_empty(), "addresses compare without case");
     }
+    fn caps_of(source: crate::calendar::CalendarSource) -> Capabilities {
+        use crate::calendar::{Access, Calendar, CalendarId};
+        crate::calendar::caps::of(&Calendar {
+            id: CalendarId(1),
+            account_id: None,
+            source,
+            remote_id: "x".into(),
+            name: "x".into(),
+            color: None,
+            zone: None,
+            access: Access::Owner,
+            shown: true,
+            counts_as_busy: true,
+            notify: true,
+            default_reminder: None,
+            is_default: false,
+            cursor: None,
+            refresh: None,
+            synced: None,
+        })
+    }
+
+    fn six() -> EventData {
+        let mut e = meeting();
+        e.attendees = std::iter::once(Attendee { is_me: true, ..person("me@example.com") })
+            .chain(["ann", "bo", "cy", "dee", "els"].iter().map(|n| person(&format!("{n}@example.com"))))
+            .collect();
+        e.attendees[5].person.name = "Els Maes".into();
+        e
+    }
+
+    fn buttons(d: &UpdateDialog) -> Vec<(&str, Option<Notify>, ChoiceStyle)> {
+        d.choices.iter().map(|c| (c.label.as_str(), c.notify, c.style)).collect()
+    }
+
+    /// Each row of the Send an update? table (C3 spec, section 5).
+    #[test]
+    fn the_dialog_follows_the_table_per_provider() {
+        use crate::calendar::CalendarSource::{CalDav, Google, Graph, Local};
+        let before = six();
+        let mut after = before.clone();
+        after.span = Span::Timed { start: at("2026-11-24 10:00"), end: at("2026-11-24 10:30") };
+        after.attendees.retain(|a| !a.person.address.starts_with("els"));
+        after.attendees.push(Attendee { person: Person { address: "jan@example.com".into(), name: "Jan Peeters".into() }, ..person("jan@example.com") });
+        let c = classify(&before, &after, &[]);
+
+        let g = dialog(&c, &caps_of(Google), "Google", false).unwrap();
+        assert_eq!(g.title, "Send an update to 6 people?");
+        assert_eq!(g.body, "4 get the new time. Jan Peeters is new and gets an invitation. Els Maes is removed and gets a cancellation.");
+        assert_eq!(g.note.as_deref(), Some("To add a note, use Email guests after saving."), "no message field on an update");
+        assert_eq!(
+            buttons(&g),
+            [
+                ("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart),
+                ("Keep editing", None, ChoiceStyle::Back),
+                ("Send", Some(Notify::All), ChoiceStyle::Primary),
+                ("Only guests who don't use Google Calendar", Some(Notify::Outside), ChoiceStyle::Link),
+            ]
+        );
+
+        for (source, name) in [(Graph, "Microsoft 365"), (CalDav, "iCloud")] {
+            let m = dialog(&c, &caps_of(source), name, false).unwrap();
+            assert_eq!(m.title, format!("{name} will email 6 people"));
+            assert!(m.body.starts_with(&format!("{name} sends every change")), "{}", m.body);
+            assert_eq!(buttons(&m), [("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::All), ChoiceStyle::Primary)], "no Don't send on {name}");
+        }
+        assert_eq!(dialog(&c, &caps_of(Local), "Jolta", false), None, "Jolta's own invitations come with iMIP (U5b)");
+
+        let mut added = before.clone();
+        added.attendees.push(Attendee { person: Person { address: "jan@example.com".into(), name: "Jan Peeters".into() }, ..person("jan@example.com") });
+        let people = classify(&before, &added, &[]);
+        let g = dialog(&people, &caps_of(Google), "Google", false).unwrap();
+        assert_eq!((g.title.as_str(), g.body.as_str()), ("Invite 1 new person?", "Jan Peeters gets an invitation. The 5 others get nothing."));
+        assert!(buttons(&g).contains(&("Send", Some(Notify::Changed), ChoiceStyle::Primary)) && buttons(&g).contains(&("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart)));
+        let m = dialog(&people, &caps_of(Graph), "Microsoft 365", false).unwrap();
+        assert_eq!(buttons(&m), [("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::Changed), ChoiceStyle::Primary)]);
+        let i = dialog(&people, &caps_of(CalDav), "Your calendar server", false).unwrap();
+        assert_eq!(i.title, "Your calendar server will email 6 people", "a CalDAV server not measured may tell everyone");
+
+        let mut gone = before.clone();
+        gone.attendees.retain(|a| !a.person.address.starts_with("els"));
+        let g = dialog(&classify(&before, &gone, &[]), &caps_of(Google), "Google", false).unwrap();
+        assert_eq!((g.title.as_str(), g.body.as_str()), ("Send 1 cancellation?", "Els Maes gets a cancellation. The 4 others get nothing."));
+
+        let mut alarm = before.clone();
+        alarm.alarms = vec![crate::calendar::Alarm { trigger: crate::calendar::AlarmTrigger::MinutesBefore(5), email: false }];
+        assert_eq!(dialog(&classify(&before, &alarm, &[]), &caps_of(Graph), "Microsoft 365", false), None, "the user's own fields mail nobody");
+
+        let lonely = EventData { attendees: vec![Attendee { is_me: true, ..person("me@example.com") }], ..meeting() };
+        let moved = EventData { title: "Moved".into(), ..lonely.clone() };
+        assert_eq!(dialog(&classify(&lonely, &moved, &[]), &caps_of(Google), "Google", false), None, "nobody else on it");
+
+        let blank = EventData::new("u1", before.span);
+        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Google), "Google", true).unwrap();
+        assert_eq!((new.title.as_str(), new.body.as_str()), ("Send invitations to 5 people?", "5 people get an invitation."));
+        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Graph), "Microsoft 365", true).unwrap();
+        assert_eq!(new.title, "Microsoft 365 will email 5 people");
+    }
+
+    #[test]
+    fn the_cancel_dialog_carries_a_message_where_the_provider_does() {
+        use crate::calendar::CalendarSource::{Google, Graph};
+        use crate::calendar::ops::Scope;
+        let m = cancel_dialog(6, &caps_of(Graph), "Microsoft 365", Scope::All);
+        assert_eq!((m.title.as_str(), m.body.as_str(), m.message, m.note), ("Cancel the meeting for 6 people?", "Everyone gets a cancellation from Microsoft 365.", true, None));
+        let g = cancel_dialog(1, &caps_of(Google), "Google", Scope::All);
+        assert_eq!((g.title.as_str(), g.message), ("Cancel the meeting for 1 person?", false), "Google's delete takes no message (decision 4)");
+        assert_eq!(g.note.as_deref(), Some("To add a note, use Email guests after cancelling."));
+        assert!(!cancel_dialog(6, &caps_of(Graph), "Microsoft 365", Scope::Following).message, "ending a series is an update, with no comment");
+    }
+
+    /// Check 2: a change to the whole series reaches an occurrence that kept
+    /// the series' people, and each guest keeps the answer given to that
+    /// occurrence alone.
+    #[test]
+    fn a_series_wide_change_keeps_answers_given_to_one_occurrence() {
+        let series = meeting();
+        let mut occurrence = series.clone();
+        occurrence.recurrence_id = Some(crate::calendar::Moment::Time(at("2026-12-01 09:00")));
+        occurrence.attendees[1].response = Response::Declined;
+        occurrence.attendees[1].comment = "Away that week".into();
+        let mut renamed = series.clone();
+        renamed.title = "Daily".into();
+        renamed.attendees.push(person("cy@example.com"));
+        let out = carried(&series, &renamed, &occurrence);
+        assert_eq!(out.title, "Daily");
+        let ann = out.attendees.iter().find(|a| a.person.address == "ann@example.com").unwrap();
+        assert_eq!((ann.response, ann.comment.as_str()), (Response::Declined, "Away that week"), "the occurrence's own answer stays");
+        assert!(out.attendees.iter().any(|a| a.person.address == "cy@example.com"), "the new guest reaches it");
+    }
+
 }

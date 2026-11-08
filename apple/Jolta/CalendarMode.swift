@@ -29,6 +29,9 @@ struct CalendarModeView: View {
             .background(Color(Theme.bg))
             // Not beside `confirmation`: one view presents one sheet.
             .scopePrompt(Binding(get: { cal.scopePrompt }, set: { cal.scopePrompt = $0 }))
+            .meetingDialogs(send: Binding(get: { cal.sendPrompt }, set: { cal.sendPrompt = $0 }),
+                            cancel: Binding(get: { cal.cancelPrompt }, set: { cal.cancelPrompt = $0 }),
+                            decline: Binding(get: { cal.declinePrompt }, set: { cal.declinePrompt = $0 }))
             .coordinateSpace(.named(CalendarSpace.main))
             .overlayPreferenceValue(SelectedFrame.self) { frame in
                 GeometryReader { geo in
