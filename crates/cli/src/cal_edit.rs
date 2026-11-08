@@ -821,8 +821,9 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     if let Some(title) = a.title {
         d.title = title;
     }
-    if let Some(room) = a.room {
+    if let Some(room) = a.room.filter(|r| !r.eq_ignore_ascii_case(&d.room)) {
         d.room = room;
+        d.room_name.clear();
     }
     if let Some(location) = a.location {
         d.location = location;

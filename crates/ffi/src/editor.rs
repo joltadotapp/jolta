@@ -6,8 +6,8 @@
 use chrono::{Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use jolta_core::calendar::draft::{self, Reminder};
 use jolta_core::calendar::series::Horizon;
-use jolta_core::calendar::{self as cal, CalendarId, EventId, Span, Zone, detail, tz};
-use jolta_core::store;
+use jolta_core::calendar::{self as cal, CalendarId, EventId, Span, Zone, detail, invite, tz};
+use jolta_core::{AccountId, ThreadId, store};
 
 use crate::calendar::{AttendeeRole, EventResponse, EventVisibility, MeetingInfo, MeetingProvider, OccurrenceTime, PersonRecord, ShowAs, meeting_info};
 use crate::{Core, CoreError, Result};
@@ -260,7 +260,10 @@ pub struct EventDraft {
     /// Names from quick create still to pick or remove.
     pub unresolved: Vec<UnresolvedPerson>,
     pub options: MeetingOptions,
+    /// One room's address.
     pub room: String,
+    /// The room's name when known; clear it when the address is changed by hand.
+    pub room_name: String,
     pub location: String,
     /// The user's own text; a meeting block stays out of it and is kept on save.
     pub description: String,
@@ -303,7 +306,7 @@ pub struct EventPrefill {
     pub time: Option<OccurrenceTime>,
     pub required: Vec<PersonRecord>,
     pub optional: Vec<PersonRecord>,
-    pub room: Option<String>,
+    pub room: Option<PersonRecord>,
     pub description: String,
     pub video: Option<MeetingProvider>,
 }
@@ -454,7 +457,7 @@ fn time_of(span: &Span) -> OccurrenceTime {
     }
 }
 
-fn person(p: &PersonRecord) -> cal::Person {
+pub(crate) fn person(p: &PersonRecord) -> cal::Person {
     cal::Person { address: p.address.trim().to_string(), name: p.name.clone() }
 }
 
@@ -499,6 +502,7 @@ impl From<draft::EventDraft> for EventDraft {
                 .collect(),
             options: d.options.into(),
             room: d.room,
+            room_name: d.room_name,
             location: d.location,
             description: d.description,
             video: d.video.map(Into::into),
@@ -574,6 +578,7 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
                 .collect(),
             options: d.options.into(),
             room: d.room.clone(),
+            room_name: d.room_name.clone(),
             location: d.location.clone(),
             description: d.description.clone(),
             video: d.video.map(Into::into),
@@ -684,11 +689,29 @@ impl Core {
             span: prefill.time.as_ref().map(|t| span_of(t, Zone::Tz(here))).transpose()?,
             required: prefill.required.iter().map(person).collect(),
             optional: prefill.optional.iter().map(person).collect(),
-            room: prefill.room,
+            room: prefill.room.as_ref().map(person),
             description: prefill.description,
             video: prefill.video.map(Into::into),
         };
         Ok(self.jolta.store.read(|c| draft::draft_from_prefill(c, &core, Utc::now(), here))?.into())
+    }
+
+    /// Invite from Find a time: a new meeting from `start` to `end` (unix
+    /// seconds) with the people and the first room of the panel's rows,
+    /// titled after the conversation `thread_id` and linking back to it, in
+    /// the account's own calendar with its video call.
+    pub fn invite_draft(&self, account_id: i64, thread_id: Option<i64>, people: Vec<PersonRecord>, rooms: Vec<PersonRecord>, start: i64, end: i64) -> Result<EventDraft> {
+        let here = tz::here();
+        let (people, rooms): (Vec<cal::Person>, Vec<cal::Person>) = (people.iter().map(person).collect(), rooms.iter().map(person).collect());
+        let picked = invite::Picked {
+            account: AccountId(account_id),
+            thread: thread_id.map(ThreadId),
+            people: &people,
+            rooms: &rooms,
+            span: draft::timed_span(start, end, Zone::Tz(here), here),
+        };
+        let d = self.jolta.store.read(|c| draft::draft_from_prefill(c, &invite::prefill(c, &picked)?, Utc::now(), here))?;
+        Ok(d.into())
     }
 
     /// A draft of a stored event at one occurrence (`time` from its row),

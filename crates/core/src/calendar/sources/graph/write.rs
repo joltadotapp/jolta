@@ -305,6 +305,20 @@ pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&Extra>,
     Ok(v)
 }
 
+/// The location as Graph takes it. When it names a room on the event, it
+/// carries the room's address too, as Outlook writes a booked room (C4 spec,
+/// "Rooms on Exchange").
+fn location(e: &EventData) -> Value {
+    let named = e.location.trim();
+    let room = e.attendees.iter().filter(|a| matches!(a.role, Role::Room | Role::Resource)).find(|a| {
+        !named.is_empty() && (named.eq_ignore_ascii_case(a.person.address.trim()) || named.eq_ignore_ascii_case(a.person.name.trim()))
+    });
+    match room {
+        Some(r) => json!({ "displayName": e.location, "locationEmailAddress": r.person.address, "locationType": "conferenceRoom" }),
+        None => json!({ "displayName": e.location }),
+    }
+}
+
 /// Puts `field` of `e` into the body the way Graph takes it.
 fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> Result<()> {
     match field {
@@ -323,7 +337,7 @@ fn set(v: &mut Value, field: Field, e: &EventData, here: Tz, creating: bool) -> 
                 Some(r) => pattern(r, &e.span, here).ok_or_else(|| cannot(MICROSOFT, "repeat an event this way"))?,
             }
         }
-        Field::Location => v["location"] = json!({ "displayName": e.location }),
+        Field::Location => v["location"] = location(e),
         Field::Title => v["subject"] = json!(e.title),
         Field::Description => v["body"] = json!({ "contentType": if e.description_html { "html" } else { "text" }, "content": e.description }),
         Field::Status if e.status == EventStatus::Confirmed => {}
@@ -653,6 +667,27 @@ mod tests {
             ])
         );
         assert_eq!((body["hideAttendees"].as_bool(), body["responseRequested"].as_bool()), (Some(true), Some(true)));
+    }
+
+    /// A location that names a room on the event carries the room's
+    /// address, so Exchange shows the room booked there; any other location
+    /// is only text.
+    #[test]
+    fn a_room_in_the_location_carries_its_address() {
+        let base = EventData { title: "Review".into(), ..EventData::new("u1", Span::AllDay { start: chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(), end: chrono::NaiveDate::from_ymd_opt(2026, 11, 25).unwrap() }) };
+        let mut room = person("bruegel@rooms.example", Role::Room, false);
+        room.person.name = "Bruegel".into();
+        let booked = EventData { attendees: vec![person("ann@example.com", Role::Required, false), room.clone()], location: "Bruegel".into(), ..base.clone() };
+        let body = create_body(std::slice::from_ref(&booked), "key", None, Brussels).unwrap();
+        assert_eq!(body["location"], json!({ "displayName": "Bruegel", "locationEmailAddress": "bruegel@rooms.example", "locationType": "conferenceRoom" }));
+        assert_eq!(body["attendees"][1], json!({ "emailAddress": { "address": "bruegel@rooms.example", "name": "Bruegel" }, "type": "resource" }));
+
+        let by_address = EventData { location: "BRUEGEL@rooms.example".into(), ..booked.clone() };
+        assert_eq!(patch_body(&base, &by_address, None, Brussels).unwrap()["location"]["locationEmailAddress"], "bruegel@rooms.example");
+        let elsewhere = EventData { location: "The café downstairs".into(), ..booked.clone() };
+        assert_eq!(patch_body(&base, &elsewhere, None, Brussels).unwrap()["location"], json!({ "displayName": "The café downstairs" }));
+        let no_room = EventData { attendees: vec![person("ann@example.com", Role::Required, false)], ..booked };
+        assert_eq!(patch_body(&base, &no_room, None, Brussels).unwrap()["location"], json!({ "displayName": "Bruegel" }), "a guest named like the room isn't one");
     }
 
     /// Cancelling a meeting goes through `/cancel` with the user's words,

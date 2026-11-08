@@ -90,6 +90,9 @@ pub struct EventDraft {
     pub options: MeetingOptions,
     /// One room's address.
     pub room: String,
+    /// Its name, when the room picker or the event gave one: the location
+    /// says it in place of the address.
+    pub room_name: String,
     pub location: String,
     /// The user's own text: a Teams, Meet or Zoom block stays out of it and
     /// is written back after it unchanged.
@@ -140,7 +143,7 @@ pub struct EventPrefill {
     pub span: Option<Span>,
     pub required: Vec<Person>,
     pub optional: Vec<Person>,
-    pub room: Option<String>,
+    pub room: Option<Person>,
     pub description: String,
     pub video: Option<MeetingProvider>,
 }
@@ -275,6 +278,7 @@ pub fn draft_for_new(conn: &Connection, calendar: Option<CalendarId>, span: Opti
         unresolved: Vec::new(),
         options: MeetingOptions::default(),
         room: String::new(),
+        room_name: String::new(),
         location: String::new(),
         description: String::new(),
         video: None,
@@ -301,7 +305,10 @@ pub fn draft_from_prefill(conn: &Connection, prefill: &EventPrefill, now: DateTi
     let person = |p: &Person, role| Attendee { person: p.clone(), role, response: Response::NeedsAction, comment: String::new(), is_me: false };
     draft.title.clone_from(&prefill.title);
     draft.people = prefill.required.iter().map(|p| person(p, Role::Required)).chain(prefill.optional.iter().map(|p| person(p, Role::Optional))).collect();
-    draft.room = prefill.room.clone().unwrap_or_default();
+    if let Some(room) = &prefill.room {
+        draft.room.clone_from(&room.address);
+        draft.room_name.clone_from(&room.name);
+    }
     draft.description.clone_from(&prefill.description);
     draft.video = prefill.video;
     Ok(draft)
@@ -360,6 +367,7 @@ pub fn draft_for_copy(conn: &Connection, event: EventId, at: Option<Bounds>, now
     copy.title = source.title;
     copy.location = location;
     copy.room = source.room;
+    copy.room_name = source.room_name;
     copy.description = description;
     copy.show_as = source.show_as;
     copy.visibility = source.visibility;
@@ -400,7 +408,7 @@ pub(crate) fn without_meeting(text: &str, meeting: &Meeting) -> String {
 /// The draft fields of a stored event, nothing locked.
 fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
     let parts = description::split(&e.description, e.description_html);
-    let room = room_of(e).map(|a| a.person.address.clone()).unwrap_or_default();
+    let (room, room_name) = room_of(e).map(|a| (a.person.address.clone(), a.person.name.clone())).unwrap_or_default();
     EventDraft {
         calendar,
         base: Some(e.clone()),
@@ -412,8 +420,9 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         options: e.options,
         // A location that only repeats the room, as saving a room puts it
         // there, isn't one of its own.
-        location: if mirrors_room(&e.location, &room) { String::new() } else { e.location.clone() },
+        location: if mirrors_room(&e.location, &room, &room_name) { String::new() } else { e.location.clone() },
         room,
+        room_name,
         description: parts.editable.clone(),
         // A video call asked for and not made yet, while its op waits.
         video: e.video,
@@ -519,8 +528,9 @@ pub fn guests<'a>(calendar: &Calendar, account: &str, event: &'a EventData) -> V
     event.attendees.iter().filter(|a| !a.is_me && !me.iter().any(|m| m.eq_ignore_ascii_case(&a.person.address))).collect()
 }
 
-fn mirrors_room(location: &str, room: &str) -> bool {
-    !room.is_empty() && location.trim().eq_ignore_ascii_case(room)
+fn mirrors_room(location: &str, room: &str, name: &str) -> bool {
+    let location = location.trim();
+    !room.is_empty() && (location.eq_ignore_ascii_case(room) || (!name.is_empty() && location.eq_ignore_ascii_case(name.trim())))
 }
 
 fn is_room(a: &Attendee) -> bool {
@@ -582,7 +592,7 @@ fn event_of(draft: &EventDraft) -> EventData {
                 attendees.extend(others);
                 if !room.is_empty() {
                     attendees.push(kept_room.unwrap_or_else(|| Attendee {
-                        person: Person { address: room.to_string(), name: String::new() },
+                        person: Person { address: room.to_string(), name: draft.room_name.trim().to_string() },
                         role: Role::Room,
                         response: Response::NeedsAction,
                         comment: String::new(),
@@ -623,11 +633,12 @@ fn event_of(draft: &EventDraft) -> EventData {
             DraftField::Repeat | DraftField::Calendar => {}
         }
     }
-    // The location is the user's, or else the room's address (C4 spec,
-    // "C3-room-field"), which follows the room while the user has none.
+    // The location is the user's, or else the room's name or address (C3
+    // spec, "Room"), which follows the room while the user has none.
     if fields.contains(&DraftField::Location) || fields.contains(&DraftField::Room) {
         let own = draft.location.trim();
-        e.location = if own.is_empty() { draft.room.trim().to_string() } else { own.to_string() };
+        let room = room_of(&e).map(|a| if a.person.name.trim().is_empty() { a.person.address.trim() } else { a.person.name.trim() }).unwrap_or_default();
+        e.location = if own.is_empty() { room.to_string() } else { own.to_string() };
     }
     e
 }
@@ -976,6 +987,7 @@ fn reset(draft: &EventDraft, base: &EventData, lost: &[Field]) -> EventDraft {
             Field::People => {
                 out.people.clone_from(&was.people);
                 out.room.clone_from(&was.room);
+                out.room_name.clone_from(&was.room_name);
             }
             Field::Options => out.options = was.options,
             Field::Alarms => out.reminder = was.reminder,
@@ -1005,7 +1017,10 @@ fn whole_series(draft: &EventDraft, series: &EventData, here: Tz) -> Result<Even
             DraftField::Title => whole.title.clone_from(&draft.title),
             DraftField::People => whole.people.clone_from(&draft.people),
             DraftField::Options => whole.options = draft.options,
-            DraftField::Room => whole.room.clone_from(&draft.room),
+            DraftField::Room => {
+                whole.room.clone_from(&draft.room);
+                whole.room_name.clone_from(&draft.room_name);
+            }
             DraftField::Location => whole.location.clone_from(&draft.location),
             DraftField::Video => whole.video = draft.video,
             DraftField::Description => whole.description.clone_from(&draft.description),
@@ -1141,7 +1156,10 @@ fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: Calen
                     fresh.people = draft.people.iter().filter(|p| !dropped.contains(&p.person.address.to_lowercase())).cloned().collect();
                 }
                 DraftField::Options => fresh.options = draft.options,
-                DraftField::Room => fresh.room.clone_from(&draft.room),
+                DraftField::Room => {
+                    fresh.room.clone_from(&draft.room);
+                    fresh.room_name.clone_from(&draft.room_name);
+                }
                 DraftField::Location => fresh.location.clone_from(&draft.location),
                 DraftField::Video => fresh.video = draft.video,
                 DraftField::Description => fresh.description.clone_from(&draft.description),
@@ -1880,6 +1898,20 @@ mod tests {
     }
 
     #[test]
+    fn a_room_with_a_name_puts_the_name_in_the_location() {
+        let (s, cal) = setup("room-name");
+        let mut d = new_draft(&s, cal, "Review");
+        (d.room, d.room_name) = ("bruegel@rooms.example".into(), "Bruegel".into());
+        s.write(|tx| save_draft(tx, &d, None, Some(ops::Notify::Nobody), None, NOW, &horizon(), Brussels)).unwrap();
+        let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
+        assert_eq!(stored.attendees.iter().map(|a| (a.person.address.as_str(), a.person.name.as_str(), a.role)).collect::<Vec<_>>(), [("bruegel@rooms.example", "Bruegel", Role::Room)]);
+        assert_eq!(stored.location, "Bruegel");
+        let reopened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        assert_eq!((reopened.room.as_str(), reopened.room_name.as_str(), reopened.location.as_str()), ("bruegel@rooms.example", "Bruegel", ""), "the location only named the room");
+        assert!(s.read(|c| plan_save(c, &reopened, Brussels)).unwrap().unchanged);
+    }
+
+    #[test]
     fn a_prefill_fills_the_fields_and_its_guests_wait_for_invitations() {
         let (s, cal) = setup("prefill");
         let prefill = EventPrefill {
@@ -1887,7 +1919,7 @@ mod tests {
             span: Some(span("2026-11-25 10:00", "2026-11-25 11:00")),
             required: vec![person("jan@example.com", "Jan Peeters")],
             optional: vec![person("els@example.com", "Els Maes")],
-            room: Some("room-214@example.com".into()),
+            room: Some(person("room-214@example.com", "")),
             description: "From the thread".into(),
             ..Default::default()
         };

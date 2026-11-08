@@ -15,6 +15,7 @@ pub mod freebusy;
 pub mod ical;
 pub mod ical_edit;
 pub mod invitation;
+pub mod invite;
 pub mod meeting;
 pub mod merge;
 pub mod moving;
