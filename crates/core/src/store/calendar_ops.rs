@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::calendar::{moment_from_text, moment_text};
 use crate::calendar::change::Field;
+use crate::calendar::moving::How;
 use crate::calendar::ops::{CalendarOp, CalendarOpId, Extra, Held, OpState, Row as KeptRow, Write};
 use crate::calendar::{CalendarId, EventData};
 use crate::{Error, Result};
@@ -21,8 +22,8 @@ struct Target {
     /// A sync passed over a server version of the op's rows (`apply_item`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     passed_over: bool,
-    /// An update's changed occurrences that leave with it, or a cancelled
-    /// occurrence's own row.
+    /// An update's changed occurrences that leave with it, a cancelled
+    /// occurrence's own row, or the rows a move took out of its calendar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rows: Vec<KeptRow>,
     /// An update of an occurrence that had no row of its own.
@@ -31,6 +32,11 @@ struct Target {
     /// The op this one waits for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     after: Option<i64>,
+    /// The calendar a move takes the event out of, and how.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    how: Option<How>,
 }
 
 const COLS: &str = "id, calendar_id, uid, recurrence_id, kind, scope, notify, message, base, target, remote_key,
@@ -57,6 +63,10 @@ fn op_row(r: &Row) -> rusqlite::Result<CalendarOp> {
         "cancel" => {
             let Some([series, occurrence]) = base.and_then(|b| <[EventData; 2]>::try_from(b).ok()) else { return Err(broken()) };
             Write::Cancel { series, occurrence, row: target.rows.into_iter().next() }
+        }
+        "move" => {
+            let (Some(from), Some(how)) = (target.from, target.how) else { return Err(broken()) };
+            Write::Move { from: CalendarId(from), how, rows: target.rows, events: target.events }
         }
         _ => return Err(broken()),
     };
@@ -112,13 +122,18 @@ pub fn insert_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<Calendar
 
 /// An op's `base` and `target` columns.
 fn written(op: &CalendarOp) -> Result<(Option<String>, String)> {
+    let (mut from, mut how) = (None, None);
     let (base, events, rows, fresh) = match &op.write {
         Write::Create(events) => (None, events.clone(), Vec::new(), false),
+        Write::Move { from: f, how: h, rows, events } => {
+            (from, how) = (Some(f.0), Some(*h));
+            (None, events.clone(), rows.clone(), false)
+        }
         Write::Update { base, event, dropped, fresh } => (Some(vec![base.clone()]), vec![event.clone()], dropped.clone(), *fresh),
         Write::Delete(events) => (Some(events.clone()), Vec::new(), Vec::new(), false),
         Write::Cancel { series, occurrence, row } => (Some(vec![series.clone(), occurrence.clone()]), Vec::new(), row.iter().cloned().collect(), false),
     };
-    let target = Target { events, extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over, rows, fresh, after: op.after.map(|a| a.0) };
+    let target = Target { events, extra: op.extra.clone(), held: op.held.clone(), passed_over: op.passed_over, rows, fresh, after: op.after.map(|a| a.0), from, how };
     Ok((base.as_deref().map(to_json).transpose()?, to_json(&target)?))
 }
 
@@ -140,9 +155,10 @@ pub fn calendar_ops(conn: &Connection, limit: usize) -> Result<Vec<CalendarOp>> 
 }
 
 /// An op `o` that nothing holds back: no older op of its event still to
-/// settle, and the op it waits for, if any, done.
-const READY: &str = "NOT EXISTS (SELECT 1 FROM calendar_op p WHERE p.calendar_id = o.calendar_id AND p.uid = o.uid
-                                 AND p.id < o.id AND p.state IN ('pending', 'sending'))
+/// settle, in its calendar or, for a move, in the calendar it leaves, and
+/// the op it waits for, if any, done.
+const READY: &str = "NOT EXISTS (SELECT 1 FROM calendar_op p WHERE p.uid = o.uid AND p.id < o.id AND p.state IN ('pending', 'sending')
+                                 AND (p.calendar_id = o.calendar_id OR (o.kind = 'move' AND p.calendar_id = json_extract(o.target, '$.from'))))
      AND NOT EXISTS (SELECT 1 FROM calendar_op a WHERE a.id = json_extract(o.target, '$.after') AND a.state <> 'done')";
 
 /// Claims up to `limit` ops that are due, oldest first, for sending. An op
@@ -223,19 +239,21 @@ pub fn calendar_ops_after(conn: &Connection, id: CalendarOpId) -> Result<Vec<Cal
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The newer ops of the same event that wait, oldest first.
+/// The newer ops of the same event that wait, oldest first: in its
+/// calendar, and a move that takes it out of there.
 pub fn later_calendar_ops(conn: &Connection, op: &CalendarOp) -> Result<Vec<CalendarOp>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLS} FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND id > ?3 AND state = 'pending' ORDER BY id"
+        "SELECT {COLS} FROM calendar_op WHERE uid = ?2 AND id > ?3 AND state = 'pending'
+           AND (calendar_id = ?1 OR (kind = 'move' AND json_extract(target, '$.from') = ?1)) ORDER BY id"
     ))?;
     let rows = stmt.query_map(params![op.calendar, op.uid, op.id.0], op_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// How many creates of this UID the calendar has queued, whatever came of
-/// them.
+/// How many creates of this UID the calendar has queued, moves into it
+/// included, whatever came of them.
 pub fn calendar_creates(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<i64> {
-    Ok(conn.query_row("SELECT count(*) FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND kind = 'create'", params![calendar, uid], |r| r.get(0))?)
+    Ok(conn.query_row("SELECT count(*) FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND kind IN ('create', 'move')", params![calendar, uid], |r| r.get(0))?)
 }
 
 pub fn set_calendar_op_lost(conn: &Connection, id: CalendarOpId, lost: &[Field]) -> Result<()> {
@@ -319,6 +337,15 @@ pub fn newest_calendar_op(conn: &Connection, calendar: CalendarId, uid: &str) ->
     Ok(conn
         .query_row("SELECT max(id) FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2", params![calendar, uid], |r| r.get::<_, Option<i64>>(0))?
         .map(CalendarOpId))
+}
+
+/// Whether a move still to be sent takes the event out of `calendar`.
+pub fn moved_away(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE kind = 'move' AND uid = ?2 AND json_extract(target, '$.from') = ?1 AND state IN ('pending', 'sending'))",
+        params![calendar, uid],
+        |r| r.get(0),
+    )?)
 }
 
 /// Whether an op for the event waits or is on its way.

@@ -97,7 +97,7 @@ pub fn op_mails(op: &CalendarOp, sender: &Account, changed: &[EventData]) -> Res
                 }
                 imip_request(&list, &organizer, &to, notice == Notice::Update, message, seed(event, event.sequence))?
             }
-            (_, Write::Delete(_) | Write::Cancel { .. }) => continue,
+            (_, Write::Delete(_) | Write::Cancel { .. } | Write::Move { .. }) => continue,
         };
         out.push(built);
     }
@@ -125,7 +125,7 @@ pub fn prepare(write: &mut Write, sender: Option<&Account>, notify: Notify) {
             }
         }
         Write::Cancel { series, .. } => series.sequence += 1,
-        Write::Delete(_) => {}
+        Write::Delete(_) | Write::Move { .. } => {}
     }
 }
 
@@ -173,6 +173,8 @@ pub fn letters(write: &Write, notify: Notify, me: &[String]) -> Vec<(Person, Not
         Write::Create(events) => all(others(&events.iter().collect::<Vec<_>>()), Notice::Invitation),
         Write::Delete(events) => all(others(&events.iter().collect::<Vec<_>>()), Notice::Cancellation),
         Write::Cancel { occurrence, .. } => all(others(&[occurrence]), Notice::Cancellation),
+        // A meeting with guests never moves into or out of this Mac.
+        Write::Move { .. } => Vec::new(),
         Write::Update { base, event, .. } => {
             let c = change::classify(base, event, me);
             let kept = if notify == Notify::Changed { Vec::new() } else { c.kept };

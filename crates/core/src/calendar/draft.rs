@@ -366,7 +366,7 @@ pub fn draft_for_copy(conn: &Connection, event: EventId, at: Option<Bounds>, now
 /// `text` without its lines that name `meeting`: the link, the ID, the
 /// passcode or a dial-in number, and with the blank lines that leaves
 /// folded into one.
-fn without_meeting(text: &str, meeting: &Meeting) -> String {
+pub(crate) fn without_meeting(text: &str, meeting: &Meeting) -> String {
     let digits = |s: &str| s.chars().filter(char::is_ascii_digit).collect::<String>();
     let numbers: Vec<String> = meeting
         .meeting_id

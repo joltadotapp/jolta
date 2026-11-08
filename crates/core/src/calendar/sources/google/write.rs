@@ -73,7 +73,7 @@ pub(crate) fn writable(write: &OpWrite<'_>, here: Tz) -> Result<()> {
             changed.iter().try_for_each(|e| occurrence_body(master, e, here).map(drop))
         }
         OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => patch_body(base, event, *extra, "", here).map(drop),
-        OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
+        OpWrite::Delete { .. } | OpWrite::Cancel { .. } | OpWrite::Move { .. } => Ok(()),
     }
 }
 
@@ -205,6 +205,34 @@ async fn send(google: &impl Http, calendar: &Calendar, write: &OpWrite<'_>, tell
                 _ => Err(failure(status, &reply)),
             }
         }
+        OpWrite::Move { held, to } => {
+            let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
+            let alarms = &held.data.alarms;
+            // Google's move names no version to hold it to, so the event is
+            // read first: changed since, nothing moves.
+            match fetch(google, calendar, &held.remote_id, alarms).await? {
+                None => return moved_before(google, to, held).await,
+                Some(now) if now.etag.as_deref() != Some(etag) => return Ok(Written::Stale),
+                Some(_) => {}
+            }
+            let url = format!("{events_url}/{}/move?destination={}&sendUpdates=none", encode(&held.remote_id), encode(&to.remote_id));
+            let (status, reply) = google.request(reqwest::Method::POST, &url, None, Some(etag)).await?;
+            match status {
+                200..300 => Ok(Written::Saved(Some(version(google, to, &reply, alarms)?))),
+                412 => Ok(Written::Stale),
+                404 | 410 => moved_before(google, to, held).await,
+                _ => Err(failure(status, &reply)),
+            }
+        }
+    }
+}
+
+/// An event no longer in its calendar: in `to` when an earlier try of the
+/// move reached Google and its answer was lost, else gone.
+async fn moved_before(google: &impl Http, to: &Calendar, held: &crate::calendar::rsvp::Stored) -> Result<Written> {
+    match fetch(google, to, &held.remote_id, &held.data.alarms).await? {
+        Some(v) if v.events.iter().any(|e| e.uid == held.data.uid) => Ok(Written::Saved(Some(v))),
+        _ => Ok(Written::Gone),
     }
 }
 
@@ -717,6 +745,29 @@ mod tests {
         let unread = Stored { etag: None, ..held.clone() };
         let (done, seen) = sent(OpWrite::Delete { held: &unread }, vec![]).await;
         assert_eq!((done.unwrap(), seen.len()), (Written::Stale, 0), "nothing goes out without a version to guard it");
+    }
+
+    /// `events.move` names no version to hold it to, so the event is read
+    /// first; one an earlier try moved is found in the other calendar
+    /// (check 4).
+    #[tokio::test]
+    async fn a_move_reads_the_event_first_and_finds_one_moved_before() {
+        let held = Stored { id: EventId(1), remote_id: "abc".into(), etag: Some("\"3\"".into()), raw: None, data: standup() };
+        let to = Calendar { remote_id: "home".into(), ..calendar() };
+        let moving = OpWrite::Move { held: &held, to: &to };
+        let now = google("abc", "\"3\"", "u1@jolta.app", "confirmed");
+        let (done, seen) = sent(moving, vec![(200, now.clone()), (200, google("abc", "\"4\"", "u1@jolta.app", "confirmed"))]).await;
+        assert!(matches!(done.unwrap(), Written::Saved(Some(Version { etag: Some(e), .. })) if e == "\"4\""));
+        assert_eq!(seen, ["GET /calendars/primary/events/abc", "POST /calendars/primary/events/abc/move?destination=home&sendUpdates=none If-Match \"3\""]);
+
+        let (done, seen) = sent(moving, vec![(200, google("abc", "\"9\"", "u1@jolta.app", "confirmed"))]).await;
+        assert_eq!((done.unwrap(), seen.len()), (Written::Stale, 1), "changed since: nothing moves");
+
+        let (done, seen) = sent(moving, vec![(404, json!({})), (200, google("abc", "\"4\"", "u1@jolta.app", "confirmed"))]).await;
+        assert!(matches!(done.unwrap(), Written::Saved(Some(_))), "the first try moved it");
+        assert_eq!(seen, ["GET /calendars/primary/events/abc", "GET /calendars/home/events/abc"]);
+        let (done, _) = sent(moving, vec![(200, google("abc", "\"3\"", "u1@jolta.app", "cancelled")), (404, json!({}))]).await;
+        assert_eq!(done.unwrap(), Written::Gone, "deleted, and in neither calendar");
     }
 
     #[tokio::test]

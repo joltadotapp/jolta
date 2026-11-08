@@ -64,6 +64,43 @@ impl CalDav {
                     status => Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
                 }
             }
+            OpWrite::Move { held, to } => self.move_to(&collection, held, to).await,
+        }
+    }
+
+    /// MOVE of the resource `held` into the collection of `to`, under the
+    /// same name. iCloud moves a resource whatever ETag If-Match names
+    /// (iCloud test account, 2026-11-08), so it is read first: gone, or at
+    /// another version, nothing moves. A resource gone because an earlier
+    /// try moved it is found in `to`.
+    async fn move_to(&self, collection: &Url, held: &rsvp::Stored, to: &Calendar) -> Result<Written> {
+        let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
+        let url = join(collection, &path_escape(&held.remote_id))?;
+        let dest = moved_path(to, &held.remote_id)?;
+        let dest_url = join(&Url::parse(&to.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", to.remote_id)))?, &path_escape(&dest))?;
+        let moved_before = || async {
+            Ok(match self.fetch(to, &dest).await? {
+                Some(v) if v.events.iter().any(|e| e.uid == held.data.uid) => Written::Saved(Some(v)),
+                _ => Written::Gone,
+            })
+        };
+        let now = self.exchange("GET", &url, &[], "").await?;
+        match now.status {
+            404 | 410 => return moved_before().await,
+            200..300 if now.etag.as_deref() == Some(etag) => {}
+            200..300 => return Ok(Written::Stale),
+            status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
+        }
+        let headers = [("Destination", dest_url.as_str()), ("Overwrite", "F"), ("If-Match", etag)];
+        let reply = self.exchange("MOVE", &url, &headers, "").await?;
+        match reply.status {
+            200..300 => match self.fetch(to, &dest).await? {
+                Some(v) => Ok(Written::Saved(Some(v))),
+                None => Err(Error::Other(format!("CalDAV MOVE {url}: the server lost the event"))),
+            },
+            412 => Ok(Written::Stale),
+            404 | 410 => moved_before().await,
+            status => Err(Error::Other(format!("CalDAV MOVE {url}: {status} {}", reply.body.trim()))),
         }
     }
 
@@ -125,6 +162,14 @@ pub(crate) fn resource_path(calendar: &Calendar, key: &str) -> Result<String> {
     Ok(href_key(join(&collection, &resource_name(key))?.path()))
 }
 
+/// Where MOVE puts the resource at `path` in `calendar`: the same name in
+/// its collection.
+pub(crate) fn moved_path(calendar: &Calendar, path: &str) -> Result<String> {
+    let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+    Ok(href_key(join(&collection, &path_escape(name))?.path()))
+}
+
 pub(crate) fn writable(write: &OpWrite<'_>) -> Result<()> {
     match write {
         OpWrite::Create { events, extra, .. } => created_text(events, *extra).map(drop),
@@ -132,7 +177,7 @@ pub(crate) fn writable(write: &OpWrite<'_>) -> Result<()> {
             lines(*extra)?;
             changed_fields(base, event).into_iter().try_for_each(|f| editable(f))
         }
-        OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
+        OpWrite::Delete { .. } | OpWrite::Cancel { .. } | OpWrite::Move { .. } => Ok(()),
     }
 }
 
@@ -447,6 +492,29 @@ mod tests {
         let other = first.replace("l@jolta.app", "someone-else");
         let (dav, calendar, _) = caldav_server(vec![("412 Precondition Failed", None, None), ("200 OK", Some("\"7\""), Some(other))]).await;
         assert!(dav.write(&calendar, &create).await.is_err(), "another event at that name is left alone");
+    }
+
+    /// iCloud moves a resource whatever ETag If-Match names, so it is read
+    /// first; a resource an earlier try moved is found in the other
+    /// calendar (check 4).
+    #[tokio::test]
+    async fn a_move_reads_the_resource_first_and_finds_one_moved_before() {
+        let (stored, _) = held(Some("\"1\""));
+        let home = |calendar: &Calendar| Calendar { remote_id: calendar.remote_id.replace("/cal/", "/home/"), ..calendar.clone() };
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(APPLE.into())), ("201 Created", None, None), ("200 OK", Some("\"2\""), Some(APPLE.into()))]).await;
+        let Written::Saved(Some(v)) = dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap() else { panic!("moved") };
+        assert_eq!((v.remote_id.as_str(), v.etag.as_deref()), ("/home/standup.ics", Some("\"2\"")), "the same name in the other calendar, at the version it has there");
+        assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics", "MOVE /cal/standup.ics If-Match \"1\"", "GET /home/standup.ics"]);
+
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"5\""), Some(APPLE.into()))]).await;
+        assert_eq!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap(), Written::Stale);
+        assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics"], "changed since: no MOVE");
+
+        let (dav, calendar, server) = caldav_server(vec![("404 Not Found", None, None), ("200 OK", Some("\"2\""), Some(APPLE.into()))]).await;
+        assert!(matches!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap(), Written::Saved(Some(_))), "the first try moved it");
+        assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics", "GET /home/standup.ics"]);
+        let (dav, calendar, _) = caldav_server(vec![("404 Not Found", None, None), ("404 Not Found", None, None)]).await;
+        assert_eq!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap(), Written::Gone);
     }
 
     #[tokio::test]

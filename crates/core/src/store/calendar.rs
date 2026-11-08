@@ -309,22 +309,26 @@ pub(super) fn moment_from_text(text: &str) -> Option<Moment> {
 }
 
 /// Rows a calendar op still has to send: an edit of that event or
-/// occurrence, or a create or delete of its whole series. A sync, or any
-/// other version from the server, leaves them as the user saved them, with
-/// the ETag and text the op's edit started from, so its write stays guarded
-/// by that version and a change made elsewhere meanwhile goes through the
-/// op's merge instead of being lost or overwriting the edit.
-const HELD: &str = "EXISTS (SELECT 1 FROM calendar_op o WHERE o.calendar_id = event.calendar_id AND o.uid = event.uid
-       AND o.state IN ('pending', 'sending') AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete', 'cancel')
-                                   OR json_array_length(o.target, '$.rows') > 0))";
+/// occurrence, a create, delete or move of its whole series, and, in the
+/// calendar a move takes it out of, the rows it left. A sync, or any other
+/// version from the server, leaves them as the user saved them, with the
+/// ETag and text the op's edit started from, so its write stays guarded by
+/// that version and a change made elsewhere meanwhile goes through the op's
+/// merge instead of being lost or overwriting the edit; an event moved away
+/// doesn't come back while the server still has it here.
+const HELD: &str = "EXISTS (SELECT 1 FROM calendar_op o WHERE o.uid = event.uid AND o.state IN ('pending', 'sending')
+       AND ((o.calendar_id = event.calendar_id AND (o.recurrence_id = event.recurrence_id OR o.kind IN ('create', 'delete', 'cancel', 'move')
+                                                    OR json_array_length(o.target, '$.rows') > 0))
+            OR (o.kind = 'move' AND json_extract(o.target, '$.from') = event.calendar_id)))";
 
 /// Whether a calendar op still has to send the row with this UID and
 /// recurrence id (`HELD`).
 fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Option<&Moment>) -> Result<bool> {
     Ok(conn
         .prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE calendar_id = ?1 AND uid = ?2 AND state IN ('pending', 'sending')
-               AND (recurrence_id = ?3 OR kind IN ('create', 'delete', 'cancel') OR json_array_length(target, '$.rows') > 0))",
+            "SELECT EXISTS (SELECT 1 FROM calendar_op WHERE uid = ?2 AND state IN ('pending', 'sending')
+               AND ((calendar_id = ?1 AND (recurrence_id = ?3 OR kind IN ('create', 'delete', 'cancel', 'move') OR json_array_length(target, '$.rows') > 0))
+                    OR (kind = 'move' AND json_extract(target, '$.from') = ?1)))",
         )?
         .query_row(params![calendar, uid, recurrence_id.map(moment_text).unwrap_or_default()], |r| r.get(0))?)
 }
@@ -335,7 +339,7 @@ fn held(conn: &Connection, calendar: CalendarId, uid: &str, recurrence_id: Optio
 fn passed_over(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Result<()> {
     conn.prepare_cached(
         "UPDATE calendar_op SET target = json_set(target, '$.passed_over', json('true'))
-         WHERE calendar_id = ?1 AND state IN ('pending', 'sending')
+         WHERE (calendar_id = ?1 OR (kind = 'move' AND json_extract(target, '$.from') = ?1)) AND state IN ('pending', 'sending')
            AND (uid IN (SELECT uid FROM event WHERE calendar_id = ?1 AND remote_id = ?2)
                 OR json_extract(target, '$.held.remote_id') = ?2)",
     )?
@@ -349,7 +353,7 @@ fn passed_over(conn: &Connection, calendar: CalendarId, remote_id: &str) -> Resu
 fn mark_passed_over(conn: &Connection, calendar: CalendarId, uid: &str) -> Result<()> {
     conn.prepare_cached(
         "UPDATE calendar_op SET target = json_set(target, '$.passed_over', json('true'))
-         WHERE calendar_id = ?1 AND uid = ?2 AND state IN ('pending', 'sending')",
+         WHERE (calendar_id = ?1 OR (kind = 'move' AND json_extract(target, '$.from') = ?1)) AND uid = ?2 AND state IN ('pending', 'sending')",
     )?
     .execute(params![calendar, uid])?;
     Ok(())
