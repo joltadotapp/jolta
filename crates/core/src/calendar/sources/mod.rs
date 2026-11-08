@@ -111,7 +111,7 @@ impl Source {
             Source::Graph(s) => s.free_busy(people, from, to).await,
             Source::CalDav(_) | Source::Webcal(_) => Ok(people
                 .iter()
-                .map(|p| Schedule { person: p.clone(), availability: Availability::Unknown(Unknown::NotSupported) })
+                .map(|p| Schedule::new(p.clone(), Availability::Unknown(Unknown::NotSupported)))
                 .collect()),
         }
     }

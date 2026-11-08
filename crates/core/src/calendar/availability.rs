@@ -2,7 +2,7 @@
 //! and the free slots they leave. Everything here is pure; `freebusy`
 //! fetches the busy times and the working hours.
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Offset, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +70,16 @@ pub enum Availability {
 pub struct Schedule {
     pub person: String,
     pub availability: Availability,
+    /// The person's working hours, when the provider says: Microsoft 365
+    /// gives them with the busy times, Google never does.
+    #[serde(default)]
+    pub hours: Option<WorkingHours>,
+}
+
+impl Schedule {
+    pub fn new(person: impl Into<String>, availability: Availability) -> Schedule {
+        Schedule { person: person.into(), availability, hours: None }
+    }
 }
 
 /// Days of the week, Monday as bit 0.
@@ -131,6 +141,40 @@ impl WorkingHours {
         }
         out
     }
+
+    /// The time from `start` to `end` outside these hours, on their clock.
+    pub fn off(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+        let mut out = Vec::new();
+        let mut at = start;
+        let mut day = start.with_timezone(&self.zone).date_naive().pred_opt().expect("a day after the start of time");
+        while at < end {
+            let Some(next) = day.succ_opt() else { break };
+            if self.days.has(day.weekday()) && self.start < self.end {
+                let (s, e) = (tz::instant(day.and_time(self.start), self.zone), tz::instant(day.and_time(self.end), self.zone));
+                if e > at {
+                    if s > at {
+                        out.push((at, s.min(end)));
+                    }
+                    at = at.max(e);
+                }
+            }
+            if tz::instant(next.and_time(NaiveTime::MIN), self.zone) >= end {
+                break;
+            }
+            day = next;
+        }
+        if at < end {
+            out.push((at, end));
+        }
+        out
+    }
+}
+
+/// What `suggest` takes into account besides busy times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SuggestOptions {
+    /// A slot must also fit inside each known person's working hours.
+    pub respect_others_hours: bool,
 }
 
 /// A time everyone known is free. `missing` names the people whose busy
@@ -146,8 +190,9 @@ pub struct Slot {
 /// `from`: the first start in each free stretch, then one every hour (or
 /// every `duration`, when longer) while the stretch lasts. Starts fall on
 /// the quarter hour for meetings under 30 minutes, else on the half hour,
-/// on the working hours' clock.
-pub fn suggest(own: &[Busy], others: &[Schedule], hours: &WorkingHours, duration: Duration, from: DateTime<Utc>, days: u32) -> Vec<Slot> {
+/// on the working hours' clock. `hours` are the user's and set the days;
+/// other people's hours narrow them when `options` says so.
+pub fn suggest(own: &[Busy], others: &[Schedule], hours: &WorkingHours, duration: Duration, from: DateTime<Utc>, days: u32, options: SuggestOptions) -> Vec<Slot> {
     if duration <= Duration::zero() {
         return Vec::new();
     }
@@ -160,7 +205,17 @@ pub fn suggest(own: &[Busy], others: &[Schedule], hours: &WorkingHours, duration
         Availability::Known(busy) => Some(busy.as_slice()),
         Availability::Unknown(_) => None,
     });
-    let taken = merged(std::iter::once(own).chain(known).flatten());
+    let mut taken: Vec<Busy> = std::iter::once(own).chain(known).flatten().copied().collect();
+    if options.respect_others_hours {
+        let windows = hours.windows(from, days);
+        if let (Some(first), Some(last)) = (windows.first(), windows.last()) {
+            let theirs = others.iter().filter(|s| matches!(s.availability, Availability::Known(_))).filter_map(|s| s.hours);
+            for (start, end) in theirs.flat_map(|h| h.off(first.start, last.end)) {
+                taken.push(Busy { start, end, kind: BusyKind::Busy });
+            }
+        }
+    }
+    let taken = merged(&taken);
     let step = if duration < Duration::minutes(30) { 15 } else { 30 };
     let every = duration.max(Duration::hours(1));
     let mut out = Vec::new();
@@ -205,6 +260,56 @@ pub fn proposal_line(start: DateTime<Utc>, end: DateTime<Utc>, zone: Tz) -> Stri
     let (s, e) = (start.with_timezone(&zone), end.with_timezone(&zone));
     let end_text = if e.date_naive() == s.date_naive() { e.format("%H:%M").to_string() } else { e.format("%A %-d %B, %H:%M").to_string() };
     format!("Would {}, {} to {end_text} ({}) work for you?", s.format("%A %-d %B"), s.format("%H:%M"), s.format("%Z"))
+}
+
+/// The line under a person's name in Find a time: the shown days they are
+/// out of office ("Out of office Thu, Fri"), else their working hours on
+/// their own clock when those differ from the user's ("Works 09:00 to
+/// 15:00", with their city when their clock differs).
+pub fn note(schedule: &Schedule, windows: &[Window], mine: &WorkingHours) -> Option<String> {
+    if let Availability::Known(busy) = &schedule.availability {
+        let away: Vec<usize> = windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| busy.iter().any(|b| b.kind == BusyKind::OutOfOffice && b.start < w.end && b.end > w.start))
+            .map(|(i, _)| i)
+            .collect();
+        if !away.is_empty() {
+            return Some(format!("Out of office {}", day_runs(&away, windows)));
+        }
+    }
+    let theirs = schedule.hours?;
+    let at = windows.first().map_or_else(Utc::now, |w| w.start).naive_utc();
+    let offset = |zone: Tz| zone.offset_from_utc_datetime(&at).fix();
+    let same_clock = offset(theirs.zone) == offset(mine.zone);
+    if same_clock && (theirs.start, theirs.end) == (mine.start, mine.end) {
+        return None;
+    }
+    let times = format!("Works {} to {}", theirs.start.format("%H:%M"), theirs.end.format("%H:%M"));
+    Some(if same_clock { times } else { format!("{times} in {}", city(theirs.zone)) })
+}
+
+/// "Mon", "Thu, Fri" or "Mon to Wed": runs of neighbouring shown days.
+fn day_runs(indices: &[usize], windows: &[Window]) -> String {
+    let name = |i: usize| windows[i].day.format("%a").to_string();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for &i in indices {
+        match runs.last_mut() {
+            Some(run) if run.1 + 1 == i => run.1 = i,
+            _ => runs.push((i, i)),
+        }
+    }
+    let text = |&(a, b): &(usize, usize)| match b - a {
+        0 => name(a),
+        1 => format!("{}, {}", name(a), name(b)),
+        _ => format!("{} to {}", name(a), name(b)),
+    };
+    runs.iter().map(text).collect::<Vec<_>>().join(", ")
+}
+
+/// "New York" for America/New_York.
+fn city(zone: Tz) -> String {
+    zone.name().rsplit('/').next().unwrap_or(zone.name()).replace('_', " ")
 }
 
 /// The blocking times, sorted and joined where they touch or overlap.
@@ -270,7 +375,7 @@ mod tests {
     }
 
     fn known(person: &str, busy: Vec<Busy>) -> Schedule {
-        Schedule { person: person.into(), availability: Availability::Known(busy) }
+        Schedule::new(person, Availability::Known(busy))
     }
 
     /// Slot starts as Brussels wall-clock text.
@@ -282,11 +387,24 @@ mod tests {
         WorkingHours::standard(Brussels)
     }
 
+    const ANY_HOURS: SuggestOptions = SuggestOptions { respect_others_hours: false };
+    const THEIR_HOURS: SuggestOptions = SuggestOptions { respect_others_hours: true };
+
+    fn clock(h: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, 0, 0).unwrap()
+    }
+
+    /// Ann works 09:00 to 15:00 in New York.
+    fn ann_in_new_york(busy: Vec<Busy>) -> Schedule {
+        let hours = WorkingHours { start: clock(9), end: clock(15), ..WorkingHours::standard(chrono_tz::America::New_York) };
+        Schedule { hours: Some(hours), ..known("ann@example.com", busy) }
+    }
+
     // 2026-11-09 is a Monday.
 
     #[test]
     fn a_free_day_gives_one_slot_an_hour_inside_working_hours() {
-        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 07:00"), 1);
+        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 07:00"), 1, ANY_HOURS);
         assert_eq!(starts(&slots), ["Mon 09:00", "Mon 10:00", "Mon 11:00", "Mon 12:00", "Mon 13:00", "Mon 14:00", "Mon 15:00", "Mon 16:00"]);
         assert_eq!(slots.last().unwrap().end, at("2026-11-09 16:30"));
         assert!(slots.iter().all(|s| s.missing.is_empty()));
@@ -294,11 +412,11 @@ mod tests {
 
     #[test]
     fn past_times_today_are_skipped_and_starts_round_up() {
-        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 10:07"), 1);
+        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 10:07"), 1, ANY_HOURS);
         assert_eq!(starts(&slots)[0], "Mon 10:30", "a half-hour meeting starts on the half hour");
-        let slots = suggest(&[], &[], &hours(), Duration::minutes(15), at("2026-11-09 10:07"), 1);
+        let slots = suggest(&[], &[], &hours(), Duration::minutes(15), at("2026-11-09 10:07"), 1, ANY_HOURS);
         assert_eq!(starts(&slots)[0], "Mon 10:15", "a quarter-hour meeting starts on the quarter hour");
-        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 16:45"), 2);
+        let slots = suggest(&[], &[], &hours(), Duration::minutes(30), at("2026-11-09 16:45"), 2, ANY_HOURS);
         assert_eq!(starts(&slots)[0], "Tue 09:00", "the quarter hour left today is too short for the meeting");
     }
 
@@ -309,21 +427,21 @@ mod tests {
             known("ann@example.com", vec![busy("2026-11-09 09:30", "2026-11-09 11:00", BusyKind::Busy)]),
             known("bo@example.com", vec![busy("2026-11-09 10:30", "2026-11-09 11:15", BusyKind::Tentative), busy("2026-11-09 12:00", "2026-11-09 17:00", BusyKind::OutOfOffice)]),
         ];
-        let slots = suggest(&own, &others, &hours(), Duration::minutes(30), at("2026-11-09 07:00"), 1);
+        let slots = suggest(&own, &others, &hours(), Duration::minutes(30), at("2026-11-09 07:00"), 1, ANY_HOURS);
         assert_eq!(starts(&slots), ["Mon 11:30"], "11:15 rounds to 11:30, and 12:00 is taken");
     }
 
     #[test]
     fn working_elsewhere_leaves_the_time_free() {
         let others = [known("ann@example.com", vec![busy("2026-11-09 09:00", "2026-11-09 17:00", BusyKind::Elsewhere)])];
-        let slots = suggest(&[], &others, &hours(), Duration::minutes(60), at("2026-11-09 07:00"), 1);
+        let slots = suggest(&[], &others, &hours(), Duration::minutes(60), at("2026-11-09 07:00"), 1, ANY_HOURS);
         assert_eq!(starts(&slots)[0], "Mon 09:00");
     }
 
     #[test]
     fn a_block_over_midnight_takes_the_next_morning() {
         let others = [known("ann@example.com", vec![busy("2026-11-09 16:00", "2026-11-10 10:00", BusyKind::Busy)])];
-        let slots = suggest(&[], &others, &hours(), Duration::minutes(60), at("2026-11-09 14:00"), 2);
+        let slots = suggest(&[], &others, &hours(), Duration::minutes(60), at("2026-11-09 14:00"), 2, ANY_HOURS);
         assert_eq!(starts(&slots), ["Mon 14:00", "Mon 15:00", "Tue 10:00", "Tue 11:00", "Tue 12:00", "Tue 13:00", "Tue 14:00", "Tue 15:00", "Tue 16:00"]);
     }
 
@@ -331,9 +449,9 @@ mod tests {
     fn people_not_known_are_listed_in_every_slot_and_never_block_or_free_it() {
         let others = [
             known("ann@example.com", vec![busy("2026-11-09 09:00", "2026-11-09 16:00", BusyKind::Busy)]),
-            Schedule { person: "bo@example.com".into(), availability: Availability::Unknown(Unknown::NotShared) },
+            Schedule::new("bo@example.com", Availability::Unknown(Unknown::NotShared)),
         ];
-        let slots = suggest(&[], &others, &hours(), Duration::minutes(30), at("2026-11-09 07:00"), 1);
+        let slots = suggest(&[], &others, &hours(), Duration::minutes(30), at("2026-11-09 07:00"), 1, ANY_HOURS);
         assert_eq!(starts(&slots), ["Mon 16:00"]);
         assert_eq!(slots[0].missing, ["bo@example.com"]);
     }
@@ -345,7 +463,7 @@ mod tests {
         let windows = every_day.windows(at("2026-10-24 00:00"), 2);
         let utc = |w: &Window| w.start.format("%a %H:%M UTC").to_string();
         assert_eq!(windows.iter().map(utc).collect::<Vec<_>>(), ["Sat 07:00 UTC", "Sun 08:00 UTC"]);
-        let slots = suggest(&[], &[], &every_day, Duration::minutes(30), at("2026-10-25 08:10"), 1);
+        let slots = suggest(&[], &[], &every_day, Duration::minutes(30), at("2026-10-25 08:10"), 1, ANY_HOURS);
         assert_eq!(starts(&slots)[0], "Sun 09:00", "rounding uses the clock after the change");
     }
 
@@ -385,5 +503,55 @@ mod tests {
             proposal_line(at("2026-11-10 14:00"), at("2026-11-10 14:30"), Brussels),
             "Would Tuesday 10 November, 14:00 to 14:30 (CET) work for you?"
         );
+    }
+
+    #[test]
+    fn slots_fit_inside_each_known_persons_working_hours() {
+        // New York is 6 hours behind Brussels on Tuesday 10 November, so Ann's
+        // day is 15:00 to 21:00 in Brussels and overlaps the user's from 15:00 to 17:00.
+        let others = [ann_in_new_york(Vec::new())];
+        let slots = suggest(&[], &others, &hours(), Duration::minutes(30), at("2026-11-10 07:00"), 1, THEIR_HOURS);
+        assert_eq!(starts(&slots), ["Tue 15:00", "Tue 16:00"]);
+        let slots = suggest(&[], &others, &hours(), Duration::minutes(30), at("2026-11-10 07:00"), 1, ANY_HOURS);
+        assert_eq!(starts(&slots)[0], "Tue 09:00", "turned off, their hours narrow nothing");
+    }
+
+    #[test]
+    fn a_person_without_hours_or_not_known_constrains_nothing() {
+        let without = known("bo@example.com", Vec::new());
+        let unknown = Schedule { hours: ann_in_new_york(Vec::new()).hours, ..Schedule::new("cy@example.com", Availability::Unknown(Unknown::NotShared)) };
+        let slots = suggest(&[], &[without, unknown], &hours(), Duration::minutes(30), at("2026-11-10 07:00"), 1, THEIR_HOURS);
+        assert_eq!(starts(&slots).len(), 8, "every hour from 09:00 to 16:00");
+        assert_eq!(slots[0].missing, ["cy@example.com"]);
+    }
+
+    #[test]
+    fn time_off_their_hours_covers_nights_weekends_and_the_clock_change() {
+        let fmt = |spans: Vec<(DateTime<Utc>, DateTime<Utc>)>| {
+            spans.iter().map(|(s, e)| format!("{} to {}", s.with_timezone(&Brussels).format("%a %H:%M"), e.with_timezone(&Brussels).format("%a %H:%M"))).collect::<Vec<_>>()
+        };
+        assert_eq!(fmt(hours().off(at("2026-11-13 07:00"), at("2026-11-16 18:00"))), ["Fri 07:00 to Fri 09:00", "Fri 17:00 to Mon 09:00", "Mon 17:00 to Mon 18:00"]);
+        assert_eq!(fmt(hours().off(at("2026-11-13 10:00"), at("2026-11-13 12:00"))), Vec::<String>::new(), "inside working hours");
+        let ann = ann_in_new_york(Vec::new()).hours.unwrap();
+        assert_eq!(fmt(ann.off(at("2026-11-10 09:00"), at("2026-11-10 17:00"))), ["Tue 09:00 to Tue 15:00"]);
+        // New York leaves summer time on 1 November 2026, a week after Brussels.
+        assert_eq!(fmt(ann.off(at("2026-10-27 09:00"), at("2026-10-27 17:00"))), ["Tue 09:00 to Tue 14:00"], "5 hours apart that week");
+    }
+
+    #[test]
+    fn the_note_names_out_of_office_days_else_hours_that_differ() {
+        let windows = hours().windows(at("2026-11-09 07:00"), 5);
+        let away = |days: &[u32]| days.iter().map(|d| busy(&format!("2026-11-{d} 00:00"), &format!("2026-11-{} 00:00", d + 1), BusyKind::OutOfOffice)).collect::<Vec<_>>();
+        let note_of = |s: Schedule| note(&s, &windows, &hours());
+        assert_eq!(note_of(known("bo@example.com", away(&[13]))).as_deref(), Some("Out of office Fri"));
+        assert_eq!(note_of(known("bo@example.com", away(&[9, 12, 13]))).as_deref(), Some("Out of office Mon, Thu, Fri"));
+        assert_eq!(note_of(known("bo@example.com", away(&[10, 11, 12]))).as_deref(), Some("Out of office Tue to Thu"));
+        assert_eq!(note_of(ann_in_new_york(away(&[11]))).as_deref(), Some("Out of office Wed"), "out of office before working hours");
+        assert_eq!(note_of(ann_in_new_york(Vec::new())).as_deref(), Some("Works 09:00 to 15:00 in New York"));
+        let short = WorkingHours { end: clock(15), ..hours() };
+        assert_eq!(note_of(Schedule { hours: Some(short), ..known("jan@example.com", Vec::new()) }).as_deref(), Some("Works 09:00 to 15:00"));
+        let same = WorkingHours { days: Weekdays::of([Weekday::Mon]), ..WorkingHours::standard(chrono_tz::Europe::Paris) };
+        assert_eq!(note_of(Schedule { hours: Some(same), ..known("jan@example.com", Vec::new()) }), None, "the same clock and times; the shading shows the days");
+        assert_eq!(note_of(known("bo@example.com", Vec::new())), None);
     }
 }

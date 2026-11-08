@@ -76,7 +76,7 @@ fn schedules(reply: Reply, people: &[String]) -> Vec<Schedule> {
                     None => Availability::Known(c.busy.iter().map(|b| Busy { start: b.start, end: b.end, kind: BusyKind::Busy }).collect()),
                 },
             };
-            Schedule { person: person.clone(), availability }
+            Schedule::new(person.clone(), availability)
         })
         .collect()
 }

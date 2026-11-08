@@ -3,11 +3,12 @@
 //! user's free times turn into. Times cross as unix seconds.
 
 use chrono::{DateTime, Duration, NaiveTime, Utc, Weekday};
-use jolta_core::calendar::availability::{self, Availability, Busy, Schedule, Unknown, Weekdays, WorkingHours};
+use jolta_core::calendar::availability::{self, Availability, Busy, Schedule, SuggestOptions, Unknown, Weekdays, WorkingHours};
 use jolta_core::calendar::freebusy::{self, Found, Lookup};
 use jolta_core::calendar::{Person, tz};
 use jolta_core::{AccountId, MessageId, ThreadId, compose, store};
 
+use crate::calendar::TimeSlot;
 use crate::{ComposeData, Core, CoreError, ReplyMode, Result};
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +60,12 @@ pub struct PersonRow {
     pub busy: Vec<BusyBlock>,
     /// Why the busy times aren't known; the row is hatched. None when known.
     pub unknown: Option<String>,
+    /// Their working hours, when the provider says (Microsoft 365).
+    pub hours: Option<WorkingHoursInfo>,
+    /// The shown times outside their working hours, shaded.
+    pub outside_hours: Vec<TimeSlot>,
+    /// "Out of office Fri" or "Works 09:00 to 15:00", under the name.
+    pub note: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
@@ -132,13 +139,29 @@ fn info(found: Found, people: &[Person]) -> FindTimeInfo {
     let name = |address: &str| {
         people.iter().find(|p| p.address.eq_ignore_ascii_case(address)).map(|p| p.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| address.to_string())
     };
-    let mut rows = vec![PersonRow { address: found.me.clone(), name: "You".into(), is_me: true, busy: blocks(&found.own), unknown: None }];
+    let me = PersonRow { address: found.me.clone(), name: "You".into(), is_me: true, busy: blocks(&found.own), unknown: None, hours: None, outside_hours: Vec::new(), note: None };
+    let mut rows = vec![me];
     rows.extend(found.others.iter().map(|s| {
         let (busy, unknown) = match &s.availability {
             Availability::Known(b) => (blocks(b), None),
             Availability::Unknown(why) => (Vec::new(), Some(why.reason())),
         };
-        PersonRow { address: s.person.clone(), name: name(&s.person), is_me: false, busy, unknown }
+        let outside_hours = s
+            .hours
+            .iter()
+            .flat_map(|h| found.windows.iter().flat_map(|w| h.off(w.start, w.end)))
+            .map(|(start, end)| TimeSlot { start: start.timestamp(), end: end.timestamp() })
+            .collect();
+        PersonRow {
+            address: s.person.clone(),
+            name: name(&s.person),
+            is_me: false,
+            busy,
+            unknown,
+            hours: s.hours.as_ref().map(hours_info),
+            outside_hours,
+            note: availability::note(s, &found.windows, &found.hours),
+        }
     }));
     let days = found
         .windows
@@ -149,26 +172,29 @@ fn info(found: Found, people: &[Person]) -> FindTimeInfo {
 }
 
 /// The own busy times and the others' schedules back from the panel's copy.
-fn parts(info: &FindTimeInfo) -> (Vec<Busy>, Vec<Schedule>) {
+fn parts(info: &FindTimeInfo) -> Result<(Vec<Busy>, Vec<Schedule>)> {
     let busy = |row: &PersonRow| row.busy.iter().map(|b| Busy { start: at(b.start), end: at(b.end), kind: b.kind.into() }).collect::<Vec<_>>();
     let own = info.people.iter().filter(|r| r.is_me).flat_map(busy).collect();
     let others = info
         .people
         .iter()
         .filter(|r| !r.is_me)
-        .map(|r| Schedule {
-            person: r.name.clone(),
-            availability: match &r.unknown {
-                None => Availability::Known(busy(r)),
-                Some(why) => Availability::Unknown(Unknown::Failed(why.clone())),
-            },
+        .map(|r| {
+            Ok(Schedule {
+                person: r.name.clone(),
+                availability: match &r.unknown {
+                    None => Availability::Known(busy(r)),
+                    Some(why) => Availability::Unknown(Unknown::Failed(why.clone())),
+                },
+                hours: r.hours.as_ref().map(hours_of).transpose()?,
+            })
         })
-        .collect();
-    (own, others)
+        .collect::<Result<_>>()?;
+    Ok((own, others))
 }
 
 fn free(info: &FindTimeInfo, minutes: i64) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
-    let (own, _) = parts(info);
+    let (own, _) = parts(info)?;
     let hours = hours_of(&info.hours)?;
     Ok(availability::free_times(&own, &hours, Utc::now(), info.days.len() as u32, Duration::minutes(minutes)))
 }
@@ -215,12 +241,13 @@ impl Core {
         self.find_time(AccountId(account_id), Vec::new(), days).await
     }
 
-    /// The slots of `minutes` that suit everyone known.
-    pub fn find_time_slots(&self, info: FindTimeInfo, minutes: i64) -> Result<Vec<FindTimeSlot>> {
-        let (own, others) = parts(&info);
+    /// The slots of `minutes` that suit everyone known, inside each known
+    /// person's working hours when `respect_others_hours`.
+    pub fn find_time_slots(&self, info: FindTimeInfo, minutes: i64, respect_others_hours: bool) -> Result<Vec<FindTimeSlot>> {
+        let (own, others) = parts(&info)?;
         let hours = hours_of(&info.hours)?;
         let days = info.days.len() as u32;
-        Ok(availability::suggest(&own, &others, &hours, Duration::minutes(minutes), Utc::now(), days)
+        Ok(availability::suggest(&own, &others, &hours, Duration::minutes(minutes), Utc::now(), days, SuggestOptions { respect_others_hours })
             .into_iter()
             .map(|s| FindTimeSlot { start: s.start.timestamp(), end: s.end.timestamp(), missing: s.missing })
             .collect())
@@ -291,5 +318,31 @@ mod tests {
         assert_eq!(info.days, [true, false, true, false, false, false, true]);
         assert_eq!((info.start, info.end, info.zone.as_str()), (540, 1020, "Europe/Brussels"));
         assert_eq!(hours_of(&info).unwrap(), h);
+    }
+
+    #[test]
+    fn a_persons_hours_shade_their_row_name_it_and_come_back_for_suggestions() {
+        use chrono::TimeZone;
+        let brussels = WorkingHours::standard(chrono_tz::Europe::Brussels);
+        let from = Utc.with_ymd_and_hms(2026, 11, 9, 6, 0, 0).unwrap();
+        let windows = brussels.windows(from, 2);
+        let ann = WorkingHours { end: NaiveTime::from_hms_opt(15, 0, 0).unwrap(), ..WorkingHours::standard(chrono_tz::America::New_York) };
+        let found = Found {
+            account: AccountId(1),
+            me: "me@example.com".into(),
+            own: Vec::new(),
+            others: vec![Schedule { hours: Some(ann), ..Schedule::new("ann@example.com", Availability::Known(Vec::new())) }],
+            hours: brussels,
+            windows,
+        };
+        let info = info(found, &[Person { address: "ann@example.com".into(), name: "Ann Berg".into() }]);
+        let row = &info.people[1];
+        assert_eq!(row.note.as_deref(), Some("Works 09:00 to 15:00 in New York"));
+        let shaded: Vec<(i64, i64)> = row.outside_hours.iter().map(|s| (s.start, s.end)).collect();
+        let utc = |d, h| Utc.with_ymd_and_hms(2026, 11, d, h, 0, 0).unwrap().timestamp();
+        assert_eq!(shaded, [(utc(9, 8), utc(9, 14)), (utc(10, 8), utc(10, 14))], "09:00 to 15:00 in Brussels is before Ann starts");
+        assert_eq!(info.people[0].note, None, "the user's own row");
+        let (_, others) = parts(&info).unwrap();
+        assert_eq!(others[0].hours, Some(ann), "the hours come back for suggestions");
     }
 }

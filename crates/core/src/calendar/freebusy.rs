@@ -41,12 +41,15 @@ pub enum Lookup {
     CalendarOff { account: AccountId, address: String, needs_consent: bool },
 }
 
-/// The answers `free-busy.json` holds, by address.
+/// The answers `free-busy.json` holds, by address: busy times, each
+/// person's working hours, and the user's.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Recorded {
     #[serde(default)]
     people: BTreeMap<String, Availability>,
+    #[serde(default)]
+    people_hours: BTreeMap<String, WorkingHours>,
     #[serde(default)]
     working_hours: Option<WorkingHours>,
 }
@@ -86,7 +89,7 @@ pub async fn look_up(jolta: &Jolta, account: AccountId, people: &[String], from:
     let mut answers = match (&recorded, &source) {
         (Some(r), _) => asked.iter().map(|p| recorded_answer(r, p)).collect(),
         (None, Some(s)) => s.free_busy(&asked, start, end).await?,
-        (None, None) => people.iter().map(|p| Schedule { person: p.clone(), availability: Availability::Unknown(Unknown::NotSupported) }).collect(),
+        (None, None) => people.iter().map(|p| Schedule::new(p.clone(), Availability::Unknown(Unknown::NotSupported))).collect(),
     };
     let mine = answers.iter().position(|s| s.person == a.address).map(|i| answers.remove(i));
 
@@ -127,7 +130,8 @@ fn recorded(dir: &Path) -> Result<Option<Recorded>> {
 
 fn recorded_answer(r: &Recorded, person: &str) -> Schedule {
     let found = r.people.iter().find(|(p, _)| p.eq_ignore_ascii_case(person)).map(|(_, a)| a.clone());
-    Schedule { person: person.to_string(), availability: found.unwrap_or(Availability::Unknown(Unknown::NotFound)) }
+    let hours = r.people_hours.iter().find(|(p, _)| p.eq_ignore_ascii_case(person)).map(|(_, h)| *h);
+    Schedule { hours, ..Schedule::new(person, found.unwrap_or(Availability::Unknown(Unknown::NotFound))) }
 }
 
 /// The provider's busy blocks for the account's own address that the
@@ -293,6 +297,7 @@ mod tests {
         let hours = availability::WorkingHours { days: Weekdays::MONDAY_TO_FRIDAY, ..WorkingHours::standard(Brussels) };
         let file = serde_json::json!({
             "workingHours": hours,
+            "peopleHours": { "Ann@example.com": WorkingHours { end: chrono::NaiveTime::from_hms_opt(12, 0, 0).unwrap(), start: chrono::NaiveTime::from_hms_opt(8, 0, 0).unwrap(), ..WorkingHours::standard(chrono_tz::America::New_York) } },
             "people": {
                 "ann@example.com": {"known": [{"start": "2026-11-09T08:00:00Z", "end": "2026-11-09T12:00:00Z", "kind": "busy"}]},
                 "bo@example.com": {"unknown": "notShared"},
@@ -312,9 +317,14 @@ mod tests {
             [("13:00".to_string(), BusyKind::Tentative), ("15:00".to_string(), BusyKind::Busy)],
             "the recording's answer for the user beside the stored standup; the free lunch blocks nothing"
         );
-        let slots = availability::suggest(&found.own, &found.others, &found.hours, Duration::minutes(60), from, 1);
+        assert_eq!(found.others[0].hours.map(|h| h.zone), Some(chrono_tz::America::New_York), "the recording's hours for Ann");
+        assert_eq!(found.others[1].hours, None);
+        let suggest = |respect_others_hours| availability::suggest(&found.own, &found.others, &found.hours, Duration::minutes(60), from, 1, availability::SuggestOptions { respect_others_hours });
+        let slots = suggest(false);
         assert_eq!(slots[0].start, Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap(), "after Ann's morning, 13:00 in Brussels");
         assert_eq!(slots[0].missing, ["bo@example.com", "cy@example.com"]);
+        let slots = suggest(true);
+        assert_eq!(slots[0].start, Utc.with_ymd_and_hms(2026, 11, 9, 14, 0, 0).unwrap(), "Ann starts at 14:00 in Brussels, and the user is busy until 15:00");
 
         std::fs::remove_file(j.data_dir.join("free-busy.json")).unwrap();
         let Lookup::Found(found) = rt.block_on(look_up(&j, account, &people, from, 1)).unwrap() else { panic!("calendar is on") };
