@@ -641,7 +641,7 @@ final class HourCanvas: CanvasView {
     var content = HourGridContent.empty {
         didSet {
             guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID || content.draft != oldValue.draft
-                    || content.weekends != oldValue.weekends || content.now != oldValue.now || content.today != oldValue.today else { return }
+                    || content.pending != oldValue.pending || content.weekends != oldValue.weekends || content.now != oldValue.now || content.today != oldValue.today else { return }
             elements = nil
             needsDisplay = true
             reportSelection()

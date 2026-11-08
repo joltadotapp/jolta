@@ -507,6 +507,8 @@ final class Journeys: XCTestCase {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        // The view is remembered per test folder, and this journey ends in month view.
+        app.typeKey("w", modifierFlags: [])
         let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
         let standup = event("Standup, 9:30 to 9:45")
         XCTAssertTrue(standup.waitForExistence(timeout: 5), "Monday's standup marks the column and the hours")
@@ -539,7 +541,19 @@ final class Journeys: XCTestCase {
 
         longer.click()
         app.typeKey(.upArrow, modifierFlags: .option)
-        XCTAssertTrue(event("Grid check, 10:45 to 12:15").waitForExistence(timeout: 5), "⌥↑ moves it 15 minutes earlier")
+        let earlier = event("Grid check, 10:45 to 12:15")
+        XCTAssertTrue(earlier.waitForExistence(timeout: 5), "⌥↑ moves it 15 minutes earlier")
+
+        earlier.click()
+        app.typeKey(.downArrow, modifierFlags: .shift)
+        app.typeKey(.downArrow, modifierFlags: .shift)
+        XCTAssertTrue(event("Grid check, 10:45 to 12:45").waitForExistence(timeout: 5), "two ⇧↓ make it 30 minutes longer")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(earlier.waitForExistence(timeout: 5))
+        earlier.click()
+        app.typeKey(.downArrow, modifierFlags: [])
+        RunLoop.current.run(until: Date() + 1.5)
+        XCTAssertTrue(earlier.exists, "↓ moves the selection, never the event")
 
         let call = event("1:1 Els, 11:00 to 12:00")
         XCTAssertTrue(call.waitForExistence(timeout: 5))

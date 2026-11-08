@@ -264,8 +264,8 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
     /// The command a key typed in calendar mode runs.
     static func forKey(_ event: NSEvent) -> CalendarCommand? {
         switch event.keyCode {
-        case 125, 126 where event.modifierFlags.contains(.option): return .nudge
-        case 125, 126 where event.modifierFlags.contains(.shift): return .resize
+        case 125 where event.modifierFlags.contains(.option), 126 where event.modifierFlags.contains(.option): return .nudge
+        case 125 where event.modifierFlags.contains(.shift), 126 where event.modifierFlags.contains(.shift): return .resize
         case 123, 124, 125, 126: return .move
         case 36, 76: return .open
         case 53: return .close
