@@ -29,6 +29,14 @@ final class EventEditorModel {
     @ObservationIgnored var onChange: (() -> Void)?
     /// What the draft's calendar can do: which organizer options it has.
     private(set) var caps: CapabilitiesInfo?
+    /// The Add video call menu for the draft's calendar; empty where it
+    /// can have no call, and the button is left out.
+    private(set) var videoChoices: [VideoChoice] = []
+
+    /// "Teams meeting", as the menu names the call to be made.
+    func videoLabel(_ provider: MeetingProvider) -> String {
+        videoChoices.first { $0.provider == provider }?.label ?? "\(provider.name) meeting"
+    }
     /// Saving shows Send an update?, so the button reads "Save and send…".
     private(set) var willSend = false
     /// The organizer options are open.
@@ -75,6 +83,7 @@ final class EventEditorModel {
         willSend = (try? core.planSave(draft: draft))?.dialog != nil
         if caps == nil || calendarOfCaps != draft.calendarId {
             caps = try? core.capabilities(calendarId: draft.calendarId)
+            videoChoices = (try? core.videoChoices(calendarId: draft.calendarId)) ?? []
             calendarOfCaps = draft.calendarId
         }
     }
@@ -631,15 +640,37 @@ struct EventEditorPanel: View {
             } else if let video = editor.draft.video {
                 EditorRow(icon: "video") {
                     HStack {
-                        Text("\(video.name) meeting · link made on save").foregroundStyle(Color(Theme.text2))
+                        Text("\(editor.videoLabel(video)) · link made on save").foregroundStyle(Color(Theme.text2))
                         Spacer()
                         Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color(Theme.text3))
                             .help("Remove the video call")
+                            .accessibilityLabel("Remove the video call")
                     }
                 }
                 ForEach(editor.problems(.video), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+            } else if !editor.locked(.video), !editor.videoChoices.isEmpty {
+                EditorRow(icon: "video") {
+                    Menu {
+                        ForEach(editor.videoChoices, id: \.provider) { choice in
+                            Button {
+                                editor.draft.video = choice.provider
+                            } label: {
+                                Text(choice.label)
+                                if let why = choice.refusal { Text(why) }
+                            }
+                            .disabled(choice.refusal != nil)
+                        }
+                    } label: {
+                        Text("Add video call")
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .foregroundStyle(Color(Theme.text2))
+                    .accessibilityIdentifier("editor-video")
+                }
             }
         }
     }

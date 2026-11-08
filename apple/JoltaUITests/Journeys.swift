@@ -348,6 +348,50 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(moved.waitForExistence(timeout: 5), "Z brings it back")
     }
 
+    /// Add video call: on a Google calendar the menu offers Google Meet,
+    /// with Teams greyed, and the call shows as made on save; a calendar on
+    /// this Mac can't have one and says so; the saved event keeps asking for
+    /// the call until Google answers.
+    func testAddVideoCall() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Video check")
+        let picker = app.descendants(matching: .any).matching(identifier: "editor-calendar").firstMatch
+        let pick = { (name: String) in
+            picker.click()
+            let item = app.menuItems[name]
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "the calendar picker lists \(name)")
+            item.click()
+        }
+        pick("Team")
+        let add = app.descendants(matching: .any).matching(identifier: "editor-video").firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 5), "a Google calendar offers Add video call")
+        add.click()
+        let meet = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "Google Meet")).firstMatch
+        let teams = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "Teams meeting")).firstMatch
+        XCTAssertTrue(meet.waitForExistence(timeout: 5), "the menu lists Google Meet")
+        XCTAssertTrue(meet.isEnabled && teams.exists && !teams.isEnabled, "Teams is greyed on Google")
+        meet.click()
+        let pending = text(app, "Google Meet · link made on save")
+        XCTAssertTrue(pending.waitForExistence(timeout: 5), "the chosen call waits for the save")
+
+        pick("Work")
+        XCTAssertTrue(text(app, "Work can't have a video call").waitForExistence(timeout: 5), "a calendar on this Mac says it can't")
+        pick("Team")
+        XCTAssertTrue(pending.waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: .command)
+        let created = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Video check,")).firstMatch
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "⌘↩ saves it into the week")
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(pending.waitForExistence(timeout: 5), "until Google answers, the event still asks for its Meet")
+        XCTAssertFalse(add.exists, "and offers no second call")
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
     /// A repeating event: ⌘R in the editor opens the repeat popover, ↓ picks
     /// the weekly preset and Return takes it. A new time for the second
     /// occurrence asks which events it is for, and 1 moves only that one;
