@@ -67,6 +67,9 @@ final class AppModel {
     var showsCalendarIntro = false
     @ObservationIgnored var reminderTask: Task<Void, Never>?
     private(set) var accounts: [AccountSection] = []
+    /// Accounts whose automatic replies are on now, for the strip over the list.
+    private(set) var away: [AwayInfo] = []
+    private(set) var turningOffAway: Set<Int64> = []
     var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
     var section: SectionInfo? { didSet { listChanged() } }
@@ -221,7 +224,13 @@ final class AppModel {
             }
         }
         reloadAccounts()
+        reloadAway()
         try core.start()
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification) {
+                self?.core.checkAway()
+            }
+        }
         if !Self.isTestData { startMCP() }
         power.start(core: core)
         AddressBook.load(into: core)
@@ -590,6 +599,8 @@ final class AppModel {
             calendar.reloadCalendars()
         case .calendarOpFailed(let message, _):
             show(Toast(text: message, undo: nil))
+        case .awayChanged:
+            reloadAway()
         }
     }
 
@@ -862,6 +873,30 @@ final class AppModel {
     /// A message with nothing to undo.
     func notify(_ text: String) {
         show(Toast(text: text, undo: nil))
+    }
+
+    func reloadAway() {
+        away = (try? core.awayStates()) ?? []
+    }
+
+    /// Turns automatic replies off where Jolta can (Microsoft 365); Gmail's
+    /// are changed in Gmail, so its setting opens there.
+    func turnOffAway(_ info: AwayInfo) {
+        guard info.editable else { return openAwaySettings(info) }
+        turningOffAway.insert(info.accountId)
+        Task {
+            do {
+                show(Toast(text: try await core.turnOffAway(accountId: info.accountId), undo: nil))
+            } catch {
+                show(Toast(text: "Couldn't turn automatic replies off: \(error)", undo: nil))
+            }
+            turningOffAway.remove(info.accountId)
+            reloadAway()
+        }
+    }
+
+    func openAwaySettings(_ info: AwayInfo) {
+        if let url = URL(string: info.settingsUrl) { NSWorkspace.shared.open(url) }
     }
 
     /// A calendar edit's message, which Undo takes back while it shows.

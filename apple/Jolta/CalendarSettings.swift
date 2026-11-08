@@ -206,6 +206,9 @@ struct CalendarSettings: View {
             SettingsSection("Invitations") {
                 FileResponsesRow(core: model.core)
             }
+            SettingsSection("Out of office", footer: "Jolta shows a line over the mail list while automatic replies are on. It can turn them off on Microsoft 365. Gmail's vacation responder is changed in Gmail.") {
+                OutOfOfficeRows(model: model, switches: switches)
+            }
             SettingsSection("Working hours", footer: "Find a time and Insert my availability suggest times inside these hours. Until you set them, Jolta uses your Outlook working hours on Microsoft 365, else Monday to Friday, 9:00 to 17:00.") {
                 WorkingHoursRow(core: model.core)
             }

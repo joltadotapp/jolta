@@ -788,6 +788,19 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(family.waitForExistence(timeout: 5), "the calendar sidebar lists it")
     }
 
+    /// The strip over the mail list says automatic replies are on, and its
+    /// Turn off ends them. The data folder's `away.json` stands in for
+    /// Microsoft 365's mailbox settings.
+    func testTurnOffAutomaticReplies() throws {
+        let app = try launch()
+        let strip = app.descendants(matching: .any).matching(identifier: "away-strip").firstMatch
+        XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while replies are on")
+        XCTAssertTrue(text(app, "Automatic replies are on").exists)
+        strip.buttons["Turn off"].click()
+        XCTAssertTrue(text(app, "Automatic replies are off.").waitForExistence(timeout: 5), "the toast says so")
+        XCTAssertTrue(strip.waitForNonExistence(timeout: 5), "and the strip goes")
+    }
+
     /// Return in a new section's query field saves it. The page used to read
     /// the sections before they reloaded, drop the new row under the focused
     /// field, and crash (2026-11-04, a "Starred" section with is:starred).
