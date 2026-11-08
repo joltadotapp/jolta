@@ -65,6 +65,16 @@ pub fn holds(answered: &[EventData], source: Option<CalendarSource>, message: &[
     event && occurrence
 }
 
+/// Whether two versions place the whole event, or with `rid` that
+/// occurrence, at the same time (`same_time`).
+fn same_place(a: &[EventData], b: &[EventData], rid: Option<&Moment>, here: Tz) -> bool {
+    let pick = |events: &[EventData]| match rid {
+        None => events.iter().find(|e| e.recurrence_id.is_none()).cloned(),
+        Some(rid) => series::occurrence(events, rid, here),
+    };
+    matches!((pick(a), pick(b)), (Some(a), Some(b)) if same_time(&a, &b, here))
+}
+
 /// The same start, end and repeat rule. EXDATEs don't count: an
 /// occurrence cancelled doesn't move the others.
 pub fn same_time(a: &EventData, b: &EventData, here: Tz) -> bool {
@@ -133,15 +143,22 @@ pub fn organizer(conn: &Connection, account: AccountId, me: &[String], uid: &str
 /// Whether a message naming `organizer`, From `from`, is the organizer's:
 /// it names the meeting's organizer, when there is one, and comes from that
 /// address, from a provider sending for it, or for the user's own meeting
-/// from another of the user's addresses.
+/// from another of the user's addresses. iCloud names Apple's relay as the
+/// ORGANIZER, with the organizer's own address in EMAIL, which Microsoft
+/// 365's copy and Graph's sender give instead: a mail naming the relay from
+/// the meeting's organizer is the organizer's.
 pub fn sent_by(me: &[String], meeting: Option<&str>, organizer: &str, from: &str) -> bool {
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     let mine = |a: &str| me.iter().any(|m| same(m, a));
-    if organizer.trim().is_empty() || meeting.is_some_and(|m| !same(m, organizer)) {
+    let relayed = organizer.trim().to_ascii_lowercase().ends_with(APPLE_RELAY) && meeting.is_some_and(|m| same(m, from));
+    if organizer.trim().is_empty() || (meeting.is_some_and(|m| !same(m, organizer)) && !relayed) {
         return false;
     }
-    same(organizer, from) || SENDS_FOR_ORGANIZERS.iter().any(|s| same(s, from)) || (mine(organizer) && mine(from))
+    relayed || same(organizer, from) || SENDS_FOR_ORGANIZERS.iter().any(|s| same(s, from)) || (mine(organizer) && mine(from))
 }
+
+/// The domain of the addresses iCloud gives organizers in its invitations.
+const APPLE_RELAY: &str = "@imip.me.com";
 
 /// The other versions of `sent`, the event a message names, and which of
 /// them came before it. Other mails count only on the account the message
@@ -160,18 +177,34 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         return Ok(History { not_from_guest: true, ..History::default() });
     }
 
-    let mut versions = mails(seen, organizer.as_deref(), uid, rid.as_ref(), this)?;
+    // A proposal is set against the time of every later version, so all are read.
+    let read_up_to = if sent.method == Method::Counter { Version { sequence: i64::MAX, stamp: None } } else { this };
+    let mut versions = mails(seen, organizer.as_deref(), uid, rid.as_ref(), read_up_to)?;
     if rid.is_some() {
-        let series = mails(seen, organizer.as_deref(), uid, None, this)?;
+        let series = mails(seen, organizer.as_deref(), uid, None, read_up_to)?;
         versions.extend(series.into_iter().filter(|(method, ..)| *method == Method::Cancel));
     }
-    let mut newest: Option<(Version, Method)> = None;
     let mut before: Option<(Version, Vec<EventData>)> = None;
+    for (method, events, version) in &versions {
+        if *version < this && *method != Method::Cancel && before.as_ref().is_none_or(|(v, _)| version > v) {
+            before = Some((*version, events.clone()));
+        }
+    }
+    // A proposal answers the time the guest saw: a later version that kept
+    // it, such as one that only changed the guest list, leaves it open, and
+    // so does the cancellation that took another guest off.
+    let counter = sent.method == Method::Counter;
+    let kept_time = |events: &[EventData]| counter && before.as_ref().is_some_and(|(_, saw)| same_place(saw, events, rid.as_ref(), seen.here));
+    let proposer = proposer(&sent.event, seen.sender).map(|a| a.person.address.clone());
+    let ends_it = |events: &[EventData]| {
+        !counter
+            || events.iter().any(|e| e.attendees.is_empty() || e.attendees.iter().any(|a| proposer.as_ref().is_some_and(|p| a.person.address.eq_ignore_ascii_case(p))))
+    };
+    let mut newest: Option<(Version, Method)> = None;
     for (method, events, version) in versions {
-        if version > this && newest.is_none_or(|(v, _)| version > v) {
+        let moved = if method == Method::Cancel { ends_it(&events) } else { !kept_time(&events) };
+        if version > this && moved && newest.is_none_or(|(v, _)| version > v) {
             newest = Some((version, method));
-        } else if version < this && method != Method::Cancel && before.as_ref().is_none_or(|(v, _)| version > *v) {
-            before = Some((version, events));
         }
     }
 
@@ -188,7 +221,7 @@ pub fn history(seen: &Seen, sent: &Invitation) -> Result<History> {
         let newer_copy = match source {
             _ if cancelled && sent.method == Method::Cancel => false,
             CalendarSource::Graph => cancelled,
-            _ => copy.event.sequence > this.sequence || cancels(copy, this.sequence),
+            _ => (copy.event.sequence > this.sequence && !kept_time(std::slice::from_ref(&copy.event))) || cancels(copy, this.sequence),
         };
         if newer_copy {
             let version = Version { sequence: copy.event.sequence, stamp: None };

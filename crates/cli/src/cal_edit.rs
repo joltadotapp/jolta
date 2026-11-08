@@ -576,7 +576,11 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
             };
         }
         d.people.retain(|p| !a.remove.iter().any(|r| r.trim().eq_ignore_ascii_case(&p.person.address)));
-        d.people.extend(a.add.iter().map(|s| guest(s)));
+        for added in a.add.iter().map(|s| guest(s)) {
+            if !d.people.iter().any(|p| p.person.address.eq_ignore_ascii_case(&added.person.address)) {
+                d.people.push(added);
+            }
+        }
         if a.people.hide_guests {
             d.options.hide_guests = true;
         }

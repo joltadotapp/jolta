@@ -46,7 +46,7 @@ pub fn between(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>, here: 
         "SELECT e.uid, o.event_id, o.calendar_id, e.title, e.location, o.start_utc, o.end_utc, o.start_day, o.end_day,
                 e.meeting_provider, e.join_url,
                 json_extract(a.value, '$.trigger.MinutesBefore'), json_extract(a.value, '$.trigger.At'),
-                c.source, c.is_default
+                c.source, c.is_default, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM occurrence o JOIN calendar c ON c.id = o.calendar_id JOIN event e ON e.id = o.event_id,
               json_each(e.data, '$.alarms') a
          WHERE ((o.start_utc >= ?1 AND o.start_utc < ?2) OR (o.start_day >= ?3 AND o.start_day <= ?4))
@@ -78,7 +78,7 @@ pub fn between(conn: &Connection, from: DateTime<Utc>, to: DateTime<Utc>, here: 
             bounds,
             meeting,
         };
-        let rank = super::series::copy_rank(&uid, r.get(13)?, r.get(14)?, reminder.calendar_id);
+        let rank = super::series::copy_rank(&uid, r.get(15)?, r.get(13)?, r.get(14)?, reminder.calendar_id);
         Ok((uid, trigger, rank, reminder))
     })?;
     let mut out = Vec::new();

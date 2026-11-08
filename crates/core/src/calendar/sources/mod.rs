@@ -188,7 +188,7 @@ impl Source {
     /// whom the server mails about it.
     pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
         match self {
-            Source::CalDav(s) => s.write(calendar, write).await,
+            Source::CalDav(s) => s.write(calendar, write, tell).await,
             Source::Google(s) => s.write(calendar, write, tell).await,
             Source::Graph(s) => s.write(calendar, write, tell).await,
             Source::Webcal(_) => Err(Error::Other("A subscribed calendar is read-only.".into())),

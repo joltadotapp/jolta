@@ -92,11 +92,13 @@ pub fn busy(e: &EventData) -> bool {
 }
 
 /// Which copy of a meeting found in several calendars Jolta keeps; lower
-/// wins. First the organizer's own copy, in a calendar on the provider the
-/// UID comes from: the other copies are converted invitations, whose titles
-/// can be the invitation mail's subject. Then the default calendar, then
-/// the calendar added first, so the choice never flips.
-pub fn copy_rank(uid: &str, source: CalendarSource, is_default: bool, calendar: CalendarId) -> (bool, bool, i64) {
+/// wins. First the copy the user organizes the meeting in, so a meeting Jolta
+/// made, whose UID names no provider, opens where the user can change it.
+/// Then the organizer's copy by the UID's provider: the other copies are
+/// converted invitations, whose titles can be the invitation mail's subject.
+/// Then the default calendar, then the calendar added first, so the choice
+/// never flips.
+pub fn copy_rank(uid: &str, organizer_is_me: bool, source: CalendarSource, is_default: bool, calendar: CalendarId) -> (bool, bool, bool, i64) {
     let origin = if uid.to_ascii_lowercase().ends_with("@google.com") {
         Some(CalendarSource::Google)
     } else if uid.len() >= 32 && uid[..32].eq_ignore_ascii_case(OUTLOOK_ID) {
@@ -104,7 +106,7 @@ pub fn copy_rank(uid: &str, source: CalendarSource, is_default: bool, calendar: 
     } else {
         None
     };
-    (origin != Some(source), !is_default, calendar.0)
+    (!organizer_is_me, origin != Some(source), !is_default, calendar.0)
 }
 
 /// How every Outlook Global Object ID starts ([MS-OXCICAL] 2.1.3.1.1.20.26).
@@ -117,7 +119,7 @@ mod copy_tests {
     #[test]
     fn the_organizers_copy_then_the_default_calendar_then_the_oldest() {
         let pick = |uid: &str, copies: &[(CalendarSource, bool, i64)]| {
-            copies.iter().min_by_key(|(s, d, c)| copy_rank(uid, *s, *d, CalendarId(*c))).unwrap().2
+            copies.iter().min_by_key(|(s, d, c)| copy_rank(uid, false, *s, *d, CalendarId(*c))).unwrap().2
         };
         let both = [(CalendarSource::Graph, false, 1), (CalendarSource::Google, false, 6)];
         assert_eq!(pick("1c7g18fd92ki@google.com", &both), 6, "made in Google Calendar");

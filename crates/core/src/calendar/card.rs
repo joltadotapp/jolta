@@ -1576,6 +1576,32 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// iCloud names Apple's relay as the ORGANIZER, with the organizer's own
+    /// address in EMAIL. Microsoft 365 keeps that own address in its copy,
+    /// and Graph gives it as the mail's sender (C3 U11, R3 A1): the mail is
+    /// the organizer's. One from anyone else naming the relay is not.
+    #[test]
+    fn an_icloud_invitation_through_apples_relay_is_the_organizers() {
+        let (j, calendar) = jolta("card-icloud-relay");
+        let relayed = |id: &str, from: &str| {
+            version(id, "relay", "REQUEST", 0, "20261104T080000Z", V1)
+                .replace("From: ann@example.com", &format!("From: {from}"))
+                .replace("ORGANIZER;CN=Ann Dupont:mailto:ann@example.com", "ORGANIZER;EMAIL=ann@example.com;CN=Ann Dupont:mailto:2_HAZW4YLSJQ2TEOA@imip.me.com")
+        };
+        let real = relayed("i1", "ann@example.com");
+        let mut copy = invitation::find(real.as_bytes(), &[ME.into()]).remove(0).event;
+        copy.organizer = Some(Person { address: "ann@example.com".into(), name: "Ann Dupont".into() });
+        j.store.write(|tx| store::apply_item(tx, calendar, "relay.ics", None, &[copy], None, &Horizon::around(now(), Brussels))).unwrap();
+        let m1 = import(&j, real.as_bytes());
+        let c = stored_card(&j, m1, &real);
+        assert!(!notes(&c).contains(&"This isn't from the meeting's organizer"), "{:?}", c.notes);
+        assert!(c.answering.is_some(), "the guest can answer");
+        let posing = relayed("x1", "eve@example.net");
+        let x1 = import(&j, posing.as_bytes());
+        assert!(notes(&stored_card(&j, x1, &posing)).contains(&"This isn't from the meeting's organizer"));
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// Sync stores a message's date from the server, IMAP's INTERNALDATE or
     /// Graph's receivedDateTime, so a stranger's backdated Date header
     /// doesn't put a later mail before the request that named the organizer.

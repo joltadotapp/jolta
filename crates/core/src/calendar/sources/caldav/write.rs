@@ -6,19 +6,22 @@
 use chrono_tz::Tz;
 use reqwest::Url;
 
-use super::super::{OpWrite, Version, Written, cannot, changed_fields};
+use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields};
 use super::add::resource_name;
 use super::{CalDav, href_key, join, path_escape};
 use crate::calendar::change::Field;
 use crate::calendar::ical_edit::{Component, Object, Prop, utc_stamp, vevent, write_event, write_field};
-use crate::calendar::ops::Extra;
-use crate::calendar::{Calendar, EventData, Person, ical, rsvp, tz};
+use crate::calendar::ops::{Extra, Notify};
+use crate::calendar::{Calendar, EventData, Person, ical, organizer, rsvp, tz};
 use crate::{Error, Result};
 
 const PRODID: &str = concat!("-//Jolta//Jolta ", env!("CARGO_PKG_VERSION"), "//EN");
 
 impl CalDav {
-    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>) -> Result<Written> {
+    pub async fn write(&self, calendar: &Calendar, write: &OpWrite<'_>, tell: Tell<'_>) -> Result<Written> {
+        // iCloud mails a new time or place on its own but not a new title, so
+        // Send asks it to tell every guest.
+        let send = (tell.notify == Notify::All).then_some(());
         let collection = Url::parse(&calendar.remote_id).map_err(|e| Error::Other(format!("calendar address {}: {e}", calendar.remote_id)))?;
         match *write {
             OpWrite::Create { events, key, extra } => {
@@ -40,18 +43,18 @@ impl CalDav {
                 let (Some(etag), Some(raw)) = (held.etag.as_deref(), held.raw.as_deref()) else { return Ok(Written::Stale) };
                 let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, dropped, tz::here())?;
                 let text = organized(&text, &event.uid, &self.organizer().await);
-                self.put_over(&collection, held, etag, text).await
+                self.put_over(&collection, held, etag, text, send.map(|_| event.uid.as_str())).await
             }
             OpWrite::Occurrence { series, base, event, extra } => {
                 let (Some(etag), Some(raw)) = (series.etag.as_deref(), series.raw.as_deref()) else { return Ok(Written::Stale) };
                 let text = edited_text(&String::from_utf8_lossy(raw), base, event, extra, &[], tz::here())?;
                 let text = organized(&text, &event.uid, &self.organizer().await);
-                self.put_over(&collection, series, etag, text).await
+                self.put_over(&collection, series, etag, text, send.map(|_| event.uid.as_str())).await
             }
             OpWrite::Cancel { held, occurrence, .. } => {
                 let (Some(etag), Some(raw)) = (held.etag.as_deref(), held.raw.as_deref()) else { return Ok(Written::Stale) };
                 let text = cancelled_text(&String::from_utf8_lossy(raw), occurrence, tz::here())?;
-                self.put_over(&collection, held, etag, text).await
+                self.put_over(&collection, held, etag, text, None).await
             }
             OpWrite::Delete { held } => {
                 let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
@@ -114,7 +117,9 @@ impl CalDav {
     }
 
     /// Writes `text` over the resource `held` while it is still at `etag`.
-    async fn put_over(&self, collection: &Url, held: &rsvp::Stored, etag: &str, text: String) -> Result<Written> {
+    /// With `force_send`, a meeting's UID, the body sent asks the server to
+    /// mail every guest of it (`forced`); the version kept is `text`.
+    async fn put_over(&self, collection: &Url, held: &rsvp::Stored, etag: &str, text: String, force_send: Option<&str>) -> Result<Written> {
         let url = join(collection, &path_escape(&held.remote_id))?;
         // iCloud takes a PUT with the ETag of a resource deleted
         // since and makes it again (iCloud test account,
@@ -127,8 +132,23 @@ impl CalDav {
             200..300 => return Ok(Written::Stale),
             status => return Err(Error::Other(format!("CalDAV GET {url}: {status}"))),
         }
-        let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag)];
-        let reply = self.exchange("PUT", &url, &headers, &text).await?;
+        let text = unforced(&text);
+        // iCloud keeps the mark and mails only for a PUT that adds it, so a
+        // copy that has it goes back without it first, which mails nobody.
+        let mut etag = etag.to_string();
+        if force_send.is_some() && marked(&now.body) {
+            let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag.as_str())];
+            let reply = self.exchange("PUT", &url, &headers, &unforced(&now.body)).await?;
+            match (reply.status, reply.etag) {
+                (200..300, Some(next)) => etag = next,
+                (200..300, None) | (412, _) => return Ok(Written::Stale),
+                (404 | 410, _) => return Ok(Written::Gone),
+                (status, _) => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
+            }
+        }
+        let headers = [("Content-Type", "text/calendar; charset=utf-8"), ("If-Match", etag.as_str())];
+        let body = force_send.map_or_else(|| text.clone(), |uid| forced(&text, uid));
+        let reply = self.exchange("PUT", &url, &headers, &body).await?;
         match reply.status {
             200..300 => Ok(Written::Saved(Some(self.version(&held.remote_id, reply.etag, text).await?))),
             412 => Ok(Written::Stale),
@@ -290,6 +310,9 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
                     return Err(Error::Other("The calendar's copy no longer has this series.".into()));
                 }
                 let mut changed = vevent(event);
+                if organizer::asks_again(base, event, here) {
+                    ask_again(&mut changed, event.options.request_responses);
+                }
                 add_lines(&mut changed, extra)?;
                 obj.add_after_master(changed);
                 return Ok(obj.to_string());
@@ -309,12 +332,18 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
                 editable(f)?;
                 write_field(component, f, &carried);
             }
+            if organizer::asks_again(&o, &carried, here) {
+                ask_again(component, carried.options.request_responses);
+            }
         }
     }
     let component = obj.event_mut(&event.uid, rid.as_deref()).ok_or_else(|| Error::Other("The calendar's copy no longer has this event.".into()))?;
     for &field in &fields {
         editable(field)?;
         write_field(component, field, event);
+    }
+    if organizer::asks_again(base, event, here) {
+        ask_again(component, event.options.request_responses);
     }
     if fields.iter().any(|f| matches!(f, Field::Time | Field::Repeat | Field::Status)) {
         let sequence = component.prop("SEQUENCE").and_then(|p| p.value().trim().parse::<i64>().ok()).unwrap_or(0);
@@ -327,6 +356,65 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
     }
     add_lines(component, extra)?;
     Ok(obj.to_string())
+}
+
+/// `text` with each guest of the meeting `uid` but the organizer marked
+/// SCHEDULE-FORCE-SEND=REQUEST (RFC 6638 7.3): the server mails them the
+/// change whatever it changed. The server drops the parameter.
+fn forced(text: &str, uid: &str) -> String {
+    let mut obj = Object::parse(text);
+    for component in obj.events_mut(uid) {
+        let Some(organizer) = organizer_addresses(component) else { continue };
+        component.update("ATTENDEE", |p| !is_one_of(p, &organizer), |p| p.set_param("SCHEDULE-FORCE-SEND", "REQUEST"));
+    }
+    obj.to_string()
+}
+
+fn marked(text: &str) -> bool {
+    text.replace("\r\n ", "").replace("\n ", "").contains("SCHEDULE-FORCE-SEND")
+}
+
+/// `text` without any SCHEDULE-FORCE-SEND mark, which iCloud keeps.
+fn unforced(text: &str) -> String {
+    if !marked(text) {
+        return text.to_string();
+    }
+    let mut obj = Object::parse(text);
+    let uids: Vec<String> = ical::read(text, &[]).map(|events| events.into_iter().map(|e| e.uid).collect()).unwrap_or_default();
+    for uid in uids {
+        for component in obj.events_mut(&uid) {
+            component.update("ATTENDEE", |p| p.param("SCHEDULE-FORCE-SEND").is_some(), |p| p.remove_param("SCHEDULE-FORCE-SEND"));
+        }
+    }
+    obj.to_string()
+}
+
+/// The addresses of a VEVENT's ORGANIZER, None without one: its mailto
+/// and its EMAIL, where iCloud keeps the address of a principal.
+fn organizer_addresses(component: &Component) -> Option<Vec<String>> {
+    let p = component.prop("ORGANIZER")?;
+    Some(p.address().into_iter().chain(p.param("EMAIL")).map(str::to_ascii_lowercase).collect())
+}
+
+fn is_one_of(attendee: &Prop, addresses: &[String]) -> bool {
+    attendee.address().is_some_and(|a| addresses.iter().any(|o| o.eq_ignore_ascii_case(a)))
+}
+
+/// Every guest's answer back to NEEDS-ACTION, as the organizer's client
+/// does for a server that schedules (RFC 6638): the server mails what the
+/// copy says. The organizer's own line stays.
+fn ask_again(component: &mut Component, rsvp: bool) {
+    let organizer = organizer_addresses(component).unwrap_or_default();
+    component.update(
+        "ATTENDEE",
+        |p| !is_one_of(p, &organizer),
+        |p| {
+            p.set_param("PARTSTAT", "NEEDS-ACTION");
+            if rsvp {
+                p.set_param("RSVP", "TRUE");
+            }
+        },
+    );
 }
 
 #[cfg(test)]
@@ -457,23 +545,23 @@ mod tests {
         let update = OpWrite::Update { held: &stored, base: &base, event: &mine, extra: None, dropped: &[] };
         for (status, expected) in [("412 Precondition Failed", Written::Stale), ("404 Not Found", Written::Gone)] {
             let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(APPLE.into())), (status, None, None)]).await;
-            assert_eq!(dav.write(&calendar, &update).await.unwrap(), expected);
+            assert_eq!(dav.write(&calendar, &update, Tell::NOBODY).await.unwrap(), expected);
             assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics", "PUT /cal/standup.ics If-Match \"1\""]);
         }
         let (dav, calendar, server) = caldav_server(vec![("404 Not Found", None, None)]).await;
-        assert_eq!(dav.write(&calendar, &update).await.unwrap(), Written::Gone);
+        assert_eq!(dav.write(&calendar, &update, Tell::NOBODY).await.unwrap(), Written::Gone);
         assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics"], "deleted since: no PUT, which iCloud would take and make it again");
         let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"5\""), Some(APPLE.into()))]).await;
-        assert_eq!(dav.write(&calendar, &update).await.unwrap(), Written::Stale);
+        assert_eq!(dav.write(&calendar, &update, Tell::NOBODY).await.unwrap(), Written::Stale);
         assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics"], "changed since: no PUT");
         let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(APPLE.into())), ("204 No Content", Some("\"2\""), None)]).await;
-        let Written::Saved(Some(v)) = dav.write(&calendar, &update).await.unwrap() else { panic!("saved") };
+        let Written::Saved(Some(v)) = dav.write(&calendar, &update, Tell::NOBODY).await.unwrap() else { panic!("saved") };
         assert_eq!((v.etag.as_deref(), v.events.len()), (Some("\"2\""), 2), "the series and its changed occurrence");
         server.await.unwrap();
 
         let (unread, _) = held(None);
         let (dav, calendar, server) = caldav_server(vec![]).await;
-        assert_eq!(dav.write(&calendar, &OpWrite::Update { held: &unread, base: &base, event: &mine, extra: None, dropped: &[] }).await.unwrap(), Written::Stale, "nothing without an ETag");
+        assert_eq!(dav.write(&calendar, &OpWrite::Update { held: &unread, base: &base, event: &mine, extra: None, dropped: &[] }, Tell::NOBODY).await.unwrap(), Written::Stale, "nothing without an ETag");
         assert!(server.await.unwrap().is_empty());
     }
 
@@ -485,13 +573,13 @@ mod tests {
         let first = created_text(std::slice::from_ref(&e), None).unwrap();
         let create = OpWrite::Create { events: std::slice::from_ref(&e), key: "/cal/jolta-l.ics", extra: None };
         let (dav, calendar, server) = caldav_server(vec![("412 Precondition Failed", None, None), ("200 OK", Some("\"7\""), Some(first.clone()))]).await;
-        let Written::Saved(Some(v)) = dav.write(&calendar, &create).await.unwrap() else { panic!("saved") };
+        let Written::Saved(Some(v)) = dav.write(&calendar, &create, Tell::NOBODY).await.unwrap() else { panic!("saved") };
         assert_eq!((v.remote_id.as_str(), v.etag.as_deref(), v.events[0].title.as_str()), ("/cal/jolta-l.ics", Some("\"7\""), "Lunch"));
         assert_eq!(server.await.unwrap(), ["PUT /cal/jolta-l.ics If-None-Match *", "GET /cal/jolta-l.ics"]);
 
         let other = first.replace("l@jolta.app", "someone-else");
         let (dav, calendar, _) = caldav_server(vec![("412 Precondition Failed", None, None), ("200 OK", Some("\"7\""), Some(other))]).await;
-        assert!(dav.write(&calendar, &create).await.is_err(), "another event at that name is left alone");
+        assert!(dav.write(&calendar, &create, Tell::NOBODY).await.is_err(), "another event at that name is left alone");
     }
 
     /// iCloud moves a resource whatever ETag If-Match names, so it is read
@@ -502,28 +590,109 @@ mod tests {
         let (stored, _) = held(Some("\"1\""));
         let home = |calendar: &Calendar| Calendar { remote_id: calendar.remote_id.replace("/cal/", "/home/"), ..calendar.clone() };
         let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(APPLE.into())), ("201 Created", None, None), ("200 OK", Some("\"2\""), Some(APPLE.into()))]).await;
-        let Written::Saved(Some(v)) = dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap() else { panic!("moved") };
+        let Written::Saved(Some(v)) = dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }, Tell::NOBODY).await.unwrap() else { panic!("moved") };
         assert_eq!((v.remote_id.as_str(), v.etag.as_deref()), ("/home/standup.ics", Some("\"2\"")), "the same name in the other calendar, at the version it has there");
         assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics", "MOVE /cal/standup.ics If-Match \"1\"", "GET /home/standup.ics"]);
 
         let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"5\""), Some(APPLE.into()))]).await;
-        assert_eq!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap(), Written::Stale);
+        assert_eq!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }, Tell::NOBODY).await.unwrap(), Written::Stale);
         assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics"], "changed since: no MOVE");
 
         let (dav, calendar, server) = caldav_server(vec![("404 Not Found", None, None), ("200 OK", Some("\"2\""), Some(APPLE.into()))]).await;
-        assert!(matches!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap(), Written::Saved(Some(_))), "the first try moved it");
+        assert!(matches!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }, Tell::NOBODY).await.unwrap(), Written::Saved(Some(_))), "the first try moved it");
         assert_eq!(server.await.unwrap(), ["GET /cal/standup.ics", "GET /home/standup.ics"]);
         let (dav, calendar, _) = caldav_server(vec![("404 Not Found", None, None), ("404 Not Found", None, None)]).await;
-        assert_eq!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }).await.unwrap(), Written::Gone);
+        assert_eq!(dav.write(&calendar, &OpWrite::Move { held: &stored, to: &home(&calendar) }, Tell::NOBODY).await.unwrap(), Written::Gone);
     }
 
     #[tokio::test]
     async fn a_delete_carries_the_held_etag() {
         let (stored, _) = held(Some("\"1\""));
         let (dav, calendar, server) = caldav_server(vec![("204 No Content", None, None)]).await;
-        assert_eq!(dav.write(&calendar, &OpWrite::Delete { held: &stored }).await.unwrap(), Written::Saved(None));
+        assert_eq!(dav.write(&calendar, &OpWrite::Delete { held: &stored }, Tell::NOBODY).await.unwrap(), Written::Saved(None));
         assert_eq!(server.await.unwrap(), ["DELETE /cal/standup.ics If-Match \"1\""]);
     }
+    /// iCloud mails a new time or place on its own, but not a new title
+    /// (C3 U11, R3 A10: the guests never heard). With Send, every guest who
+    /// stays asks the server to send (SCHEDULE-FORCE-SEND, RFC 6638 7.3),
+    /// which iCloud does; without it nothing is forced. The copy Jolta keeps
+    /// holds no such parameter, so a later edit forces nothing again.
+    #[tokio::test]
+    async fn send_makes_the_server_tell_every_guest() {
+        let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m@example.com\r\nDTSTAMP:20261101T120000Z\r\n\
+            DTSTART:20261124T090000Z\r\nDTEND:20261124T093000Z\r\nSUMMARY:Review\r\nORGANIZER:mailto:me@example.com\r\n\
+            ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;SCHEDULE-STATUS=2.0:mailto:ann@example.com\r\n\
+            SEQUENCE:1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let base = read(text).remove(0);
+        let stored = Stored { id: EventId(1), remote_id: "/cal/m.ics".into(), etag: Some("\"1\"".into()), raw: Some(text.as_bytes().to_vec()), data: base.clone() };
+        let renamed = EventData { title: "Design review".into(), ..base.clone() };
+        let update = OpWrite::Update { held: &stored, base: &base, event: &renamed, extra: None, dropped: &[] };
+        // iCloud keeps its ORGANIZER as a principal, the address in EMAIL.
+        let icloud = text.replace("ORGANIZER:mailto:me@example.com", "ORGANIZER;EMAIL=me@example.com:/aODI4/principal/");
+        let icloud_held = Stored { raw: Some(icloud.as_bytes().to_vec()), ..stored.clone() };
+        let icloud_update = OpWrite::Update { held: &icloud_held, base: &base, event: &renamed, extra: None, dropped: &[] };
+        for (update, notify, forced) in [(&update, Notify::All, true), (&update, Notify::Changed, false), (&icloud_update, Notify::All, true)] {
+            let served = if std::ptr::eq(update, &icloud_update) { icloud.clone() } else { text.to_string() };
+            let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(served)), ("204 No Content", Some("\"2\""), None)]).await;
+            let Written::Saved(Some(v)) = dav.write(&calendar, update, Tell { notify, message: None }).await.unwrap() else { panic!("saved") };
+            let put = format!("PUT /cal/m.ics If-Match \"1\"{}", if forced { " forces a send" } else { "" });
+            assert_eq!(server.await.unwrap(), ["GET /cal/m.ics".to_string(), put], "{notify:?}");
+            assert!(!String::from_utf8_lossy(v.raw.as_deref().unwrap()).contains("SCHEDULE-FORCE-SEND"), "the copy kept");
+        }
+
+        // iCloud keeps the mark, and mails only for a PUT that adds it
+        // (iCloud test account, 2026-11-08): a copy that has it is put back
+        // without it first, which mails nobody, then the change goes forced.
+        let marked = icloud.replace("ATTENDEE;CN=Ann;", "ATTENDEE;SCHEDULE-FORCE-SEND=REQUEST;CN=Ann;");
+        let marked_held = Stored { raw: Some(marked.as_bytes().to_vec()), ..stored.clone() };
+        let update = OpWrite::Update { held: &marked_held, base: &base, event: &renamed, extra: None, dropped: &[] };
+        let (dav, calendar, server) = caldav_server(vec![
+            ("200 OK", Some("\"1\""), Some(marked.clone())),
+            ("204 No Content", Some("\"2\""), None),
+            ("204 No Content", Some("\"3\""), None),
+        ])
+        .await;
+        let Written::Saved(Some(v)) = dav.write(&calendar, &update, Tell { notify: Notify::All, message: None }).await.unwrap() else { panic!("saved") };
+        assert_eq!(server.await.unwrap(), ["GET /cal/m.ics", "PUT /cal/m.ics If-Match \"1\"", "PUT /cal/m.ics If-Match \"2\" forces a send"]);
+        assert_eq!(v.etag.as_deref(), Some("\"3\""));
+        let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(marked)), ("204 No Content", Some("\"2\""), None)]).await;
+        dav.write(&calendar, &update, Tell { notify: Notify::Changed, message: None }).await.unwrap();
+        assert_eq!(server.await.unwrap(), ["GET /cal/m.ics", "PUT /cal/m.ics If-Match \"1\""], "without Send the mark goes, which mails nobody");
+    }
+
+    /// A meeting the server schedules takes its guests' answers from the
+    /// organizer's copy: a new time asks them again, as Apple's Calendar
+    /// does, and iCloud kept "accepted" for a guest who never saw the new
+    /// time (C3 U11, R3 A4). A new place keeps the answers, and so does a
+    /// series that only ends sooner; the organizer's own line stays.
+    #[test]
+    fn a_new_time_asks_the_guests_again() {
+        let text = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m@example.com\r\nDTSTAMP:20261101T120000Z\r\n\
+            DTSTART:20261124T090000Z\r\nDTEND:20261124T093000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\nSUMMARY:Review\r\nORGANIZER:mailto:me@icloud.com\r\n\
+            ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@icloud.com\r\n\
+            ATTENDEE;CN=Ann;PARTSTAT=ACCEPTED;SCHEDULE-STATUS=2.0:mailto:ann@example.com\r\nSEQUENCE:1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let base = read(text).remove(0);
+        let ann = |out: &str| out.replace("\r\n ", "").lines().find(|l| l.contains("ann@example.com")).unwrap().to_string();
+        let placed = EventData { location: "Room 4".into(), ..base.clone() };
+        assert!(ann(&edited_text(text, &base, &placed, None, &[], Brussels).unwrap()).contains("PARTSTAT=ACCEPTED"), "a new place");
+        let shorter = EventData { recurrence: Some(crate::calendar::Recurrence { rules: vec!["FREQ=WEEKLY;COUNT=2".into()], ..Default::default() }), ..base.clone() };
+        assert!(ann(&edited_text(text, &base, &shorter, None, &[], Brussels).unwrap()).contains("PARTSTAT=ACCEPTED"), "fewer occurrences");
+        let mut moved = base.clone();
+        let utc = |s: &str| Local { wall: NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(chrono_tz::UTC) };
+        moved.span = Span::Timed { start: utc("2026-11-24 11:00"), end: utc("2026-11-24 11:30") };
+        let out = edited_text(text, &base, &moved, None, &[], Brussels).unwrap();
+        assert!(ann(&out).contains("PARTSTAT=NEEDS-ACTION") && ann(&out).contains("RSVP=TRUE"), "{}", ann(&out));
+        assert!(out.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@icloud.com\r\n"), "the organizer's own line: {out}");
+
+        let second = Moment::Time(Local { wall: NaiveDateTime::parse_from_str("2026-12-01 09:00", "%Y-%m-%d %H:%M").unwrap(), zone: Zone::Tz(chrono_tz::UTC) });
+        let was = crate::calendar::series::occurrence(std::slice::from_ref(&base), &second, Brussels).unwrap();
+        let mut moved = was.clone();
+        moved.span = Span::Timed { start: utc("2026-12-01 11:00"), end: utc("2026-12-01 11:30") };
+        let out = edited_text(text, &was, &moved, None, &[], Brussels).unwrap().replace("\r\n ", "");
+        let last_ann = out.lines().filter(|l| l.contains("ann@example.com")).last().unwrap().to_string();
+        assert!(out.contains("RECURRENCE-ID") && last_ann.contains("PARTSTAT=NEEDS-ACTION"), "an occurrence moved the first time: {out}");
+    }
+
     /// A meeting iCloud scheduled: a guest who stays keeps their line with
     /// what the server added, a new one gets RSVP from Request responses, a
     /// removed one goes, and only the user organizes.

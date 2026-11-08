@@ -692,15 +692,24 @@ pub(crate) mod tests {
             for (status, etag, body) in answers {
                 let Ok(Ok((mut socket, _))) = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await else { break };
                 let mut request = vec![0; 16384];
-                let n = socket.read(&mut request).await.unwrap();
+                let mut n = socket.read(&mut request).await.unwrap();
+                let wanted = |got: &[u8]| {
+                    let text = String::from_utf8_lossy(got);
+                    let length = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()));
+                    text.find("\r\n\r\n").map(|end| end + 4 + length.unwrap_or(0))
+                };
+                while wanted(&request[..n]).is_some_and(|w| n < w) {
+                    n += socket.read(&mut request[n..]).await.unwrap();
+                }
                 let request = String::from_utf8_lossy(&request[..n]).to_string();
                 let first = request.lines().next().unwrap_or_default().trim_end_matches(" HTTP/1.1").to_string();
                 let guard = request.lines().find_map(|l| l.to_ascii_lowercase().starts_with("if-match:").then(|| l[9..].trim().to_string()));
                 let absent = request.lines().find_map(|l| l.to_ascii_lowercase().starts_with("if-none-match:").then(|| l[14..].trim().to_string()));
+                let forces = if request.replace("\r\n ", "").contains("SCHEDULE-FORCE-SEND=REQUEST") { " forces a send" } else { "" };
                 seen.push(match (guard, absent) {
-                    (Some(etag), _) => format!("{first} If-Match {etag}"),
-                    (None, Some(any)) => format!("{first} If-None-Match {any}"),
-                    (None, None) => first,
+                    (Some(etag), _) => format!("{first} If-Match {etag}{forces}"),
+                    (None, Some(any)) => format!("{first} If-None-Match {any}{forces}"),
+                    (None, None) => format!("{first}{forces}"),
                 });
                 let body = body.unwrap_or_default();
                 let etag = etag.map(|e| format!("ETag: {e}\r\n")).unwrap_or_default();

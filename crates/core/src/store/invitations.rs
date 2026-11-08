@@ -39,6 +39,44 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
             timing(i),
         ])?;
     }
+    for i in invitations.iter().filter(|i| i.method == Method::Cancel && i.event.recurrence_id.is_none()) {
+        forget_answer(conn, id, i)?;
+    }
+    Ok(())
+}
+
+/// The organizer's cancellation of the whole event, newer than every
+/// invitation to it on the account, ends the answer given and takes back
+/// its reply still waiting: an invitation after it, such as the organizer
+/// adding the user again, asks for a new one.
+fn forget_answer(conn: &Connection, message: MessageId, cancel: &Invitation) -> Result<()> {
+    let uid = &cancel.event.uid;
+    let (account, address, from): (AccountId, String, String) = conn.query_row(
+        "SELECT m.account_id, a.address, m.from_addr FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let me = [address];
+    let organizer = update::organizer(conn, account, &me, uid)?;
+    let named = cancel.event.organizer.as_ref().map(|o| o.address.as_str()).unwrap_or_default();
+    let newer_invitation: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM invitation i JOIN message m ON m.id = i.message_id, message c
+             WHERE c.id = ?1 AND i.uid = ?2 AND i.method IN ('REQUEST', 'ADD') AND m.account_id = c.account_id
+               AND (m.date, m.id) > (c.date, c.id))",
+        params![message, uid],
+        |r| r.get(0),
+    )?;
+    if newer_invitation || !update::sent_by(&me, organizer.as_deref(), named, &from) {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare_cached(
+        "SELECT o.id FROM invitation_answer a JOIN outbox o ON o.id = a.reply WHERE a.account_id = ?1 AND a.uid = ?2 AND o.state = 'queued'",
+    )?;
+    let waiting = stmt.query_map(params![account, uid], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for reply in waiting {
+        super::cancel_send(conn, reply)?;
+    }
+    conn.execute("DELETE FROM invitation_answer WHERE account_id = ?1 AND uid = ?2", params![account, uid])?;
     Ok(())
 }
 
@@ -98,9 +136,16 @@ pub struct StoredEvent {
 /// mail and never decides who organizes the meeting.
 const NOT_ADDED: &str = "NOT EXISTS (SELECT 1 FROM added_copy a WHERE a.calendar_id = e.calendar_id AND (a.uid = e.uid OR a.remote_id = e.remote_id))";
 
+/// The calendars `c` of the account bound to `param`: its own, and the ones
+/// on this Mac that send their meetings' invitations from it, whose
+/// meetings are the account's as a meeting in its own calendar is.
+fn of_account(param: &str) -> String {
+    format!("(c.account_id = {param} OR (c.source = 'local' AND c.send_from = {param}))")
+}
+
 /// The event with this UID and recurrence id in a shown calendar, of
-/// `account` only when one is given, and then never a copy the user added
-/// (`NOT_ADDED`). A recurrence id matches the same moment written in
+/// `account` only when one is given (`of_account`), and then never a copy
+/// the user added (`NOT_ADDED`). A recurrence id matches the same moment written in
 /// another zone, as `Moment::names` decides. A meeting in several calendars
 /// gives the copy the views show.
 pub fn stored_event(conn: &Connection, uid: &str, recurrence_id: Option<&Moment>, account: Option<AccountId>, here: Tz) -> Result<Option<StoredEvent>> {
@@ -117,15 +162,16 @@ pub fn stored_event_in(
     keep: impl Fn(&Calendar) -> bool,
 ) -> Result<Option<StoredEvent>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
+        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR (c.account_id = ?3 AND {NOT_ADDED}))"
+         WHERE e.uid = ?1 AND (e.recurrence_id = '') = ?2 AND c.shown AND (?3 IS NULL OR ({} AND {NOT_ADDED}))",
+        of_account("?3")
     ))?;
     let rows = stmt.query_map(params![uid, recurrence_id.is_none(), account], |r| {
         let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-        Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, source, r.get::<_, String>(4)?))
+        Ok((copy_rank(uid, r.get(5)?, source, is_default, calendar_id), event_id, calendar_id, source, r.get::<_, String>(4)?))
     })?;
-    let mut best: Option<((bool, bool, i64), StoredEvent)> = None;
+    let mut best: Option<((bool, bool, bool, i64), StoredEvent)> = None;
     for row in rows {
         let (rank, event_id, calendar_id, source, data) = row?;
         if best.as_ref().is_some_and(|(b, _)| *b <= rank) || !keep(&super::calendar(conn, calendar_id)?) {
@@ -145,14 +191,15 @@ pub fn stored_event_in(
 /// only when one is given, and then never a copy the user added.
 pub fn stored_series(conn: &Connection, uid: &str, account: Option<AccountId>) -> Result<Vec<EventData>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data
+        "SELECT e.id, e.calendar_id, c.source, c.is_default, e.data, ifnull(json_extract(e.data, '$.organizer_is_me'), 0)
          FROM event e JOIN calendar c ON c.id = e.calendar_id
-         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR (c.account_id = ?2 AND {NOT_ADDED}))"
+         WHERE e.uid = ?1 AND c.shown AND (?2 IS NULL OR ({} AND {NOT_ADDED}))",
+        of_account("?2")
     ))?;
     let rows = stmt
         .query_map(params![uid, account], |r| {
             let (event_id, calendar_id, source, is_default): (EventId, CalendarId, CalendarSource, bool) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-            Ok((copy_rank(uid, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
+            Ok((copy_rank(uid, r.get(5)?, source, is_default, calendar_id), event_id, calendar_id, r.get::<_, String>(4)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let Some(best) = rows.iter().map(|(rank, _, calendar, _)| (*rank, *calendar)).min() else { return Ok(Vec::new()) };

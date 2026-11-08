@@ -963,6 +963,37 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
+    /// Taken off a meeting and invited again (C3 U11, A5): the answer given
+    /// before the cancellation is no answer to the new invitation, which the
+    /// organizer sends asking for one, at the same SEQUENCE on Google. A
+    /// cancellation older than the invitation answered changes nothing.
+    #[test]
+    fn a_cancellation_ends_the_answer_and_a_new_invitation_asks_again() {
+        use crate::calendar::card::tests::{V1, version};
+        let (j, _) = jolta("respond-reinvited");
+        let dated = |hour: u32, id: &str, method: &str| {
+            format!("Date: Mon, 16 Nov 2026 {hour}:00:00 +0000\r\n{}", version(id, "again", method, 1, &format!("20261116T{hour}0000Z"), V1))
+        };
+        let first = dated(10, "r1", "REQUEST");
+        let m1 = import(&j, first.as_bytes());
+        run(&j, request(m1, Answer::Accept, None, true, false)).unwrap();
+        assert_eq!(card_answer(&j, m1, first.as_bytes()), Some(Response::Accepted));
+        let posing = dated(11, "x1", "CANCEL").replace("From: ann@example.com", "From: eve@example.net");
+        import(&j, posing.as_bytes());
+        assert_eq!(card_answer(&j, m1, first.as_bytes()), Some(Response::Accepted), "a stranger's cancellation ends nothing");
+        assert_eq!(replies(&j).len(), 1, "and the reply still goes");
+        import(&j, dated(11, "r2", "CANCEL").as_bytes());
+        assert!(replies(&j).is_empty(), "the Accept still waiting goes with the answer");
+        let again = dated(12, "r3", "REQUEST");
+        let m3 = import(&j, again.as_bytes());
+        assert_eq!(card_answer(&j, m3, again.as_bytes()), None, "invited again after the cancellation: no answer yet, as a first invitation");
+
+        run(&j, request(m3, Answer::Accept, None, true, false)).unwrap();
+        import(&j, dated(9, "r0", "CANCEL").as_bytes());
+        assert_eq!(card_answer(&j, m3, again.as_bytes()), Some(Response::Accepted), "an older cancellation read late");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
     /// "Don't send a reply" keeps the version answered as a reply mail
     /// would: the card and the list keep the answer for a new title, and ask
     /// again for a new day or a new repeat rule.
