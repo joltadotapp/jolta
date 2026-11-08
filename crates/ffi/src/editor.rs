@@ -165,7 +165,21 @@ pub struct UpdateDialogInfo {
     pub body: String,
     /// Where a message field would be: "To add a note, use Email guests after saving."
     pub note: Option<String>,
+    /// Shows a message field: Jolta's own mail carries the user's words.
+    pub message: bool,
     pub choices: Vec<SendChoice>,
+}
+
+/// An account the user can pick in Send invitations from.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct SenderInfo {
+    pub account_id: i64,
+    pub address: String,
+    pub name: String,
+}
+
+fn senders(list: Vec<draft::Sender>) -> Vec<SenderInfo> {
+    list.into_iter().map(|s| SenderInfo { account_id: s.account.0, address: s.address, name: s.name }).collect()
 }
 
 impl From<cal::change::UpdateDialog> for UpdateDialogInfo {
@@ -175,6 +189,7 @@ impl From<cal::change::UpdateDialog> for UpdateDialogInfo {
             title: d.title,
             body: d.body,
             note: d.note,
+            message: d.message,
             choices: d
                 .choices
                 .into_iter()
@@ -297,6 +312,9 @@ pub struct SavePlan {
     /// Send an update?, after the scope prompt; saving then passes the
     /// chosen button's notify to `save_event`.
     pub dialog: Option<UpdateDialogInfo>,
+    /// Send invitations from, before the dialog: the accounts to pick from
+    /// with `set_send_from` when the calendar has none to mail from yet.
+    pub senders: Vec<SenderInfo>,
 }
 
 /// Which events of a series a change or delete is for.
@@ -365,6 +383,8 @@ pub struct DeletePlan {
     pub cancel: Vec<CancelDialogInfo>,
     /// For a meeting someone else organizes, in place of a delete.
     pub decline: Option<DeclineInfo>,
+    /// Send invitations from, before the cancel dialog.
+    pub senders: Vec<SenderInfo>,
 }
 
 impl From<draft::DeletePlan> for DeletePlan {
@@ -380,6 +400,7 @@ impl From<draft::DeletePlan> for DeletePlan {
                 .map(|(scope, d)| CancelDialogInfo { scope: scope.into(), title: d.title, body: d.body, message: d.message, note: d.note })
                 .collect(),
             decline: plan.decline.map(|d| DeclineInfo { title: d.title, body: d.body, organizer: d.organizer }),
+            senders: senders(plan.senders),
         }
     }
 }
@@ -609,7 +630,7 @@ impl Core {
     pub fn plan_save(&self, draft: EventDraft) -> Result<SavePlan> {
         let d = draft::EventDraft::try_from(&draft)?;
         let plan = self.jolta.store.read(|c| draft::plan_save(c, &d, tz::here()))?;
-        Ok(SavePlan { unchanged: plan.unchanged, scopes: choices(plan.scopes), prompt: plan.prompt, dialog: plan.dialog.map(Into::into) })
+        Ok(SavePlan { unchanged: plan.unchanged, scopes: choices(plan.scopes), prompt: plan.prompt, dialog: plan.dialog.map(Into::into), senders: senders(plan.senders) })
     }
 
     /// Saves the draft for `scope` when `plan_save` asked for one, telling
@@ -678,6 +699,22 @@ impl Core {
     pub fn set_default_calendar(&self, calendar_id: i64) -> Result<()> {
         self.jolta.store.write(|tx| store::set_default_calendar(tx, Some(CalendarId(calendar_id))))?;
         self.calendar_changed([CalendarId(calendar_id)]);
+        Ok(())
+    }
+
+    /// The account a calendar on this Mac sends its meetings' invitations
+    /// from: Send invitations from, and Settings › Calendar.
+    pub fn set_send_from(&self, calendar_id: i64, account_id: i64) -> Result<()> {
+        let id = CalendarId(calendar_id);
+        self.jolta.store.write(|tx| {
+            let calendar = store::calendar(tx, id)?;
+            if !cal::organizer::sends_itself(&calendar) {
+                return Err(jolta_core::Error::Other(format!("{} mails its guests itself", calendar.name)));
+            }
+            store::account(tx, jolta_core::AccountId(account_id))?;
+            store::set_calendar_send_from(tx, id, Some(jolta_core::AccountId(account_id)))
+        })?;
+        self.calendar_changed([id]);
         Ok(())
     }
 

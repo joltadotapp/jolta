@@ -45,16 +45,20 @@ struct State {
     failures: HashMap<CalendarId, (u32, String)>,
 }
 
+/// Asks an account's mail worker to send what its outbox holds now.
+pub type MailWaker = Box<dyn Fn(crate::AccountId) + Send + Sync>;
+
 pub struct Scheduler {
     jolta: Jolta,
     sink: Sink,
     wake: Notify,
     state: Mutex<State>,
+    mail: std::sync::OnceLock<MailWaker>,
 }
 
 impl Scheduler {
     pub fn start(jolta: Jolta, sink: Sink, runtime: &tokio::runtime::Handle) -> Arc<Scheduler> {
-        let scheduler = Arc::new(Scheduler { jolta, sink, wake: Notify::new(), state: Mutex::default() });
+        let scheduler = Arc::new(Scheduler { jolta, sink, wake: Notify::new(), state: Mutex::default(), mail: std::sync::OnceLock::new() });
         runtime.spawn(scheduler.clone().run());
         scheduler
     }
@@ -68,6 +72,12 @@ impl Scheduler {
     pub fn sync(&self, id: CalendarId) {
         self.state().wanted.insert(id);
         self.wake.notify_one();
+    }
+
+    /// How the invitations an op queues get sent at once: the mail engine's
+    /// wake for the sending account.
+    pub fn on_mail(&self, wake: MailWaker) {
+        let _ = self.mail.set(wake);
     }
 
     /// Sends calendar ops that are due now, such as an edit just queued.
@@ -147,6 +157,9 @@ impl Scheduler {
         let settled = ops::run_due(&self.jolta, Horizon::around(Utc::now(), tz::here())).await?;
         let mut changed: Vec<CalendarId> = Vec::new();
         for s in settled {
+            if let (Some(account), Some(wake)) = (s.mailed, self.mail.get()) {
+                wake(account);
+            }
             if let Some(f) = s.failure {
                 (self.sink)(Event::CalendarOpFailed { calendar: s.calendar, event: f.event, message: f.message });
             }

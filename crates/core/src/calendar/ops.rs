@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use super::change::{FIELDS, Field};
 use super::series::Horizon;
 use super::sources::{self, OpWrite, Source, Tell, Version, Written};
-use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, merge, rsvp, series as occurrences};
+use super::{Alarm, Calendar, CalendarId, CalendarSource, EventData, EventId, EventStatus, Moment, caps, merge, organizer, rsvp, series as occurrences};
 use crate::model::text_enum;
 use crate::{Error, Jolta, Result, store};
 
@@ -260,7 +260,21 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
     if !caps::of(&calendar).writable {
         return Err(Error::Other(format!("{} is read-only", calendar.name)));
     }
-    let Some(Planned { write, remote_key, held }) = plan(conn, &calendar, &edit.change, horizon.here)? else { return Ok(None) };
+    // A new meeting Jolta mails itself is the sending account's: stamped
+    // before the store is compared, so the same create again is no change.
+    let mut change = edit.change.clone();
+    let mails_itself = organizer::sends_itself(&calendar);
+    if let (true, Change::Create(events)) = (mails_itself, &mut change)
+        && let Some(first) = events.first().cloned()
+    {
+        let sender = organizer::sender(conn, &calendar, &first)?;
+        events.iter_mut().for_each(|e| organizer::stamp(e, sender.as_ref()));
+    }
+    let Some(Planned { mut write, remote_key, held }) = plan(conn, &calendar, &change, horizon.here)? else { return Ok(None) };
+    if mails_itself && let Some(e) = write.event() {
+        let sender = organizer::sender(conn, &calendar, e)?;
+        organizer::prepare(&mut write, sender.as_ref(), edit.notify);
+    }
     check(conn, &calendar, &write, &remote_key, held.as_ref(), edit.extra.as_ref(), Some(edit.notify))?;
     let first = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;
     let (uid, recurrence_id) = (first.uid.clone(), if matches!(write, Write::Update { .. } | Write::Cancel { .. }) { first.recurrence_id } else { None });
@@ -271,6 +285,7 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
     };
     let waits = edit.notify != Notify::Nobody || write.removes_occurrences() || link.following;
     let delay = if waits { UNDO_SEND_SECONDS } else { 0 };
+    let series_update = matches!(&write, Write::Update { event, .. } if event.recurrence_id.is_none());
     apply(conn, calendar.id, &write, &remote_key, horizon)?;
     let id = store::insert_calendar_op(
         conn,
@@ -297,6 +312,12 @@ pub(super) fn queue_op(conn: &Connection, edit: &Edit, link: Link, now: i64, hor
             after: link.after,
         },
     )?;
+    // Its update carries the series' changed occurrences as this op left
+    // them, not as later edits still to be sent or undone have them.
+    if mails_itself && series_update {
+        let changed: Vec<EventData> = series(conn, calendar.id, &uid)?.into_iter().filter(|e| e.recurrence_id.is_some()).collect();
+        store::set_calendar_op_changed(conn, id, &changed)?;
+    }
     store::refresh_changed_locally(conn, calendar.id, &uid)?;
     Ok(Some(id))
 }
@@ -318,13 +339,7 @@ pub fn refusal(conn: &Connection, edit: &Edit) -> Result<Option<String>> {
 /// guests anyway, and any change the provider's request can't carry.
 /// `notify` is None when only the change is checked, before the user chose.
 fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held: Option<&Held>, extra: Option<&Extra>, notify: Option<Notify>) -> Result<()> {
-    if calendar.source == CalendarSource::Local {
-        return Ok(());
-    }
-    let account = match calendar.account_id {
-        Some(a) => store::account(conn, a)?.address,
-        None => String::new(),
-    };
+    let account = store::calendar_address(conn, calendar)?.unwrap_or_default();
     let caps = caps::of(calendar);
     let title = write.event().map_or("the event", |e| e.title.as_str());
     let mails = match write {
@@ -353,6 +368,16 @@ fn check(conn: &Connection, calendar: &Calendar, write: &Write, key: &str, held:
             !super::draft::guests(calendar, &account, occurrence).is_empty()
         }
     };
+    if organizer::sends_itself(calendar) {
+        let event = write.event().ok_or_else(|| Error::Other("an edit without an event".into()))?;
+        return match notify {
+            Some(Notify::Outside) => Err(Error::Other("Jolta can't tell which guests use another calendar, so it mails all of them or none".into())),
+            Some(Notify::All | Notify::Changed) if mails && organizer::sender(conn, calendar, event)?.is_none() => {
+                Err(Error::Other(format!("Choose the account Jolta sends the invitations for {} from first", calendar.name)))
+            }
+            _ => Ok(()),
+        };
+    }
     match notify {
         Some(Notify::Nobody) if mails && caps.hold_update == caps::Hold::NeverForMeetingFields => {
             return Err(Error::Other(format!("{} emails the guests of {title} about this change, so Jolta can't save it without sending", caps::mailer(calendar))));
@@ -437,7 +462,10 @@ fn plan(conn: &Connection, calendar: &Calendar, change: &Change, here: Tz) -> Re
                 let held = on_server.then(|| Held { remote_id: master.remote_id.clone(), etag: master.etag.clone() });
                 return Ok(Some(Planned { write: Write::Update { base, event: event.clone(), dropped: Vec::new(), fresh: true }, remote_key: master.remote_id, held }));
             };
-            if base.event == *event {
+            // The SEQUENCE Jolta raised for a local meeting is no change of
+            // the user's: the same edit again holds the one it started from.
+            let same = EventData { sequence: base.event.sequence.max(event.sequence), ..event.clone() };
+            if base.event == same {
                 return Ok(None);
             }
             let dropped = dropped(conn, calendar, &base.event, event, here)?;
@@ -838,6 +866,8 @@ pub fn apply_mine(conn: &Connection, id: CalendarOpId, now: i64, horizon: &Horiz
 pub struct Settled {
     pub op: CalendarOpId,
     pub calendar: CalendarId,
+    /// The account whose outbox got the op's invitations, to send them now.
+    pub mailed: Option<crate::AccountId>,
     /// The op failed, met a conflict or found its event deleted, and its
     /// change wasn't saved: what to tell the user.
     pub failure: Option<Failure>,
@@ -977,7 +1007,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
         }
     }
     store::refresh_changed_locally(conn, op.calendar, &op.uid)?;
-    Ok(Settled { op: op.id, calendar: op.calendar, failure })
+    Ok(Settled { op: op.id, calendar: op.calendar, mailed: None, failure })
 }
 
 /// This and following whose old series the server kept whole: the new
@@ -1102,18 +1132,26 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
         .await;
         for (op, result) in sent {
             let now = chrono::Utc::now().timestamp();
-            out.push(jolta.store.write_async(move |tx| settle(tx, &op, result, now, &horizon)).await?);
+            let (result, mailed) = match result {
+                Ok((sent, mailed)) => (Ok(sent), mailed),
+                Err(e) => (Err(e), None),
+            };
+            let settled = jolta.store.write_async(move |tx| settle(tx, &op, result, now, &horizon)).await?;
+            out.push(Settled { mailed, ..settled });
         }
     }
 }
 
 /// Reaches the op's server and keeps the text of the object it left there.
-/// A local calendar's store is its server, which `queue` already wrote.
-async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
+/// A local calendar's store is its server, which `queue` already wrote; its
+/// guests hear of the op through the outbox of the account it sends from,
+/// which comes back with the result.
+async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<(Sent, Option<crate::AccountId>)> {
     let id = op.calendar;
     let calendar = jolta.store.read_async(move |c| store::calendar(c, id)).await?;
-    if calendar.source == CalendarSource::Local {
-        return Ok(Sent::Done { version: None, merged: false });
+    if organizer::sends_itself(&calendar) {
+        let mailed = mail_guests(jolta, op, &calendar).await?;
+        return Ok((Sent::Done { version: None, merged: false }, mailed));
     }
     let source = super::sync::calendar_source(jolta, &calendar).await?;
     // A CalDAV write goes onto the resource's text, which the row it
@@ -1139,11 +1177,50 @@ async fn send(jolta: &Jolta, op: &CalendarOp) -> Result<Sent> {
         })
         .transpose()
     };
-    Ok(match delivered {
+    let sent = match delivered {
         Delivered::Done { version, merged } => Sent::Done { version: keep(version)?, merged },
         Delivered::Conflict { version, lost } => Sent::Conflict { version: keep(version)?, lost },
         Delivered::Gone => Sent::Gone,
-    })
+    };
+    Ok((sent, None))
+}
+
+/// Queues the mails that tell the guests of `op` what it changed, from the
+/// account the meeting is sent from, and links them to the op. A mail
+/// already in the outbox, from an earlier try of the same op, isn't queued
+/// again. The op waited the undo window already, so they go at once.
+async fn mail_guests(jolta: &Jolta, op: &CalendarOp, calendar: &Calendar) -> Result<Option<crate::AccountId>> {
+    let Some(event) = op.write.event().cloned() else { return Ok(None) };
+    if op.notify == Notify::Nobody {
+        return Ok(None);
+    }
+    let (cal, id) = (calendar.clone(), op.id);
+    let (sender, changed) = jolta.store.read_async(move |c| Ok((organizer::sender(c, &cal, &event)?, store::calendar_op_changed(c, id)?))).await?;
+    let Some(sender) = sender else { return Err(Error::Other(format!("no account sends the invitations for {}", calendar.name))) };
+    let mails = organizer::op_mails(op, &sender, &changed)?;
+    if mails.is_empty() {
+        return Ok(None);
+    }
+    let mut queued = Vec::new();
+    for m in mails {
+        queued.push((jolta.blobs.put(&m.raw)?, m));
+    }
+    let (id, account) = (op.id, sender.id);
+    jolta
+        .store
+        .write_async(move |tx| {
+            let mut ids = Vec::new();
+            for (blob, m) in &queued {
+                let row = match store::outbox_mail(tx, account, &m.message_id)? {
+                    Some(store::ReplyMail::Waiting(row) | store::ReplyMail::Sent(row)) => row,
+                    None => store::queue_outbox(tx, account, None, blob, &m.message_id, &m.from, &m.recipients, None, 0)?,
+                };
+                ids.push(row);
+            }
+            store::set_calendar_op_outbox(tx, id, &ids)
+        })
+        .await?;
+    Ok(Some(account))
 }
 
 /// What the server made of an op, before its text is kept.

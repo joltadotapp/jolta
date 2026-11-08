@@ -234,6 +234,8 @@ pub enum CalCommand {
     },
     /// What Jolta can do with a calendar's events.
     Caps { calendar: i64 },
+    /// The account a calendar on this Mac sends its meetings' invitations from.
+    SendFrom { calendar: i64, account: String },
     /// The event as the editor opens it: its fields, what is locked and
     /// why, and what is wrong with it for its calendar.
     ///
@@ -271,6 +273,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,
         CalCommand::ApplyMine { op, wait } => crate::cal_edit::apply_mine(jolta, op, wait).await,
         CalCommand::Caps { calendar } => crate::cal_edit::print_caps(jolta, calendar),
+        CalCommand::SendFrom { calendar, account } => crate::cal_edit::send_from(jolta, calendar, &account),
         CalCommand::Draft(a) => crate::cal_edit::draft(jolta, a).await,
         CalCommand::Default { calendar, clear } => crate::cal_edit::default_calendar(jolta, calendar, clear),
         CalCommand::Enable { account, port } => {

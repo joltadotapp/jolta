@@ -98,8 +98,10 @@ final class Journeys: XCTestCase {
         app.typeKey("n", modifierFlags: [])
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "n declines")
         XCTAssertTrue(chip(app, "Declined").waitForExistence(timeout: 5), "the list row follows")
-
+        // The reader loads the answered page again, before or after the list
+        // row changes; while it loads, the header isn't laid out.
         let header = reader.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", "Ann Organizer", "Ann Organizer")).firstMatch
+        XCTAssertTrue(waitUntil { header.exists && header.isHittable }, "the page lays out the message header")
         header.click()
         XCTAssertTrue(link("Declined").waitForNonExistence(timeout: 5), "the invitation's message collapses")
         app.typeKey("y", modifierFlags: [])
@@ -110,6 +112,7 @@ final class Journeys: XCTestCase {
         XCTAssertFalse(paletteRow(app, "Accept invitation").waitForExistence(timeout: 2), "the palette offers no answer either")
         app.typeKey(.escape, modifierFlags: [])
 
+        XCTAssertTrue(waitUntil { header.exists && header.isHittable })
         header.click()
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "expanded again, the card is back")
         app.typeKey("k", modifierFlags: .command)
@@ -492,6 +495,51 @@ final class Journeys: XCTestCase {
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(cancel.waitForNonExistence(timeout: 5), "Return keeps the meeting")
         XCTAssertTrue(meeting.exists, "and the meeting stays")
+    }
+
+    /// A meeting in a calendar on this Mac, whose invitations Jolta mails
+    /// itself: the first save asks once which account sends them, Return
+    /// takes the first, and Send invitations? names it and has a message
+    /// field; Return sends after the undo window and Z takes it back. The
+    /// next meeting goes straight to Send invitations?.
+    func testLocalMeetingSendsItself() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        let meeting = { (name: String) in
+            app.typeKey("c", modifierFlags: [])
+            let title = app.textFields["editor-title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor on a calendar on this Mac")
+            title.typeText(name)
+            let people = app.textFields["editor-people"]
+            people.click()
+            people.typeText("ward@example.com\r")
+            XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Save and send")).firstMatch.waitForExistence(timeout: 5), "Save says it sends")
+            app.typeKey(.return, modifierFlags: .command)
+        }
+        let sender = app.descendants(matching: .any).matching(identifier: "sender-dialog").firstMatch
+        let dialog = app.descendants(matching: .any).matching(identifier: "send-dialog").firstMatch
+
+        meeting("Studio review")
+        XCTAssertTrue(sender.waitForExistence(timeout: 5), "the calendar asks which account sends its invitations")
+        XCTAssertTrue(text(app, "Send invitations from").exists)
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5), "then Send invitations?")
+        XCTAssertTrue(text(app, "Send invitations to 1 person?").exists)
+        XCTAssertTrue(text(app, "ward@example.com gets an invitation. Jolta sends them from me@test.invalid.").exists, "it names the account picked")
+        XCTAssertTrue(app.textFields["send-message"].exists, "Jolta's own mail takes a message")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Return sends")
+        XCTAssertTrue(text(app, "Invitation sent to 1 person").waitForExistence(timeout: 5), "the toast offers Undo while the invitation waits")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(text(app, "Undone").waitForExistence(timeout: 5), "Z takes it back before it goes")
+
+        meeting("Studio review again")
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5), "the account is asked once per calendar")
+        XCTAssertFalse(sender.exists)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Esc keeps editing")
+        XCTAssertTrue(app.textFields["editor-people"].exists, "with the editor still open")
     }
 
     /// Settings › Calendar makes a calendar on this Mac, which the calendar

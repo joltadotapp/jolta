@@ -17,9 +17,9 @@ use super::ops::{self, CalendarOpId, Change, Edit, Extra, Scope};
 use super::series::{self, Horizon};
 use super::{
     Alarm, AlarmTrigger, Attendee, Bounds, Calendar, CalendarId, CalendarSource, EventData, EventId, Local, Meeting, MeetingOptions, MeetingProvider,
-    Moment, Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, caps, description, detail, merge, repeat, split, tz,
+    Moment, Person, Recurrence, Response, Role, ShowAs, Span, Visibility, Zone, caps, description, detail, merge, organizer, repeat, split, tz,
 };
-use crate::{Error, Result, store};
+use crate::{AccountId, Error, Result, store};
 
 /// A part of the editor, top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -156,6 +156,17 @@ pub struct SavePlan {
     /// Send an update?, for a change the guests of a meeting the user
     /// organizes would hear about. Saving then takes one of its choices.
     pub dialog: Option<UpdateDialog>,
+    /// Send invitations from: the accounts to pick from first, when the
+    /// meeting's calendar has no account to mail its guests from.
+    pub senders: Vec<Sender>,
+}
+
+/// An account the user can pick to send a calendar's invitations from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sender {
+    pub account: AccountId,
+    pub address: String,
+    pub name: String,
 }
 
 /// One row of the scope prompt.
@@ -196,6 +207,8 @@ pub struct DeletePlan {
     /// For a meeting someone else organizes: Decline and remove? goes in
     /// place of a delete.
     pub decline: Option<Decline>,
+    /// Send invitations from, asked before the cancellation can go.
+    pub senders: Vec<Sender>,
 }
 
 /// "Decline and remove?" for a meeting someone else organizes.
@@ -281,7 +294,7 @@ pub fn draft_from_prefill(conn: &Connection, prefill: &EventPrefill, now: DateTi
 /// the user may not change and why.
 pub fn draft_for_event(conn: &Connection, event: EventId, at: Option<Bounds>, here: Tz) -> Result<EventDraft> {
     let d = detail::open(conn, event, at, here, "")?;
-    let account = d.calendar.account_id.map(|a| store::account(conn, a)).transpose()?.map(|a| a.address).unwrap_or_default();
+    let account = store::calendar_address(conn, &d.calendar)?.unwrap_or_default();
     let rule = match &d.event.recurrence_id {
         None => d.event.recurrence.clone(),
         Some(_) => ops::stored(conn, d.calendar.id, &d.event.uid, None)?.and_then(|m| m.event.recurrence),
@@ -654,9 +667,31 @@ fn locks_now(conn: &Connection, draft: &EventDraft, calendar: &Calendar) -> Resu
     Ok(access(calendar, &account, &stored.event, rule.as_ref(), &span, tz::here()))
 }
 
-/// The account address of a calendar, if it has an account.
+/// The address that is the user in a calendar: its account's, or the one a
+/// calendar on this Mac sends invitations from.
 fn account_of(conn: &Connection, calendar: &Calendar) -> Result<Option<String>> {
-    calendar.account_id.map(|a| store::account(conn, a).map(|a| a.address)).transpose()
+    store::calendar_address(conn, calendar)
+}
+
+/// The accounts to pick from when saving or deleting `event` would mail its
+/// guests from a calendar that has no account to send from yet: Send
+/// invitations from, asked once per calendar. Empty otherwise.
+fn senders_needed(conn: &Connection, calendar: &Calendar, event: &EventData) -> Result<Vec<Sender>> {
+    let account = account_of(conn, calendar)?.unwrap_or_default();
+    if !organizer::sends_itself(calendar) || guests(calendar, &account, event).is_empty() || organizer::sender(conn, calendar, event)?.is_some() {
+        return Ok(Vec::new());
+    }
+    Ok(organizer::senders(conn)?.into_iter().map(|a| Sender { account: a.id, address: a.address, name: a.display_name }).collect())
+}
+
+/// Who a calendar's mail comes from, for the dialogs: the provider, or for a
+/// calendar Jolta sends from itself, the address it sends from.
+fn mailer(conn: &Connection, calendar: &Calendar, event: &EventData) -> Result<(String, Option<String>)> {
+    if !organizer::sends_itself(calendar) {
+        return Ok((caps::mailer(calendar).to_string(), None));
+    }
+    let from = organizer::sender(conn, calendar, event)?.map(|a| a.address);
+    Ok((from.clone().unwrap_or_else(|| "Jolta".into()), from))
 }
 
 /// "02:30 doesn't exist on 29 March; the event starts at 03:30".
@@ -758,8 +793,9 @@ pub fn plan_save(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Save
     let unchanged = draft.base.is_some() && touched.is_empty();
     let occurrence = draft.base.as_ref().and_then(|b| b.recurrence_id);
     let dialog = if unchanged { None } else { send_dialog(conn, draft)? };
-    let (Some(at), false) = (occurrence, unchanged) else { return Ok(SavePlan { unchanged, scopes: Vec::new(), prompt: None, dialog }) };
     let calendar = store::calendar(conn, draft.calendar)?;
+    let senders = if dialog.is_some() { senders_needed(conn, &calendar, &event_of(draft))? } else { Vec::new() };
+    let (Some(at), false) = (occurrence, unchanged) else { return Ok(SavePlan { unchanged, scopes: Vec::new(), prompt: None, dialog, senders }) };
     let series = series_of(conn, draft)?.ok_or_else(|| Error::Other(format!("{} was deleted while you edited it.", draft.title)))?;
     let mut scopes = Vec::new();
     if !touched.contains(&DraftField::Repeat) {
@@ -786,7 +822,7 @@ pub fn plan_save(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Save
         ([DraftField::Time], Moment::Time(t)) => format!("You moved {title} to {}.", t.wall.format("%H:%M")),
         _ => format!("You changed {title}."),
     };
-    Ok(SavePlan { unchanged, scopes, prompt: Some(prompt), dialog })
+    Ok(SavePlan { unchanged, scopes, prompt: Some(prompt), dialog, senders })
 }
 
 /// The calendar's account address, and what the change the draft makes is.
@@ -813,7 +849,8 @@ fn send_dialog(conn: &Connection, draft: &EventDraft) -> Result<Option<UpdateDia
     if draft.base.as_ref().is_some_and(|b| other_organizer(&calendar, &account, b).is_some()) {
         return Ok(None);
     }
-    Ok(change::dialog(&c, &caps::of(&calendar), caps::mailer(&calendar), draft.base.is_none()))
+    let (mailer, from) = mailer(conn, &calendar, &event_of(draft))?;
+    Ok(change::dialog(&c, &caps::of(&calendar), &mailer, from.as_deref(), draft.base.is_none()))
 }
 
 /// The toast's words for a save that mails people: "Update sent to 6
@@ -977,7 +1014,7 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
     let message = message.filter(|m| !m.trim().is_empty() && notify != ops::Notify::Nobody);
     let told = match notify {
         ops::Notify::Nobody => None,
-        n => Some(sent_line(&classified(conn, draft)?.2, n, draft.base.is_none(), caps::mailer(&calendar))),
+        n => Some(sent_line(&classified(conn, draft)?.2, n, draft.base.is_none(), &mailer(conn, &calendar, &event_of(draft))?.0)),
     };
     if scope == Scope::Following {
         let edited = event_of(draft);
@@ -1054,11 +1091,16 @@ fn delete_plan(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Delete
     });
     let caps = caps::of(&calendar);
     let people = draft.base.as_ref().map_or(0, |b| guests(&calendar, &account, b).len());
-    let cancel = match (&other, people > 0 && caps.sends_itself) {
-        (None, true) => {
+    let cancel = match (&other, &draft.base) {
+        (None, Some(base)) if people > 0 && (caps.sends_itself || organizer::sends_itself(&calendar)) => {
             let list: Vec<Scope> = if scopes.is_empty() { vec![Scope::All] } else { scopes.iter().map(|c| c.scope).collect() };
-            list.into_iter().map(|s| (s, change::cancel_dialog(people, &caps, caps::mailer(&calendar), s))).collect()
+            let (mailer, _) = mailer(conn, &calendar, base)?;
+            list.into_iter().map(|s| (s, change::cancel_dialog(people, &caps, &mailer, s))).collect()
         }
+        _ => Vec::new(),
+    };
+    let senders = match (&other, &draft.base) {
+        (None, Some(base)) => senders_needed(conn, &calendar, base)?,
         _ => Vec::new(),
     };
     let decline = other.map(|o| Decline {
@@ -1066,7 +1108,7 @@ fn delete_plan(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Delete
         body: format!("{} gets your decline, and the meeting leaves your calendar.", change::name(&o)),
         organizer: change::name(&o).to_string(),
     });
-    Ok(DeletePlan { refusal, title: draft.title.clone(), scopes, prompt, cancel, decline })
+    Ok(DeletePlan { refusal, title: draft.title.clone(), scopes, prompt, cancel, decline, senders })
 }
 
 /// Who a delete tells, from its plan: a meeting the user organizes is
@@ -1497,7 +1539,7 @@ mod tests {
         let (s, cal) = setup("room");
         let mut d = new_draft(&s, cal, "Review");
         d.room = "room-214@example.com".into();
-        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &d, None, Some(ops::Notify::Nobody), None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!(stored.attendees.iter().map(|a| (a.person.address.as_str(), a.role)).collect::<Vec<_>>(), [("room-214@example.com", Role::Room)]);
         assert_eq!(stored.location, "room-214@example.com");
@@ -1506,13 +1548,13 @@ mod tests {
         assert!(s.read(|c| plan_save(c, &reopened, Brussels)).unwrap().unchanged);
 
         reopened.room = "room-301@example.com".into();
-        s.write(|tx| save_draft(tx, &reopened, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &reopened, None, Some(ops::Notify::Nobody), None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!(stored.location, "room-301@example.com", "the location follows the room while the user has none");
 
         let mut reopened = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
         reopened.location = "Gent, Belfort".into();
-        s.write(|tx| save_draft(tx, &reopened, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        s.write(|tx| save_draft(tx, &reopened, None, Some(ops::Notify::Nobody), None, NOW, &horizon(), Brussels)).unwrap();
         let stored = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event;
         assert_eq!((stored.location.as_str(), stored.attendees.len()), ("Gent, Belfort", 1), "a location of the user's own stays");
     }

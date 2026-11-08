@@ -784,6 +784,11 @@ async fn sync(jolta: &Jolta, account: Option<String>, bodies: bool) -> Result<()
         } else {
             imap::sync_account(jolta, &a, SyncOptions { bodies }, on_event).await?
         };
+        let horizon = jolta_core::calendar::series::Horizon::around(chrono::Utc::now(), jolta_core::calendar::tz::here());
+        let answered = jolta_core::calendar::organizer::read_replies(jolta, a.id, &horizon)?;
+        if !answered.is_empty() {
+            println!("  guests' replies changed {} calendar(s) on this Mac", answered.len());
+        }
         if report.bodies > 0 {
             eprintln!();
         }

@@ -96,6 +96,10 @@ pub struct Guests {
     /// would: the second changes nothing (check 4).
     #[arg(long)]
     repeat_op: bool,
+    /// Words that go with the invitation or update, where the dialog has a
+    /// message field (a calendar on this Mac).
+    #[arg(long = "note")]
+    note: Option<String>,
 }
 
 /// Which events of a series, as the editor's scope prompt asks.
@@ -220,11 +224,15 @@ async fn save_with_guests(jolta: &Jolta, d: &draft::EventDraft, scope: Option<Sc
     if let Some(dialog) = &plan.dialog {
         print_dialog(dialog);
     }
+    if !plan.senders.is_empty() {
+        let list: Vec<&str> = plan.senders.iter().map(|s| s.address.as_str()).collect();
+        println!("Send invitations from: `jolta cal send-from {} <account>` with one of {}", d.calendar, list.join(", "));
+    }
     let h = horizon();
     let notify = g.notify.map(Into::into);
-    let saved = jolta.store.write(|tx| draft::save_draft(tx, d, scope, notify, None, Utc::now().timestamp(), &h, here))?;
+    let saved = jolta.store.write(|tx| draft::save_draft(tx, d, scope, notify, g.note.clone(), Utc::now().timestamp(), &h, here))?;
     if g.repeat_op {
-        let again = jolta.store.write(|tx| draft::save_draft(tx, d, scope, notify, None, Utc::now().timestamp(), &h, here))?;
+        let again = jolta.store.write(|tx| draft::save_draft(tx, d, scope, notify, g.note.clone(), Utc::now().timestamp(), &h, here))?;
         println!("The same save again: {}", again.op.map_or("no op queued".to_string(), |o| format!("op {} queued", o.0)));
     }
     finish(jolta, saved, send).await
@@ -312,18 +320,48 @@ async fn submit(jolta: &Jolta, edit: Edit, send: &Send) -> Result<()> {
     Ok(())
 }
 
-/// Sends what is due and prints the op; with `wait`, until it is settled.
+/// Sends what is due and prints the op; with `wait`, until it is settled
+/// and the invitations it queued have left the outbox.
 async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Result<()> {
     loop {
         send_due(jolta).await?;
         let op = jolta.store.read(|c| store::calendar_op(c, id))?;
         if !wait || !matches!(op.state, OpState::Pending | OpState::Sending) {
-            print_op(&op);
+            if wait {
+                send_mail(jolta, id).await?;
+            }
+            print_op(jolta, &op);
             return Ok(());
         }
         let left = (op.send_after - Utc::now().timestamp()).clamp(1, 60);
         tokio::time::sleep(std::time::Duration::from_secs(left as u64)).await;
     }
+}
+
+/// Sends the invitations an op queued, through the engine as the app
+/// does, and waits up to three minutes for each to leave.
+async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<()> {
+    let waiting = |j: &Jolta| -> Result<Vec<i64>> { Ok(j.store.read(|c| store::calendar_op_outbox(c, id))?.into_iter().filter(|(_, state, _)| state == "queued").map(|(row, _, _)| row).collect()) };
+    if waiting(jolta)?.is_empty() {
+        return Ok(());
+    }
+    let account: jolta_core::AccountId = jolta.store.read(|c| {
+        let rows = store::calendar_op_outbox(c, id)?;
+        Ok(c.query_row("SELECT account_id FROM outbox WHERE id = ?1", [rows[0].0], |r| r.get(0))?)
+    })?;
+    let sink: jolta_core::engine::Sink = std::sync::Arc::new(|_| {});
+    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+    let started = std::time::Instant::now();
+    while !waiting(jolta)?.is_empty() {
+        if started.elapsed() > std::time::Duration::from_secs(180) {
+            bail!("the invitations didn't leave the outbox within three minutes");
+        }
+        engine.wake(account);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    // Lets the engine file the Sent copies.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    Ok(())
 }
 
 async fn send_due(jolta: &Jolta) -> Result<()> {
@@ -402,7 +440,7 @@ async fn finish(jolta: &Jolta, saved: draft::Saved, send: &Send) -> Result<()> {
             // This and following waits for the new series' create first.
             let op = jolta.store.read(|c| store::calendar_op(c, id))?;
             if let Some(first) = op.after {
-                print_op(&jolta.store.read(|c| store::calendar_op(c, first))?);
+                print_op(jolta, &jolta.store.read(|c| store::calendar_op(c, first))?);
             }
         }
     }
@@ -528,12 +566,12 @@ pub async fn list_ops(jolta: &Jolta, send: bool) -> Result<()> {
         println!("No calendar ops.");
     }
     for op in ops.iter().rev() {
-        print_op(op);
+        print_op(jolta, op);
     }
     Ok(())
 }
 
-fn print_op(op: &CalendarOp) {
+fn print_op(jolta: &Jolta, op: &CalendarOp) {
     let title = op.write.event().map_or("(no event)", |e| e.title.as_str());
     let now = Utc::now().timestamp();
     let wait = match op.state {
@@ -552,6 +590,9 @@ fn print_op(op: &CalendarOp) {
         if op.tried { "yes" } else { "no" },
         op.attempts
     );
+    for (row, state, to) in jolta.store.read(|c| store::calendar_op_outbox(c, op.id)).unwrap_or_default() {
+        println!("          mail: outbox {row} to {to}, {state}");
+    }
 }
 
 pub async fn undo(jolta: &Jolta, op: i64) -> Result<()> {
@@ -562,9 +603,21 @@ pub async fn undo(jolta: &Jolta, op: i64) -> Result<()> {
         Undone::Queued(inverse) => {
             send_due(jolta).await?;
             println!("Op {op} may have reached the server; its opposite is queued:");
-            print_op(&jolta.store.read(|c| store::calendar_op(c, inverse))?);
+            print_op(jolta, &jolta.store.read(|c| store::calendar_op(c, inverse))?);
         }
     }
+    Ok(())
+}
+
+/// The account a calendar on this Mac sends its invitations from.
+pub fn send_from(jolta: &Jolta, calendar: i64, account: &str) -> Result<()> {
+    let id = CalendarId(calendar);
+    let (c, a) = jolta.store.read(|c| Ok((store::calendar(c, id)?, store::find_account(c, account)?)))?;
+    if !jolta_core::calendar::organizer::sends_itself(&c) {
+        bail!("{} mails its guests itself", c.name);
+    }
+    jolta.store.write(|tx| store::set_calendar_send_from(tx, id, Some(a.id)))?;
+    println!("{} sends its invitations from {}.", c.name, a.address);
     Ok(())
 }
 

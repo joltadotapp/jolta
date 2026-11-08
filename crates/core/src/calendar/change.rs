@@ -198,6 +198,8 @@ pub struct UpdateDialog {
     /// Under the body, where a message field would be: "To add a note, use
     /// Email guests after saving."
     pub note: Option<String>,
+    /// A message field, where the mail carries the user's words.
+    pub message: bool,
     /// The buttons, each with what it sends.
     pub choices: Vec<SendChoice>,
 }
@@ -225,11 +227,13 @@ pub enum ChoiceStyle {
 }
 
 /// The dialog for saving `c`, a change to a meeting the user organizes, on
-/// a calendar with `caps` whose server `mailer` mails the guests. None when
-/// nobody else would hear of it, and on calendars whose invitations Jolta
-/// sends itself, which U5b adds.
-pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, creating: bool) -> Option<UpdateDialog> {
-    if c.is_own_only() || !caps.sends_itself {
+/// a calendar with `caps` whose server `mailer` mails the guests. On a
+/// calendar whose invitations Jolta mails itself, `from` is the address it
+/// sends them from, when the calendar has one, and the dialog has a message
+/// field: the user's words go in the mail and its COMMENT. None when nobody
+/// else would hear of it.
+pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, from: Option<&str>, creating: bool) -> Option<UpdateDialog> {
+    if c.is_own_only() {
         return None;
     }
     let people_only = c.meeting.is_empty();
@@ -239,7 +243,9 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, creating: bool)
     }
     let back = SendChoice { label: "Keep editing".into(), notify: None, style: ChoiceStyle::Back };
     let hold = caps.hold_update == Hold::Always;
-    let note = Some("To add a note, use Email guests after saving.".to_string());
+    let message = !caps.sends_itself;
+    let note = (!message).then(|| "To add a note, use Email guests after saving.".to_string());
+    let sent_from = |what: &str| from.filter(|_| message).map_or_else(String::new, |a| format!(" Jolta sends {what} from {a}."));
     let mut choices = Vec::new();
     if hold {
         choices.push(SendChoice { label: "Don't send".into(), notify: Some(Notify::Nobody), style: ChoiceStyle::Apart });
@@ -252,10 +258,10 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, creating: bool)
         }
         let body = gets(&c.added, "an invitation").trim_end().to_string();
         let (title, body) = match hold {
-            true => (format!("Send invitations to {}?", count(told, "person", "people")), body),
+            true => (format!("Send invitations to {}?", count(told, "person", "people")), format!("{body}{}", sent_from("them"))),
             false => (format!("{mailer} will email {}", count(told, "person", "people")), format!("{body} {mailer} sends the invitations as soon as Jolta saves the meeting.")),
         };
-        return Some(UpdateDialog { title, body, note, choices });
+        return Some(UpdateDialog { title, body, note, message, choices });
     }
     if people_only && caps.new_people_only {
         let others = match c.kept.len() {
@@ -268,12 +274,12 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, creating: bool)
             (0, n) => format!("Send {}?", count(n, "cancellation", "cancellations")),
             (a, r) => format!("Send {} and {}?", count(a, "invitation", "invitations"), count(r, "cancellation", "cancellations")),
         };
-        let body = format!("{}{others}", [gets(&c.added, "an invitation"), gets(&c.removed, "a cancellation")].concat().trim_end());
+        let body = format!("{}{others}{}", [gets(&c.added, "an invitation"), gets(&c.removed, "a cancellation")].concat().trim_end(), sent_from("them"));
         choices.push(SendChoice { label: "Send".into(), notify: Some(Notify::Changed), style: ChoiceStyle::Primary });
         if caps.outside_only {
             choices.push(SendChoice { label: "Only guests who don't use Google Calendar".into(), notify: Some(Notify::Outside), style: ChoiceStyle::Link });
         }
-        return Some(UpdateDialog { title, body, note, choices });
+        return Some(UpdateDialog { title, body, note, message, choices });
     }
     choices.push(SendChoice { label: "Send".into(), notify: Some(Notify::All), style: ChoiceStyle::Primary });
     if caps.outside_only {
@@ -295,12 +301,12 @@ pub fn dialog(c: &Classified, caps: &Capabilities, mailer: &str, creating: bool)
             many => format!("{} get {what}. ", many.len()),
         };
         let body = format!("{kept}{}{}", new_or_gone(&c.added, "new", "an invitation"), new_or_gone(&c.removed, "removed", "a cancellation"));
-        (format!("Send an update to {}?", count(told, "person", "people")), body.trim_end().to_string())
+        (format!("Send an update to {}?", count(told, "person", "people")), format!("{}{}", body.trim_end(), sent_from("it")))
     } else {
         let body = format!("{mailer} sends every change to a meeting's time, title, place or description to its guests. Jolta can't save this change without emailing them.");
         (format!("{mailer} will email {}", count(told, "person", "people")), body)
     };
-    Some(UpdateDialog { title, body, note, choices })
+    Some(UpdateDialog { title, body, note, message, choices })
 }
 
 /// The dialog for deleting a meeting the user organizes, for `people`
@@ -520,7 +526,7 @@ mod tests {
         after.attendees.push(Attendee { person: Person { address: "jan@example.com".into(), name: "Jan Peeters".into() }, ..person("jan@example.com") });
         let c = classify(&before, &after, &[]);
 
-        let g = dialog(&c, &caps_of(Google), "Google", false).unwrap();
+        let g = dialog(&c, &caps_of(Google), "Google", None, false).unwrap();
         assert_eq!(g.title, "Send an update to 6 people?");
         assert_eq!(g.body, "4 get the new time. Jan Peeters is new and gets an invitation. Els Maes is removed and gets a cancellation.");
         assert_eq!(g.note.as_deref(), Some("To add a note, use Email guests after saving."), "no message field on an update");
@@ -535,42 +541,52 @@ mod tests {
         );
 
         for (source, name) in [(Graph, "Microsoft 365"), (CalDav, "iCloud")] {
-            let m = dialog(&c, &caps_of(source), name, false).unwrap();
+            let m = dialog(&c, &caps_of(source), name, None, false).unwrap();
             assert_eq!(m.title, format!("{name} will email 6 people"));
             assert!(m.body.starts_with(&format!("{name} sends every change")), "{}", m.body);
             assert_eq!(buttons(&m), [("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::All), ChoiceStyle::Primary)], "no Don't send on {name}");
         }
-        assert_eq!(dialog(&c, &caps_of(Local), "Jolta", false), None, "Jolta's own invitations come with iMIP (U5b)");
+        let l = dialog(&c, &caps_of(Local), "Jolta", Some("me@example.com"), false).unwrap();
+        assert_eq!(l.title, "Send an update to 6 people?");
+        assert!(l.body.ends_with(" Jolta sends it from me@example.com."), "{}", l.body);
+        assert!(l.message && l.note.is_none(), "Jolta's own mail carries a message");
+        assert_eq!(buttons(&l), [("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart), ("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::All), ChoiceStyle::Primary)]);
+        assert!(!g.message, "Google's update carries no message");
 
         let mut added = before.clone();
         added.attendees.push(Attendee { person: Person { address: "jan@example.com".into(), name: "Jan Peeters".into() }, ..person("jan@example.com") });
         let people = classify(&before, &added, &[]);
-        let g = dialog(&people, &caps_of(Google), "Google", false).unwrap();
+        let g = dialog(&people, &caps_of(Google), "Google", None, false).unwrap();
         assert_eq!((g.title.as_str(), g.body.as_str()), ("Invite 1 new person?", "Jan Peeters gets an invitation. The 5 others get nothing."));
         assert!(buttons(&g).contains(&("Send", Some(Notify::Changed), ChoiceStyle::Primary)) && buttons(&g).contains(&("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart)));
-        let m = dialog(&people, &caps_of(Graph), "Microsoft 365", false).unwrap();
+        let m = dialog(&people, &caps_of(Graph), "Microsoft 365", None, false).unwrap();
         assert_eq!(buttons(&m), [("Keep editing", None, ChoiceStyle::Back), ("Send", Some(Notify::Changed), ChoiceStyle::Primary)]);
-        let i = dialog(&people, &caps_of(CalDav), "Your calendar server", false).unwrap();
+        let l = dialog(&people, &caps_of(Local), "Jolta", Some("me@example.com"), false).unwrap();
+        assert_eq!((l.title.as_str(), l.body.as_str()), ("Invite 1 new person?", "Jan Peeters gets an invitation. The 5 others get nothing. Jolta sends them from me@example.com."));
+        assert!(buttons(&l).contains(&("Send", Some(Notify::Changed), ChoiceStyle::Primary)) && buttons(&l).contains(&("Don't send", Some(Notify::Nobody), ChoiceStyle::Apart)));
+        let i = dialog(&people, &caps_of(CalDav), "Your calendar server", None, false).unwrap();
         assert_eq!(i.title, "Your calendar server will email 6 people", "a CalDAV server not measured may tell everyone");
 
         let mut gone = before.clone();
         gone.attendees.retain(|a| !a.person.address.starts_with("els"));
-        let g = dialog(&classify(&before, &gone, &[]), &caps_of(Google), "Google", false).unwrap();
+        let g = dialog(&classify(&before, &gone, &[]), &caps_of(Google), "Google", None, false).unwrap();
         assert_eq!((g.title.as_str(), g.body.as_str()), ("Send 1 cancellation?", "Els Maes gets a cancellation. The 4 others get nothing."));
 
         let mut alarm = before.clone();
         alarm.alarms = vec![crate::calendar::Alarm { trigger: crate::calendar::AlarmTrigger::MinutesBefore(5), email: false }];
-        assert_eq!(dialog(&classify(&before, &alarm, &[]), &caps_of(Graph), "Microsoft 365", false), None, "the user's own fields mail nobody");
+        assert_eq!(dialog(&classify(&before, &alarm, &[]), &caps_of(Graph), "Microsoft 365", None, false), None, "the user's own fields mail nobody");
 
         let lonely = EventData { attendees: vec![Attendee { is_me: true, ..person("me@example.com") }], ..meeting() };
         let moved = EventData { title: "Moved".into(), ..lonely.clone() };
-        assert_eq!(dialog(&classify(&lonely, &moved, &[]), &caps_of(Google), "Google", false), None, "nobody else on it");
+        assert_eq!(dialog(&classify(&lonely, &moved, &[]), &caps_of(Google), "Google", None, false), None, "nobody else on it");
 
         let blank = EventData::new("u1", before.span);
-        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Google), "Google", true).unwrap();
+        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Google), "Google", None, true).unwrap();
         assert_eq!((new.title.as_str(), new.body.as_str()), ("Send invitations to 5 people?", "5 people get an invitation."));
-        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Graph), "Microsoft 365", true).unwrap();
+        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Graph), "Microsoft 365", None, true).unwrap();
         assert_eq!(new.title, "Microsoft 365 will email 5 people");
+        let new = dialog(&classify(&blank, &before, &[]), &caps_of(Local), "Jolta", None, true).unwrap();
+        assert_eq!((new.title.as_str(), new.body.as_str()), ("Send invitations to 5 people?", "5 people get an invitation."), "no address before the user picks one");
     }
 
     #[test]
