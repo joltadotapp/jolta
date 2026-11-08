@@ -1119,19 +1119,18 @@ fn land(conn: &Connection, op: &CalendarOp, version: Option<&Landed>, clean: boo
 
 /// An edit queued while an earlier op still asked for a video call starts
 /// from the meeting the server made, so its write keeps the call and the
-/// block the server wrote into the description, with the user's own text
-/// before the block.
+/// block the server wrote into the description. Its base and its event
+/// each keep their own text before the block, so the edit still changes
+/// what it changed.
 fn carry_call(base: &mut EventData, event: &mut EventData, made: &EventData) {
     if base.video.is_none() || made.meeting.is_none() {
         return;
     }
-    let typed = Field::Description.differs(base, event).then(|| description::split(&event.description, event.description_html).editable);
+    let block = description::split(&made.description, made.description_html);
     for e in [&mut *base, &mut *event] {
+        let own = description::split(&e.description, e.description_html).editable;
         Field::MeetingLink.copy(e, made);
-        Field::Description.copy(e, made);
-    }
-    if let Some(text) = typed {
-        (event.description, event.description_html) = description::split(&made.description, made.description_html).join(&text);
+        (e.description, e.description_html) = block.join(&own);
     }
 }
 
@@ -2301,13 +2300,16 @@ mod tests {
         let server = Server { names_itself: true, ..Server::default() };
         let asked = EventData { video: Some(crate::calendar::MeetingProvider::Teams), ..event("u1", "Review", "2026-11-24 09:00") };
         q(&s, cal, Change::Create(vec![asked.clone()])).unwrap();
-        let edit = q(&s, cal, Change::Update(EventData { description: "Agenda".into(), ..asked })).unwrap();
-        run(&s, &server);
-        run(&s, &server);
-        assert_eq!(state(&s, edit).0, OpState::Done);
+        let edit = q(&s, cal, Change::Update(EventData { description: "Agenda".into(), ..asked.clone() })).unwrap();
+        let cleared = q(&s, cal, Change::Update(asked)).unwrap();
+        for _ in 0..3 {
+            run(&s, &server);
+        }
+        assert_eq!((state(&s, edit).0, state(&s, cleared).0), (OpState::Done, OpState::Done));
         let id = server.objects.lock().unwrap().keys().next().unwrap().clone();
+        assert_eq!(server.log().len(), 3, "the create and both edits reach the server");
         let now = server.get(&id).unwrap();
-        assert_eq!(now.description, format!("Agenda\n\n{TEAMS_BLOCK}"), "the user's text, then the block as the server wrote it");
+        assert_eq!(now.description, TEAMS_BLOCK, "the text cleared after it is gone, the block stays as the server wrote it (Sol, U8 S3)");
         assert!(now.meeting.is_some_and(|m| m.join_url.contains("meetup-join")));
     }
 
