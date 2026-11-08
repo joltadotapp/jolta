@@ -72,6 +72,8 @@ enum GridTarget {
 enum GridDrop {
     /// Over empty time: a new event.
     case create(day: Int, top: Int, bottom: Int)
+    /// ⌥ over empty time: focus time.
+    case focus(day: Int, top: Int, bottom: Int)
     /// To start at `top`, keeping the length; with ⌥ on an event, a copy.
     case move(GridTarget, day: Int, top: Int, copy: Bool)
     /// A new start, or with `top` false a new end.
@@ -733,6 +735,8 @@ final class HourCanvas: CanvasView {
         var moving = false
         var refused = false
         var copy = false
+        /// ⌥ on empty time: the drag draws focus time.
+        var focus = false
         var drop: GridDrop?
         var preview: DraftBlock?
 
@@ -956,16 +960,16 @@ final class HourCanvas: CanvasView {
             return
         }
         guard let placed = content.placed.last(where: { box($0).contains(doc) }) else {
-            // ⌥ on empty time is left for focus time (C4).
-            if event.modifierFlags.contains(.option) { return super.mouseDown(with: event) }
-            if event.clickCount == 2, let create, point.x > content.gutter {
+            if event.clickCount == 2, !event.modifierFlags.contains(.option), let create, point.x > content.gutter {
                 let day = Int((point.x - content.gutter) / columnWidth)
                 let minute = Int(doc.y / CalendarLayout.hourHeight * 60)
                 if day < content.days, (0..<24 * 60).contains(minute) { return create(day, minute) }
             }
             guard drop != nil, point.x > content.gutter, !content.columns.isEmpty else { return super.mouseDown(with: event) }
             let day = column(at: doc.x)
-            press = Press(item: nil, grip: .body, point: doc, day: day, start: .now, end: .now, title: "New event", color: nil)
+            let focus = event.modifierFlags.contains(.option)
+            press = Press(item: nil, grip: .body, point: doc, day: day, start: .now, end: .now, title: focus ? "Focus time" : "New event", color: nil)
+            press?.focus = focus
             return
         }
         let hit = placed.event
@@ -977,7 +981,7 @@ final class HourCanvas: CanvasView {
                       day: placed.day, start: start, end: end, title: hit.title, color: hit.record.color)
     }
 
-    /// Dragging empty time draws a new event; dragging an event or the
+    /// Dragging empty time draws a new event, or focus time with ⌥; dragging an event or the
     /// editor's draft moves it, across days too, and dragging an edge
     /// resizes it, all in 15-minute steps. ⌥ copies an event.
     override func mouseDragged(with event: NSEvent) {
@@ -999,7 +1003,7 @@ final class HourCanvas: CanvasView {
         case (nil, _):
             let a = Self.snap(pressed), b = Self.snap(minute)
             let top = max(0, min(min(a, b), 1440 - 15)), bottom = min(1440, max(max(a, b), top + 15))
-            press.drop = .create(day: press.day, top: top, bottom: bottom)
+            press.drop = press.focus ? .focus(day: press.day, top: top, bottom: bottom) : .create(day: press.day, top: top, bottom: bottom)
             (start, end) = (at(press.day, top), at(press.day, bottom))
         case (let item?, .body):
             // The start as minutes on the day it is drawn on, moved by the pointer.

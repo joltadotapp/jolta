@@ -801,6 +801,45 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(strip.waitForNonExistence(timeout: 5), "and the strip goes")
     }
 
+    /// ⌥-drag over empty time adds focus time there at once, with Undo in
+    /// the toast. The palette's Focus time… opens the sheet at the next free
+    /// two hours and says what the calendar gets: in the Work calendar,
+    /// standing in for a Google account's primary one, Google's focus time
+    /// that declines new invitations. ⌘↩ adds it.
+    func testFocusTime() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        let standup = event("Standup, 9:30 to 9:45")
+        XCTAssertTrue(standup.waitForExistence(timeout: 5), "Monday's standup marks the column and the hours")
+        let nineThirty = standup.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0)).withOffset(CGVector(dx: 0, dy: -1))
+        let at = { (hour: Double) in nineThirty.withOffset(CGVector(dx: 0, dy: (hour - 9.5) * 48 + 2)) }
+        XCUIElement.perform(withKeyModifiers: .option) {
+            at(10).click(forDuration: 0.1, thenDragTo: at(11))
+        }
+        let focus = event("Focus time, 10:00 to 11:00")
+        XCTAssertTrue(focus.waitForExistence(timeout: 5), "⌥-drag over empty time adds focus time there")
+        XCTAssertTrue(text(app, "Focus time added for").waitForExistence(timeout: 5), "with a toast")
+        XCTAssertFalse(app.textFields["editor-title"].exists, "and no editor")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(focus.waitForNonExistence(timeout: 5), "Z takes it back")
+
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
+        app.typeText("Focus time")
+        XCTAssertTrue(paletteRow(app, "Focus time").waitForExistence(timeout: 5), "the palette offers Focus time…")
+        app.typeKey(.return, modifierFlags: [])
+        let sheet = app.descendants(matching: .any).matching(identifier: "focus-sheet").firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the sheet opens")
+        XCTAssertTrue(text(app, "Google focus time that declines new invitations.").waitForExistence(timeout: 5), "it says what the calendar gets")
+        XCTAssertTrue(app.checkBoxes["Do not disturb in Google Chat"].exists, "and offers Chat's Do not disturb on Google")
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(text(app, "Focus time added for").waitForExistence(timeout: 5), "⌘↩ adds it")
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), "and the sheet closes")
+    }
+
     /// The palette's Out of office… opens the sheet, which says what each
     /// account gets; ⌘↩ turns it on, and the account's row then offers Turn
     /// off. The Work calendar stands in for a Google account's primary one.

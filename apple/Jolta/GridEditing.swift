@@ -44,7 +44,7 @@ extension CalendarModel {
     func drop(_ drop: GridDrop) {
         let index: Int
         switch drop {
-        case .create(let d, _, _), .move(_, let d, _, _), .resize(_, _, let d, _): index = d
+        case .create(let d, _, _), .focus(let d, _, _), .move(_, let d, _, _), .resize(_, _, let d, _): index = d
         }
         guard days.indices.contains(index) else { return }
         let day = days[index]
@@ -52,6 +52,8 @@ extension CalendarModel {
         switch drop {
         case .create(_, let top, let bottom):
             newEvent(at: .timed(start: at(top), end: at(bottom)))
+        case .focus(_, let top, let bottom):
+            addFocus(start: at(top), end: at(bottom))
         case .move(let item, _, let top, let copy):
             reschedule(item, copy: copy) { start, end in (at(top), at(top) + end - start) }
         case .resize(let item, let isTop, _, let minute):
