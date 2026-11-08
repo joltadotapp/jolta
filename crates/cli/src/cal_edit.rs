@@ -786,6 +786,15 @@ pub async fn quick(jolta: &Jolta, a: QuickArgs) -> Result<()> {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("jolta-ai"));
         let engine = ai::Ai::new(&jolta.data_dir, helper);
+        // The app keeps its model loaded between requests; load it first so
+        // the 5-second limit times the answer, as there.
+        let settings = jolta.store.read(ai::settings)?;
+        if settings.provider == Some(ai::Provider::Local) {
+            let started = std::time::Instant::now();
+            let warm = ai::Request { system: String::new(), user: "Say OK.".into(), max_tokens: 2, temperature: 0.0, grammar: None };
+            engine.generate(&settings, &warm, &ai::Cancel::default(), &mut |_| {}).await?;
+            println!("  loaded the local model in {:.1} s", started.elapsed().as_secs_f64());
+        }
         let started = std::time::Instant::now();
         let q = ai::quick::draft(jolta, &engine, &people, &text, now, here, &prefs, &ai::Cancel::default()).await?;
         println!("  asked the AI: {} ({:.1} s)", ai::quick::wanted(&text, &parsed), started.elapsed().as_secs_f64());

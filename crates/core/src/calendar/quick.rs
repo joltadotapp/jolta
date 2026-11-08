@@ -176,6 +176,25 @@ pub fn go_to_date(text: &str, today: NaiveDate, prefs: &Prefs) -> Option<NaiveDa
     None
 }
 
+/// The one weekday a line names in any of the three languages ("the
+/// friday after next"), to check the AI's day against. Short forms such
+/// as "sun" and "sat" are words too often to count.
+pub fn weekday_named(text: &str) -> Option<Weekday> {
+    let mut found: Option<Weekday> = None;
+    for tok in tokens(text).into_iter().filter(|t| t.key.chars().count() > 3) {
+        for w in [&EN, &NL, &FR] {
+            let key = tok.key.strip_suffix('s').filter(|_| std::ptr::eq(w, &FR)).unwrap_or(&tok.key);
+            if let Some(n) = w.weekdays.iter().position(|names| names.contains(&key)) {
+                match found {
+                    Some(d) if d != WEEKDAYS[n] => return None,
+                    _ => found = Some(WEEKDAYS[n]),
+                }
+            }
+        }
+    }
+    found
+}
+
 /// The editor's draft for what `parse` read, in the default calendar. A
 /// name becomes a guest only on one clear match among the people the user
 /// has written to; otherwise it waits in `unresolved` for the user.
@@ -2103,6 +2122,15 @@ mod tests {
         let d = s.read(|c| draft(c, &people, &parsed, now, Brussels)).unwrap();
         assert_eq!(d.span, draft::timed_span(now.timestamp() + 1800, now.timestamp() + 3600, Zone::Tz(Brussels), Brussels), "the next half hour");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn names_the_one_weekday_a_line_has() {
+        assert_eq!(weekday_named("drinks the friday after next around six"), Some(Weekday::Fri));
+        assert_eq!(weekday_named("Rétro tous les vendredis"), Some(Weekday::Fri));
+        assert_eq!(weekday_named("borrel vrijdag of zaterdag"), None, "two weekdays");
+        assert_eq!(weekday_named("Read chapter 12"), None);
+        assert_eq!(weekday_named("Picnic in the sun on friday"), Some(Weekday::Fri));
     }
 
     #[test]

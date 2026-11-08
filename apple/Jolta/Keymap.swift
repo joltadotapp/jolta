@@ -194,7 +194,7 @@ extension AppModel {
 
 /// Calendar mode's keys, in one table for the key handler and the help sheet.
 enum CalendarCommand: String, CaseIterable, Identifiable {
-    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, newEvent, edit, duplicate, delete
+    case today, next, previous, day, workWeek, week, month, agenda, toggleCalendar, move, open, close, newEvent, quickCreate, goToDate, edit, duplicate, delete
     case nudge, resize, accept, maybe, decline, undo, dayPanel, mail, calendar, joinNext
 
     var id: String { rawValue }
@@ -214,6 +214,8 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case .open: "↩"
         case .close: "esc"
         case .newEvent: "c"
+        case .quickCreate: "q"
+        case .goToDate: "g"
         case .edit: "e"
         case .duplicate: "⌘D"
         case .delete: "⌫"
@@ -245,6 +247,8 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
         case .open: "Open event"
         case .close: "Close event"
         case .newEvent: "New event"
+        case .quickCreate: "Quick create: type the event"
+        case .goToDate: "Go to date"
         case .edit: "Edit event"
         case .duplicate: "Duplicate event"
         case .delete: "Delete event"

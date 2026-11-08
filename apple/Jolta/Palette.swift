@@ -15,6 +15,10 @@ enum PaletteMode: Equatable {
     case label
     /// A theme to show, previewed as the selection moves.
     case themes
+    /// Q and New event: a line read into an event (`QuickCreateView`).
+    case quickEvent
+    /// G: a typed day to show in the calendar (`QuickCreateView`).
+    case goToDate
 }
 
 private struct PaletteItem: Identifiable {
@@ -56,6 +60,7 @@ struct PaletteView: View {
         case .move: "Move to folder"
         case .label: "Add or remove a label"
         case .themes: "Choose a theme"
+        case .quickEvent, .goToDate: ""
         }
     }
 
@@ -67,7 +72,7 @@ struct PaletteView: View {
         case .snippets: "text.badge.plus"
         case .themes: "paintpalette"
         case .label: "tag"
-        case .commands, .move: "magnifyingglass"
+        case .commands, .move, .quickEvent, .goToDate: "magnifyingglass"
         }
     }
 
@@ -80,6 +85,7 @@ struct PaletteView: View {
         case .label: all = labelItems
         case .snippets: all = snippetItems
         case .themes: all = themeItems
+        case .quickEvent, .goToDate: return []
         }
         // "frappe" finds Catppuccin Frappé, "geneve" a folder called Genève.
         let fold = { (s: String) in s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil) }
@@ -139,6 +145,14 @@ struct PaletteView: View {
         } else if model.selectedThreadID != nil {
             out.append(PaletteItem(id: "find-time", title: "Find a time", detail: "With the people on this conversation",
                                    icon: "calendar.badge.clock") { [model] in model.findTimeForConversation() })
+        }
+        out.append(PaletteItem(id: "new-event", title: "New event", detail: "Type it: Lunch with Jan fri 12:30 at Mok", icon: "calendar.badge.plus",
+                               keys: model.mode == .calendar ? CalendarCommand.quickCreate.keys : nil, keepsOpen: true) { [model] in
+            model.palette = .quickEvent
+        })
+        if model.mode == .calendar {
+            out.append(PaletteItem(id: "go-to-date", title: "Go to date", detail: "fri, 14 dec, morgen", icon: "calendar",
+                                   keys: CalendarCommand.goToDate.keys, keepsOpen: true) { [model] in model.palette = .goToDate })
         }
         out.append(PaletteItem(id: "join-next", title: "Join next meeting", detail: model.calendar.nextMeeting?.title ?? "",
                                icon: "video", keys: CalendarCommand.joinNext.keys) { [model] in model.joinNextMeeting() })

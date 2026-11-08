@@ -33,6 +33,10 @@ final class EventEditorModel {
     private(set) var willSend = false
     /// The organizer options are open.
     var showsOptions = false
+    /// Quick create's model filled in a field: the header says "Read by AI".
+    var readByAI = false
+    /// Quick create found no day or time: the focus starts on the start time.
+    var focusTime = false
 
     init(core: Core, draft: EventDraft, event: CalEvent?) {
         self.core = core
@@ -48,6 +52,13 @@ final class EventEditorModel {
     var isReadOnly: Bool { draft.locks.contains(.title) && draft.locks.contains(.showAs) }
 
     func locked(_ field: DraftField) -> Bool { draft.locks.contains(field) }
+
+    /// Picks who a name from quick create is.
+    func resolve(_ name: UnresolvedPerson, as person: PersonRecord) {
+        draft.unresolved.removeAll { $0.typed == name.typed }
+        guard !draft.people.contains(where: { $0.address.caseInsensitiveCompare(person.address) == .orderedSame }) else { return }
+        draft.people.append(DraftPerson(name: person.name, address: person.address, role: .required, response: .needsAction, comment: "", isMe: false))
+    }
 
     func problems(_ field: DraftField?) -> [DraftProblem] { problems.filter { $0.field == field } }
 
@@ -240,6 +251,9 @@ struct EventEditorPanel: View {
 
     private var cal: CalendarModel { model.calendar }
 
+    /// The title, or the start time when quick create read no day or time.
+    private var firstFocus: Focus { editor.focusTime && editor.interval != nil ? .start : .title }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -261,7 +275,7 @@ struct EventEditorPanel: View {
                     }
                     title
                     whenSection
-                    if editor.locked(.people) ? !editor.draft.people.isEmpty : editor.caps?.invite == true { peopleSection }
+                    if editor.locked(.people) ? !editor.draft.people.isEmpty : editor.caps?.invite == true || !editor.draft.unresolved.isEmpty { peopleSection }
                     placeSection
                     descriptionSection
                     calendarSection
@@ -282,11 +296,13 @@ struct EventEditorPanel: View {
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
         .font(.system(size: 12.5))
         .foregroundStyle(Color(Theme.text))
-        .defaultFocus($focus, .title)
+        .defaultFocus($focus, firstFocus)
         .onAppear {
-            // The panel is in the window only after this pass; focus then.
+            // The panel is in the window only after this pass; focus then,
+            // and once more after quick create's field has let go.
             guard !editor.isReadOnly else { return }
-            DispatchQueue.main.async { focus = .title }
+            DispatchQueue.main.async { focus = firstFocus }
+            if editor.focusTime { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { focus = firstFocus } }
         }
         .onChange(of: focus) { old, _ in
             if old == .start || old == .end { editor.commit() }
@@ -303,6 +319,16 @@ struct EventEditorPanel: View {
                 .font(.system(size: 11, weight: .semibold))
                 .tracking(0.2)
                 .foregroundStyle(Color(Theme.text3))
+            if editor.readByAI {
+                Label("Read by AI", systemImage: "sparkles")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Color(Theme.text2))
+                    .padding(.horizontal, 6)
+                    .frame(height: 18)
+                    .background(Capsule().fill(Color(Theme.fill)))
+                    .help("The AI read the words the parser couldn't. Check the fields before saving.")
+                    .accessibilityIdentifier("editor-read-by-ai")
+            }
             Spacer()
             Button { cal.closeEditor() } label: {
                 HStack(spacing: 6) {

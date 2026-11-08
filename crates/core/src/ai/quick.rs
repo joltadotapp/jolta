@@ -8,7 +8,7 @@
 
 use std::time::Duration as Wait;
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::Value;
 
@@ -48,10 +48,29 @@ pub async fn draft(jolta: &Jolta, ai: &Ai, people: &People, text: &str, now: Dat
     let settings = jolta.store.read_async(super::settings).await?;
     let (mut by_ai, mut dropped) = (false, Vec::new());
     if settings.provider.is_some() && wanted(text, &parsed) {
-        let ask = request(text, local_now, prefs);
-        if let Ok(Ok(Finish::Done(answer))) = tokio::time::timeout(LIMIT, ai.generate(&settings, &ask, cancel, &mut |_| {})).await {
-            let calendar = jolta.store.read(draft::default_calendar)?;
-            let reading = read_answer(&answer, local_now, prefs, calendar.as_ref());
+        let calendar = jolta.store.read(draft::default_calendar)?;
+        let weekday = quick::weekday_named(text);
+        // One retry, inside the same time limit, when the day was refused:
+        // small models miss the weekday even with the days listed.
+        let asked = async {
+            let first = request(text, local_now, prefs);
+            let mut ask = first.clone();
+            let mut last = None;
+            for attempt in 0..2 {
+                let Ok(Finish::Done(answer)) = ai.generate(&settings, &ask, cancel, &mut |_| {}).await else { break };
+                let reading = read_answer(&answer, local_now, prefs, calendar.as_ref(), weekday);
+                let again = attempt == 0 && reading.when.is_none() && !reading.dropped.is_empty();
+                if again {
+                    ask.user = format!("{}\n\n(Your answer was refused: {} Answer again.)", first.user, reading.dropped.join(" "));
+                }
+                last = Some(reading);
+                if !again {
+                    break;
+                }
+            }
+            last
+        };
+        if let Ok(Some(reading)) = tokio::time::timeout(LIMIT, asked).await {
             dropped.clone_from(&reading.dropped);
             by_ai = merge(&mut parsed, reading);
         }
@@ -123,9 +142,10 @@ pub struct Reading {
 }
 
 /// Checks the model's answer: a start from yesterday to two years ahead,
-/// an end after the start, a timed event at most 14 days long, a zone
-/// chrono-tz knows, an RRULE `rrule` reads and `calendar` can hold.
-pub fn read_answer(answer: &str, now: DateTime<Tz>, prefs: &Prefs, calendar: Option<&Calendar>) -> Reading {
+/// on `weekday` when the line names one, an end after the start, a timed
+/// event at most 14 days long, a zone chrono-tz knows, an RRULE `rrule`
+/// reads and `calendar` can hold.
+pub fn read_answer(answer: &str, now: DateTime<Tz>, prefs: &Prefs, calendar: Option<&Calendar>, weekday: Option<Weekday>) -> Reading {
     let mut out = Reading::default();
     let object = match (answer.find('{'), answer.rfind('}')) {
         (Some(a), Some(b)) if a < b => &answer[a..=b],
@@ -203,6 +223,16 @@ pub fn read_answer(answer: &str, now: DateTime<Tz>, prefs: &Prefs, calendar: Opt
             }
         }
     }
+    if let (Some(span), Some(named)) = (&out.when, weekday) {
+        let first = match span {
+            Span::AllDay { start, .. } => *start,
+            Span::Timed { start, .. } => start.wall.date(),
+        };
+        if first.weekday() != named {
+            out.dropped.push(format!("{} is a {}, but the line names {}.", first.format("%Y-%m-%d"), first.format("%A"), name_of(named)));
+            out.when = None;
+        }
+    }
     if let Some(rule) = text("repeat") {
         let rule = rule.trim_start_matches("RRULE:").to_string();
         let rec = Recurrence { rules: vec![rule.clone()], ..Default::default() };
@@ -217,6 +247,10 @@ pub fn read_answer(answer: &str, now: DateTime<Tz>, prefs: &Prefs, calendar: Opt
         }
     }
     out
+}
+
+fn name_of(wd: Weekday) -> &'static str {
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][wd.num_days_from_monday() as usize]
 }
 
 fn wall(s: &str) -> Option<NaiveDateTime> {
@@ -297,7 +331,7 @@ mod tests {
     /// Answers a model gave, and ones made to fail each check.
     #[test]
     fn checks_every_field() {
-        let read = |answer: &str| read_answer(answer, now(), &prefs(), None);
+        let read = |answer: &str| read_answer(answer, now(), &prefs(), None, None);
         let good = read(
             r#"```json
 {"title": "Drinks", "all_day": false, "start": "2026-11-20T18:00", "end": null, "duration_minutes": 90, "zone": null, "location": "Café Mok", "people": ["Jan"], "repeat": null}
@@ -341,6 +375,16 @@ mod tests {
         assert_eq!(read(r#"{"title": "x", "start": "soon"}"#).dropped, ["soon isn't a date."]);
     }
 
+    /// A small model put "the friday after next" on Sat 28 Nov in the live check.
+    #[test]
+    fn the_day_must_fall_on_the_weekday_the_line_names() {
+        let answer = r#"{"title": "Drinks", "all_day": false, "start": "2026-11-28T18:00"}"#;
+        let r = read_answer(answer, now(), &prefs(), None, Some(Weekday::Fri));
+        assert_eq!((r.when, r.dropped), (None, vec!["2026-11-28 is a Saturday, but the line names Friday.".to_string()]));
+        let r = read_answer(&answer.replace("28", "20"), now(), &prefs(), None, Some(Weekday::Fri));
+        assert!(r.when.is_some());
+    }
+
     #[test]
     fn a_rule_the_calendar_cant_hold_is_dropped() {
         let google = Calendar {
@@ -361,7 +405,7 @@ mod tests {
             refresh: None,
             synced: None,
         };
-        let r = read_answer(r#"{"title": "x", "all_day": false, "start": "2026-11-20T18:00", "repeat": "FREQ=HOURLY"}"#, now(), &prefs(), Some(&google));
+        let r = read_answer(r#"{"title": "x", "all_day": false, "start": "2026-11-20T18:00", "repeat": "FREQ=HOURLY"}"#, now(), &prefs(), Some(&google), None);
         assert_eq!(r.repeat, None);
         assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
     }
@@ -387,11 +431,14 @@ mod tests {
 
     /// An OpenAI-compatible server on this Mac that streams one answer, so
     /// the whole path runs as it does with a provider, offline.
-    async fn fixture_server(answer: &'static str, delay: Wait) -> String {
+    async fn fixture_server(answers: &'static [&'static str], delay: Wait) -> String {
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
+                let n = served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = answers[n.min(answers.len() - 1)];
                 tokio::spawn(async move {
                     let mut seen = Vec::new();
                     let mut buf = [0u8; 8192];
@@ -439,13 +486,21 @@ mod tests {
 
     #[tokio::test]
     async fn reads_what_the_parser_cant_through_the_provider() {
-        let url = fixture_server(r#"{"title": "Drinks", "all_day": false, "start": "2026-11-20T18:00", "end": null, "duration_minutes": null, "zone": null, "location": null, "people": [], "repeat": null}"#, Wait::ZERO).await;
+        let url = fixture_server(
+            &[
+                r#"{"title": "Drinks", "all_day": false, "start": "2026-11-28T18:00", "end": null, "duration_minutes": null, "zone": null, "location": null, "people": [], "repeat": null}"#,
+                r#"{"title": "Drinks", "all_day": false, "start": "2026-11-20T18:00", "end": null, "duration_minutes": null, "zone": null, "location": null, "people": [], "repeat": null}"#,
+            ],
+            Wait::ZERO,
+        )
+        .await;
         let (dir, jolta) = jolta("read", &url);
         let ai = Ai::new(&dir, dir.join("no-helper"));
         let people = jolta.store.read(|c| People::build(c, 0, &[])).unwrap();
         let now = now().with_timezone(&Utc);
         let q = draft(&jolta, &ai, &people, "drinks the friday after next around six", now, Brussels, &prefs(), &Cancel::default()).await.unwrap();
-        assert!(q.by_ai);
+        assert!(q.by_ai, "the second answer, after the Saturday was refused");
+        assert!(q.dropped.is_empty());
         assert_eq!(q.draft.title, "Drinks");
         assert_eq!(q.draft.span, Span::Timed { start: at("2026-11-20 18:00", Brussels), end: at("2026-11-20 18:30", Brussels) });
         assert!(!q.focus_time);
@@ -458,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn opens_with_the_parsers_reading_after_five_seconds() {
-        let url = fixture_server(r#"{"title": "Late"}"#, Wait::from_secs(8)).await;
+        let url = fixture_server(&[r#"{"title": "Late"}"#], Wait::from_secs(8)).await;
         let (dir, jolta) = jolta("slow", &url);
         let ai = Ai::new(&dir, dir.join("no-helper"));
         let people = jolta.store.read(|c| People::build(c, 0, &[])).unwrap();

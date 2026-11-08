@@ -63,7 +63,11 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) {
-            if let mode = model.palette {
+            if let mode = model.palette, mode == .quickEvent || mode == .goToDate {
+                QuickCreateView(model: model, mode: mode)
+                    .id(mode)
+                    .padding(.top, 110)
+            } else if let mode = model.palette {
                 PaletteView(model: model, mode: mode)
                     .id(mode)
                     .padding(.top, 110)

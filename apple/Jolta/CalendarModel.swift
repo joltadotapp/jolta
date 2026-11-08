@@ -684,6 +684,16 @@ final class CalendarModel {
         }
     }
 
+    /// Quick create's Return: the parsed draft in the editor, its title
+    /// selected, or its start time when the line named no day or time.
+    func openQuick(_ q: QuickDraftInfo) {
+        guard confirmLeaving({ self.openQuick(q) }) else { return }
+        let editor = EventEditorModel(core: core, draft: q.draft, event: nil)
+        editor.readByAI = q.readByAi
+        editor.focusTime = q.focusTime
+        open(editor)
+    }
+
     /// Double-click on empty time: a new event on that half hour.
     func newEvent(day: CalendarDay, minute: Int) {
         let s = Int64(Self.at(day.start, minutes: minute / 30 * 30).timeIntervalSince1970)
