@@ -71,6 +71,9 @@ pub enum Reminder {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EventDraft {
     pub calendar: CalendarId,
+    /// The calendar the user picked for a stored event, when it isn't the
+    /// one it is in: saving moves the whole series there.
+    pub move_to: Option<CalendarId>,
     /// The stored event the editor opened; None for a new one. Saving
     /// changes only the fields that differ from it, so a change made
     /// elsewhere meanwhile to another field stays.
@@ -195,6 +198,8 @@ pub struct Saved {
     /// The Undo token; None when nothing changed.
     pub op: Option<CalendarOpId>,
     pub calendar: CalendarId,
+    /// The calendar a move took the event out of.
+    pub left: Option<CalendarId>,
     /// The UID the saved event has now: a new one for This and following.
     pub uid: String,
     /// The toast's words: "Saved Standup".
@@ -286,6 +291,7 @@ pub fn draft_for_new(conn: &Connection, calendar: Option<CalendarId>, span: Opti
         description_note: None,
         responses: String::new(),
         show_as_note: None,
+        move_to: None,
     })
 }
 
@@ -424,6 +430,7 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         description_note: parts.loses_formatting().then(|| "Formatting from Outlook is removed when you change this text.".into()),
         responses: String::new(),
         show_as_note: None,
+        move_to: None,
     }
 }
 
@@ -548,7 +555,7 @@ fn changed(draft: &EventDraft, base: &EventData) -> Vec<DraftField> {
             DraftField::Location => draft.location != was.location,
             DraftField::Video => draft.video != was.video,
             DraftField::Description => draft.description.trim_end() != was.description,
-            DraftField::Calendar => false,
+            DraftField::Calendar => draft.move_to.is_some_and(|to| to != draft.calendar),
             DraftField::ShowAs => draft.show_as != was.show_as,
             DraftField::Reminder => draft.reminder != was.reminder,
             DraftField::Visibility => draft.visibility != was.visibility,
@@ -716,6 +723,12 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
     {
         problem(Some(DraftField::Time), text, true);
     }
+    if let (Some(to), Some(base), true) = (draft.move_to, &draft.base, touched.contains(&DraftField::Calendar)) {
+        match ops::move_note(conn, draft.calendar, &base.uid, to) {
+            Ok(note) => out.extend(note.map(|text| Problem { field: Some(DraftField::Calendar), text, blocking: false })),
+            Err(e) => out.push(Problem { field: Some(DraftField::Calendar), text: e.to_string(), blocking: true }),
+        }
+    }
     if out.iter().all(|p| !p.blocking) && !touched.is_empty() {
         let scope = if draft.base.as_ref().is_some_and(|b| b.recurrence_id.is_some()) && !touched.contains(&DraftField::Repeat) { Scope::This } else { Scope::All };
         let refusal = match edit(conn, draft, &calendar, scope).and_then(|(edit, _)| ops::refusal(conn, &edit)) {
@@ -875,13 +888,14 @@ pub fn plan_save(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Save
     let dialog = if unchanged { None } else { send_dialog(conn, draft)? };
     let calendar = store::calendar(conn, draft.calendar)?;
     let senders = if dialog.is_some() { senders_needed(conn, &calendar, &event_of(draft))? } else { Vec::new() };
-    let (Some(at), false) = (occurrence, unchanged) else { return Ok(SavePlan { unchanged, scopes: Vec::new(), prompt: None, dialog, senders }) };
+    let moving = touched.contains(&DraftField::Calendar);
+    let (Some(at), false, false) = (occurrence, unchanged, moving && touched.len() == 1) else { return Ok(SavePlan { unchanged, scopes: Vec::new(), prompt: None, dialog, senders }) };
     let series = series_of(conn, draft)?.ok_or_else(|| Error::Other(format!("{} was deleted while you edited it.", draft.title)))?;
     let mut scopes = Vec::new();
     if !touched.contains(&DraftField::Repeat) {
         scopes.push(ScopeChoice { scope: Scope::This, label: "This event".into(), detail: None });
     }
-    if caps::of(&calendar).split_series && !series.span.start().names(&at, here) {
+    if caps::of(&calendar).split_series && !moving && !series.span.start().names(&at, here) {
         let day = match draft.span.start() {
             Moment::Date(d) => d,
             Moment::Time(t) => t.wall.date(),
@@ -1075,6 +1089,38 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
     if let Some(p) = check_draft(conn, draft, here)?.into_iter().find(|p| p.blocking) {
         return Err(Error::Other(p.text));
     }
+    if let (Some(to), Some(base)) = (draft.move_to.filter(|to| *to != draft.calendar), &draft.base) {
+        return save_moved(conn, draft, base, to, scope, notify, message, now, horizon, here);
+    }
+    save_here(conn, draft, scope, notify, message, None, now, horizon, here)
+}
+
+/// Saves a draft that moves its event to `to`: the move, then the other
+/// changes as an edit there that waits for it, so one Undo takes back both.
+/// Everything is checked again against `to`, in the same transaction, so an
+/// edit `to` can't hold leaves the event where it was.
+#[allow(clippy::too_many_arguments)]
+fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: CalendarId, scope: Option<Scope>, notify: Option<ops::Notify>, message: Option<String>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
+    let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
+    let moved = ops::queue(conn, &Edit::quiet(draft.calendar, Change::Move { uid: base.uid.clone(), to }), now, horizon)?.ok_or_else(|| Error::Other(format!("{title} is there already")))?;
+    let there = EventDraft { calendar: to, move_to: None, ..draft.clone() };
+    let name = store::calendar(conn, to)?.name;
+    let saved = save_here(conn, &there, scope, notify, message, Some(moved), now, horizon, here)?;
+    // The toast still says whom the edit mails, or what of it wasn't saved.
+    let mails = saved.op.map(|id| store::calendar_op(conn, id)).transpose()?.is_some_and(|op| op.notify != ops::Notify::Nobody);
+    let message = match mails || saved.message.contains("wasn't saved") {
+        true => format!("Moved {title} to {name}. {}", saved.message),
+        false => format!("Moved {title} to {name}"),
+    };
+    Ok(Saved { op: saved.op.or(Some(moved)), calendar: to, left: Some(draft.calendar), uid: base.uid.clone(), message })
+}
+
+/// Saves the draft in its own calendar; `after` is a move it waits for.
+#[allow(clippy::too_many_arguments)]
+fn save_here(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, notify: Option<ops::Notify>, message: Option<String>, after: Option<CalendarOpId>, now: i64, horizon: &Horizon, here: Tz) -> Result<Saved> {
+    if let Some(p) = check_draft(conn, draft, here)?.into_iter().find(|p| p.blocking) {
+        return Err(Error::Other(p.text));
+    }
     let title = if draft.title.trim().is_empty() { "(no title)".to_string() } else { draft.title.trim().to_string() };
     let calendar = store::calendar(conn, draft.calendar)?;
     let plan = plan_save(conn, draft, here)?;
@@ -1096,6 +1142,9 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
         ops::Notify::Nobody => None,
         n => Some(sent_line(&classified(conn, draft)?.2, n, draft.base.is_none(), &mailer(conn, &calendar, &event_of(draft))?.0)),
     };
+    if scope == Scope::Following && after.is_some() {
+        return Err(Error::Other(format!("Save This and following for {title} first, then move it.")));
+    }
     if scope == Scope::Following {
         let edited = event_of(draft);
         let rule = draft.rule.clone().ok_or_else(|| Error::Other(format!("{title} doesn't repeat")))?;
@@ -1104,13 +1153,16 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
             Some(id) => store::calendar_op(conn, id)?.after.map(|a| store::calendar_op(conn, a)).transpose()?.map_or_else(|| draft.uid.clone(), |a| a.uid),
             None => draft.uid.clone(),
         };
-        return Ok(Saved { op, calendar: draft.calendar, uid, message: told.unwrap_or_else(|| format!("Saved {title} from this event on")) });
+        return Ok(Saved { op, calendar: draft.calendar, left: None, uid, message: told.unwrap_or_else(|| format!("Saved {title} from this event on")) });
     }
     let (mut edit, lost) = edit(conn, draft, &calendar, scope)?;
     edit.notify = notify;
     edit.message = message;
     let creating = matches!(edit.change, Change::Create(_));
-    let op = ops::queue(conn, &edit, now, horizon)?;
+    let op = match after {
+        Some(after) => ops::queue_after(conn, &edit, after, now, horizon)?,
+        None => ops::queue(conn, &edit, now, horizon)?,
+    };
     let message = match (creating, lost.as_slice(), plan.scopes.is_empty(), scope) {
         _ if told.is_some() && lost.is_empty() => told.unwrap_or_default(),
         (true, _, _, _) => format!("Added {title}"),
@@ -1118,7 +1170,7 @@ pub fn save_draft(conn: &Connection, draft: &EventDraft, scope: Option<Scope>, n
         (false, [], _, _) => format!("Saved {title}"),
         (false, lost, _, _) => format!("Saved {title}. It changed elsewhere while you edited; your new {} wasn't saved.", nouns(lost)),
     };
-    Ok(Saved { op, calendar: draft.calendar, uid: draft.uid.clone(), message })
+    Ok(Saved { op, calendar: draft.calendar, left: None, uid: draft.uid.clone(), message })
 }
 
 fn nouns(fields: &[Field]) -> String {
@@ -1230,7 +1282,7 @@ pub fn delete_event(conn: &Connection, event: EventId, message: Option<String>, 
     let edit = Edit { notify, message, ..Edit::quiet(calendar, Change::Delete { uid: uid.clone() }) };
     let op = ops::queue(conn, &edit, now, horizon)?;
     let title = if plan.title.is_empty() { "(no title)".into() } else { plan.title };
-    Ok(Saved { op, calendar, uid, message: told.unwrap_or_else(|| format!("Deleted {title}")) })
+    Ok(Saved { op, calendar, left: None, uid, message: told.unwrap_or_else(|| format!("Deleted {title}")) })
 }
 
 /// Deletes the stored event a draft opened, found again by its UID: the
@@ -1273,7 +1325,7 @@ pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope
         Some(Scope::Following) => format!("Deleted {title} from this event on"),
         _ => format!("Deleted all events of {title}"),
     };
-    Ok(Saved { op, calendar: draft.calendar, uid: base.uid.clone(), message })
+    Ok(Saved { op, calendar: draft.calendar, left: None, uid: base.uid.clone(), message })
 }
 
 /// The calendar new events go to: the one the user chose in Settings ›
@@ -1531,6 +1583,44 @@ mod tests {
         assert_eq!((stored.location.as_str(), stored.span), ("Room 2.14", editing.span), "the other field stays, the user's time lands");
         assert_eq!(stored.title, "Daily standup", "both changed the title: the stored one stays");
         assert_eq!(saved.message, "Saved Standup moved. It changed elsewhere while you edited; your new title wasn't saved.");
+    }
+
+    /// The calendar picker of a stored event: the move saves with the
+    /// other changes as one edit in the calendar picked, one Undo takes back
+    /// both, and a calendar that can't take the event says why before Save.
+    #[test]
+    fn a_stored_event_moves_to_the_calendar_picked_with_its_changes() {
+        let (s, cal) = setup("move");
+        let home = s.write(|tx| ops::new_local_calendar(tx, "Home", None)).unwrap().id;
+        let d = new_draft(&s, cal, "Standup");
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let id = event_id(&s, cal, &d.uid);
+        let mut editing = s.read(|c| draft_for_event(c, id, None, Brussels)).unwrap();
+        assert_eq!(editing.move_to, None);
+        let choices = s.read(|c| ops::move_choices(c, cal, &d.uid)).unwrap();
+        assert_eq!(choices, [ops::MoveChoice { calendar: home, refusal: None, note: None }]);
+
+        editing.move_to = Some(home);
+        let plan = s.read(|c| plan_save(c, &editing, Brussels)).unwrap();
+        assert!(!plan.unchanged && plan.scopes.is_empty() && plan.dialog.is_none(), "a move alone asks nothing");
+        editing.title = "Daily".into();
+        let saved = s.write(|tx| save_draft(tx, &editing, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        assert_eq!((saved.calendar, saved.left, saved.message.as_str()), (home, Some(cal), "Moved Daily to Home"));
+        assert!(s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().is_none());
+        assert_eq!(s.read(|c| ops::stored(c, home, &d.uid, None)).unwrap().unwrap().event.title, "Daily");
+        s.write(|tx| ops::undo(tx, saved.op.unwrap(), NOW, &horizon())).unwrap();
+        assert_eq!(s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().unwrap().event.title, "Standup", "Undo takes back the edit and the move");
+        assert!(s.read(|c| ops::stored(c, home, &d.uid, None)).unwrap().is_none());
+
+        let feed = s
+            .write(|tx| store::add_calendar(tx, CalendarSource::Webcal, &store::RemoteCalendar { remote_id: "https://example.com/f.ics".into(), name: "Holidays".into(), color: None, zone: None, access: Access::Read, primary: false, refresh: None, video: None }))
+            .unwrap()
+            .id;
+        let mut editing = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        editing.move_to = Some(feed);
+        let problems = s.read(|c| check_draft(c, &editing, Brussels)).unwrap();
+        assert_eq!(problems, [Problem { field: Some(DraftField::Calendar), text: "Holidays is read-only.".into(), blocking: true }]);
+        assert!(s.write(|tx| save_draft(tx, &editing, None, None, None, NOW, &horizon(), Brussels)).is_err());
     }
 
     #[test]

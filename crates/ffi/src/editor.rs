@@ -284,6 +284,10 @@ pub struct EventDraft {
     pub responses: String,
     /// Under Show as: "Your guests see this with the next update."
     pub show_as_note: Option<String>,
+    /// The calendar the user picked for a stored event, from
+    /// `move_choices`: saving moves the whole series there. None for a new
+    /// event, whose `calendar_id` is where it goes.
+    pub move_to: Option<i64>,
 }
 
 /// What another feature fills in when it opens the editor.
@@ -515,6 +519,7 @@ impl From<draft::EventDraft> for EventDraft {
             description_note: d.description_note,
             responses: d.responses,
             show_as_note: d.show_as_note,
+            move_to: d.move_to.map(|c| c.0),
         }
     }
 }
@@ -586,6 +591,7 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
             description_note: None,
             responses: String::new(),
             show_as_note: None,
+            move_to: d.move_to.map(CalendarId),
         })
     }
 }
@@ -602,6 +608,16 @@ impl Core {
 
 fn horizon() -> Horizon {
     Horizon::around(Utc::now(), tz::here())
+}
+
+/// A calendar of the editor's picker for a stored event.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct MoveChoice {
+    pub calendar_id: i64,
+    /// Why the event can't move there, shown greyed; None when it can.
+    pub refusal: Option<String>,
+    /// What the move costs, shown under the calendar once picked.
+    pub note: Option<String>,
 }
 
 /// One entry of the editor's Add video call menu.
@@ -679,7 +695,23 @@ impl Core {
         let h = horizon();
         let saved = self.jolta.store.write(|tx| draft::save_draft(tx, &d, scope.map(Into::into), notify.map(Into::into), message, Utc::now().timestamp(), &h, tz::here()))?;
         self.edited(saved.calendar);
+        if let Some(left) = saved.left {
+            self.calendar_changed([left]);
+        }
         Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
+    }
+
+    /// Where the stored event a draft opened can move: every shown calendar
+    /// but its own, each with why it can't take it, or what the move costs
+    /// ("Standup's Teams meeting stays behind: Google calendars can't have
+    /// one."). The editor greys the refused ones with their reason.
+    pub fn move_choices(&self, draft: EventDraft) -> Result<Vec<MoveChoice>> {
+        let d = draft::EventDraft::try_from(&draft)?;
+        if d.base.is_none() {
+            return Ok(Vec::new());
+        }
+        let choices = self.jolta.store.read(|c| cal::ops::move_choices(c, d.calendar, &d.uid))?;
+        Ok(choices.into_iter().map(|m| MoveChoice { calendar_id: m.calendar.0, refusal: m.refusal, note: m.note }).collect())
     }
 
     /// Whether the event can be deleted, and at the occurrence `time` of a
