@@ -218,6 +218,10 @@ pub enum CalCommand {
     Copy(crate::cal_edit::CopyArgs),
     /// Delete an event, or a series with its changed occurrences, through the op queue.
     Delete(crate::cal_edit::DeleteArgs),
+    /// Move an event, with its whole series, to another calendar: within an
+    /// account by the server's own move, else a copy and then a delete.
+    /// Refused, with the reason, where the guests would hear of it.
+    Move(crate::cal_edit::MoveArgs),
     /// The calendar op queue, oldest first, with each op's state.
     Ops {
         /// Send the ops that are due first, as the app's worker does.
@@ -282,6 +286,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Edit(a) => crate::cal_edit::edit(jolta, a).await,
         CalCommand::Copy(a) => crate::cal_edit::copy(jolta, a).await,
         CalCommand::Delete(a) => crate::cal_edit::delete(jolta, a).await,
+        CalCommand::Move(a) => crate::cal_edit::move_event(jolta, a).await,
         CalCommand::Ops { send } => crate::cal_edit::list_ops(jolta, send).await,
         CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,
         CalCommand::ApplyMine { op, wait } => crate::cal_edit::apply_mine(jolta, op, wait).await,

@@ -849,7 +849,7 @@ final class CalendarModel {
             let saved = try core.saveEvent(draft: draft, scope: scope, notify: notify, message: message)
             then()
             refresh()
-            let mine = events.filter { $0.record.uid == saved.uid && $0.record.calendarId == draft.calendarId }
+            let mine = events.filter { $0.record.uid == saved.uid && $0.record.calendarId == (draft.moveTo ?? draft.calendarId) }
             if let event = mine.first(where: { $0.record.time == draft.time }) ?? mine.first { selectedID = event.id }
             toast?(saved.message, saved.token)
         } catch {

@@ -44,6 +44,7 @@ pub(crate) fn writable(write: &OpWrite<'_>, here: Tz) -> Result<()> {
         }
         OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => patch_body(base, event, *extra, here).map(drop),
         OpWrite::Delete { .. } | OpWrite::Cancel { .. } => Ok(()),
+        OpWrite::Move { .. } => Err(cannot(MICROSOFT, "move an event to another calendar")),
     }
 }
 
@@ -223,6 +224,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
                 _ => Err(api.failure(status, &reply)),
             }
         }
+        OpWrite::Move { .. } => Err(cannot(MICROSOFT, "move an event to another calendar")),
     }
 }
 

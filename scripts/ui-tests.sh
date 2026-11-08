@@ -38,7 +38,7 @@ for t in $TESTS; do
 	"$JOLTA" --data-dir "$dir" import me@test.invalid sent "$FIXTURES/02-numbers-reply.eml" >/dev/null
 	"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-work.ics" --name Work --color '#4f6fae' >/dev/null
 	"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-personal.ics" --name Personal --color '#9a5a8a' >/dev/null
-	if [ "$t" = testMeetingUpdate ] || [ "$t" = testGridDragAndKeys ] || [ "$t" = testAddVideoCall ]; then
+	if [ "$t" = testMeetingUpdate ] || [ "$t" = testGridDragAndKeys ] || [ "$t" = testAddVideoCall ] || [ "$t" = testMoveBetweenCalendars ]; then
 		"$JOLTA" --data-dir "$dir" cal import "$FIXTURES/calendar-team.ics" --name Team --color '#3f8f6b' >/dev/null
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Team me@test.invalid >/dev/null
 	fi

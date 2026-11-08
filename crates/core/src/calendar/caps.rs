@@ -71,6 +71,11 @@ pub struct Capabilities {
     /// "This and following events".
     pub split_series: bool,
     pub move_within: MoveRule,
+    /// A meeting with guests moves within the account without the server
+    /// telling them: iCloud's MOVE between two calendars mailed neither
+    /// guest, and an update after it reached both as usual (iCloud test
+    /// account, 2026-11-08).
+    pub move_meetings: bool,
     pub video: Vec<MeetingProvider>,
     pub remove_video: bool,
     pub options: OrganizerOptions,
@@ -114,6 +119,7 @@ pub fn of(calendar: &Calendar) -> Capabilities {
         repeat: RepeatLimits::ALL,
         split_series: false,
         move_within: MoveRule::None,
+        move_meetings: false,
         video: Vec::new(),
         remove_video: false,
         options: OrganizerOptions::default(),
@@ -157,6 +163,7 @@ pub fn of(calendar: &Calendar) -> Capabilities {
             // removed (iCloud test account, 2026-11-08); Fastmail is unknown.
             new_people_only: calendar.remote_id.contains("icloud.com"),
             move_within: MoveRule::Native,
+            move_meetings: calendar.remote_id.contains("icloud.com"),
             options: OrganizerOptions { request_responses: true, allow_new_time_proposals: true, ..Default::default() },
             show_as: vec![ShowAs::Free, ShowAs::Busy],
             sends_itself: true,
@@ -244,6 +251,7 @@ mod tests {
         assert_eq!((i.hold_update, i.new_people_only, i.sends_itself), (Hold::NeverForMeetingFields, false, true));
         let icloud = of(&Calendar { remote_id: "https://p01-caldav.icloud.com/1/calendars/home/".into(), ..calendar(CalendarSource::CalDav, Access::Owner) });
         assert!(icloud.new_people_only, "iCloud mails only the people added or removed");
+        assert!(icloud.move_meetings && !i.move_meetings && !g.move_meetings && !m.move_meetings, "only iCloud's MOVE is known to mail nobody");
         assert!(i.video.is_empty());
 
         let no_teams = of(&Calendar { video: Some(Vec::new()), ..calendar(CalendarSource::Graph, Access::Owner) });

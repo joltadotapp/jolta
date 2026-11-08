@@ -348,6 +348,80 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(moved.waitForExistence(timeout: 5), "Z brings it back")
     }
 
+    /// Moving between calendars: the editor's calendar picker on a stored
+    /// event moves it there with its other changes, and Z takes back both;
+    /// a meeting someone else organizes offers no picker, and the user's own
+    /// meeting with guests finds the calendars on this Mac greyed.
+    func testMoveBetweenCalendars() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        let picker = app.descendants(matching: .any).matching(identifier: "editor-calendar").firstMatch
+        let pick = { (name: String) in
+            picker.click()
+            let item = app.menuItems[name]
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "the calendar picker lists \(name)")
+            XCTAssertTrue(item.isEnabled, "\(name) can take the event")
+            item.click()
+        }
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Move check")
+        pick("Work")
+        app.typeKey(.return, modifierFlags: .command)
+        let created = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Move check,")).firstMatch
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "⌘↩ saves it into Work")
+
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "E opens it again")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "a stored event has the calendar picker too")
+        title.click()
+        app.typeKey("a", modifierFlags: .command)
+        title.typeText("Moved check")
+        pick("Personal")
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(text(app, "Moved Moved check to Personal").waitForExistence(timeout: 5), "the toast says where it went, with Undo")
+        let moved = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Moved check,")).firstMatch
+        XCTAssertTrue(moved.waitForExistence(timeout: 5), "the new title shows")
+
+        let work = app.descendants(matching: .any).matching(identifier: "calendar-Work").firstMatch
+        XCTAssertTrue(work.waitForExistence(timeout: 5), "the sidebar lists the Work calendar")
+        let key = try XCTUnwrap((work.value as? String)?.split(separator: " ").last.map(String.init), "Work has a number key")
+        app.typeKey(key, modifierFlags: [])
+        XCTAssertTrue(waitUntil { app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Design review,")).count == 0 }, "\(key) hides Work")
+        XCTAssertTrue(moved.exists, "the moved event isn't in Work any more")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(moved.waitForNonExistence(timeout: 5), "Z takes the move and the new title back, into the hidden Work")
+        app.typeKey(key, modifierFlags: [])
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "Work shows it again, as it was")
+
+        let review = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Design review,")).firstMatch
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        review.click()
+        app.typeKey("e", modifierFlags: [])
+        let notice = app.descendants(matching: .any).matching(identifier: "editor-notice").firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 5), "E opens someone else's meeting, saying who organizes it")
+        XCTAssertFalse(picker.exists, "it stays in the calendar the invitation reached: no picker")
+        app.typeKey(.escape, modifierFlags: [])
+
+        let team = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Team sync,")).firstMatch
+        XCTAssertTrue(team.waitForExistence(timeout: 5), "the user's own meeting on a Google calendar")
+        team.click()
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "a meeting the user organizes has the picker")
+        picker.click()
+        let mac = app.menuItems["Work"]
+        XCTAssertTrue(mac.waitForExistence(timeout: 5))
+        XCTAssertFalse(mac.isEnabled, "a calendar on this Mac is greyed for a meeting with guests")
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "move-picker"
+        shot.lifetime = .keepAlways
+        add(shot)
+        app.typeKey(.escape, modifierFlags: [])
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
     /// Add video call: on a Google calendar the menu offers Google Meet,
     /// with Teams greyed, and the call shows as made on save; a calendar on
     /// this Mac can't have one and says so; the saved event keeps asking for

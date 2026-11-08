@@ -163,8 +163,10 @@ impl Scheduler {
             if let Some(f) = s.failure {
                 (self.sink)(Event::CalendarOpFailed { calendar: s.calendar, event: f.event, message: f.message });
             }
-            if !changed.contains(&s.calendar) {
-                changed.push(s.calendar);
+            for calendar in std::iter::once(s.calendar).chain(s.moved_from) {
+                if !changed.contains(&calendar) {
+                    changed.push(calendar);
+                }
             }
         }
         if !changed.is_empty() {

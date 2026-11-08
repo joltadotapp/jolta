@@ -271,6 +271,11 @@ pub enum OpWrite<'a> {
     /// One occurrence taken out of its series: `held` is its own object
     /// when it was `changed`, else the series'.
     Cancel { held: &'a Stored, occurrence: &'a EventData, changed: bool },
+    /// The whole object `held` moved to `to`, another calendar of the same
+    /// account, only while the server still has that version, telling
+    /// nobody: Google `events.move`, CalDAV MOVE. A retry whose first try
+    /// moved it finds it in `to`.
+    Move { held: &'a Stored, to: &'a Calendar },
 }
 
 /// An object as the server holds it, to store as a sync would.

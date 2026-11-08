@@ -603,6 +603,7 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         options: d.options,
         responses: d.responses.clone(),
         show_as_note: d.show_as_note.clone(),
+        move_to: None,
         room: d.room.clone(),
         location: d.location.clone(),
         description: d.description.clone(),

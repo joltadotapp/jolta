@@ -227,6 +227,16 @@ pub struct DeleteArgs {
     send: Send,
 }
 
+#[derive(Args)]
+pub struct MoveArgs {
+    /// The event's id, as `jolta cal list` shows it after the title.
+    event: i64,
+    /// The calendar it goes to, as `jolta cal calendars` lists it.
+    calendar: i64,
+    #[command(flatten)]
+    send: Send,
+}
+
 /// "ann@example.com" or "ann@example.com:optional" as a guest.
 fn guest(spec: &str) -> Attendee {
     let (address, role) = match spec.trim().rsplit_once(':') {
@@ -617,6 +627,23 @@ pub async fn delete(jolta: &Jolta, a: DeleteArgs) -> Result<()> {
     finish(jolta, saved, &a.send).await
 }
 
+/// Moves the event as the editor's calendar picker does, saying first what
+/// the move costs or why it can't go.
+pub async fn move_event(jolta: &Jolta, a: MoveArgs) -> Result<()> {
+    let here = tz::here();
+    let mut d = drafted(jolta, a.event, None)?;
+    d.move_to = Some(CalendarId(a.calendar));
+    for p in jolta.store.read(|c| draft::check_draft(c, &d, here))? {
+        if p.blocking {
+            bail!("{}", p.text);
+        }
+        println!("{}", p.text);
+    }
+    let h = horizon();
+    let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, None, None, None, Utc::now().timestamp(), &h, here))?;
+    finish(jolta, saved, &a.send).await
+}
+
 pub async fn apply_mine(jolta: &Jolta, op: i64, wait: bool) -> Result<()> {
     let h = horizon();
     match jolta.store.write(|tx| ops::apply_mine(tx, CalendarOpId(op), Utc::now().timestamp(), &h))? {
@@ -649,8 +676,9 @@ fn print_op(jolta: &Jolta, op: &CalendarOp) {
     };
     let error = op.error.as_deref().map(|e| format!(", last error: {e}")).unwrap_or_default();
     let lost = if op.lost.is_empty() { String::new() } else { format!(", the server kept: {}", op.lost.iter().map(|f| f.noun()).collect::<Vec<_>>().join(", ")) };
+    let from = op.moved_from().map(|f| format!(" from {f}")).unwrap_or_default();
     println!(
-        "op {:>4}  {:<8} {:<6} {:<30} calendar {}  tried: {}, attempts: {}{wait}{error}{lost}",
+        "op {:>4}  {:<8} {:<6} {:<30} calendar {}{from}  tried: {}, attempts: {}{wait}{error}{lost}",
         op.id.0,
         op.state,
         op.write.kind(),
@@ -725,6 +753,9 @@ pub struct DraftArgs {
     /// otherwise takes its calendar's default.
     #[arg(long)]
     no_reminder: bool,
+    /// Move the event to this calendar, as the editor's calendar picker does.
+    #[arg(long, requires = "event")]
+    move_to: Option<i64>,
     /// Save the draft as the editor's Save does.
     #[arg(long, conflicts_with = "delete")]
     save: bool,
@@ -753,6 +784,7 @@ pub async fn draft(jolta: &Jolta, a: DraftArgs) -> Result<()> {
     if a.no_reminder {
         d.reminder = draft::Reminder::Off;
     }
+    d.move_to = a.move_to.map(CalendarId);
     if let Some(span) = a.when.span(Some(&d.span))? {
         d.span = span;
     }

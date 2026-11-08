@@ -16,6 +16,7 @@ pub mod ical_edit;
 pub mod invitation;
 pub mod meeting;
 pub mod merge;
+pub mod moving;
 mod model;
 pub mod ops;
 pub mod organizer;
