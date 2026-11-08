@@ -558,11 +558,11 @@ pub struct MoveChoice {
     pub note: Option<String>,
 }
 
-/// Where the event `uid` of `from` can move: every shown calendar but its
-/// own, each with the reason it can't take it or what the move costs.
+/// Where the event `uid` of `from` can move: every calendar but its own,
+/// each with the reason it can't take it or what the move costs.
 pub fn move_choices(conn: &Connection, from: CalendarId, uid: &str) -> Result<Vec<MoveChoice>> {
     let mut out = Vec::new();
-    for to in store::calendars(conn)?.into_iter().filter(|c| c.shown && c.id != from) {
+    for to in store::calendars(conn)?.into_iter().filter(|c| c.id != from) {
         out.push(match plan_move(conn, from, uid, to.id) {
             Ok(planned) => MoveChoice { calendar: to.id, refusal: None, note: planned.note },
             Err(e) => MoveChoice { calendar: to.id, refusal: Some(e.to_string()), note: None },

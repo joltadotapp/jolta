@@ -37,6 +37,30 @@ final class EventEditorModel {
     func videoLabel(_ provider: MeetingProvider) -> String {
         videoChoices.first { $0.provider == provider }?.label ?? "\(provider.name) meeting"
     }
+    /// Where a stored event can move, by calendar: why it can't, or what
+    /// the move costs. Empty for a new event, whose calendar is picked freely.
+    private(set) var moveChoices: [Int64: MoveChoice] = [:]
+
+    /// The calendar the event is shown in: the one picked for a move, else its own.
+    var shownCalendar: Int64 { draft.moveTo ?? draft.calendarId }
+
+    /// Picks the calendar: a new event goes there, a stored one moves there.
+    func pick(calendar id: Int64) {
+        if isNew {
+            draft.calendarId = id
+        } else {
+            draft.moveTo = id == draft.calendarId ? nil : id
+        }
+    }
+
+    /// Why the event can't go to the calendar `info`, shown greyed in the
+    /// picker; nil when it can.
+    func refusal(_ info: CalendarInfo) -> String? {
+        if isNew { return info.writable ? nil : "Read-only" }
+        if info.id == draft.calendarId { return nil }
+        return moveChoices[info.id].map { $0.refusal } ?? "Not open in Jolta"
+    }
+
     /// Saving shows Send an update?, so the button reads "Save and send…".
     private(set) var willSend = false
     /// The organizer options are open.
@@ -51,6 +75,9 @@ final class EventEditorModel {
         self.draft = draft
         self.event = event
         repeatText = draft.repeat
+        if draft.base != nil {
+            moveChoices = Dictionary(((try? core.moveChoices(draft: draft)) ?? []).map { ($0.calendarId, $0) }) { a, _ in a }
+        }
         refreshTexts()
         check()
     }
@@ -708,17 +735,19 @@ struct EventEditorPanel: View {
     private var calendarSection: some View {
         EditorSection {
             EditorRow(icon: "calendar") {
-                let current = cal.calendarInfo(editor.draft.calendarId)
+                let current = cal.calendarInfo(editor.shownCalendar)
                 HStack(spacing: 6) {
-                    if editor.isNew && !editor.locked(.calendar) {
+                    if (editor.isNew || !editor.moveChoices.isEmpty) && !editor.locked(.calendar) {
                         Menu {
                             ForEach(cal.groups) { group in
                                 Section(group.title) {
                                     ForEach(group.calendars) { entry in
-                                        Button { editor.draft.calendarId = entry.info.id } label: {
-                                            Text(entry.info.writable ? entry.info.name : "\(entry.info.name) (read-only)")
+                                        let refusal = editor.refusal(entry.info)
+                                        Button { editor.pick(calendar: entry.info.id) } label: {
+                                            Text(entry.info.name)
+                                            if let refusal { Text(refusal) }
                                         }
-                                        .disabled(!entry.info.writable)
+                                        .disabled(refusal != nil)
                                     }
                                 }
                             }
@@ -737,7 +766,7 @@ struct EventEditorPanel: View {
                         Text(current?.name ?? "")
                     }
                     Spacer()
-                    if let group = cal.groups.first(where: { $0.calendars.contains { $0.info.id == editor.draft.calendarId } }) {
+                    if let group = cal.groups.first(where: { $0.calendars.contains { $0.info.id == editor.shownCalendar } }) {
                         Text(group.detail.isEmpty ? group.title : group.detail)
                             .foregroundStyle(Color(Theme.text3))
                             .font(.system(size: 12))

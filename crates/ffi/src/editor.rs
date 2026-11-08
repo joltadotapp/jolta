@@ -701,8 +701,8 @@ impl Core {
         Ok(SavedEdit { token: saved.op.map(|o| o.0), uid: saved.uid, message: saved.message })
     }
 
-    /// Where the stored event a draft opened can move: every shown calendar
-    /// but its own, each with why it can't take it, or what the move costs
+    /// Where the stored event a draft opened can move: every calendar but
+    /// its own, each with why it can't take it, or what the move costs
     /// ("Standup's Teams meeting stays behind: Google calendars can't have
     /// one."). The editor greys the refused ones with their reason.
     pub fn move_choices(&self, draft: EventDraft) -> Result<Vec<MoveChoice>> {

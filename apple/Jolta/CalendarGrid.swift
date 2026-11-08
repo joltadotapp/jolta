@@ -273,7 +273,7 @@ final class CalendarWeekView: NSView {
             if let editor = cal.editor, !editor.isReadOnly {
                 // The event being edited shows only as the draft.
                 if let editing = editor.editing { events = events.filter { $0.id != editing } }
-                draft = DraftBlock(editor, days: days, color: cal.color(of: editor.draft.calendarId))
+                draft = DraftBlock(editor, days: days, color: cal.color(of: editor.shownCalendar))
                 revision = revision &* 31 &+ (draft?.hashValue ?? 0) &+ (editor.editing?.hashValue ?? 0)
             }
             if let change = cal.gridChange {
