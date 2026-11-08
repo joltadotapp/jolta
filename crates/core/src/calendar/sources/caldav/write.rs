@@ -347,23 +347,31 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
 fn forced(text: &str, uid: &str) -> String {
     let mut obj = Object::parse(text);
     for component in obj.events_mut(uid) {
-        let organizer = component.prop("ORGANIZER").and_then(|p| p.address()).map(str::to_ascii_lowercase);
-        if organizer.is_none() {
-            continue;
-        }
-        component.update("ATTENDEE", |p| p.address().map(str::to_ascii_lowercase) != organizer, |p| p.set_param("SCHEDULE-FORCE-SEND", "REQUEST"));
+        let Some(organizer) = organizer_addresses(component) else { continue };
+        component.update("ATTENDEE", |p| !is_one_of(p, &organizer), |p| p.set_param("SCHEDULE-FORCE-SEND", "REQUEST"));
     }
     obj.to_string()
+}
+
+/// The addresses of a VEVENT's ORGANIZER, None without one: its mailto
+/// and its EMAIL, where iCloud keeps the address of a principal.
+fn organizer_addresses(component: &Component) -> Option<Vec<String>> {
+    let p = component.prop("ORGANIZER")?;
+    Some(p.address().into_iter().chain(p.param("EMAIL")).map(str::to_ascii_lowercase).collect())
+}
+
+fn is_one_of(attendee: &Prop, addresses: &[String]) -> bool {
+    attendee.address().is_some_and(|a| addresses.iter().any(|o| o.eq_ignore_ascii_case(a)))
 }
 
 /// Every guest's answer back to NEEDS-ACTION, as the organizer's client
 /// does for a server that schedules (RFC 6638): the server mails what the
 /// copy says. The organizer's own line stays.
 fn ask_again(component: &mut Component, rsvp: bool) {
-    let organizer = component.prop("ORGANIZER").and_then(|p| p.address()).map(str::to_ascii_lowercase);
+    let organizer = organizer_addresses(component).unwrap_or_default();
     component.update(
         "ATTENDEE",
-        |p| p.address().map(str::to_ascii_lowercase) != organizer,
+        |p| !is_one_of(p, &organizer),
         |p| {
             p.set_param("PARTSTAT", "NEEDS-ACTION");
             if rsvp {
@@ -583,9 +591,14 @@ mod tests {
         let stored = Stored { id: EventId(1), remote_id: "/cal/m.ics".into(), etag: Some("\"1\"".into()), raw: Some(text.as_bytes().to_vec()), data: base.clone() };
         let renamed = EventData { title: "Design review".into(), ..base.clone() };
         let update = OpWrite::Update { held: &stored, base: &base, event: &renamed, extra: None, dropped: &[] };
-        for (notify, forced) in [(Notify::All, true), (Notify::Changed, false)] {
-            let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(text.into())), ("204 No Content", Some("\"2\""), None)]).await;
-            let Written::Saved(Some(v)) = dav.write(&calendar, &update, Tell { notify, message: None }).await.unwrap() else { panic!("saved") };
+        // iCloud keeps its ORGANIZER as a principal, the address in EMAIL.
+        let icloud = text.replace("ORGANIZER:mailto:me@example.com", "ORGANIZER;EMAIL=me@example.com:/aODI4/principal/");
+        let icloud_held = Stored { raw: Some(icloud.as_bytes().to_vec()), ..stored.clone() };
+        let icloud_update = OpWrite::Update { held: &icloud_held, base: &base, event: &renamed, extra: None, dropped: &[] };
+        for (update, notify, forced) in [(&update, Notify::All, true), (&update, Notify::Changed, false), (&icloud_update, Notify::All, true)] {
+            let served = if std::ptr::eq(update, &icloud_update) { icloud.clone() } else { text.to_string() };
+            let (dav, calendar, server) = caldav_server(vec![("200 OK", Some("\"1\""), Some(served)), ("204 No Content", Some("\"2\""), None)]).await;
+            let Written::Saved(Some(v)) = dav.write(&calendar, update, Tell { notify, message: None }).await.unwrap() else { panic!("saved") };
             let put = format!("PUT /cal/m.ics If-Match \"1\"{}", if forced { " forces a send" } else { "" });
             assert_eq!(server.await.unwrap(), ["GET /cal/m.ics".to_string(), put], "{notify:?}");
             assert!(!String::from_utf8_lossy(v.raw.as_deref().unwrap()).contains("SCHEDULE-FORCE-SEND"), "the copy kept");
