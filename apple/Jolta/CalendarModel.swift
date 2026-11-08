@@ -223,9 +223,17 @@ final class CalendarModel {
     var declinePrompt: DeclinePrompt?
     /// Send invitations from, before a calendar on this Mac first mails guests.
     var senderPrompt: SenderPrompt?
+    /// An event moved on the grid and not saved yet (`GridEditing.swift`).
+    var gridChange: GridChange?
+    /// Saves `gridChange` a second after the last key that changed it.
+    @ObservationIgnored var gathering: Task<Void, Never>?
     /// Shows a toast, with the token Undo takes back.
     @ObservationIgnored var toast: ((String, Int64?) -> Void)?
-    private(set) var list = CalendarList(accounts: [], otherCalendars: [])
+    private(set) var list = CalendarList(accounts: [], otherCalendars: []) {
+        didSet { writableCalendars = Set((list.accounts.flatMap(\.calendars) + list.otherCalendars).filter(\.writable).map(\.id)) }
+    }
+    /// Calendars the user can write to, whose events show resize cursors.
+    @ObservationIgnored private(set) var writableCalendars: Set<Int64> = []
     /// Ticks every 30 seconds: the now line, past events and Join buttons follow it.
     private(set) var now: Date = .now
     private(set) var nextMeeting: NextMeetingRecord?
@@ -698,28 +706,23 @@ final class CalendarModel {
         if let event = selected { edit(event) }
     }
 
-    /// ⌘D: a new event like the selected one, at the same time, without its
-    /// people or meeting link: a copy never carries the original's call.
+    /// ⌘D: a new event like the selected one, at the same time.
     func duplicateSelected() {
         guard let event = selected, confirmLeaving({ self.duplicateSelected() }) else { return }
         do {
-            let source = try core.draftForEvent(eventId: event.record.eventId, time: event.record.time)
-            let calendar = calendarInfo(source.calendarId)?.writable == true ? source.calendarId : nil
-            var copy = try core.newDraft(calendarId: calendar, time: source.time)
-            copy.title = source.title
-            copy.location = source.location
-            copy.room = source.room
-            copy.description = source.description
-            copy.showAs = source.showAs
-            copy.visibility = source.visibility
-            if case .before = source.reminder { copy.reminder = source.reminder }
-            open(EventEditorModel(core: core, draft: copy, event: nil))
+            open(EventEditorModel(core: core, draft: try copyDraft(of: event), event: nil))
         } catch {
             toast?("\(error)", nil)
         }
     }
 
-    private func open(_ model: EventEditorModel) {
+    /// A new event like `event`, at its time, without its people, repeat or
+    /// meeting link.
+    func copyDraft(of event: CalEvent) throws -> EventDraft {
+        try core.copyDraft(eventId: event.record.eventId, time: event.record.time)
+    }
+
+    func open(_ model: EventEditorModel) {
         closeDetail()
         model.onChange = { [weak self, weak model] in
             guard let self, let model else { return }
@@ -733,7 +736,7 @@ final class CalendarModel {
 
     /// Whether the open editor may go: true when nothing would be lost, else
     /// it asks "Discard changes?" and runs `then` on Discard.
-    private func confirmLeaving(_ then: @escaping () -> Void) -> Bool {
+    func confirmLeaving(_ then: @escaping () -> Void) -> Bool {
         guard let editor, hasChanges(editor) else { return true }
         discard = Confirmation(title: "Discard changes?", message: "Your changes to \(editor.draft.title.isEmpty ? "this event" : editor.draft.title) aren't saved.",
                                action: "Discard") { [weak self] in
@@ -769,25 +772,38 @@ final class CalendarModel {
     func saveEditor() {
         guard let editor else { return }
         if editor.isReadOnly { return dropEditor() }
+        let failed = { (text: String) in editor.failure = text }
         do {
-            let plan = try core.planSave(draft: editor.draft)
-            if plan.unchanged { return dropEditor() }
-            if !plan.senders.isEmpty {
-                return askSender(plan.senders, calendar: editor.draft.calendarId) { [weak self] in
-                    guard let self, self.editor === editor else { return }
-                    self.saveEditor()
-                }
+            if try core.planSave(draft: editor.draft).unchanged { return dropEditor() }
+            try confirmSave(editor.draft, failed: failed) { [weak self] scope, notify, message in
+                guard let self, self.editor === editor else { return }
+                self.save(editor.draft, scope: scope, notify: notify, message: message, failed: failed) { self.dropEditor() }
             }
-            let send = { [weak self] (scope: EditScope?, prompted: Bool) in
-                guard let self else { return }
-                guard let dialog = plan.dialog else { return self.save(editor, scope: scope, notify: nil, message: nil) }
-                self.after(prompted) { self.sendPrompt = SendPrompt(dialog: dialog) { [weak self] notify, message in self?.save(editor, scope: scope, notify: notify, message: message) } }
-            }
-            guard !plan.scopes.isEmpty else { return send(nil, false) }
-            scopePrompt = ScopePrompt(title: "Change a repeating event", line: plan.prompt, choices: plan.scopes) { send($0, true) }
         } catch {
-            editor.failure = "\(error)"
+            failed("\(error)")
         }
+    }
+
+    /// What saving `draft` asks first, in order: Send invitations from when
+    /// its calendar has no account to mail from yet, the scope prompt for one
+    /// occurrence of a series, and Send an update? when the guests hear about
+    /// it. `perform` saves with the answers. Nothing is saved when the user
+    /// cancels the scope prompt (`cancel`) or picks Keep editing (`back`).
+    func confirmSave(_ draft: EventDraft, cancel: @escaping () -> Void = {}, back: @escaping () -> Void = {}, failed: @escaping (String) -> Void,
+                     perform: @escaping (EditScope?, NotifyChoice?, String?) -> Void) throws {
+        let plan = try core.planSave(draft: draft)
+        if !plan.senders.isEmpty {
+            return askSender(plan.senders, calendar: draft.calendarId, cancel: back) { [weak self] in
+                do { try self?.confirmSave(draft, cancel: cancel, back: back, failed: failed, perform: perform) } catch { failed("\(error)") }
+            }
+        }
+        let send = { [weak self] (scope: EditScope?, prompted: Bool) in
+            guard let self else { return }
+            guard let dialog = plan.dialog else { return perform(scope, nil, nil) }
+            self.after(prompted) { self.sendPrompt = SendPrompt(dialog: dialog, back: back) { perform(scope, $0, $1) } }
+        }
+        guard !plan.scopes.isEmpty else { return send(nil, false) }
+        scopePrompt = ScopePrompt(title: "Change a repeating event", line: plan.prompt, choices: plan.scopes, cancel: cancel) { send($0, true) }
     }
 
     /// Runs `show`, after the scope prompt has gone when it was `prompted`:
@@ -801,9 +817,9 @@ final class CalendarModel {
     }
 
     /// Send invitations from, then `next` once the calendar has its account.
-    private func askSender(_ senders: [SenderInfo], calendar id: Int64, next: @escaping () -> Void) {
+    private func askSender(_ senders: [SenderInfo], calendar id: Int64, cancel: @escaping () -> Void = {}, next: @escaping () -> Void) {
         let name = calendarInfo(id)?.name ?? "this calendar"
-        senderPrompt = SenderPrompt(calendar: name, senders: senders) { [weak self] sender in
+        senderPrompt = SenderPrompt(calendar: name, senders: senders, cancel: cancel) { [weak self] sender in
             guard let self else { return }
             do {
                 try self.core.setSendFrom(calendarId: id, accountId: sender.accountId)
@@ -811,24 +827,23 @@ final class CalendarModel {
                 self.after(true, next)
             } catch {
                 self.toast?("\(error)", nil)
+                cancel()
             }
         }
     }
 
-    private func save(_ editor: EventEditorModel, scope: EditScope?, notify: NotifyChoice?, message: String?) {
-        guard self.editor === editor else { return }
+    /// Queues the op for `draft`, then selects the event at its new time,
+    /// so E and Delete act on it, and offers Undo. `then` runs once it is queued.
+    func save(_ draft: EventDraft, scope: EditScope?, notify: NotifyChoice?, message: String?, failed: (String) -> Void, then: () -> Void = {}) {
         do {
-            let saved = try core.saveEvent(draft: editor.draft, scope: scope, notify: notify, message: message)
-            let (uid, calendarID, time) = (saved.uid, editor.draft.calendarId, editor.draft.time)
-            dropEditor()
+            let saved = try core.saveEvent(draft: draft, scope: scope, notify: notify, message: message)
+            then()
             refresh()
-            // The event just saved is the selected one, so E and Delete act on
-            // it: the occurrence at its new time when it is one of a series.
-            let mine = events.filter { $0.record.uid == uid && $0.record.calendarId == calendarID }
-            if let event = mine.first(where: { $0.record.time == time }) ?? mine.first { selectedID = event.id }
+            let mine = events.filter { $0.record.uid == saved.uid && $0.record.calendarId == draft.calendarId }
+            if let event = mine.first(where: { $0.record.time == draft.time }) ?? mine.first { selectedID = event.id }
             toast?(saved.message, saved.token)
         } catch {
-            editor.failure = "\(error)"
+            failed("\(error)")
         }
     }
 
@@ -953,6 +968,14 @@ final class CalendarModel {
     /// after it: on a day with a clock change the two differ by an hour.
     static func at(_ day: Date, minutes: Int) -> Date {
         calendar.date(bySettingHour: minutes / 60 % 24, minute: minutes % 60, second: 0, of: day) ?? day
+    }
+
+    /// As `at`, counting on into the days after `day`: 1440 is the next
+    /// midnight, and 1500 01:00 the next day.
+    static func at(_ day: Date, minutesOn minutes: Int) -> Date {
+        let days = minutes >= 0 ? minutes / 1440 : -((-minutes + 1439) / 1440)
+        let date = calendar.date(byAdding: .day, value: days, to: day) ?? day
+        return at(date, minutes: minutes - days * 1440)
     }
 
     // MARK: Meetings

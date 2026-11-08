@@ -123,6 +123,15 @@ extension AppModel {
         KeyRouter.shared.window?.makeKeyAndOrderFront(nil)
     }
 
+    /// Y, N and ⇧M: answers the selected event when it is an invitation,
+    /// with the detail's default choices.
+    private func answerSelectedEvent(_ answer: InvitationAnswer) {
+        guard let event = calendar.selected ?? calendar.detailEvent,
+              let detail = event == calendar.detailEvent ? calendar.detail : try? core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: ""),
+              detail.canAnswer else { return }
+        Task { _ = await answerEvent(event.record.eventId, time: event.record.time, answer: answer, choices: AnswerChoices()) }
+    }
+
     /// Calendar mode's keys, and ⇧C in mail. Returns false to leave a key to mail.
     func handleCalendarKey(_ event: NSEvent) -> Bool {
         CalendarBench.shared?.mark("key received")
@@ -156,6 +165,7 @@ extension AppModel {
             return true
         }
         if event.characters == "?" { showsHelp = true; return true }
+        if command != .nudge, command != .resize { cal.settleKeys() }
         switch command {
         case .today: cal.goToday()
         case .next: cal.shift(1); CalendarBench.shared?.mark("key handled")
@@ -174,6 +184,11 @@ extension AppModel {
             default: .up
             }
             cal.moveSelection(move)
+        case .nudge: cal.nudge(moving: true, by: event.keyCode == 125 ? 15 : -15)
+        case .resize: cal.nudge(moving: false, by: event.keyCode == 125 ? 15 : -15)
+        case .accept: answerSelectedEvent(.accept)
+        case .maybe: answerSelectedEvent(.maybe)
+        case .decline: answerSelectedEvent(.decline)
         case .newEvent: cal.newEvent()
         case .edit: cal.editSelected()
         case .delete: cal.deleteSelected()

@@ -16,13 +16,20 @@ struct HourGridContent {
     let revision: Int
     /// The event the editor holds, drawn dashed where its fields put it.
     var draft: DraftBlock?
+    /// An event moved on the grid that waits for a dialog or more keys, drawn like the draft.
+    var pending: DraftBlock?
+    /// The period's days, for the times a drag lands on.
+    var columns: [CalendarDay] = []
+    /// Calendars whose events show the resize cursor at their edges.
+    var writable: Set<Int64> = []
 
     var days: Int { weekends.count }
 
     static let empty = HourGridContent(placed: [], weekends: [false], today: nil, todayStart: nil, selectedID: nil, now: .now, gutter: 64, revision: -1)
 }
 
-/// The editor's timed draft on one day of the period.
+/// A dashed event on one day of the period: the editor's draft, an event
+/// waiting to be saved, or one being dragged.
 struct DraftBlock: Hashable {
     let day: Int
     /// Minutes after the day's midnight.
@@ -31,18 +38,43 @@ struct DraftBlock: Hashable {
     let title: String
     let range: String
     let color: String?
+    /// Its real times, which `top` and `bottom` cut to the day.
+    let start: Date
+    let end: Date
+}
 
-    /// The draft on the period's days, or nil when it is all-day or elsewhere.
+extension DraftBlock {
+    /// From `start` to `end` on the period's days, or nil when it starts elsewhere.
+    init?(start: Date, end: Date, title: String, days: [CalendarDay], color: String?) {
+        guard let day = days.firstIndex(where: { $0.start <= start && start < $0.end }) else { return nil }
+        let top = start.timeIntervalSince(days[day].start) / 60
+        self.init(day: day, top: top, bottom: min(max(end.timeIntervalSince(days[day].start) / 60, top + 15), 24 * 60), title: title,
+                  range: "\(CalendarModel.clockTime(start)) – \(CalendarModel.clockTime(end))", color: color, start: start, end: end)
+    }
+
+    /// The editor's draft, or nil when it is all-day or elsewhere.
     @MainActor
     init?(_ editor: EventEditorModel, days: [CalendarDay], color: String?) {
-        guard let (start, end) = editor.interval, let day = days.firstIndex(where: { $0.start <= start && start < $0.end }) else { return nil }
-        self.day = day
-        top = start.timeIntervalSince(days[day].start) / 60
-        bottom = min(max(end.timeIntervalSince(days[day].start) / 60, top + 15), 24 * 60)
-        title = editor.draft.title.isEmpty ? "New event" : editor.draft.title
-        range = "\(CalendarModel.clockTime(start)) – \(CalendarModel.clockTime(end))"
-        self.color = color
+        guard let (start, end) = editor.interval else { return nil }
+        self.init(start: start, end: end, title: editor.draft.title.isEmpty ? "New event" : editor.draft.title, days: days, color: color)
     }
+}
+
+/// What the hour grid's drags are on: an event, or the editor's draft.
+enum GridTarget {
+    case event(CalEvent)
+    case draft
+}
+
+/// A drag on the hour grid, as it is let go. Times are minutes after the
+/// midnight of the period's day `day`.
+enum GridDrop {
+    /// Over empty time: a new event.
+    case create(day: Int, top: Int, bottom: Int)
+    /// To start at `top`, keeping the length; with ⌥ on an event, a copy.
+    case move(GridTarget, day: Int, top: Int, copy: Bool)
+    /// A new start, or with `top` false a new end.
+    case resize(GridTarget, top: Bool, day: Int, minute: Int)
 }
 
 /// A flipped, transparent view that draws itself with `paint`.
@@ -185,6 +217,10 @@ struct WeekGrid: NSViewRepresentable {
         view.hours.canvas.create = source == .period ? { day, minute in
             if cal.days.indices.contains(day) { cal.newEvent(day: cal.days[day], minute: minute) }
         } : nil
+        view.hours.canvas.drop = source == .period ? { cal.drop($0) } : nil
+        view.hours.canvas.canMove = { cal.canMove($0) }
+        view.strip.drop = source == .period ? { cal.move($0, days: $1, copy: $2) } : nil
+        view.strip.canMove = { cal.canMove(.event($0)) }
         view.update()
     }
 }
@@ -230,7 +266,7 @@ final class CalendarWeekView: NSView {
         guard let cal = model else { return }
         CalendarBench.shared?.mark("grid update")
         var days: [CalendarDay], events: [CalEvent], revision: Int, selected: String?
-        var draft: DraftBlock?
+        var draft: DraftBlock?, pending: DraftBlock?
         switch source {
         case .period:
             (days, events, revision, selected) = (cal.days, cal.events, cal.revision, cal.selectedID)
@@ -240,6 +276,17 @@ final class CalendarWeekView: NSView {
                 draft = DraftBlock(editor, days: days, color: cal.color(of: editor.draft.calendarId))
                 revision = revision &* 31 &+ (draft?.hashValue ?? 0) &+ (editor.editing?.hashValue ?? 0)
             }
+            if let change = cal.gridChange {
+                // A moved event shows only where it goes; a copy beside the original.
+                if !change.copy { events = events.filter { $0.id != change.event.id } }
+                let moved = change.preview
+                if let start = moved.start, let end = moved.end, !moved.isLong {
+                    pending = DraftBlock(start: start, end: end, title: moved.title, days: days, color: moved.record.color)
+                } else {
+                    events.append(moved)
+                }
+                revision = revision &* 31 &+ moved.id.hashValue &+ change.copy.hashValue &+ 1
+            }
         case .today: (days, events, revision, selected) = (cal.today.map { [$0] } ?? [], cal.todayEvents, cal.todayRevision, nil)
         }
         guard !days.isEmpty else { return }
@@ -247,7 +294,8 @@ final class CalendarWeekView: NSView {
         strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days), selectedID: selected, now: cal.now, revision: revision)
         hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), weekends: days.map(\.isWeekend), today: today,
                                                todayStart: today.map { days[$0].start }, selectedID: selected, now: cal.now,
-                                               gutter: hours.canvas.gutter, revision: revision, draft: draft)
+                                               gutter: hours.canvas.gutter, revision: revision, draft: draft, pending: pending,
+                                               columns: days, writable: source == .period ? cal.writableCalendars : [])
         if strip.frame.height != strip.height { needsLayout = true }
         // Draw now, inside the key's own pass, rather than at the next
         // display pass, which waited about 7 ms for the frame on a 120 Hz screen.
@@ -300,8 +348,30 @@ final class DayStrip: CanvasView {
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
     var selectedFrame: (CGRect?) -> Void = { _ in }
+    /// An event dragged to other days: by how many, and whether ⌥ copied it.
+    var drop: ((CalEvent, Int, Bool) -> Void)?
+    var canMove: (CalEvent) -> Bool = { _ in false }
     private var elements: [EventElement]?
     private var lastReported: CGRect??
+    private var press: Press?
+
+    /// A press on an event, until the mouse is let go.
+    private struct Press {
+        let item: LaneEvent
+        let point: CGPoint
+        let column: Int
+        var moving = false
+        var days = 0
+        var copy = false
+        var refused = false
+
+        /// Where the event goes, when it is drawn there.
+        func moved(_ columns: Int) -> LaneEvent? {
+            guard moving, !refused else { return nil }
+            let first = max(0, item.first + days), last = min(columns - 1, item.last + days)
+            return first <= last ? LaneEvent(event: item.event, first: first, last: last, lane: item.lane) : nil
+        }
+    }
 
     private static let namesHeight: CGFloat = 36
     private static let laneHeight: CGFloat = 20
@@ -373,7 +443,9 @@ final class DayStrip: CanvasView {
             cg.textPosition = CGPoint(x: gutter - 10 - labelWidth, y: lanesTop + 15)
             CTLineDraw(label, cg)
         }
+        let moved = press?.moved(content.days.count)
         for item in content.lanes where item.lane < Self.maxLanes {
+            if moved != nil, press?.copy == false, item.id == moved?.id { continue }
             let e = item.event, r = box(item)
             cg.saveGState()
             let alpha = EventStyle.alpha(e, now: content.now)
@@ -401,8 +473,33 @@ final class DayStrip: CanvasView {
                 ring.stroke()
             }
         }
+        if let moved { drawMoved(moved, cg: cg) }
         Theme.line2.setFill()
         CGRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+    }
+
+    /// The event being dragged, dashed on the days it would move to.
+    private func drawMoved(_ item: LaneEvent, cg: CGContext) {
+        let r = box(item)
+        let bar = CalendarColor.color(item.event.record.color, .bar)
+        let shape = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
+        Theme.bg.setFill()
+        shape.fill()
+        bar.withAlphaComponent(0.12).setFill()
+        shape.fill()
+        let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.75, dy: 0.75), xRadius: 4.5, yRadius: 4.5)
+        edge.lineWidth = 1.5
+        edge.setLineDash([4, 3], count: 2, phase: 0)
+        bar.withAlphaComponent(0.85).setStroke()
+        edge.stroke()
+        var title = line(item.event.title, Self.laneFont)
+        let width = r.width - 14
+        if CTLineGetTypographicBounds(title, nil, nil, nil) > width {
+            title = CTLineCreateTruncatedLine(title, max(0, width), .end, line("…", Self.laneFont)) ?? title
+        }
+        cg.setFillColor(Theme.text.cgColor)
+        cg.textPosition = CGPoint(x: r.minX + 7, y: r.minY + 14)
+        CTLineDraw(title, cg)
     }
 
     func reportSelection() {
@@ -413,10 +510,42 @@ final class DayStrip: CanvasView {
         DispatchQueue.main.async { report(frame) }
     }
 
+    private func column(at x: CGFloat) -> Int {
+        min(max(Int(floor((x - gutter) / columnWidth)), 0), max(content.days.count - 1, 0))
+    }
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let hit = content.lanes.last(where: { $0.lane < Self.maxLanes && box($0).contains(point) })?.event else { return super.mouseDown(with: event) }
-        if event.clickCount == 2 { open(hit) } else { select(hit) }
+        guard let hit = content.lanes.last(where: { $0.lane < Self.maxLanes && box($0).contains(point) }) else { return super.mouseDown(with: event) }
+        if event.clickCount == 2 { return open(hit.event) }
+        select(hit.event)
+        if drop != nil { press = Press(item: hit, point: point, column: column(at: point.x)) }
+    }
+
+    /// Dragging an event sideways moves it by whole days; ⌥ copies it.
+    override func mouseDragged(with event: NSEvent) {
+        guard var press else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        if !press.moving {
+            guard hypot(point.x - press.point.x, point.y - press.point.y) >= 4 else { return }
+            press.moving = true
+            press.refused = !canMove(press.item.event)
+        }
+        press.days = column(at: point.x) - press.column
+        press.copy = event.modifierFlags.contains(.option)
+        (press.refused ? NSCursor.operationNotAllowed : press.copy ? NSCursor.dragCopy : NSCursor.closedHand).set()
+        self.press = press
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let press else { return }
+        self.press = nil
+        guard press.moving else { return }
+        NSCursor.arrow.set()
+        needsDisplay = true
+        // A refused move still goes to the model, which says why.
+        if press.days != 0 { drop?(press.item.event, press.days, event.modifierFlags.contains(.option)) }
     }
 
     override func isAccessibilityElement() -> Bool { false }
@@ -487,6 +616,7 @@ final class HourScrollView: NSScrollView {
             canvas.frame = visible
             canvas.needsDisplay = true
             canvas.reportSelection()
+            window?.invalidateCursorRects(for: canvas)
         }
     }
 
@@ -515,16 +645,53 @@ final class HourCanvas: CanvasView {
             elements = nil
             needsDisplay = true
             reportSelection()
+            window?.invalidateCursorRects(for: self)
         }
     }
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
     /// Double-click on empty time: the day's index and the minute clicked.
     var create: ((Int, Int) -> Void)?
+    /// A drag let go; nil where the grid only shows, as beside mail.
+    var drop: ((GridDrop) -> Void)?
+    var canMove: (GridTarget) -> Bool = { _ in false }
     var selectedFrame: (CGRect?) -> Void = { _ in }
     var gutter = CalendarLayout.gutter
     private var elements: [EventElement]?
     private var lastReported: CGRect??
+    private var press: Press?
+
+    /// A press on an event, the editor's draft or empty time (no item),
+    /// until the mouse is let go.
+    private struct Press {
+        enum Grip { case body, top, bottom }
+        let item: GridTarget?
+        let grip: Grip
+        /// Where it went down, in the document's coordinates, and the day there.
+        let point: CGPoint
+        let day: Int
+        /// The item's times; the press's own for empty time.
+        let start: Date
+        let end: Date
+        let title: String
+        let color: String?
+        var moving = false
+        var refused = false
+        var copy = false
+        var drop: GridDrop?
+        var preview: DraftBlock?
+
+        /// The event that shows only where it is dragged to.
+        var hides: String? {
+            guard moving, !refused, !copy, preview != nil, case .event(let e) = item else { return nil }
+            return e.id
+        }
+
+        var hidesDraft: Bool {
+            guard moving, !refused, preview != nil, case .draft = item else { return false }
+            return true
+        }
+    }
 
     private var columnWidth: CGFloat { (bounds.width - content.gutter) / CGFloat(max(content.days, 1)) }
 
@@ -542,12 +709,15 @@ final class HourCanvas: CanvasView {
             cg.translateBy(x: 0, y: -self.frame.minY)
             let visible = self.frame
             self.drawGrid(visible, cg: cg)
-            for p in self.content.placed {
+            let hidden = self.press?.hides
+            for p in self.content.placed where p.event.id != hidden {
                 let r = self.box(p)
                 guard r.intersects(visible) else { continue }
                 self.draw(p.event, in: r, cg: cg)
             }
-            if let draft = self.content.draft { self.drawDraft(draft, cg: cg) }
+            if let draft = self.content.draft, self.press?.hidesDraft != true { self.drawDraft(draft, cg: cg) }
+            if let pending = self.content.pending { self.drawDraft(pending, cg: cg) }
+            if let press = self.press, !press.refused, let preview = press.preview { self.drawDraft(preview, cg: cg) }
             self.drawNow(cg: cg)
         }
         if let bench = CalendarBench.shared { bench.time("draw (hour grid)", paint) } else { paint() }
@@ -654,10 +824,14 @@ final class HourCanvas: CanvasView {
 
     /// The editor's draft: dashed in its calendar's color, ringed with the
     /// accent, with its title and times.
-    private func drawDraft(_ d: DraftBlock, cg: CGContext) {
+    private func rect(_ d: DraftBlock) -> CGRect {
         let hh = CalendarLayout.hourHeight
-        let r = CGRect(x: content.gutter + CGFloat(d.day) * columnWidth + 3, y: d.top / 60 * hh + 1,
-                       width: max(columnWidth - 7, 4), height: max(16, (d.bottom - d.top) / 60 * hh - 2))
+        return CGRect(x: content.gutter + CGFloat(d.day) * columnWidth + 3, y: d.top / 60 * hh + 1,
+                      width: max(columnWidth - 7, 4), height: max(16, (d.bottom - d.top) / 60 * hh - 2))
+    }
+
+    private func drawDraft(_ d: DraftBlock, cg: CGContext) {
+        let r = rect(d)
         let bar = CalendarColor.color(d.color, .bar)
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
         Theme.bg.setFill()
@@ -702,22 +876,144 @@ final class HourCanvas: CanvasView {
         DispatchQueue.main.async { report(shown) }
     }
 
-    private func event(at point: CGPoint) -> CalEvent? {
-        let p = CGPoint(x: point.x, y: point.y + frame.minY)
-        return content.placed.last { box($0).contains(p) }?.event
+    private func column(at x: CGFloat) -> Int {
+        min(max(Int(floor((x - content.gutter) / columnWidth)), 0), max(content.days - 1, 0))
+    }
+
+    /// To the nearest 15 minutes.
+    private static func snap(_ minutes: Double) -> Int { Int((minutes / 15).rounded()) * 15 }
+
+    /// The grip a press at `point` takes on an item drawn in `r`: an edge
+    /// that is its real start or end resizes it.
+    private static func grip(_ r: CGRect, _ point: CGPoint, top: Bool, bottom: Bool) -> Press.Grip {
+        if top, point.y - r.minY <= 4 { return .top }
+        if bottom, r.maxY - point.y <= 4 { return .bottom }
+        return .body
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let hit = self.event(at: point) else {
+        let doc = CGPoint(x: point.x, y: point.y + frame.minY)
+        press = nil
+        if drop != nil, let d = content.draft, rect(d).contains(doc) {
+            press = Press(item: .draft, grip: Self.grip(rect(d), doc, top: true, bottom: true), point: doc, day: d.day,
+                          start: d.start, end: d.end, title: d.title, color: d.color)
+            return
+        }
+        guard let placed = content.placed.last(where: { box($0).contains(doc) }) else {
+            // ⌥ on empty time is left for focus time (C4).
+            if event.modifierFlags.contains(.option) { return super.mouseDown(with: event) }
             if event.clickCount == 2, let create, point.x > content.gutter {
                 let day = Int((point.x - content.gutter) / columnWidth)
-                let minute = Int((point.y + frame.minY) / CalendarLayout.hourHeight * 60)
+                let minute = Int(doc.y / CalendarLayout.hourHeight * 60)
                 if day < content.days, (0..<24 * 60).contains(minute) { return create(day, minute) }
             }
-            return super.mouseDown(with: event)
+            guard drop != nil, point.x > content.gutter, !content.columns.isEmpty else { return super.mouseDown(with: event) }
+            let day = column(at: doc.x)
+            press = Press(item: nil, grip: .body, point: doc, day: day, start: .now, end: .now, title: "New event", color: nil)
+            return
         }
-        if event.clickCount == 2 { open(hit) } else { select(hit) }
+        let hit = placed.event
+        if event.clickCount == 2 { return open(hit) }
+        select(hit)
+        guard drop != nil, let start = hit.start, let end = hit.end, content.columns.indices.contains(placed.day) else { return }
+        let day = content.columns[placed.day]
+        press = Press(item: .event(hit), grip: Self.grip(box(placed), doc, top: start >= day.start, bottom: end <= day.end), point: doc,
+                      day: placed.day, start: start, end: end, title: hit.title, color: hit.record.color)
+    }
+
+    /// Dragging empty time draws a new event; dragging an event or the
+    /// editor's draft moves it, across days too, and dragging an edge
+    /// resizes it, all in 15-minute steps. ⌥ copies an event.
+    override func mouseDragged(with event: NSEvent) {
+        guard var press else { return }
+        autoscroll(with: event)
+        let point = convert(event.locationInWindow, from: nil)
+        let doc = CGPoint(x: point.x, y: point.y + frame.minY)
+        if !press.moving {
+            guard hypot(doc.x - press.point.x, doc.y - press.point.y) >= 4 else { return }
+            press.moving = true
+            press.refused = press.item.map { !canMove($0) } ?? false
+        }
+        let hh = Double(CalendarLayout.hourHeight)
+        let minute = doc.y / hh * 60, pressed = press.point.y / hh * 60
+        let columns = content.columns
+        let at = { (day: Int, minute: Int) in CalendarModel.at(columns[day].start, minutesOn: minute) }
+        var start = press.start, end = press.end
+        switch (press.item, press.grip) {
+        case (nil, _):
+            let a = Self.snap(pressed), b = Self.snap(minute)
+            let top = max(0, min(min(a, b), 1440 - 15)), bottom = min(1440, max(max(a, b), top + 15))
+            press.drop = .create(day: press.day, top: top, bottom: bottom)
+            (start, end) = (at(press.day, top), at(press.day, bottom))
+        case (let item?, .body):
+            // The start as minutes on the day it is drawn on, moved by the pointer.
+            let first = columns.lastIndex { $0.start <= press.start } ?? 0
+            var day = first + column(at: doc.x) - press.day
+            var top = Self.snap(press.start.timeIntervalSince(columns[first].start) / 60 + minute - pressed)
+            while top < 0, day > 0 { day -= 1; top += 1440 }
+            while top >= 1440, day < content.days - 1 { day += 1; top -= 1440 }
+            day = min(max(day, 0), content.days - 1)
+            top = min(max(top, 0), 1440 - 15)
+            if case .event = item { press.copy = event.modifierFlags.contains(.option) }
+            press.drop = .move(item, day: day, top: top, copy: press.copy)
+            start = at(day, top)
+            end = start.addingTimeInterval(press.end.timeIntervalSince(press.start))
+        case (let item?, .top):
+            let top = max(0, min(Self.snap(minute), Self.snap(press.end.timeIntervalSince(columns[press.day].start) / 60) - 15))
+            press.drop = .resize(item, top: true, day: press.day, minute: top)
+            start = at(press.day, top)
+        case (let item?, .bottom):
+            let bottom = min(1440, max(Self.snap(minute), Self.snap(press.start.timeIntervalSince(columns[press.day].start) / 60) + 15, 15))
+            press.drop = .resize(item, top: false, day: press.day, minute: bottom)
+            end = at(press.day, bottom)
+        }
+        press.preview = DraftBlock(start: start, end: end, title: press.title, days: columns, color: press.color)
+        let cursor: NSCursor = press.refused ? .operationNotAllowed : press.copy ? .dragCopy
+            : press.item == nil ? .arrow : press.grip == .body ? .closedHand : .resizeUpDown
+        cursor.set()
+        self.press = press
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let press else { return }
+        self.press = nil
+        guard press.moving else { return }
+        NSCursor.arrow.set()
+        window?.invalidateCursorRects(for: self)
+        needsDisplay = true
+        guard var dropped = press.drop else { return }
+        if case .move(.event(let e), let day, let top, _) = dropped {
+            dropped = .move(.event(e), day: day, top: top, copy: event.modifierFlags.contains(.option))
+        }
+        // A refused move still goes to the model, which says why.
+        drop?(dropped)
+    }
+
+    /// The middle of the first event in sight, in window coordinates, where
+    /// the bench starts its drag.
+    var firstEventPoint: CGPoint? {
+        content.placed.lazy.map { self.box($0).offsetBy(dx: 0, dy: -self.frame.minY) }
+            .first { self.bounds.contains(CGPoint(x: $0.midX, y: $0.midY)) }
+            .map { self.convert(CGPoint(x: $0.midX, y: $0.midY), to: nil) }
+    }
+
+    /// The resize cursor on the edges of events the user may change.
+    override func resetCursorRects() {
+        guard drop != nil else { return }
+        func edges(_ r: CGRect, top: Bool, bottom: Bool) {
+            let r = r.offsetBy(dx: 0, dy: -frame.minY)
+            guard r.intersects(bounds) else { return }
+            if top { addCursorRect(CGRect(x: r.minX, y: r.minY, width: r.width, height: 4), cursor: .resizeUpDown) }
+            if bottom { addCursorRect(CGRect(x: r.minX, y: r.maxY - 4, width: r.width, height: 4), cursor: .resizeUpDown) }
+        }
+        for p in content.placed where content.writable.contains(p.event.record.calendarId) && content.columns.indices.contains(p.day) {
+            guard let start = p.event.start, let end = p.event.end else { continue }
+            let day = content.columns[p.day]
+            edges(box(p), top: start >= day.start, bottom: end <= day.end)
+        }
+        if let d = content.draft { edges(rect(d), top: true, bottom: true) }
     }
 
     // VoiceOver reads every event by its full label and can open it.
@@ -784,7 +1080,9 @@ extension NSView {
 /// posting the key to the hour grid's draw and to the next display-link
 /// frame after it, the stages in between, and the process's memory before
 /// calendar mode, with it open, right after the switches and 15 s later,
-/// to `calbench.txt` in the data folder.
+/// to `calbench.txt` in the data folder. Then it drags the first event in
+/// sight 40 steps, 20 of 5 points down and 20 back, one per frame, and lets
+/// go where it began, so nothing is saved; each step is timed the same way.
 @MainActor
 final class CalendarBench: NSObject {
     static let shared: CalendarBench? = UserDefaults.standard.bool(forKey: "JoltaCalBench") ? CalendarBench() : nil
@@ -798,6 +1096,12 @@ final class CalendarBench: NSObject {
     private var memoryBefore = 0.0
     private var memoryOpen = 0.0
     private var remaining = 0
+    /// The drag's points still to come, once the switches are done.
+    private var drags: [CGPoint] = []
+    private var dragging = false
+    private var dragDraw: [Double] = []
+    private var dragFrame: [Double] = []
+    private var missed = 0
 
     func drew() {
         if posted != nil, drawnAt == nil { drawnAt = CACurrentMediaTime() }
@@ -813,6 +1117,7 @@ final class CalendarBench: NSObject {
     /// Times one stage of a switch, such as the model's reload or the layer's draw.
     func time<T>(_ stage: String, _ work: () -> T) -> T {
         let t = CACurrentMediaTime()
+        let stage = dragging ? "drag: " + stage : stage
         defer { if posted != nil { stages[stage, default: []].append((CACurrentMediaTime() - t) * 1000) } }
         return work()
     }
@@ -833,7 +1138,7 @@ final class CalendarBench: NSObject {
     }
 
     private func post() {
-        guard let window, remaining > 0 else { return finish() }
+        guard let window, remaining > 0 else { return startDrag() }
         let forward = remaining > 50
         remaining -= 1
         let key = forward ? "j" : "k"
@@ -850,8 +1155,65 @@ final class CalendarBench: NSObject {
         }
     }
 
+    private static func canvas(in view: NSView) -> HourCanvas? {
+        if let canvas = view as? HourCanvas, canvas.drop != nil { return canvas }
+        return view.subviews.lazy.compactMap(canvas(in:)).first
+    }
+
+    private func startDrag() {
+        guard let window, let canvas = window.contentView.flatMap(Self.canvas(in:)), let start = canvas.firstEventPoint else { return finish() }
+        let down = (1...20).map { CGPoint(x: start.x, y: start.y - CGFloat($0) * 5) }
+        drags = down + down.reversed().dropFirst() + [start]
+        dragged = canvas
+        dragging = true
+        mouse(.leftMouseDown, at: start)
+        nextDrag()
+    }
+
+    private func nextDrag() {
+        guard !drags.isEmpty else {
+            mouse(.leftMouseUp, at: lastDrag)
+            dragging = false
+            return finish()
+        }
+        lastDrag = drags.removeFirst()
+        drawnAt = nil
+        posted = CACurrentMediaTime()
+        mouse(.leftMouseDragged, at: lastDrag)
+    }
+
+    private var lastDrag = CGPoint.zero
+    private weak var dragged: HourCanvas?
+
+    /// Straight to the canvas: a window in the background takes a posted
+    /// mouse-down only as the click that brings it forward.
+    private func mouse(_ type: NSEvent.EventType, at point: CGPoint) {
+        guard let window, let canvas = dragged,
+              let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { return }
+        switch type {
+        case .leftMouseDown: canvas.mouseDown(with: event)
+        case .leftMouseDragged: canvas.mouseDragged(with: event)
+        default: canvas.mouseUp(with: event)
+        }
+    }
+
     @objc private func frame(_ link: CADisplayLink) {
-        guard let posted, let drawnAt else { return }
+        guard let posted else { return }
+        // A drag step that draws nothing by the next frame is counted as missed.
+        if dragging, drawnAt == nil, CACurrentMediaTime() - posted > 0.1 {
+            missed += 1
+            self.posted = nil
+            return nextDrag()
+        }
+        guard let drawnAt else { return }
+        if dragging {
+            dragDraw.append((drawnAt - posted) * 1000)
+            dragFrame.append((CACurrentMediaTime() - posted) * 1000)
+            self.posted = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { self.nextDrag() }
+            return
+        }
         toDraw.append((drawnAt - posted) * 1000)
         toFrame.append((CACurrentMediaTime() - posted) * 1000)
         self.posted = nil
@@ -879,6 +1241,8 @@ final class CalendarBench: NSObject {
             \(stageLines)
             key to draw: \(stats(toDraw))
             key to frame: \(stats(toFrame))
+            drag step to draw: \(stats(dragDraw))
+            drag step to frame: \(stats(dragFrame)), \(missed) steps drew nothing
             memory before calendar \(String(format: "%.1f", memoryBefore)) MB, week open \(String(format: "%.1f", memoryOpen)) MB (added \(String(format: "%.1f", memoryOpen - memoryBefore))), after 100 switches \(String(format: "%.1f", after)) MB (added \(String(format: "%.1f", after - memoryBefore))), 15 s later \(String(format: "%.1f", settled)) MB (added \(String(format: "%.1f", settled - memoryBefore)))
 
             """
@@ -903,3 +1267,4 @@ final class CalendarBench: NSObject {
         return result == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : 0
     }
 }
+

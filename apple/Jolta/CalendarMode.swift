@@ -484,8 +484,14 @@ struct WeekView: View {
 
 // MARK: - Month
 
+extension MonthView {
+    static let space = "month-grid"
+}
+
 struct MonthView: View {
     let cal: CalendarModel
+    /// The day a dragged event would land on.
+    @State private var target: String?
 
     private static let weekday: DateFormatter = {
         let f = DateFormatter()
@@ -506,16 +512,29 @@ struct MonthView: View {
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
             GeometryReader { geo in
                 let rowH = geo.size.height / CGFloat(max(weeks, 1))
+                let index = { (p: CGPoint) -> Int? in
+                    let (row, column) = (Int(floor(p.y / rowH)), Int(floor(p.x / (geo.size.width / 7))))
+                    guard (0..<weeks).contains(row), (0..<7).contains(column) else { return nil }
+                    return row * 7 + column
+                }
                 VStack(spacing: 0) {
                     ForEach(0..<weeks, id: \.self) { w in
                         HStack(spacing: 0) {
                             ForEach(cal.days[w * 7..<w * 7 + 7]) { day in
-                                MonthCell(cal: cal, day: day, height: rowH)
+                                MonthCell(cal: cal, day: day, height: rowH, isTarget: target == day.key) { event, drag, ended in
+                                    let to = index(drag.location)
+                                    target = ended ? nil : to.map { cal.days[$0].key }
+                                    // By the cells the drag began and ended in, so a long event moves from where it was held.
+                                    if ended, let to, let from = index(drag.startLocation), to != from {
+                                        cal.move(event, days: to - from, copy: NSEvent.modifierFlags.contains(.option))
+                                    }
+                                }
                             }
                         }
                         .frame(height: rowH)
                     }
                 }
+                .coordinateSpace(.named(MonthView.space))
             }
         }
     }
@@ -525,9 +544,11 @@ struct MonthCell: View {
     let cal: CalendarModel
     let day: CalendarDay
     let height: CGFloat
+    let isTarget: Bool
+    let dragged: (CalEvent, DragGesture.Value, _ ended: Bool) -> Void
 
     var body: some View {
-        let list = cal.events.filter { e in
+        let list = cal.shownEvents.filter { e in
             if let start = e.start, let end = e.end, !e.isLong { return start < day.end && end > day.start }
             let (a, b) = e.dayKeys
             return a <= day.key && b >= day.key
@@ -543,6 +564,9 @@ struct MonthCell: View {
                 .onTapGesture { cal.span = .day; cal.go(to: day.start) }
             ForEach(list.prefix(shown)) { e in
                 MonthLine(cal: cal, event: e)
+                    .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(MonthView.space))
+                        .onChanged { dragged(e, $0, false) }
+                        .onEnded { dragged(e, $0, true) })
             }
             if list.count > shown {
                 Text("\(list.count - shown) more").font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).padding(.horizontal, 6)
@@ -553,6 +577,11 @@ struct MonthCell: View {
         .padding(.horizontal, 3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(day.isWeekend || day.outside ? CalendarColor.offHours : .clear))
+        .overlay {
+            if isTarget {
+                RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])).padding(2)
+            }
+        }
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
         .clipped()

@@ -5,6 +5,8 @@ import SwiftUI
 /// writes every word and says what each button sends.
 struct SendPrompt: Identifiable {
     let dialog: UpdateDialogInfo
+    /// Keep editing or Esc: nothing is saved.
+    var back: () -> Void = {}
     /// The chosen button's notify, and the message where the dialog has a field.
     let perform: (NotifyChoice, String?) -> Void
 
@@ -16,6 +18,8 @@ struct SendPrompt: Identifiable {
 struct SenderPrompt: Identifiable {
     let calendar: String
     let senders: [SenderInfo]
+    /// Keep editing or Esc: nothing is saved.
+    var cancel: () -> Void = {}
     let perform: (SenderInfo) -> Void
 
     var id: String { calendar }
@@ -114,7 +118,7 @@ private struct SendPromptView: View {
                 }
                 Spacer()
                 if let back = choice(.back) {
-                    EditorButton(title: back.label, key: "Esc", action: dismiss)
+                    EditorButton(title: back.label, key: "Esc", action: goBack)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("send-back")
                 }
@@ -140,15 +144,20 @@ private struct SendPromptView: View {
         .padding(22)
         .frame(width: 420)
         .presentationBackground(Color(Theme.raise))
-        .onExitCommand(perform: dismiss)
+        .onExitCommand(perform: goBack)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("send-dialog")
+    }
+
+    private func goBack() {
+        dismiss()
+        prompt.back()
     }
 
     private func pick(_ choice: SendChoice) {
         dismiss()
         let words = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let notify = choice.notify { prompt.perform(notify, words.isEmpty ? nil : words) }
+        if let notify = choice.notify { prompt.perform(notify, words.isEmpty ? nil : words) } else { prompt.back() }
     }
 }
 
@@ -174,7 +183,7 @@ private struct SenderPromptView: View {
             .accessibilityIdentifier("sender-list")
             HStack(spacing: 8) {
                 Spacer()
-                EditorButton(title: "Keep editing", key: "Esc", action: dismiss)
+                EditorButton(title: "Keep editing", key: "Esc", action: goBack)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("sender-back")
                 EditorButton(title: "Continue", key: "↩", primary: true) {
@@ -190,9 +199,14 @@ private struct SenderPromptView: View {
         .padding(22)
         .frame(width: 420)
         .presentationBackground(Color(Theme.raise))
-        .onExitCommand(perform: dismiss)
+        .onExitCommand(perform: goBack)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("sender-dialog")
+    }
+
+    private func goBack() {
+        dismiss()
+        prompt.cancel()
     }
 }
 
