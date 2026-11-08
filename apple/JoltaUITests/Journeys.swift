@@ -98,8 +98,10 @@ final class Journeys: XCTestCase {
         app.typeKey("n", modifierFlags: [])
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "n declines")
         XCTAssertTrue(chip(app, "Declined").waitForExistence(timeout: 5), "the list row follows")
-
+        // The reader loads the answered page again, before or after the list
+        // row changes; while it loads, the header isn't laid out.
         let header = reader.staticTexts.matching(NSPredicate(format: "value == %@ OR label == %@", "Ann Organizer", "Ann Organizer")).firstMatch
+        XCTAssertTrue(waitUntil { header.exists && header.isHittable }, "the page lays out the message header")
         header.click()
         XCTAssertTrue(link("Declined").waitForNonExistence(timeout: 5), "the invitation's message collapses")
         app.typeKey("y", modifierFlags: [])
@@ -110,6 +112,7 @@ final class Journeys: XCTestCase {
         XCTAssertFalse(paletteRow(app, "Accept invitation").waitForExistence(timeout: 2), "the palette offers no answer either")
         app.typeKey(.escape, modifierFlags: [])
 
+        XCTAssertTrue(waitUntil { header.exists && header.isHittable })
         header.click()
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "expanded again, the card is back")
         app.typeKey("k", modifierFlags: .command)

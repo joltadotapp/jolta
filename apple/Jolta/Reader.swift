@@ -530,8 +530,10 @@ struct ReaderView: View {
             trustOverride = nil
         }
         reader.images.allowsRemote = imagesLoaded || trusted
-        let expanded = model.expandedMessages
         reader.show(html: thread.html) {
+            // Read once the page is in, so a message expanded or collapsed
+            // while it loaded stays that way.
+            let expanded = model.expandedMessages
             if !expanded.isEmpty { reader.expand(expanded) }
             if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
         }
