@@ -56,12 +56,14 @@ pub fn prefill(conn: &Connection, picked: &Picked) -> Result<EventPrefill> {
     })
 }
 
-/// The newest subject without reply prefixes, and a line linking to the
-/// newest message that has a Message-ID, as a `message:` URL (RFC 2392's
-/// id, the form Apple Mail and other Mac apps open).
+/// The first message's subject without reply prefixes, so a later
+/// "Accepted:" or "Canceled:" notice in the conversation doesn't name the
+/// meeting, and a line linking to the newest message that has a Message-ID,
+/// as a `message:` URL (RFC 2392's id, the form Apple Mail and other Mac
+/// apps open).
 fn conversation(conn: &Connection, thread: ThreadId) -> Result<(String, String)> {
     let subject: Option<String> = conn
-        .query_row("SELECT subject FROM message WHERE thread_id = ?1 AND trim(ifnull(subject, '')) != '' ORDER BY id DESC LIMIT 1", [thread], |r| r.get(0))
+        .query_row("SELECT subject FROM message WHERE thread_id = ?1 AND trim(ifnull(subject, '')) != '' ORDER BY id LIMIT 1", [thread], |r| r.get(0))
         .optional()?;
     let id: Option<String> = conn
         .query_row("SELECT message_id FROM message WHERE thread_id = ?1 AND ifnull(message_id, '') != '' ORDER BY id DESC LIMIT 1", [thread], |r| r.get(0))
@@ -118,18 +120,19 @@ mod tests {
     #[test]
     fn a_conversation_gives_the_title_people_room_and_a_link_back() {
         let (j, work) = jolta("invite-prefill");
-        let first = import(&j, format!("From: Ann Berg <ann@example.com>\r\nTo: {ME}\r\nSubject: Partnership call\r\nMessage-ID: <a@example.com>\r\n\r\nHi\r\n").as_bytes());
-        import(&j, format!("From: Me <{ME}>\r\nTo: ann@example.com\r\nSubject: AW: Re: Partnership call\r\nIn-Reply-To: <a@example.com>\r\nMessage-ID: <b+1/x@example.com>\r\n\r\nYes\r\n").as_bytes());
+        let first = import(&j, format!("From: Ann Berg <ann@example.com>\r\nTo: {ME}\r\nSubject: Partnership call\r\nDate: Mon, 9 Nov 2026 09:00:00 +0100\r\nMessage-ID: <a@example.com>\r\n\r\nHi\r\n").as_bytes());
+        import(&j, format!("From: Me <{ME}>\r\nTo: ann@example.com\r\nSubject: AW: Re: Partnership call\r\nDate: Tue, 10 Nov 2026 10:00:00 +0100\r\nIn-Reply-To: <a@example.com>\r\nMessage-ID: <b+1/x@example.com>\r\n\r\nYes\r\n").as_bytes());
+        import(&j, format!("From: Ann Berg <ann@example.com>\r\nTo: {ME}\r\nSubject: Accepted: Partnership call\r\nDate: Tue, 10 Nov 2026 11:00:00 +0100\r\nIn-Reply-To: <a@example.com>\r\nMessage-ID: <c@example.com>\r\n\r\nOK\r\n").as_bytes());
         let people = [person("ann@example.com", "Ann Berg"), person("Me@Example.com", "Me"), person("bruegel@rooms.example", "bruegel@rooms.example"), person("ANN@example.com", "")];
         let rooms = [person("bruegel@rooms.example", "Bruegel"), person("ensor@rooms.example", "ensor@rooms.example")];
         let picked = Picked { account: AccountId(1), thread: Some(thread_of(&j, first)), people: &people, rooms: &rooms, span: slot() };
         let p = j.store.read(|c| prefill(c, &picked)).unwrap();
 
-        assert_eq!(p.title, "Partnership call", "the newest subject without AW: and Re:");
+        assert_eq!(p.title, "Partnership call", "the first subject, not a later notice's");
         assert_eq!(p.required, [person("ann@example.com", "Ann Berg")], "without the user, the room and a second Ann");
         assert!(p.optional.is_empty());
         assert_eq!(p.room, Some(person("bruegel@rooms.example", "Bruegel")), "the first room, kept apart from the people");
-        assert_eq!(p.description, "Conversation: message:%3Cb%2B1%2Fx@example.com%3E", "the newest message, its id encoded");
+        assert_eq!(p.description, "Conversation: message:%3Cc@example.com%3E", "the newest message");
         assert_eq!((p.calendar, p.span), (Some(work), Some(slot())), "the account's calendar at the picked slot");
         assert_eq!(p.video, None, "a calendar that makes no video calls");
 
