@@ -42,7 +42,8 @@ extension AppModel {
 /// events, people whose times aren't known hatched, suggested times
 /// highlighted, time outside a person's working hours shaded. ←→ or j k
 /// move between suggestions, − and + change the length, O turns their
-/// working hours on and off, Return picks, Esc closes.
+/// working hours on and off, R adds a room as one more row, Return picks,
+/// Esc closes.
 struct FindTimePanel: View {
     @Bindable var model: AppModel
     let request: FindTimeRequest
@@ -62,6 +63,9 @@ struct FindTimePanel: View {
     /// Suggest only times inside each known person's working hours.
     @State private var theirHours = true
     @State private var keys = ""
+    /// Rooms added with + Room, each a row after the people.
+    @State private var rooms: [PersonRow] = []
+    @State private var pickingRoom = false
     @FocusState private var focused: Bool
 
     private static let lengths: [Int64] = [15, 30, 45, 60, 90]
@@ -104,6 +108,23 @@ struct FindTimePanel: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.3), radius: 24, y: 10)
         .background(keyField)
+        .overlay(alignment: .topTrailing) {
+            if pickingRoom, case .ready(let info) = phase {
+                RoomPicker(
+                    core: model.core,
+                    accountId: info.accountId,
+                    slot: slots.indices.contains(selected) ? slots[selected] : nil,
+                    fallbackStart: info.days.first?.start ?? Int64(Date().timeIntervalSince1970),
+                    people: info.people.count,
+                    taken: Set(rooms.map { $0.address.lowercased() }),
+                    add: { address in addRoom(address, info: info) },
+                    close: closeRoomPicker
+                )
+                .padding(.top, 40)
+                .padding(.trailing, 12)
+            }
+        }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("find-time")
         .task {
             minutes = request.minutes > 0 ? request.minutes : 30
@@ -111,6 +132,7 @@ struct FindTimePanel: View {
         }
         .onChange(of: minutes) { suggest() }
         .onChange(of: theirHours) { suggest() }
+        .onChange(of: rooms) { suggest() }
     }
 
     /// Takes the keyboard from the list and the message being written.
@@ -123,6 +145,11 @@ struct FindTimePanel: View {
             .onAppear { DispatchQueue.main.async { focused = true } }
             .onChange(of: keys) { if !keys.isEmpty { keys = "" } }
             .onKeyPress(.escape) { close(); return .handled }
+            .onKeyPress(keys: [KeyEquivalent("r")]) { _ in
+                guard canAddRoom else { return .ignored }
+                pickingRoom = true
+                return .handled
+            }
             .onKeyPress(.return) { pick(); return .handled }
             .onKeyPress(keys: [.rightArrow, .downArrow, KeyEquivalent("j")]) { _ in move(1); return .handled }
             .onKeyPress(keys: [.leftArrow, .upArrow, KeyEquivalent("k")]) { _ in move(-1); return .handled }
@@ -136,11 +163,62 @@ struct FindTimePanel: View {
             .accessibilityIdentifier("find-time-keys")
     }
 
+    /// Rooms go with a meeting, not with the user's free times.
+    private var canAddRoom: Bool {
+        guard !forAvailability, case .ready = phase else { return false }
+        return true
+    }
+
+    /// The panel's answer with the added rooms after the people.
+    private func withRooms(_ info: FindTimeInfo) -> FindTimeInfo {
+        var all = info
+        all.people += rooms
+        return all
+    }
+
+    /// Looks the room up over the shown days and adds it as a row.
+    private func addRoom(_ address: String, info: FindTimeInfo) {
+        closeRoomPicker()
+        guard !rooms.contains(where: { $0.address.caseInsensitiveCompare(address) == .orderedSame }),
+              let first = info.days.first, let last = info.days.last else { return }
+        Task {
+            do {
+                rooms += try await model.core.roomAvailability(accountId: info.accountId, addresses: [address], from: first.start, to: last.end)
+            } catch {
+                model.notify("\(error)")
+            }
+        }
+    }
+
+    private func closeRoomPicker() {
+        pickingRoom = false
+        DispatchQueue.main.async { focused = true }
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "calendar.badge.clock").foregroundStyle(Color(Theme.text3))
             Text(title).font(.system(size: 13, weight: .semibold))
             Spacer()
+            if canAddRoom {
+                Button { pickingRoom = true } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
+                        Text("Room")
+                        KeyCap(key: "R")
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(Theme.text2))
+                    .padding(.leading, 8)
+                    .padding(.trailing, 4)
+                    .frame(height: 22)
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Add a room as a row (R)")
+                .accessibilityIdentifier("find-time-add-room")
+            }
             if showsHoursToggle {
                 HStack(spacing: 6) {
                     Toggle("Their working hours", isOn: $theirHours)
@@ -204,7 +282,7 @@ struct FindTimePanel: View {
     }
 
     private func grid(_ info: FindTimeInfo) -> some View {
-        let people = forAvailability ? info.people.filter(\.isMe) : info.people
+        let people = forAvailability ? info.people.filter(\.isMe) : info.people + rooms
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 Color.clear.frame(width: nameWidth, height: 1)
@@ -232,8 +310,19 @@ struct FindTimePanel: View {
             ForEach(people, id: \.address) { person in
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(person.name).font(.system(size: 12.5, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
-                        if let line = person.unknown ?? person.note {
+                        HStack(spacing: 3) {
+                            Text(person.name).font(.system(size: 12.5, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
+                            if person.isRoom {
+                                Spacer(minLength: 0)
+                                Button { rooms.removeAll { $0.address == person.address } } label: {
+                                    Image(systemName: "xmark").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Color(Theme.text3))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove this room")
+                                .accessibilityIdentifier("find-time-remove-room")
+                            }
+                        }
+                        if let line = person.isRoom ? (person.note ?? person.unknown) : (person.unknown ?? person.note) {
                             Text(line).font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                         }
                     }
@@ -338,7 +427,7 @@ struct FindTimePanel: View {
         guard case .ready(let info) = phase else { return }
         slots = (forAvailability
             ? try? model.core.freeTimes(info: info, minutes: minutes)
-            : try? model.core.findTimeSlots(info: info, minutes: minutes, respectOthersHours: theirHours)) ?? []
+            : try? model.core.findTimeSlots(info: withRooms(info), minutes: minutes, respectOthersHours: theirHours)) ?? []
         selected = slots.isEmpty ? 0 : min(selected, slots.count - 1)
     }
 
@@ -443,8 +532,9 @@ struct FindTimeRow: View {
     }
 
     private func block(_ r: CGRect, kind: BusyKind, in context: inout GraphicsContext) {
-        let fill = Color(CalendarColor.color(nil, .fill))
-        let bar = Color(CalendarColor.color(nil, .bar))
+        let hue = person.isRoom ? RoomBar.color : nil
+        let fill = Color(CalendarColor.color(hue, .fill))
+        let bar = Color(CalendarColor.color(hue, .bar))
         let box = Path(roundedRect: r, cornerRadius: 4)
         switch kind {
         case .elsewhere:
