@@ -214,6 +214,8 @@ pub enum CalCommand {
     Create(crate::cal_edit::CreateArgs),
     /// Change an event's title, place or time through the op queue.
     Edit(crate::cal_edit::EditArgs),
+    /// Copy an event as ⌥-drag and ⌘D do: a new event without its people, repeat or meeting link.
+    Copy(crate::cal_edit::CopyArgs),
     /// Delete an event, or a series with its changed occurrences, through the op queue.
     Delete(crate::cal_edit::DeleteArgs),
     /// The calendar op queue, oldest first, with each op's state.
@@ -268,6 +270,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::NewLocal { name, color } => crate::cal_edit::new_local(jolta, &name, color.as_deref()),
         CalCommand::Create(a) => crate::cal_edit::create(jolta, a).await,
         CalCommand::Edit(a) => crate::cal_edit::edit(jolta, a).await,
+        CalCommand::Copy(a) => crate::cal_edit::copy(jolta, a).await,
         CalCommand::Delete(a) => crate::cal_edit::delete(jolta, a).await,
         CalCommand::Ops { send } => crate::cal_edit::list_ops(jolta, send).await,
         CalCommand::Undo { op } => crate::cal_edit::undo(jolta, op).await,

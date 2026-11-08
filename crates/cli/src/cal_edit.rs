@@ -170,6 +170,20 @@ pub struct EditArgs {
 }
 
 #[derive(Args)]
+pub struct CopyArgs {
+    /// The event's id, as `jolta cal list` shows it after the title.
+    event: i64,
+    /// The day of the occurrence to copy, "2026-11-24", for a series.
+    #[arg(long)]
+    occurrence: Option<String>,
+    /// Where the copy goes; the original's time without it.
+    #[command(flatten)]
+    when: When,
+    #[command(flatten)]
+    send: Send,
+}
+
+#[derive(Args)]
 pub struct DeleteArgs {
     event: i64,
     /// Words that go with the cancellation of a meeting, where its server
@@ -509,6 +523,22 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
         event.span = span;
     }
     submit(jolta, Edit::quiet(calendar, Change::Update(event)), &a.send).await
+}
+
+/// ⌘D's and ⌥-drag's copy: a new event without the original's people,
+/// repeat or meeting, saved as the grid saves it.
+pub async fn copy(jolta: &Jolta, a: CopyArgs) -> Result<()> {
+    let here = tz::here();
+    let at = a.occurrence.as_deref().map(|d| occurrence_on(jolta, a.event, d)).transpose()?;
+    let mut d = jolta.store.read(|c| draft::draft_for_copy(c, EventId(a.event), at, Utc::now(), here))?;
+    if let Some(span) = a.when.span(Some(&d.span))? {
+        d.span = span;
+    }
+    let problems = jolta.store.read(|c| draft::check_draft(c, &d, here))?;
+    print_draft(&d, &problems);
+    let h = horizon();
+    let saved = jolta.store.write(|tx| draft::save_draft(tx, &d, None, None, None, Utc::now().timestamp(), &h, here))?;
+    finish(jolta, saved, &a.send).await
 }
 
 fn print_delete_plan(plan: &draft::DeletePlan) {
