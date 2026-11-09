@@ -431,7 +431,7 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, op: &store::Op) -> R
             OpKind::Move { from, to } => {
                 let (from, to) = (find(from), find(to));
                 touched.push(all.id);
-                if home != all.id || to.as_ref().is_some_and(is_home) {
+                if home != all.id || to.as_ref().is_some_and(|t| is_home(t) && t.id != all.id) {
                     let target = to.ok_or_else(|| Error::NotFound("the mailbox to move to".into()))?;
                     session.uid_mv(&set, &target.remote_id).await?;
                     continue;
