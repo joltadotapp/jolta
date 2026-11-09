@@ -389,3 +389,34 @@ fn a_message_leaves_on_time_while_syncing_fails() {
     let took = sent_at.elapsed().as_secs_f64();
     assert!(took < 14.0, "the message left {took:.1} s after Send; the undo window is 10 s");
 }
+
+/// A connection that goes silent without closing, as when a router forgets
+/// it, held up every action and message behind it: the worker waited for
+/// an answer that never came, until macOS gave up on the connection
+/// minutes later.
+#[test]
+fn actions_and_mail_go_out_after_the_connection_goes_silent() {
+    if !available() {
+        return;
+    }
+    let relay = crate::server::Relay::start();
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "Question", "Are you coming?"));
+    let app = App::unstarted();
+    let account = server.add(&app);
+    app.jolta
+        .store
+        .write(|tx| Ok(tx.execute("UPDATE account SET imap_port = ?1 WHERE id = ?2", rusqlite::params![relay.port, account.id.0])?))
+        .unwrap();
+    app.core.start().unwrap();
+    wait(20, "the inbox synced", || inbox_has(&app, "Question"));
+
+    relay.freeze();
+    let thread = app.list("in:inbox")[0].thread_id;
+    app.core.perform(ThreadAction::Flag, vec![thread], ListContext::Inbox).unwrap();
+    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    reply.subject = format!("Through the silence {}", now());
+    app.core.send(reply.clone(), None, None).unwrap();
+    wait(90, "the flag reached the server", || server.flags("INBOX", "Question").iter().any(|f| f.contains("Flagged")));
+    wait(30, "Mailpit caught the reply", || caught(&reply.subject).contains("\"MessageID\""));
+}

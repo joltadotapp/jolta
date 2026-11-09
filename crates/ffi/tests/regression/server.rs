@@ -3,7 +3,9 @@
 //! mailbox and tests can run side by side.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
@@ -122,6 +124,49 @@ impl Mailbox {
             ..Default::default()
         };
         block_on(jolta_core::imap::add_account(&app.jolta, setup)).expect("the account signs in")
+    }
+}
+
+/// Passes connections through to Dovecot until `freeze`, after which the
+/// ones already open go silent both ways while staying open, as when a
+/// router forgets a connection. Connections opened later pass again.
+pub struct Relay {
+    pub port: u16,
+    generation: Arc<AtomicU64>,
+}
+
+impl Relay {
+    pub fn start() -> Relay {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let generation = Arc::new(AtomicU64::new(0));
+        let current = generation.clone();
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let Ok(server) = TcpStream::connect(IMAP) else { continue };
+                let born = current.load(Ordering::SeqCst);
+                for (mut from, mut to) in [(client.try_clone().unwrap(), server.try_clone().unwrap()), (server, client)] {
+                    let current = current.clone();
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 65536];
+                        while let Ok(n @ 1..) = from.read(&mut buf) {
+                            if current.load(Ordering::SeqCst) != born {
+                                return std::thread::park();
+                            }
+                            if to.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                        to.shutdown(std::net::Shutdown::Write).ok();
+                    });
+                }
+            }
+        });
+        Relay { port, generation }
+    }
+
+    pub fn freeze(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
 
