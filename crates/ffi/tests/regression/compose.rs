@@ -122,6 +122,9 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     compose.image_size = jolta_ffi::ImageSizeChoice::Medium;
     let id = app.core.save_draft(compose).unwrap();
 
+    let sizes = app.core.message_sizes(jolta_ffi::ComposeData { account_id: None, ..app.core.draft(id).unwrap().unwrap() }).unwrap();
+    assert_eq!(sizes.len(), 4, "the size menu shows before a sender is chosen");
+
     let reopened = app.core.draft(id).unwrap().expect("the draft is there");
     assert_eq!(reopened.image_size, jolta_ffi::ImageSizeChoice::Medium, "the draft keeps its image size");
     let spans = app.core.body_spans(reopened.body.clone());

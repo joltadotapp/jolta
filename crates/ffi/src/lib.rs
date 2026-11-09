@@ -1101,8 +1101,12 @@ impl Core {
     /// menu; empty when it shows no images.
     pub fn message_sizes(&self, compose: ComposeData) -> Result<Vec<MessageSize>> {
         let c: Compose = compose.into();
-        let Some(account) = c.account else { return Ok(Vec::new()) };
-        let account = self.jolta.store.read(|conn| store::account(conn, account))?;
+        // Before a sender is chosen, any account stands in: only the From line differs.
+        let account = match c.account {
+            Some(id) => Some(self.jolta.store.read(|conn| store::account(conn, id))?),
+            None => self.jolta.store.read(store::accounts)?.into_iter().next(),
+        };
+        let Some(account) = account else { return Ok(Vec::new()) };
         Ok(compose::size_options(&account, &c)?
             .into_iter()
             .map(|o| MessageSize { size: o.size.into(), longest_side: o.size.longest_side(), bytes: o.bytes, fits: o.fits })
