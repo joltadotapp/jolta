@@ -66,7 +66,7 @@ struct VideoRow {
     provider: MeetingProvider,
     label: &'static str,
     refusal: fn(&Calendar, &Capabilities) -> Option<String>,
-    /// Offered only once the user saved a personal link for it.
+    /// Greyed until the user saves a personal link for it.
     personal: bool,
 }
 
@@ -92,20 +92,20 @@ fn made_by_server(provider: MeetingProvider, calendar: &Calendar, caps: &Capabil
 
 /// The Add video call menu for `calendar`: the calls it can have, its
 /// account's own first (Teams on Microsoft 365, Meet on Google), then the
-/// personal Zoom link when `zoom_saved`, then the others greyed with the
-/// reason. Empty when it can have none, as on a read-only calendar, or on
-/// iCloud or a calendar on this Mac without a saved Zoom link, so the
-/// editor leaves the button out.
+/// personal Zoom link, then the others greyed with the reason; Zoom is
+/// greyed until `zoom_saved`. Empty when it can have none, as on a
+/// read-only calendar, or on iCloud or a calendar on this Mac without a
+/// saved Zoom link, so the editor leaves the button out.
 pub fn video_choices(calendar: &Calendar, zoom_saved: bool) -> Vec<VideoChoice> {
     let caps = caps::of(calendar);
     if !caps.writable {
         return Vec::new();
     }
-    let mut choices: Vec<VideoChoice> = VIDEO_ROWS
-        .iter()
-        .filter(|r| zoom_saved || !r.personal)
-        .map(|r| VideoChoice { provider: r.provider, label: r.label, refusal: (r.refusal)(calendar, &caps) })
-        .collect();
+    let refusal = |r: &VideoRow| match r.personal && !zoom_saved {
+        true => Some("Set your link in Settings › Calendar".to_string()),
+        false => (r.refusal)(calendar, &caps),
+    };
+    let mut choices: Vec<VideoChoice> = VIDEO_ROWS.iter().map(|r| VideoChoice { provider: r.provider, label: r.label, refusal: refusal(r) }).collect();
     if choices.iter().all(|c| c.refusal.is_some()) {
         return Vec::new();
     }
@@ -625,10 +625,11 @@ mod tests {
     fn the_accounts_own_video_call_comes_first() {
         use Access::*;
         let m365 = calendar(CalendarSource::Graph, Owner, Some(vec![P::Teams]));
-        assert_eq!(menu(&m365), [(P::Teams, None), (P::Meet, Some("Not on Microsoft 365 calendars".into()))]);
+        let unset = Some("Set your link in Settings › Calendar".to_string());
+        assert_eq!(menu(&m365), [(P::Teams, None), (P::Meet, Some("Not on Microsoft 365 calendars".into())), (P::Zoom, unset.clone())]);
         assert_eq!(video_choices(&m365, false)[0].label, "Teams meeting");
         let google = calendar(CalendarSource::Google, Write, None);
-        assert_eq!(menu(&google), [(P::Meet, None), (P::Teams, Some("Not on Google calendars".into()))], "a list read before U8 allows Meet");
+        assert_eq!(menu(&google), [(P::Meet, None), (P::Teams, Some("Not on Google calendars".into())), (P::Zoom, unset)], "a list read before U8 allows Meet");
     }
 
     #[test]
@@ -653,7 +654,6 @@ mod tests {
     fn a_saved_zoom_link_is_offered_on_every_writable_calendar() {
         use Access::*;
         let m365 = calendar(CalendarSource::Graph, Owner, Some(vec![P::Teams]));
-        assert_eq!(menu(&m365).len(), 2, "no Zoom row until a link is saved");
         let zoom = |c: &Calendar| video_choices(c, true).into_iter().map(|v| (v.provider, v.label, v.refusal.is_some())).collect::<Vec<_>>();
         assert_eq!(zoom(&m365), [(P::Teams, "Teams meeting", false), (P::Zoom, "Zoom (personal link)", false), (P::Meet, "Google Meet", true)]);
         for c in [
