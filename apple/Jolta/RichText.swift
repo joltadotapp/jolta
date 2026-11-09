@@ -9,10 +9,11 @@ struct RichTextEditor: NSViewRepresentable {
     @Binding var text: String
     let core: Core
     var fontSize: CGFloat = 14
-    /// Takes the keyboard when it appears, with the cursor at the start.
-    var focusOnAppear = false
     /// The message being written, where snippets go (not a signature).
     var isMessageBody = false
+    /// Runs once the editor is in a window, where it and the fields beside
+    /// it can take the keyboard.
+    var onShown: ((RichTextView) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -41,13 +42,7 @@ struct RichTextEditor: NSViewRepresentable {
         scroll.autohidesScrollers = true
         scroll.documentView = view
         context.coordinator.load(text, into: view)
-        if focusOnAppear {
-            DispatchQueue.main.async {
-                view.window?.makeFirstResponder(view)
-                view.setSelectedRange(NSRange(location: 0, length: 0))
-                view.scrollRangeToVisible(NSRange(location: 0, length: 0))
-            }
-        }
+        view.onShown = onShown
         return scroll
     }
 
@@ -91,6 +86,24 @@ final class RichTextView: NSTextView {
     /// The open message's body editor, which keeps its cursor while the
     /// snippet palette has the keyboard.
     static weak var messageBody: RichTextView?
+
+    var onShown: ((RichTextView) -> Void)?
+
+    // SwiftUI adds the view to the window after `makeNSView`, at no fixed
+    // point, so focusing from there can find no window yet.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, let shown = onShown else { return }
+        onShown = nil
+        DispatchQueue.main.async { shown(self) }
+    }
+
+    /// Takes the keyboard with the cursor at the start.
+    func focusAtStart() {
+        window?.makeFirstResponder(self)
+        setSelectedRange(NSRange(location: 0, length: 0))
+        scrollRangeToVisible(NSRange(location: 0, length: 0))
+    }
 
     /// Puts a body (in the core's format) at the cursor, as one undoable edit.
     func insert(body: String, core: Core) {

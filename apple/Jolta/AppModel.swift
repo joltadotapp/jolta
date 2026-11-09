@@ -158,6 +158,9 @@ final class AppModel {
     private(set) var focusListRequest = 0
     /// The last action, shown briefly with its undo key.
     private(set) var toast: Toast?
+    /// Each message opened in compose gets its own number, so the editor
+    /// starts afresh, cursor included, even in place of another message.
+    private(set) var composeSession = 0
     /// The message being written, shown in place of the reader.
     /// Compose lives in mail mode; starting one from calendar mode goes there.
     var compose: ComposeData? {
@@ -443,7 +446,7 @@ final class AppModel {
 
     func reviewDraft(_ id: Int64) {
         if let draft = try? core.draft(draftId: id) {
-            compose = draft
+            openCompose(draft)
         }
     }
 
@@ -747,7 +750,7 @@ final class AppModel {
             holdsRevision += 1
         case .send(let token):
             if let back = try? core.cancelSend(token: token) {
-                compose = back
+                openCompose(back)
                 show(Toast(text: "Sending cancelled", undo: nil))
             } else {
                 show(Toast(text: "Already sent", undo: nil))
@@ -759,10 +762,17 @@ final class AppModel {
 
     // MARK: Compose
 
-    func startCompose() {
+    /// Opens a message in compose, in place of any other. The compose pane
+    /// lives beside the mail list, so the calendar's messages open here too.
+    func openCompose(_ message: ComposeData) {
         composeReminder = nil
         composeSchedule = nil
-        compose = (try? core.newCompose()) ?? .blank
+        compose = message
+        composeSession += 1
+    }
+
+    func startCompose() {
+        openCompose((try? core.newCompose()) ?? .blank)
     }
 
     /// Edits the conversation's draft in compose, or reads the conversation
@@ -773,9 +783,7 @@ final class AppModel {
                 guard let draft = try await core.openDraft(threadId: threadID) else { return open(threadID: threadID) }
                 if compose?.draftId == draft.draftId { return }
                 if compose != nil { closeCompose() }
-                composeReminder = nil
-                composeSchedule = nil
-                compose = draft
+                openCompose(draft)
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
             }
@@ -787,9 +795,7 @@ final class AppModel {
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
             do {
-                composeReminder = nil
-                composeSchedule = nil
-                compose = try await core.replyCompose(threadId: thread, mode: mode, utcOffset: offset)
+                openCompose(try await core.replyCompose(threadId: thread, mode: mode, utcOffset: offset))
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
             }
@@ -820,9 +826,7 @@ final class AppModel {
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
             do {
-                composeReminder = nil
-                composeSchedule = nil
-                compose = try await core.replyProposing(threadId: thread, start: start, end: end, utcOffset: offset)
+                openCompose(try await core.replyProposing(threadId: thread, start: start, end: end, utcOffset: offset))
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
             }
@@ -894,9 +898,8 @@ final class AppModel {
         guard let back = try? core.cancelSend(token: message.token) else {
             return show(Toast(text: "Already sent", undo: nil))
         }
-        composeReminder = nil
+        openCompose(back)
         composeSchedule = Reminder(at: message.sendAt, label: PaletteView.when(message.sendAt))
-        compose = back
         reloadAccounts()
     }
 

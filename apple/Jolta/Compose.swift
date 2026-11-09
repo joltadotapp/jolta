@@ -143,9 +143,11 @@ struct ComposeView: View {
                     }
             }
 
-            // Replies and forwards start with the quote below; the cursor starts above it.
-            RichTextEditor(text: draft.body, core: model.core,
-                           focusOnAppear: !(model.compose?.to.isEmpty ?? true), isMessageBody: true)
+            // The cursor starts where the user types first: To until it names
+            // someone, then the body's first line, above any quote.
+            RichTextEditor(text: draft.body, core: model.core, isMessageBody: true) { body in
+                if model.compose?.to.isEmpty ?? true { focus = .to } else { body.focusAtStart() }
+            }
                 .padding(.horizontal, 28)
                 .padding(.top, 14)
 
@@ -180,7 +182,6 @@ struct ComposeView: View {
             let core = model.core
             Task.detached(priority: .utility) { _ = try? core.suggestAddresses(typed: "", accountId: nil, recipients: "") }
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
-            if model.compose?.to.isEmpty ?? true { focus = .to }
         }
         .onExitCommand {
             // Esc closes an open panel, then stops, undoes or closes AI
