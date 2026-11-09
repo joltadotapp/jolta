@@ -177,10 +177,16 @@ impl Engine {
         }
 
         let idle_wake = wake.clone();
-        let idle_account = account.clone();
+        let mut idle_account = account.clone();
+        let jolta = self.jolta.clone();
         self.runtime.spawn(async move {
             let mut backoff = Backoff::default();
             loop {
+                // Settings or a sign-in that took the provider's new address
+                // change the login, so each connection reads the account again.
+                if let Ok(current) = jolta.store.read(|c| store::account(c, idle_account.id)) {
+                    idle_account = current;
+                }
                 let started = Instant::now();
                 let result = imap::idle_inbox(&idle_account, || {
                     idle_wake.inbox_changed.store(true, Ordering::SeqCst);
