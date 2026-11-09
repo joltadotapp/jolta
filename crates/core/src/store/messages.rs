@@ -15,8 +15,9 @@ pub fn date_to_id_floor(unix: i64) -> i64 {
 fn allocate_id(conn: &Connection, date: i64) -> Result<MessageId> {
     let base = date_to_id_floor(date);
     let max: Option<i64> = conn.query_row(
-        "SELECT max(id) FROM message WHERE id BETWEEN ?1 AND ?2",
-        [base, base | ((1 << ID_SHIFT) - 1)],
+        "SELECT max(id) FROM (SELECT max(id) AS id FROM message WHERE id BETWEEN ?1 AND ?2
+                              UNION ALL SELECT last FROM message_id_retired WHERE second = ?3)",
+        [base, base | ((1 << ID_SHIFT) - 1), base >> ID_SHIFT],
         |r| r.get(0),
     )?;
     Ok(MessageId(max.map_or(base, |m| m + 1)))
