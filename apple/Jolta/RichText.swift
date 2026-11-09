@@ -240,6 +240,13 @@ final class RichTextView: NSTextView {
     /// Where pasted images and files go; only the message being written has one.
     var pasteTarget: PasteTarget?
 
+    // Paste stays enabled for a clipboard holding only an image or a file.
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        guard pasteTarget != nil else { return super.readablePasteboardTypes }
+        let images = [UTType.png, .jpeg, .gif, .tiff, .heic].map { NSPasteboard.PasteboardType($0.identifier) }
+        return super.readablePasteboardTypes + [.fileURL] + images
+    }
+
     /// Pasted text keeps bold, italic, strikethrough and links, in Jolta's
     /// font and colours. In a message, a pasted image goes in at the cursor
     /// and other files become attachments.
@@ -363,7 +370,7 @@ extension RichTextView {
             return CGImageDestinationFinalize(destination) ? out as Data : nil
         }
         guard let png = encode(.png) else { return nil }
-        let opaque = [.none, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo)
+        let opaque = properties[kCGImagePropertyHasAlpha] as? Bool != true
         if png.count > 5 << 20, opaque, let jpeg = encode(.jpeg, [kCGImageDestinationLossyCompressionQuality: 0.85]) {
             return (jpeg, "jpg")
         }
