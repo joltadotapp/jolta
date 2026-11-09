@@ -160,8 +160,24 @@ pub fn dirty_drafts(conn: &Connection, account: AccountId) -> Result<Vec<DirtyDr
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Records the server copy, unless the draft changed again meanwhile.
+/// Records the server copy, unless the draft changed again meanwhile. The
+/// copy it replaced leaves Drafts here too, so opening it can't bring back
+/// the old text.
 pub fn draft_synced(conn: &Connection, id: i64, server_message_id: Option<&str>, deleted: bool) -> Result<()> {
+    let old: Option<(AccountId, Option<String>)> =
+        conn.query_row("SELECT account_id, server_message_id FROM draft WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    if let Some((account, Some(old))) = old.filter(|(_, old)| old.as_deref() != server_message_id) {
+        let mut stmt = conn.prepare(
+            "SELECT mm.mailbox_id, m.id FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
+             JOIN mailbox b ON b.id = mm.mailbox_id AND b.role = 'drafts'
+             WHERE m.account_id = ?1 AND m.message_id = ?2",
+        )?;
+        let copies: Vec<(MailboxId, MessageId)> =
+            stmt.query_map(params![account, old], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        for (mailbox, message) in copies {
+            super::unlink_messages(conn, mailbox, &[message])?;
+        }
+    }
     if deleted {
         conn.execute("DELETE FROM draft WHERE id = ?1", [id])?;
     } else {
