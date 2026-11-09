@@ -151,6 +151,19 @@ pub fn swap_signature(body: &str, old: &str, new: &str) -> String {
     }
 }
 
+/// The message a reply or forward of the conversation answers: its newest
+/// one that isn't a draft waiting in Drafts.
+pub fn reply_target(conn: &Connection, thread: ThreadId) -> Result<MessageId> {
+    Ok(conn.query_row(
+        "SELECT m.id FROM message m WHERE m.thread_id = ?1
+         ORDER BY EXISTS (SELECT 1 FROM message_mailbox x JOIN mailbox b ON b.id = x.mailbox_id
+                          WHERE x.message_id = m.id AND b.role = 'drafts'), m.id DESC
+         LIMIT 1",
+        [thread],
+        |r| r.get(0),
+    )?)
+}
+
 /// Prefills a reply, reply-all or forward of `message` from its raw source.
 pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind, utc_offset: i32) -> Result<Compose> {
     let (account, date): (AccountId, i64) =

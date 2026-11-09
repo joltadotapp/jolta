@@ -1052,15 +1052,13 @@ impl Core {
         rich::markdown(&spans.into_iter().map(Into::into).collect::<Vec<_>>())
     }
 
-    /// A reply, reply-all or forward of the newest message in a thread.
+    /// A reply, reply-all or forward of the newest message in a thread that
+    /// isn't a draft.
     pub async fn reply_compose(&self, thread_id: i64, mode: ReplyMode, utc_offset: i32) -> Result<ComposeData> {
         let jolta = self.jolta.clone();
         self.runtime
             .spawn(async move {
-                let message: MessageId = jolta
-                    .store
-                    .read_async(move |c| Ok(c.query_row("SELECT max(id) FROM message WHERE thread_id = ?1", [thread_id], |r| r.get(0))?))
-                    .await?;
+                let message = jolta.store.read_async(move |c| compose::reply_target(c, ThreadId(thread_id))).await?;
                 let raw = jolta_core::imap::message_source(&jolta, message).await?;
                 let kind = match mode {
                     ReplyMode::Reply => ReplyKind::Reply,

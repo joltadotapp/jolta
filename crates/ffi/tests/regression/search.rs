@@ -40,6 +40,28 @@ fn search_terms() {
     assert!(app.core.query_count("is:sparkly".into()).is_err(), "an unknown term is an error, not an empty list");
 }
 
+/// As on Gmail, a search leaves out mail in Trash and Spam unless it names
+/// that mailbox or `in:anywhere`; Trash itself still lists everything in it.
+#[test]
+fn search_leaves_out_trash_and_spam() {
+    let app = App::new();
+    let me = app.gmail_account("me@test.invalid");
+    let mail = |subject: &str| Mail::new("ann@test.invalid", "me@test.invalid", subject, "The invoice for October.");
+    app.deliver_gmail(&me, MailboxRole::Inbox, &mail("Invoice kept"));
+    app.deliver(&me, MailboxRole::Trash, &mail("Invoice deleted"));
+    app.deliver(&me, MailboxRole::Spam, &mail("Invoice spam"));
+
+    assert_eq!(app.subjects("invoice"), ["Invoice kept"]);
+    assert_eq!(app.subjects(""), ["Invoice kept"], "All mail leaves them out too");
+    assert_eq!(app.subjects("is:unread"), ["Invoice kept"]);
+    assert_eq!(app.core.query_count("invoice".into()).unwrap(), 1);
+    assert_eq!(app.subjects("invoice in:trash"), ["Invoice deleted"]);
+    assert_eq!(app.subjects("invoice in:spam"), ["Invoice spam"]);
+    assert_eq!(app.subjects("invoice in:anywhere"), ["Invoice spam", "Invoice deleted", "Invoice kept"]);
+    let trash = app.mailbox(me.id, MailboxRole::Trash);
+    assert_eq!(app.subjects(&format!("mailbox:{}", trash.0)), ["Invoice deleted"]);
+}
+
 /// "Needs reply" shows a message AI marked until the user answers it, and a
 /// category term finds what AI sorted there.
 #[test]
