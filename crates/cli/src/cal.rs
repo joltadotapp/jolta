@@ -325,6 +325,14 @@ pub enum CalCommand {
         #[arg(long)]
         set: Option<String>,
     },
+    /// Every hold set with its slots and their states, after building the
+    /// sets whose hold events sync found from their sent mail, and the hold
+    /// events of sets this Mac doesn't know. `--check` prints what Jolta
+    /// makes of each open set now, without acting.
+    Holds {
+        #[arg(long)]
+        check: bool,
+    },
     /// Times everyone known is free for a meeting, as Find a time suggests
     /// them. Reads only.
     FindTime {
@@ -447,6 +455,7 @@ pub enum OnOff {
 pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
     match cmd {
         CalCommand::NewLocal { name, color } => crate::cal_edit::new_local(jolta, &name, color.as_deref()),
+        CalCommand::Holds { check } => crate::cal_holds::holds(jolta, check),
         CalCommand::Create(a) => crate::cal_edit::create(jolta, a).await,
         CalCommand::Edit(a) => crate::cal_edit::edit(jolta, a).await,
         CalCommand::Copy(a) => crate::cal_edit::copy(jolta, a).await,

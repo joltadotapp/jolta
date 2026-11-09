@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use super::{Audience, AutoReply, Away};
 use crate::calendar::ops::{self, Change, Edit, Extra};
+use crate::calendar::holds::Mark;
 use crate::calendar::series::Horizon;
 use crate::calendar::{AutoDecline, Calendar, CalendarId, CalendarSource, EventData, EventKind, Local, ShowAs, Span, Zone, caps, meeting, tz};
 use crate::{Account, AccountId, AccountKind, Jolta, Result, store};
@@ -26,13 +27,9 @@ use crate::{Account, AccountId, AccountKind, Jolta, Result, store};
 /// The title of every out-of-office event Jolta makes.
 pub const TITLE: &str = "Out of office";
 
-/// The value of Jolta's hold marker (C4 U9) that names an out-of-office
-/// event. Sync doesn't read markers yet, so Turn off finds the events by
-/// what they show as (`away_events`).
-const MARK: &str = "away";
-const GOOGLE_MARK: &str = "joltaHold";
-const GRAPH_MARK: &str = "String {9d3b2d55-5a0e-4a6e-9b4e-6a6f6c746130} Name JoltaHold";
-const CALDAV_MARK: &str = "X-JOLTA-HOLD";
+/// Jolta's marker on its out-of-office events, which sync reads back as
+/// `EventData::mark`.
+const MARK: Mark = Mark::Away;
 
 /// When the user is away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,7 +195,7 @@ fn step(target: &Target, request: &Request, here: Tz) -> Step {
     match calendar.source {
         CalendarSource::Graph => {
             let (from, until) = request.absence.instants(here);
-            let extra = json!({ "singleValueExtendedProperties": [{ "id": GRAPH_MARK, "value": MARK }] });
+            let extra = json!({ "singleValueExtendedProperties": MARK.graph_properties() });
             Step {
                 replies: Some(Replies { from, until, message: html(&request.message), audience: request.audience }),
                 event: Some(Planned { calendar: calendar.id, event, extra: object(extra) }),
@@ -221,7 +218,7 @@ fn step(target: &Target, request: &Request, here: Tz) -> Step {
             let extra = json!({
                 "eventType": "outOfOffice",
                 "outOfOfficeProperties": { "autoDeclineMode": decline_mode(request.declines), "declineMessage": request.message },
-                "extendedProperties": { "private": { GOOGLE_MARK: MARK } },
+                "extendedProperties": { "private": MARK.google_private() },
             });
             let declines = match request.declines {
                 AutoDecline::New => "declines new invitations for those days, with your reply as the note",
@@ -240,7 +237,7 @@ fn step(target: &Target, request: &Request, here: Tz) -> Step {
             let icloud = a.provider_label() == "iCloud";
             let what = if all_day { "A busy all-day event only." } else { "A busy event only." };
             Step {
-                event: Some(Planned { calendar: calendar.id, event, extra: Extra::Lines(vec![format!("{CALDAV_MARK}:{MARK}")]) }),
+                event: Some(Planned { calendar: calendar.id, event, extra: Extra::Lines(MARK.caldav_lines()) }),
                 line: if icloud { format!("{what} iCloud's auto-reply is set on icloud.com.") } else { what.into() },
                 link: icloud.then(|| ("Open iCloud Mail".into(), "https://www.icloud.com/mail/".into())),
                 ..blank
@@ -315,8 +312,9 @@ pub struct Found {
 }
 
 /// Guest-less single events in the account's own calendars that show as
-/// out of office or carry Jolta's title, and end after `now`. Google keeps
-/// the busy event it gets where it refuses status events by its title.
+/// out of office, carry Jolta's title or its out-of-office marker, and end
+/// after `now`. Google keeps the busy event it gets where it refuses status
+/// events by its title.
 pub fn away_events(conn: &Connection, account: &Account, now: DateTime<Utc>, here: Tz) -> Result<Vec<Found>> {
     let mut out = Vec::new();
     for c in store::account_calendars(conn, account.id)? {
@@ -325,7 +323,7 @@ pub fn away_events(conn: &Connection, account: &Account, now: DateTime<Utc>, her
         }
         let mut stmt = conn.prepare_cached(
             "SELECT data FROM event WHERE calendar_id = ?1 AND recurrence_id = '' AND status <> 'cancelled'
-                 AND (json_extract(data, '$.show_as') = 'oof' OR title = ?2)",
+                 AND (json_extract(data, '$.show_as') = 'oof' OR title = ?2 OR json_extract(data, '$.mark.is') = 'away')",
         )?;
         let rows = stmt.query_map(params![c.id, TITLE], |r| r.get::<_, String>(0))?;
         for data in rows {
@@ -676,7 +674,7 @@ mod tests {
         assert_eq!(event.event.span, Span::AllDay { start: day("2026-11-11"), end: day("2026-11-14") });
         assert_eq!((event.event.show_as, event.event.title.as_str()), (ShowAs::OutOfOffice, TITLE));
         let Extra::Json(extra) = &event.extra else { panic!("JSON for Graph") };
-        assert_eq!(extra["singleValueExtendedProperties"][0], json!({ "id": GRAPH_MARK, "value": "away" }));
+        assert_eq!(extra["singleValueExtendedProperties"][0], json!({ "id": "String {9d3b2d55-5a0e-4a6e-9b4e-6a6f6c746130} Name JoltaHold", "value": "away" }));
         assert!(graph.line.contains("doesn't let apps decline"), "{}", graph.line);
         assert!(graph.ticked);
 
@@ -893,7 +891,8 @@ mod tests {
                 let named = EventData { uid: "named".into(), show_as: ShowAs::Busy, ..alone.clone() };
                 let busy = EventData { uid: "busy".into(), show_as: ShowAs::Busy, title: "Dentist".into(), ..alone.clone() };
                 let past = EventData { uid: "past".into(), span: Span::AllDay { start: day("2026-11-01"), end: day("2026-11-02") }, ..alone.clone() };
-                for e in [alone, meeting, series, named, busy, past] {
+                let marked = EventData { uid: "marked".into(), show_as: ShowAs::Busy, title: "Away, renamed".into(), mark: Some(Mark::Away), ..alone.clone() };
+                for e in [alone, meeting, series, named, busy, past, marked] {
                     store::apply_item(tx, c, &e.uid.clone(), None, &[e], None, &horizon)?;
                 }
                 let a = store::account(tx, AccountId(1))?;
@@ -902,7 +901,7 @@ mod tests {
             .unwrap();
         let mut uids = uids;
         uids.sort();
-        assert_eq!(uids, ["alone", "named"]);
+        assert_eq!(uids, ["alone", "marked", "named"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

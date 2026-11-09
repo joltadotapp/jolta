@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
+use crate::calendar::holds::Mark;
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Occurrence, Rsvp, Target};
 use crate::calendar::{
@@ -113,6 +114,14 @@ struct GoogleEvent {
     guests_can_invite_others: Option<bool>,
     guests_can_see_other_guests: Option<bool>,
     guests_can_modify: bool,
+    extended_properties: Option<ExtendedProperties>,
+    created: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct ExtendedProperties {
+    private: HashMap<String, String>,
 }
 
 /// `outOfOfficeProperties` and `focusTimeProperties`; only focus time
@@ -707,6 +716,8 @@ fn event(g: &GoogleEvent, uid: String, defaults: &[Reminder], calendar_zone: Opt
         // that meets it asks for no second one.
         video: pending_meet(g).then_some(MeetingProvider::Meet),
         kind: kind(g),
+        mark: g.extended_properties.as_ref().and_then(|p| Mark::from_google(&p.private)),
+        created: g.created.as_deref().and_then(|c| DateTime::parse_from_rfc3339(c).ok()).map(|c| c.to_utc()),
     })
 }
 
@@ -1239,5 +1250,25 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(encode("en.be#holiday@group.v.calendar.google.com"), "en.be%23holiday%40group.v.calendar.google.com");
+    }
+
+    #[test]
+    fn a_hold_reads_its_private_properties_and_when_it_was_made() {
+        use crate::calendar::holds::{HoldSetId, Mark};
+        let item = |private: Value| {
+            mapped(json!({
+                "id": "h1", "iCalUID": "h1@google.com", "status": "tentative", "visibility": "private", "summary": "Hold: Planning",
+                "created": "2026-11-09T01:50:03.000Z",
+                "start": {"dateTime": "2026-11-10T16:00:00+01:00"}, "end": {"dateTime": "2026-11-10T16:30:00+01:00"},
+                "extendedProperties": {"private": private, "shared": {"joltaHold": "away"}}
+            }))
+        };
+        let e = item(json!({"joltaHold": "5b2f8c1e-0d4a-4e8b-9a61-3c7e2d9f4a10", "joltaHoldMessage": "<m1@example.com>"}));
+        let set = HoldSetId::parse("5b2f8c1e-0d4a-4e8b-9a61-3c7e2d9f4a10").unwrap();
+        assert_eq!(e.mark, Some(Mark::Hold { set, message: Some("<m1@example.com>".into()) }));
+        assert_eq!(e.created.map(|c| c.to_rfc3339()).as_deref(), Some("2026-11-09T01:50:03+00:00"));
+        assert_eq!(e.status, EventStatus::Tentative);
+        assert_eq!(item(json!({"joltaHold": "away"})).mark, Some(Mark::Away));
+        assert_eq!(item(json!({})).mark, None, "a shared property is anyone's to write");
     }
 }
