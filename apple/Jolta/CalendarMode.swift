@@ -72,7 +72,7 @@ struct CalendarModeView: View {
         }
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
-                ToastView(toast: toast, undo: { model.undo() })
+                ToastView(toast: toast, undo: { model.undo() }, release: { model.releaseHolds($0) })
                     .padding(.bottom, 48)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }

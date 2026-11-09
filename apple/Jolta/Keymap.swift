@@ -9,7 +9,7 @@ enum Command: String, CaseIterable, Identifiable {
     case archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
     case toggleVIP, unsubscribe, summarize, saveAttachments, nextSection, help
-    case accept, maybe, decline, propose
+    case accept, maybe, decline, propose, book
     case goInbox, goStarred, goSnoozed, goSent, goDrafts, goArchive
 
     var id: String { rawValue }
@@ -43,6 +43,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .maybe: "m"
         case .decline: "n"
         case .propose: "p"
+        case .book: "b"
         case .goInbox: "g i"
         case .goStarred: "g s"
         case .goSnoozed: "g h"
@@ -80,6 +81,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .maybe: "Answer invitation maybe"
         case .decline: "Decline invitation"
         case .propose: "Propose new time…"
+        case .book: "Book a held time…"
         case .goInbox: "Go to Inbox"
         case .goStarred: "Go to Starred"
         case .goSnoozed: "Go to Snoozed"
@@ -117,6 +119,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .maybe: "questionmark.circle"
         case .decline: "xmark.circle"
         case .propose: "clock.arrow.2.circlepath"
+        case .book: "calendar.badge.checkmark"
         case .goInbox: "tray"
         case .goStarred: "star"
         case .goSnoozed: "clock"
@@ -130,7 +133,7 @@ enum Command: String, CaseIterable, Identifiable {
     var needsThread: Bool {
         switch self {
         case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
-        case .accept, .maybe, .decline, .propose: true
+        case .accept, .maybe, .decline, .propose, .book: true
         default: false
         }
     }
@@ -184,6 +187,7 @@ extension AppModel {
             if let p = shownProposal { declineProposal(message: p.messageId) }
         case .accept, .maybe, .decline: if let answer = command.answer { answerInvitation(answer) }
         case .propose: openPropose()
+        case .book: bookHold()
         case .goInbox: source = .unifiedInbox
         case .goStarred: source = .starred
         case .goSnoozed: source = .role("snoozed")

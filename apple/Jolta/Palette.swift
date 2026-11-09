@@ -112,6 +112,7 @@ struct PaletteView: View {
             .filter { c in
                 switch c {
                 case .propose: model.shownInvitation?.newTime != nil
+                case .book: model.holdLine?.slots.contains { $0.state == .held } == true
                 case .decline: model.shownInvitation != nil || model.shownProposal != nil
                 case .label: model.cursorHasLabels
                 default: c.answer == nil || model.shownInvitation != nil
