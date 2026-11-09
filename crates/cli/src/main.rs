@@ -484,7 +484,7 @@ async fn account(jolta: &Jolta, cmd: AccountCommand) -> Result<()> {
             let client = provider.client(&jolta.data_dir)?;
             let pending = oauth::begin(provider, client, port).await?;
             let signed = browser_sign_in(pending, port, label).await?;
-            let account = oauth::save_account(jolta, provider, &signed)?;
+            let account = oauth::save_account(jolta, provider, &signed, None)?;
             println!("Added account {}: {}. Run `jolta sync {}` next.", account.id, account.address, account.id);
             Ok(())
         }

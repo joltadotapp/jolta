@@ -603,7 +603,7 @@ impl SignIn {
                     let account = jolta.store.read(|c| store::account(c, account.id))?;
                     return Ok(AccountInfo::from(account));
                 }
-                let account = jolta_core::oauth::save_account(&jolta, provider, &signed)?;
+                let account = jolta_core::oauth::save_account(&jolta, provider, &signed, None)?;
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }

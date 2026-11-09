@@ -258,6 +258,29 @@ pub struct SignedIn {
     pub expires_in: u64,
 }
 
+impl SignedIn {
+    /// Reads a token reply to an authorization code.
+    fn from_tokens(_provider: Provider, tokens: &Value) -> Result<SignedIn> {
+        let refresh_token = tokens["refresh_token"]
+            .as_str()
+            .ok_or_else(|| Error::Auth("the provider sent no refresh token".into()))?
+            .to_string();
+        let claims = tokens["id_token"].as_str().and_then(jwt_claims).unwrap_or(Value::Null);
+        let email = claims["email"]
+            .as_str()
+            .or_else(|| claims["preferred_username"].as_str())
+            .ok_or_else(|| Error::Auth("the provider did not say which address signed in".into()))?
+            .to_string();
+        Ok(SignedIn {
+            name: claims["name"].as_str().unwrap_or_default().to_string(),
+            email,
+            refresh_token,
+            access_token: tokens["access_token"].as_str().unwrap_or_default().to_string(),
+            expires_in: tokens["expires_in"].as_u64().unwrap_or(3600),
+        })
+    }
+}
+
 /// Starts a sign-in. `port` 0 picks a free port; a fixed port lets the
 /// redirect come in through an SSH tunnel from another machine's browser.
 pub async fn begin(provider: Provider, client: Client, port: u16) -> Result<Pending> {
@@ -381,33 +404,21 @@ impl Pending {
             params.push(("client_secret", secret));
         }
         let tokens = post_token(self.provider, &params).await?;
-        let refresh_token = tokens["refresh_token"]
-            .as_str()
-            .ok_or_else(|| Error::Auth("the provider sent no refresh token".into()))?
-            .to_string();
+        if tokens["refresh_token"].as_str().is_none() {
+            return Err(Error::Auth("the provider sent no refresh token".into()));
+        }
         if let Some(reason) = refused_scopes(self.provider, self.ask, tokens["scope"].as_str())? {
             return Ok(Consent::Refused(reason));
         }
-        let access_token = tokens["access_token"].as_str().unwrap_or_default().to_string();
-        let claims = tokens["id_token"].as_str().and_then(jwt_claims).unwrap_or(Value::Null);
-        let email = claims["email"]
-            .as_str()
-            .or_else(|| claims["preferred_username"].as_str())
-            .ok_or_else(|| Error::Auth("the provider did not say which address signed in".into()))?
-            .to_string();
+        let signed = SignedIn::from_tokens(self.provider, &tokens)?;
         if let Some(address) = &self.address
-            && !email.eq_ignore_ascii_case(address)
+            && !signed.email.eq_ignore_ascii_case(address)
         {
             let what = if self.ask == Ask::Rooms { "room lists were being asked" } else { "calendar was being turned on" };
+            let email = &signed.email;
             return Err(Error::Auth(format!("you signed in as {email}, but {what} for {address}. Sign in as {address}.")));
         }
-        Ok(Consent::Granted(SignedIn {
-            name: claims["name"].as_str().unwrap_or_default().to_string(),
-            email,
-            refresh_token,
-            access_token,
-            expires_in: tokens["expires_in"].as_u64().unwrap_or(3600),
-        }))
+        Ok(Consent::Granted(signed))
     }
 
     async fn receive_code(&self) -> Result<Redirect> {
@@ -851,6 +862,107 @@ mod tests {
         assert!(!has_scope(granted, "https://graph.microsoft.com/Calendars.ReadWrite.Shared"));
         assert!(has_scope("https://mail.google.com/ openid", "https://mail.google.com/"));
     }
+
+    fn data_folder(name: &str) -> crate::Jolta {
+        crate::secrets::use_memory_store();
+        let dir = std::env::temp_dir().join(format!("jolta-oauth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::Jolta::open(&dir).unwrap()
+    }
+
+    /// A token reply whose id_token carries `claims`, as JSON.
+    fn signed(provider: Provider, claims: &str) -> SignedIn {
+        let id_token = format!("x.{}.sig", URL_SAFE_NO_PAD.encode(claims));
+        let reply = serde_json::json!({"refresh_token": "r", "access_token": "a", "expires_in": 3600, "id_token": id_token});
+        SignedIn::from_tokens(provider, &reply).unwrap()
+    }
+
+    fn google(address: &str, sub: &str) -> SignedIn {
+        signed(Provider::Google, &format!(r#"{{"email":"{address}","name":"Ann","sub":"{sub}"}}"#))
+    }
+
+    fn microsoft(address: &str, oid: &str) -> SignedIn {
+        signed(Provider::Microsoft, &format!(r#"{{"preferred_username":"{address}","name":"Ann","oid":"{oid}"}}"#))
+    }
+
+    fn inbox() -> crate::store::RemoteMailbox {
+        crate::store::RemoteMailbox {
+            important: false,
+            remote_id: "INBOX".into(),
+            name: "Inbox".into(),
+            role: Some(crate::model::MailboxRole::Inbox),
+            delimiter: None,
+            selectable: true,
+        }
+    }
+
+    /// The provider renamed the user, so the address changed and the
+    /// account needed a new sign-in. Signing in again is the same account:
+    /// the provider's id for the user says so, not the address.
+    #[test]
+    fn signing_in_again_after_a_rename_keeps_the_account_and_takes_the_new_address() {
+        for (provider, sign_in) in [(Provider::Google, google as fn(&str, &str) -> SignedIn), (Provider::Microsoft, microsoft)] {
+            let j = data_folder(&format!("rename-{provider:?}"));
+            let added = save_account(&j, provider, &sign_in("old@example.com", "user-1"), None).unwrap();
+            j.store.write(|tx| crate::store::set_signature(tx, added.id, "Ann, from old")).unwrap();
+            j.store.write(|tx| crate::store::sync_mailbox_list(tx, added.id, &[inbox()])).unwrap();
+
+            let again = save_account(&j, provider, &sign_in("new@example.com", "user-1"), Some(added.id)).unwrap();
+
+            let accounts = j.store.read(crate::store::accounts).unwrap();
+            assert_eq!(accounts.len(), 1, "{provider:?}: no second account");
+            assert_eq!(again.id, added.id, "{provider:?}: the same account");
+            assert_eq!((accounts[0].address.as_str(), accounts[0].username.as_str()), ("new@example.com", "new@example.com"));
+            assert_eq!(accounts[0].signature, "Ann, from old", "{provider:?}: settings stay");
+            assert_eq!(j.store.read(|c| crate::store::mailboxes(c, added.id)).unwrap().len(), 1, "{provider:?}: mail stays");
+
+            let from_add = save_account(&j, provider, &sign_in("newer@example.com", "user-1"), None).unwrap();
+            assert_eq!(from_add.id, added.id, "{provider:?}: adding the account again finds it by the provider's id too");
+        }
+    }
+
+    /// An account added before Jolta kept the provider's id, then renamed:
+    /// Sign In Again in its settings repairs it and keeps the id from then on.
+    #[test]
+    fn signing_in_again_repairs_a_renamed_account_jolta_had_no_id_for() {
+        let j = data_folder("rename-legacy");
+        let legacy = crate::store::NewAccount {
+            kind: AccountKind::Gmail,
+            address: "old@example.com".into(),
+            display_name: "Ann".into(),
+            username: "old@example.com".into(),
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.gmail.com".into(),
+            smtp_port: 465,
+        };
+        let legacy = j.store.write(|tx| crate::store::insert_account(tx, &legacy)).unwrap();
+
+        let again = save_account(&j, Provider::Google, &google("new@example.com", "user-1"), Some(legacy.id)).unwrap();
+        assert_eq!(again.id, legacy.id);
+        assert_eq!(again.address, "new@example.com");
+
+        let later = save_account(&j, Provider::Google, &google("newer@example.com", "user-1"), None).unwrap();
+        assert_eq!(later.id, legacy.id, "the id is kept from the repair on");
+        assert_eq!(j.store.read(crate::store::accounts).unwrap().len(), 1);
+    }
+
+    /// Someone else's sign-in never takes over an account: not from its Sign
+    /// In Again, and not when the provider gave its old address to a new user.
+    #[test]
+    fn another_user_gets_an_account_of_their_own() {
+        let j = data_folder("rename-other");
+        let ann = save_account(&j, Provider::Google, &google("ann@example.com", "user-1"), None).unwrap();
+
+        let bob = save_account(&j, Provider::Google, &google("bob@example.com", "user-2"), Some(ann.id)).unwrap();
+        assert_ne!(bob.id, ann.id, "Sign In Again as someone else adds them");
+
+        let new_ann = save_account(&j, Provider::Google, &google("ann@example.com", "user-3"), None).unwrap();
+        assert_ne!(new_ann.id, ann.id, "a new user with Ann's old address is someone else");
+
+        let ann = j.store.read(|c| crate::store::account(c, ann.id)).unwrap();
+        assert_eq!(ann.address, "ann@example.com", "Ann's account is untouched");
+    }
 }
 
 /// Stores the refresh token of a calendar sign-in for the account it was
@@ -863,7 +975,7 @@ pub fn save_grant(account: &Account, signed: &SignedIn) -> Result<()> {
 
 /// Stores a finished sign-in as an account (or refreshes the token of the
 /// account with that address) and returns it.
-pub fn save_account(jolta: &crate::Jolta, provider: Provider, signed: &SignedIn) -> Result<Account> {
+pub fn save_account(jolta: &crate::Jolta, provider: Provider, signed: &SignedIn, _again: Option<crate::AccountId>) -> Result<Account> {
     let kind = match provider {
         Provider::Google => AccountKind::Gmail,
         Provider::Microsoft => AccountKind::Graph,
