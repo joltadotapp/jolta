@@ -432,4 +432,134 @@ mod tests {
         assert_eq!(quote("\\Inbox"), "\\Inbox");
         assert_eq!(quote("Work \"A\""), "\"Work \\\"A\\\"\"");
     }
+
+    use super::super::fake_gmail::{FakeGmail, SPAM, TRASH};
+    use crate::actions::{self, Action, Context};
+
+    async fn signed_in(name: &str, server: &FakeGmail) -> (Jolta, Account, Session) {
+        let dir = std::env::temp_dir().join(format!("jolta-gmail-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let jolta = Jolta::open(&dir).unwrap();
+        let new = store::NewAccount {
+            kind: AccountKind::Gmail,
+            address: "g@test.invalid".into(),
+            display_name: String::new(),
+            username: "g@test.invalid".into(),
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            smtp_host: String::new(),
+            smtp_port: 0,
+        };
+        let account = jolta.store.write(|tx| store::insert_account(tx, &new)).unwrap();
+        (jolta, account, server.connect().await)
+    }
+
+    async fn sync_once(jolta: &Jolta, session: &mut Session, account: &Account) {
+        sync(jolta, session, Caps::default(), account, SyncOptions { bodies: false }, &mut |_| {}).await.unwrap();
+    }
+
+    /// The subjects the app's list shows for a query.
+    fn list(jolta: &Jolta, query: &str) -> Vec<String> {
+        let q = crate::search::parse(query).unwrap();
+        let mut out: Vec<String> =
+            jolta.store.read(|c| crate::search::query_page(c, &q, 0, 50)).unwrap().into_iter().map(|r| r.subject).collect();
+        out.sort();
+        out
+    }
+
+    fn thread(jolta: &Jolta, subject: &str) -> ThreadId {
+        jolta.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE subject = ?1", [subject], |r| r.get(0))?)).unwrap()
+    }
+
+    fn mailbox(jolta: &Jolta, account: &Account, role: MailboxRole) -> MailboxId {
+        let id = account.id;
+        jolta.store.read(|c| store::mailboxes(c, id)).unwrap().into_iter().find(|m| m.role == Some(role)).unwrap().id
+    }
+
+    /// Sends the queued ops, as the engine does before it syncs.
+    async fn send_ops(jolta: &Jolta, session: &mut Session, account: &Account) {
+        let id = account.id;
+        while let Some(op) = jolta.store.write(|tx| store::claim_op(tx, id)).unwrap() {
+            super::super::apply_op(jolta, session, Caps::default(), &op).await.unwrap();
+            jolta.store.write(|tx| store::finish_op(tx, op.id)).unwrap();
+        }
+    }
+
+    async fn act(jolta: &Jolta, session: &mut Session, account: &Account, subject: &str, action: Action, context: Context) -> store::OpId {
+        let thread = thread(jolta, subject);
+        let (_, op) = jolta.store.write(|tx| actions::perform(tx, thread, action, context)).unwrap().expect("something to change");
+        send_ops(jolta, session, account).await;
+        op
+    }
+
+    /// Found on 2026-11-09: a conversation trashed in Jolta reached Gmail's
+    /// Trash, then left Jolta at the next sync, since Gmail's Trash wasn't
+    /// synced and the message had left All Mail.
+    #[tokio::test]
+    async fn a_conversation_trashed_in_jolta_stays_in_trash() {
+        let server = FakeGmail::default();
+        server.deliver("Bin me", &["\\Inbox"]);
+        server.deliver("Keep", &["\\Inbox", "Work"]);
+        let (jolta, account, mut session) = signed_in("trashed-here", &server).await;
+        sync_once(&jolta, &mut session, &account).await;
+        assert_eq!(list(&jolta, "in:inbox"), ["Bin me", "Keep"]);
+
+        act(&jolta, &mut session, &account, "Bin me", Action::Trash, Context::Inbox).await;
+        assert_eq!(server.subjects(TRASH), ["Bin me"], "Gmail has it in Trash");
+        sync_once(&jolta, &mut session, &account).await;
+        assert_eq!(list(&jolta, "in:trash"), ["Bin me"], "and so does Jolta after the next sync");
+        assert_eq!(list(&jolta, "in:inbox"), ["Keep"]);
+        assert_eq!(list(&jolta, "in:Work"), ["Keep"]);
+    }
+
+    /// Mail trashed or marked as spam on the web shows in Jolta's Trash and
+    /// Spam, and reading it there reaches Gmail.
+    #[tokio::test]
+    async fn trash_and_spam_from_elsewhere_arrive() {
+        let server = FakeGmail::default();
+        for subject in ["Bin me", "Junk", "Keep"] {
+            server.deliver(subject, &["\\Inbox"]);
+        }
+        let (jolta, account, mut session) = signed_in("trashed-elsewhere", &server).await;
+        sync_once(&jolta, &mut session, &account).await;
+        server.move_to("Bin me", TRASH);
+        server.move_to("Junk", SPAM);
+        sync_once(&jolta, &mut session, &account).await;
+        assert_eq!(list(&jolta, "in:trash"), ["Bin me"]);
+        assert_eq!(list(&jolta, "in:spam"), ["Junk"]);
+        assert_eq!(list(&jolta, "in:inbox"), ["Keep"]);
+
+        act(&jolta, &mut session, &account, "Bin me", Action::MarkRead, Context::Role(MailboxRole::Trash)).await;
+        assert!(server.seen("Bin me"), "read in Trash reached Gmail");
+        sync_once(&jolta, &mut session, &account).await;
+        assert!(list(&jolta, "in:trash is:unread").is_empty(), "and stays read");
+    }
+
+    /// Moving a conversation out of Trash brings it back on Gmail too, also
+    /// when Undo follows the trash before a sync learned its Trash UID.
+    #[tokio::test]
+    async fn back_out_of_trash() {
+        let server = FakeGmail::default();
+        server.deliver("Oops", &["\\Inbox"]);
+        server.deliver("Undo me", &["\\Inbox"]);
+        let (jolta, account, mut session) = signed_in("back-out", &server).await;
+        sync_once(&jolta, &mut session, &account).await;
+        let inbox = mailbox(&jolta, &account, MailboxRole::Inbox);
+
+        server.move_to("Oops", TRASH);
+        sync_once(&jolta, &mut session, &account).await;
+        act(&jolta, &mut session, &account, "Oops", Action::MoveTo(inbox), Context::Role(MailboxRole::Trash)).await;
+
+        let trashed = act(&jolta, &mut session, &account, "Undo me", Action::Trash, Context::Inbox).await;
+        assert_eq!(server.subjects(TRASH), ["Undo me"]);
+        let undo = jolta.store.write(|tx| actions::undo(tx, trashed)).unwrap();
+        assert!(undo.is_some(), "a sent trash is undone by the opposite move");
+        send_ops(&jolta, &mut session, &account).await;
+
+        assert_eq!(server.subjects("INBOX"), ["Oops", "Undo me"], "both are back in Gmail's inbox");
+        assert!(server.subjects(TRASH).is_empty());
+        sync_once(&jolta, &mut session, &account).await;
+        assert_eq!(list(&jolta, "in:inbox"), ["Oops", "Undo me"]);
+        assert!(list(&jolta, "in:trash").is_empty());
+    }
 }
