@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 /// Journeys through the real app. Run them with `scripts/ui-tests.sh`, which
@@ -1318,6 +1319,43 @@ final class Journeys: XCTestCase {
         XCTAssertTrue((body.value as? String)?.hasPrefix("Great. Noon works for me.") == true, "with what was added")
         XCTAssertTrue(focused(body), "a draft opened again: the cursor is in the body")
         app.typeKey(.escape, modifierFlags: [])
+    }
+
+    /// A pasted image goes in where the cursor is, and the Image size menu
+    /// shows what the message comes to at the size chosen.
+    func testPastedImageSize() throws {
+        let app = try launch()
+        app.typeKey("c", modifierFlags: [])
+        let body = app.textViews["compose-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "c opens compose")
+        app.typeText("ann@test.invalid")
+        body.click()
+        app.typeText("The chart: ")
+
+        let picture = NSImage(size: NSSize(width: 1600, height: 1000), flipped: false) { rect in
+            NSColor.systemTeal.setFill()
+            rect.fill()
+            NSColor.white.setFill()
+            NSRect(x: 200, y: 200, width: 900, height: 400).fill()
+            return true
+        }
+        let png = try XCTUnwrap(picture.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))?.representation(using: .png, properties: [:]))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(png, forType: .png)
+        app.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(waitUntil { (body.value as? String)?.contains("\u{FFFC}") == true }, "the image goes in at the cursor")
+
+        let menu = app.descendants(matching: .any).matching(identifier: "compose-image-size").firstMatch
+        let size = app.descendants(matching: .any).matching(identifier: "compose-message-size").firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 10), "a message with an image offers the image size")
+        func label(_ e: XCUIElement) -> String { [e.label, e.title, e.value as? String ?? ""].joined(separator: " ") }
+        XCTAssertTrue(label(menu).contains("Actual Size"), "Actual Size to start with: \(label(menu))")
+        let actual = label(size)
+        menu.click()
+        app.menuItems.matching(NSPredicate(format: "title BEGINSWITH 'Medium'")).firstMatch.click()
+        XCTAssertTrue(waitUntil { label(menu).contains("Medium") }, "the menu shows the size chosen: \(label(menu))")
+        XCTAssertNotEqual(label(size), actual, "the message size follows the choice")
+        app.buttons["⌘⌫"].click()
     }
 
     private func waitUntil(_ done: () -> Bool) -> Bool {
