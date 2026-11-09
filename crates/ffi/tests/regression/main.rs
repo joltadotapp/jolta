@@ -7,6 +7,7 @@ mod server;
 mod accounts;
 mod calendar;
 mod compose;
+mod ids;
 mod mail;
 mod search;
 mod store;
