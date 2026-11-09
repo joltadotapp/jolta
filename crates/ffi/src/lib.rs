@@ -542,7 +542,8 @@ pub enum OAuthProvider {
 /// What a browser sign-in adds.
 #[derive(Clone)]
 enum SignInFor {
-    Account,
+    /// A new account, or Sign In Again for this one.
+    Account(Option<AccountId>),
     /// Calendar access for this account.
     Calendar(jolta_core::Account),
     /// The room lists of this Microsoft 365 account's organization.
@@ -603,7 +604,11 @@ impl SignIn {
                     let account = jolta.store.read(|c| store::account(c, account.id))?;
                     return Ok(AccountInfo::from(account));
                 }
-                let account = jolta_core::oauth::save_account(&jolta, provider, &signed, None)?;
+                let again = match purpose {
+                    SignInFor::Account(again) => again,
+                    _ => None,
+                };
+                let account = jolta_core::oauth::save_account(&jolta, provider, &signed, again)?;
                 if let Some(engine) = engine {
                     engine.add_account(account.clone());
                 }
@@ -1430,6 +1435,22 @@ impl Core {
             OAuthProvider::Google => jolta_core::oauth::Provider::Google,
             OAuthProvider::Microsoft => jolta_core::oauth::Provider::Microsoft,
         };
+        self.sign_in(provider, None).await
+    }
+
+    /// Starts Sign In Again for a Google or Microsoft account. `finish()`
+    /// keeps this account, with the address the provider gives now, when
+    /// the same user signs in; someone else is added as their own account.
+    pub async fn begin_sign_in_again(&self, account_id: i64) -> Result<Arc<SignIn>> {
+        let account = self.jolta.store.read(|c| store::account(c, AccountId(account_id)))?;
+        let provider = jolta_core::oauth::Provider::for_kind(account.kind)
+            .ok_or_else(|| CoreError::Failed { message: format!("{} signs in with a password", account.address) })?;
+        self.sign_in(provider, Some(account.id)).await
+    }
+}
+
+impl Core {
+    async fn sign_in(&self, provider: jolta_core::oauth::Provider, again: Option<AccountId>) -> Result<Arc<SignIn>> {
         let client = provider.client(&self.jolta.data_dir)?;
         let pending = self
             .runtime
@@ -1439,14 +1460,17 @@ impl Core {
         Ok(Arc::new(SignIn {
             url: pending.url.clone(),
             provider,
-            purpose: SignInFor::Account,
+            purpose: SignInFor::Account(again),
             pending: Mutex::new(Some(pending)),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
             engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         }))
     }
+}
 
+#[uniffi::export]
+impl Core {
     /// Starts the browser sign-in that grants calendar access to a Google
     /// or Microsoft account. `finish()` turns calendar on for it.
     pub async fn begin_calendar_consent(&self, account_id: i64) -> Result<Arc<SignIn>> {

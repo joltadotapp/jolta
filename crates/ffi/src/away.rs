@@ -474,6 +474,7 @@ mod tests {
             verify_certs: true,
             signature: String::new(),
             calendar,
+            oauth_user_id: None,
         }
     }
 

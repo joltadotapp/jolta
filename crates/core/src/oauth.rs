@@ -131,6 +131,15 @@ impl Provider {
         }
     }
 
+    /// The id_token claim that names the user for good. Microsoft's `sub`
+    /// differs per app; `oid` is the user's object id in their directory.
+    fn user_id_claim(self) -> &'static str {
+        match self {
+            Provider::Google => "sub",
+            Provider::Microsoft => "oid",
+        }
+    }
+
     fn env_prefix(self) -> &'static str {
         match self {
             Provider::Google => "GOOGLE",
@@ -256,11 +265,14 @@ pub struct SignedIn {
     pub refresh_token: String,
     pub access_token: String,
     pub expires_in: u64,
+    /// The provider's permanent id for the user, which an address change
+    /// keeps: Google's `sub`, Microsoft's `oid`.
+    pub user_id: Option<String>,
 }
 
 impl SignedIn {
     /// Reads a token reply to an authorization code.
-    fn from_tokens(_provider: Provider, tokens: &Value) -> Result<SignedIn> {
+    fn from_tokens(provider: Provider, tokens: &Value) -> Result<SignedIn> {
         let refresh_token = tokens["refresh_token"]
             .as_str()
             .ok_or_else(|| Error::Auth("the provider sent no refresh token".into()))?
@@ -277,6 +289,7 @@ impl SignedIn {
             refresh_token,
             access_token: tokens["access_token"].as_str().unwrap_or_default().to_string(),
             expires_in: tokens["expires_in"].as_u64().unwrap_or(3600),
+            user_id: claims[provider.user_id_claim()].as_str().map(str::to_string),
         })
     }
 }
@@ -807,6 +820,7 @@ mod tests {
             verify_certs: true,
             signature: String::new(),
             calendar: true,
+            oauth_user_id: None,
         };
         let pending = begin_rooms(&account, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
         let state = pending.state.clone();
@@ -973,39 +987,58 @@ pub fn save_grant(account: &Account, signed: &SignedIn) -> Result<()> {
     Ok(())
 }
 
-/// Stores a finished sign-in as an account (or refreshes the token of the
-/// account with that address) and returns it.
-pub fn save_account(jolta: &crate::Jolta, provider: Provider, signed: &SignedIn, _again: Option<crate::AccountId>) -> Result<Account> {
+/// Stores a finished sign-in as an account, or as the account it signed in
+/// to again, and returns it. `again` is the account whose Sign In Again
+/// started it.
+pub fn save_account(jolta: &crate::Jolta, provider: Provider, signed: &SignedIn, again: Option<crate::AccountId>) -> Result<Account> {
     let kind = match provider {
         Provider::Google => AccountKind::Gmail,
         Provider::Microsoft => AccountKind::Graph,
     };
-    let existing = jolta
-        .store
-        .read(crate::store::accounts)?
-        .into_iter()
-        .find(|a| a.kind == kind && a.address.eq_ignore_ascii_case(&signed.email));
-    let account = match existing {
-        Some(a) => a,
-        None => {
-            let (imap_host, imap_port, smtp_host, smtp_port) = match provider {
-                Provider::Google => ("imap.gmail.com", 993, "smtp.gmail.com", 465),
-                Provider::Microsoft => ("", 0, "", 0),
-            };
-            let new = crate::store::NewAccount {
-                kind,
-                address: signed.email.clone(),
-                display_name: signed.name.clone(),
-                username: signed.email.clone(),
-                imap_host: imap_host.into(),
-                imap_port,
-                smtp_host: smtp_host.into(),
-                smtp_port,
-            };
-            jolta.store.write(|tx| crate::store::insert_account(tx, &new))?
-        }
-    };
+    let account = jolta.store.write(|tx| {
+        let accounts = crate::store::accounts(tx)?;
+        let id = match signed_in_to(&accounts, kind, signed, again) {
+            Some(a) => a.id,
+            None => {
+                let (imap_host, imap_port, smtp_host, smtp_port) = match provider {
+                    Provider::Google => ("imap.gmail.com", 993, "smtp.gmail.com", 465),
+                    Provider::Microsoft => ("", 0, "", 0),
+                };
+                let new = crate::store::NewAccount {
+                    kind,
+                    address: signed.email.clone(),
+                    display_name: signed.name.clone(),
+                    username: signed.email.clone(),
+                    imap_host: imap_host.into(),
+                    imap_port,
+                    smtp_host: smtp_host.into(),
+                    smtp_port,
+                };
+                crate::store::insert_account(tx, &new)?.id
+            }
+        };
+        crate::store::set_signed_in_as(tx, id, &signed.email, signed.user_id.as_deref())
+    })?;
     secrets::set_password(&account.secret_ref, &signed.refresh_token)?;
     remember(&account.secret_ref, &signed.access_token, signed.expires_in);
     Ok(account)
+}
+
+/// The account a sign-in belongs to: the one with the provider's id for
+/// the user, which a renamed address keeps. An account that has no id yet,
+/// signed in before Jolta kept them, is the one whose Sign In Again this
+/// is, else the one at the same address.
+fn signed_in_to<'a>(accounts: &'a [Account], kind: AccountKind, signed: &SignedIn, again: Option<crate::AccountId>) -> Option<&'a Account> {
+    let mut of_kind = accounts.iter().filter(|a| a.kind == kind);
+    if let Some(user) = &signed.user_id
+        && let Some(a) = of_kind.clone().find(|a| a.oauth_user_id.as_ref() == Some(user))
+    {
+        return Some(a);
+    }
+    let without_id = |a: &&Account| a.oauth_user_id.is_none() || signed.user_id.is_none();
+    of_kind
+        .clone()
+        .filter(without_id)
+        .find(|a| Some(a.id) == again)
+        .or_else(|| of_kind.find(|a| without_id(a) && a.address.eq_ignore_ascii_case(&signed.email)))
 }
