@@ -8,6 +8,8 @@
 //! series is saved for This event, This and following events or All events,
 //! which the user picks from `SavePlan::scopes`.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use rusqlite::Connection;
@@ -1482,10 +1484,14 @@ pub fn delete_drafted(conn: &Connection, draft: &EventDraft, scope: Option<Scope
 }
 
 /// The calendar new events go to: the one the user chose in Settings ›
-/// Calendar, shown or not, else the first shown calendar Jolta can write to.
+/// Calendar, shown or not, else the first of the user's own calendars Jolta
+/// can write to, shown before hidden, in the sidebar's order. A calendar
+/// someone else shared comes only when the user owns none Jolta can tell,
+/// such as on a CalDAV server that names no owner.
 pub fn default_calendar(conn: &Connection) -> Result<Option<Calendar>> {
-    let writable: Vec<Calendar> = store::calendars(conn)?.into_iter().filter(|c| caps::of(c).writable).collect();
-    Ok(writable.iter().find(|c| c.is_default).or_else(|| writable.iter().find(|c| c.shown)).cloned())
+    let addresses: HashMap<AccountId, String> = store::accounts(conn)?.into_iter().map(|a| (a.id, a.address)).collect();
+    let own = |c: &Calendar| c.is_own(c.account_id.and_then(|a| addresses.get(&a)).map_or("", String::as_str));
+    Ok(store::calendars(conn)?.into_iter().filter(|c| caps::of(c).writable).min_by_key(|c| (!c.is_default, !own(c), !c.shown)))
 }
 
 #[cfg(test)]

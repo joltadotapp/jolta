@@ -209,7 +209,7 @@ pub fn set_zoom_link(conn: &Connection, link: Option<&str>) -> Result<()> {
 }
 
 /// Makes `id` the calendar new events go to, and no other; None goes back
-/// to the first shown calendar Jolta can write to.
+/// to the user's own calendar that `draft::default_calendar` picks.
 pub fn set_default_calendar(conn: &Connection, id: Option<CalendarId>) -> Result<()> {
     if let Some(id) = id {
         calendar(conn, id)?;
