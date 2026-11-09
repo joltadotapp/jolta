@@ -434,8 +434,9 @@ fn people(e: &EventData) -> (Vec<String>, Vec<String>) {
 /// account's address and the ones the copies in its own calendars mark as
 /// its own; another of the user's accounts is someone else here.
 pub fn seen(conn: &Connection, blobs: &Blobs, set: &HoldSet, here: Tz) -> Result<Seen> {
-    let mut seen = Seen { me: vec![store::account(conn, set.account)?.address], ..Seen::default() };
-    let own: Vec<CalendarId> = store::account_calendars(conn, set.account)?.into_iter().map(|c| c.id).collect();
+    let address = store::account(conn, set.account)?.address;
+    let mut seen = Seen { me: vec![address.clone()], ..Seen::default() };
+    let own: Vec<CalendarId> = store::account_calendars(conn, set.account)?.into_iter().filter(|c| c.is_own(&address)).map(|c| c.id).collect();
     seen.holds = store::hold_events(conn, Some(&set.id))?
         .into_iter()
         .filter(|m| m.calendar == set.calendar && m.event.status != EventStatus::Cancelled)
@@ -460,8 +461,15 @@ pub fn seen(conn: &Connection, blobs: &Blobs, set: &HoldSet, here: Tz) -> Result
     let Some(sent) = set.sent else { return Ok(seen) };
     for (from, received, blob) in store::requests_since(conn, set.account, sent)? {
         let Some(raw) = blob.and_then(|b| blobs.get(&b).ok()) else { continue };
-        for i in invitation::find(&raw, &seen.me).into_iter().filter(|i| i.method == Method::Request && i.dated) {
-            for o in recur::expand(&i.event, &[], window, here) {
+        let events: Vec<EventData> = invitation::find(&raw, &seen.me).into_iter().filter(|i| i.method == Method::Request && i.dated).map(|i| i.event).collect();
+        // A series' moved occurrences come in the same mail as overrides of its master.
+        for e in &events {
+            let has_master = events.iter().any(|m| m.uid == e.uid && m.recurrence_id.is_none());
+            if e.recurrence_id.is_some() && has_master {
+                continue;
+            }
+            let overrides: Vec<EventData> = events.iter().filter(|o| o.uid == e.uid && o.recurrence_id.is_some() && e.recurrence_id.is_none()).cloned().collect();
+            for o in recur::expand(e, &overrides, window, here) {
                 let (start, end) = instants(&o.span, here);
                 seen.invitations.push(Invited { from: from.clone(), start, end, received });
             }
@@ -854,12 +862,78 @@ mod tests {
             let _ = std::fs::remove_dir_all(&j.data_dir);
         }
 
+        /// Google marks a shared calendar's owner as the copy's `self`, so
+        /// Ann's own meeting in her calendar shared with the user names her
+        /// as the user there; she stays a recipient.
+        #[test]
+        fn a_shared_calendars_owner_is_no_alias() {
+            let (j, work) = jolta("holds-shared");
+            let shared = j
+                .store
+                .write(|tx| {
+                    let cal = |remote_id: &str, access| store::RemoteCalendar {
+                        remote_id: remote_id.into(),
+                        name: remote_id.into(),
+                        color: None,
+                        zone: None,
+                        access,
+                        primary: remote_id == "/cal/work/",
+                        refresh: None,
+                        video: None,
+                    };
+                    let listed = store::sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &[cal("/cal/work/", Access::Owner), cal("/cal/ann/", Access::Write)])?;
+                    let shared = listed.iter().find(|c| c.remote_id == "/cal/ann/").unwrap().id;
+                    store::set_calendar_shown(tx, shared, true)?;
+                    Ok(shared)
+                })
+                .unwrap();
+            holds(&j, work, "<m1@example.com>");
+            let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:ann-own@example.com\r\nDTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\n\
+                ORGANIZER:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+            let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap(), Brussels);
+            j.store.write(|tx| store::apply_item(tx, shared, "ann-own", None, &ical::read(ics, &[ANN.into()])?, None, &horizon)).unwrap();
+            let seen = j.store.read(|c| super::super::seen(c, &j.blobs, &set(), Brussels)).unwrap();
+            assert_eq!(seen.me, [ME]);
+            assert_eq!(outcomes(&decide(&set(), &seen, now()))[0], ("h1", Outcome::Booked(Booking::Event { by: ANN.into() })));
+            let _ = std::fs::remove_dir_all(&j.data_dir);
+        }
+
+        /// A series' moved occurrence comes in the same request as an
+        /// override, and counts at its new time only.
+        #[test]
+        fn a_moved_occurrence_in_a_request_counts_at_its_new_time() {
+            let (j, work) = jolta("holds-moved-request");
+            holds(&j, work, "<m1@example.com>");
+            import(&j, b"From: Ann <ann@example.com>\r\nTo: me@example.com\r\nSubject: Invitation: Weekly\r\nDate: Mon, 09 Nov 2026 11:00:00 +0000\r\n\
+                Message-ID: <i2@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n\
+                BEGIN:VEVENT\r\nUID:w1@example.com\r\nDTSTAMP:20261109T110000Z\r\nDTSTART:20261103T150000Z\r\nDTEND:20261103T153000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n\
+                SUMMARY:Weekly\r\nORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\n\
+                BEGIN:VEVENT\r\nUID:w1@example.com\r\nRECURRENCE-ID:20261110T150000Z\r\nDTSTAMP:20261109T110000Z\r\nDTSTART:20261113T090000Z\r\nDTEND:20261113T093000Z\r\n\
+                SUMMARY:Weekly\r\nORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+            let seen = j.store.read(|c| super::super::seen(c, &j.blobs, &set(), Brussels)).unwrap();
+            let times: Vec<DateTime<Utc>> = seen.invitations.iter().map(|i| i.start).collect();
+            assert_eq!(times, [t("2026-11-13 09:00"), t("2026-11-17 15:00")]);
+            assert_eq!(decide(&set(), &seen, now()), []);
+            let _ = std::fs::remove_dir_all(&j.data_dir);
+        }
+
         #[test]
         fn another_macs_holds_are_built_from_the_sent_mail_their_marker_names() {
             let (j, work) = jolta("holds-adopt");
             holds(&j, work, "<m1@example.com>");
             let adopt = || j.store.write(|tx| adopt(tx, t("2026-11-09 12:00"), Brussels)).unwrap();
             assert_eq!(adopt(), [], "the sent mail isn't here yet");
+            j.store
+                .write(|tx| {
+                    tx.execute_batch(
+                        "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (2, 'imap', 'me2@example.net', 'me2', 'a2', 0);
+                         INSERT INTO mailbox (id, account_id, remote_id, name, role) VALUES (2, 2, 'INBOX', 'Inbox', 'inbox');",
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            crate::import::import_raw(&j, AccountId(2), crate::MailboxId(2), SENT.as_bytes()).unwrap();
+            assert_eq!(adopt(), [], "a copy another of the user's accounts received");
             import(&j, SENT.as_bytes());
             assert_eq!(adopt(), [HoldSetId::parse(SET).unwrap()]);
             let sets = j.store.read(store::hold_sets).unwrap();

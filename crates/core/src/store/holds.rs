@@ -116,16 +116,18 @@ pub struct StoredMail {
     pub subject: String,
 }
 
-/// The mail with this Message-ID, with or without its angle brackets: the
-/// copy from the account's own address first, so the one the user sent
-/// wins over the copy another of their accounts received.
+/// The mail with this Message-ID, with or without its angle brackets, as
+/// the account that sent it keeps it: from the account's own address, or in
+/// its Sent mailbox. A copy another of the user's accounts received is none.
 pub fn sent_mail(conn: &Connection, message_id: &str) -> Result<Option<StoredMail>> {
     let bare = message_id.trim().trim_start_matches('<').trim_end_matches('>');
     Ok(conn
         .query_row(
             "SELECT m.account_id, m.thread_id, m.date, m.to_addrs, m.cc_addrs, m.subject FROM message m JOIN account a ON a.id = m.account_id
              WHERE m.message_id IN (?1, '<' || ?1 || '>')
-             ORDER BY m.from_addr = a.address COLLATE NOCASE DESC, m.id LIMIT 1",
+               AND (m.from_addr = a.address COLLATE NOCASE
+                    OR EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id WHERE mm.message_id = m.id AND b.role = 'sent'))
+             ORDER BY m.id LIMIT 1",
             [bare],
             |r| Ok(StoredMail { account: r.get(0)?, thread: r.get(1)?, date: at(r.get(2)?), to: r.get(3)?, cc: r.get(4)?, subject: r.get(5)? }),
         )
