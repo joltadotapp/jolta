@@ -458,6 +458,8 @@ struct InlineImage {
 /// The image as it goes out at `size`, with its new width when it was made
 /// smaller. The smaller copy is made from the original and kept next to it,
 /// so the next build reuses it and going back to Actual Size loses nothing.
+/// The original goes instead when the copy comes out no smaller in bytes, as
+/// a screenshot macOS compressed well can.
 fn sized(name: &str, path: &str, original: Vec<u8>, size: ImageSize) -> Result<(Vec<u8>, Option<u32>)> {
     let failed = |e: image::ImageError| Error::Other(format!("{name} could not be made smaller: {e}"));
     let reader = |bytes: &[u8]| image::ImageReader::new(std::io::Cursor::new(bytes.to_vec())).with_guessed_format();
@@ -468,9 +470,12 @@ fn sized(name: &str, path: &str, original: Vec<u8>, size: ImageSize) -> Result<(
     }
     let jpeg = original.starts_with(&[0xFF, 0xD8, 0xFF]);
     let copy = Path::new(path).with_extension(format!("{longest}.{}", if jpeg { "jpg" } else { "png" }));
+    let smaller = |bytes: Vec<u8>, width: u32, original: Vec<u8>| {
+        if bytes.len() < original.len() { (bytes, Some(width)) } else { (original, None) }
+    };
     if let Ok(bytes) = std::fs::read(&copy) {
         let (w, _) = reader(&bytes)?.into_dimensions().map_err(failed)?;
-        return Ok((bytes, Some(w)));
+        return Ok(smaller(bytes, w, original));
     }
     let mut decoder = reader(&original)?.into_decoder().map_err(failed)?;
     let orientation = image::ImageDecoder::orientation(&mut decoder).map_err(failed)?;
@@ -481,12 +486,14 @@ fn sized(name: &str, path: &str, original: Vec<u8>, size: ImageSize) -> Result<(
     if jpeg {
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85).encode_image(&img.to_rgb8()).map_err(failed)?;
     } else {
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).map_err(failed)?;
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        let encoder = PngEncoder::new_with_quality(&mut bytes, CompressionType::Best, FilterType::Adaptive);
+        img.write_with_encoder(encoder).map_err(failed)?;
     }
     let tmp = copy.with_extension("tmp");
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, &copy)?;
-    Ok((bytes, Some(img.width())))
+    Ok(smaller(bytes, img.width(), original))
 }
 
 /// The images `body` shows at `size`, one part per distinct image, and
