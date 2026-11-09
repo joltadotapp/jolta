@@ -284,11 +284,11 @@ pub fn scheduled(conn: &Connection, after: i64) -> Result<Vec<Scheduled>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Seconds until the next queued message is due, if any.
-pub fn next_send_in(conn: &Connection, account: AccountId) -> Result<Option<i64>> {
+/// Seconds until the next queued message due after `after` is due, if any.
+pub fn next_send_in(conn: &Connection, account: AccountId, after: i64) -> Result<Option<i64>> {
     let at: Option<i64> = conn.query_row(
-        "SELECT min(send_after) FROM outbox WHERE account_id = ?1 AND state = 'queued'",
-        [account],
+        "SELECT min(send_after) FROM outbox WHERE account_id = ?1 AND state = 'queued' AND send_after > ?2",
+        params![account, after],
         |r| r.get(0),
     )?;
     Ok(at.map(|t| (t - now()).max(0)))
