@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::calendar::holds::{HeldSlot, HoldSet, HoldSetId};
+use crate::calendar::holds::{HeldSlot, HoldSet, HoldSetId, SlotState};
 use crate::calendar::{CalendarId, EventData};
 use crate::model::AccountId;
 use crate::{Error, Result};
@@ -16,7 +16,7 @@ fn at(seconds: i64) -> DateTime<Utc> {
 /// Every set with its slots, oldest first.
 pub fn hold_sets(conn: &Connection) -> Result<Vec<HoldSet>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, account_id, calendar_id, draft_id, message_id, recipients, subject, sent FROM hold_set ORDER BY created, id",
+        "SELECT id, account_id, calendar_id, draft_id, message_id, recipients, subject, sent, kept FROM hold_set ORDER BY created, id",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -28,15 +28,16 @@ pub fn hold_sets(conn: &Connection) -> Result<Vec<HoldSet>> {
             r.get::<_, String>(5)?,
             r.get::<_, String>(6)?,
             r.get::<_, Option<i64>>(7)?,
+            r.get::<_, Option<i64>>(8)?,
         ))
     })?;
     let mut sets = Vec::new();
     for row in rows {
-        let (id, account, calendar, draft, message_id, recipients, subject, sent) = row?;
+        let (id, account, calendar, draft, message_id, recipients, subject, sent, kept) = row?;
         let Some(id) = HoldSetId::parse(&id) else { continue };
         let slots = slots(conn, &id)?;
         let recipients = recipients.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
-        sets.push(HoldSet { id, account, message_id, draft, recipients, subject, calendar, sent: sent.map(at), slots });
+        sets.push(HoldSet { id, account, message_id, draft, recipients, subject, calendar, sent: sent.map(at), kept: kept.is_some(), slots });
     }
     Ok(sets)
 }
@@ -71,6 +72,63 @@ pub fn insert_hold_set(conn: &Connection, set: &HoldSet, created: DateTime<Utc>)
     for s in &set.slots {
         stmt.execute(params![set.id.as_str(), s.start.timestamp(), s.end.timestamp(), s.line, s.state, s.remote_id])?;
     }
+    Ok(())
+}
+
+/// The set inserting into `draft` made, while its mail isn't sent.
+pub fn pending_hold_set(conn: &Connection, draft: i64) -> Result<Option<HoldSet>> {
+    Ok(hold_sets(conn)?.into_iter().find(|s| s.draft == Some(draft) && s.sent.is_none()))
+}
+
+pub fn hold_set(conn: &Connection, id: &HoldSetId) -> Result<HoldSet> {
+    hold_sets(conn)?.into_iter().find(|s| &s.id == id).ok_or_else(|| Error::NotFound(format!("hold set {id}")))
+}
+
+/// Deletes a set with its slots.
+pub fn delete_hold_set(conn: &Connection, id: &HoldSetId) -> Result<()> {
+    conn.execute("DELETE FROM hold_set WHERE id = ?1", [id.as_str()])?;
+    Ok(())
+}
+
+/// Writes a set whose mail just left over its pending row: what the mail
+/// says, and the slots it kept.
+pub fn save_sent_hold_set(conn: &Connection, set: &HoldSet) -> Result<()> {
+    conn.execute(
+        "UPDATE hold_set SET account_id = ?2, calendar_id = ?3, draft_id = ?4, message_id = ?5, recipients = ?6, subject = ?7, sent = ?8 WHERE id = ?1",
+        params![set.id.as_str(), set.account, set.calendar, set.draft, set.message_id, set.recipients.join("\n"), set.subject, set.sent.map(|s| s.timestamp())],
+    )?;
+    conn.execute("DELETE FROM hold WHERE set_id = ?1", [set.id.as_str()])?;
+    let mut stmt = conn.prepare_cached("INSERT INTO hold (set_id, start, end, line, state, remote_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
+    for s in &set.slots {
+        stmt.execute(params![set.id.as_str(), s.start.timestamp(), s.end.timestamp(), s.line, s.state, s.remote_id])?;
+    }
+    Ok(())
+}
+
+/// The slot that starts at `start` is in `state` now.
+pub fn set_hold_state(conn: &Connection, set: &HoldSetId, start: DateTime<Utc>, state: SlotState) -> Result<()> {
+    conn.execute("UPDATE hold SET state = ?3 WHERE set_id = ?1 AND start = ?2", params![set.as_str(), start.timestamp(), state])?;
+    Ok(())
+}
+
+/// The slot's hold was moved in another client: it is held at its new time.
+pub fn move_hold(conn: &Connection, set: &HoldSetId, start: DateTime<Utc>, to: (DateTime<Utc>, DateTime<Utc>)) -> Result<()> {
+    conn.execute(
+        "UPDATE OR IGNORE hold SET start = ?3, end = ?4 WHERE set_id = ?1 AND start = ?2",
+        params![set.as_str(), start.timestamp(), to.0.timestamp(), to.1.timestamp()],
+    )?;
+    Ok(())
+}
+
+/// The hold filed under `from` is under `to` now, as its create landed.
+pub fn refile_hold(conn: &Connection, set: &HoldSetId, from: &str, to: &str) -> Result<()> {
+    conn.execute("UPDATE hold SET remote_id = ?3 WHERE set_id = ?1 AND remote_id = ?2", params![set.as_str(), from, to])?;
+    Ok(())
+}
+
+/// The user took back a release that followed a booking.
+pub fn set_hold_kept(conn: &Connection, set: &HoldSetId, at: DateTime<Utc>) -> Result<()> {
+    conn.execute("UPDATE hold_set SET kept = ?2 WHERE id = ?1", params![set.as_str(), at.timestamp()])?;
     Ok(())
 }
 

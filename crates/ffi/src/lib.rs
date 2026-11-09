@@ -21,6 +21,7 @@ pub mod calendar;
 pub mod editor;
 mod find_time;
 mod focus;
+mod holds;
 mod rooms;
 pub mod quick;
 pub mod repeat;
@@ -264,6 +265,9 @@ pub enum CoreEvent {
     CalendarNotice { message: String },
     /// Which accounts' automatic replies are on now changed; reload `away_states`.
     AwayChanged,
+    /// Holds changed: reload the line of these conversations (or the open
+    /// one, when empty), and show `notice` as a toast.
+    HoldsChanged { thread_ids: Vec<i64>, notice: Option<holds::HoldNotice> },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -940,6 +944,7 @@ impl Core {
                 Event::CalendarOpFailed { event, message, .. } => CoreEvent::CalendarOpFailed { message, event_id: event.map(|e| e.0) },
                 Event::CalendarNotice { message } => CoreEvent::CalendarNotice { message },
                 Event::AwayChanged => CoreEvent::AwayChanged,
+                Event::Holds { threads, notice } => CoreEvent::HoldsChanged { thread_ids: threads.iter().map(|t| t.0).collect(), notice: notice.map(Into::into) },
             };
             listener.on_event(event);
         });

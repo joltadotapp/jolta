@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 
 use super::away::Watcher;
 use super::series::Horizon;
-use super::{Calendar, CalendarId, CalendarSource, ops, sync, tz};
+use super::{Calendar, CalendarId, CalendarSource, holds, ops, sync, tz};
 use crate::engine::{Event, Sink};
 use crate::{Jolta, Result, store};
 
@@ -94,6 +94,11 @@ impl Scheduler {
         self.wake.notify_one();
     }
 
+    /// Looks at open hold sets now, as after new mail.
+    pub fn check_holds(&self) {
+        self.wake.notify_one();
+    }
+
     /// Why the calendar's last sync failed, until one succeeds.
     pub fn error(&self, id: CalendarId) -> Option<String> {
         self.state().failures.get(&id).map(|(_, e)| e.clone())
@@ -124,6 +129,7 @@ impl Scheduler {
                 ROUND_MAX
             });
             let wait = ops_due.map_or(wait, |due| due.min(wait));
+            self.check_holds_now().await;
             tokio::select! {
                 _ = self.wake.notified() => {}
                 _ = tokio::time::sleep(wait) => {}
@@ -188,6 +194,32 @@ impl Scheduler {
         }
         let next = self.jolta.store.read_async(store::next_calendar_op_due).await?;
         Ok(next.map(|at| Duration::from_secs((at - Utc::now().timestamp()).max(0) as u64)))
+    }
+
+    /// Applies what the store says happened to open hold sets, and runs
+    /// again at once when that queued releases, so they are sent when due.
+    async fn check_holds_now(&self) {
+        let jolta = self.jolta.clone();
+        let checked = self.jolta.store.write_async(move |tx| {
+            let now = Utc::now();
+            holds::act::check(tx, &jolta.blobs, now, &Horizon::around(now, tz::here()))
+        });
+        match checked.await {
+            Ok(c) => {
+                if c.queued {
+                    self.wake.notify_one();
+                }
+                let mut notices = c.notices.into_iter();
+                let first = notices.next();
+                if !c.threads.is_empty() || first.is_some() {
+                    (self.sink)(Event::Holds { threads: c.threads, notice: first });
+                }
+                for notice in notices {
+                    (self.sink)(Event::Holds { threads: Vec::new(), notice: Some(notice) });
+                }
+            }
+            Err(e) => tracing::warn!("checking holds stopped: {e}"),
+        }
     }
 
     async fn sync_one(&self, calendar: Calendar) {
