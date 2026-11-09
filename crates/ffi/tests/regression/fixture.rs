@@ -39,6 +39,7 @@ impl CoreListener for Events {
             CoreEvent::NewMail { .. } => "new mail",
             CoreEvent::Sent { .. } => "sent",
             CoreEvent::SyncFinished { .. } => "synced",
+            CoreEvent::SyncFailed { .. } => "sync failed",
             CoreEvent::ActionFailed { .. } => "action failed",
             CoreEvent::SendFailed { .. } => "send failed",
             CoreEvent::CalendarChanged { .. } => "calendar changed",

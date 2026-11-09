@@ -370,3 +370,135 @@ fn a_saved_draft_shows_in_drafts_without_sync_now() {
     app.core.discard_draft(id).unwrap();
     wait(20, "the draft left Drafts", || app.subjects("in:drafts").is_empty());
 }
+
+fn count(app: &App, event: &str) -> usize {
+    app.events.0.lock().unwrap().iter().filter(|e| **e == event).count()
+}
+
+/// Found on 2026-11-09: when Gmail closed an idle connection, the next
+/// round failed with "peer closed connection", and new mail IDLE reported
+/// in that round, and the error in the status line, stayed until the next
+/// full sync, up to ten minutes later.
+#[test]
+fn new_mail_after_the_server_drops_the_connection() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let app = App::unstarted();
+    server.sign_in(&app);
+    wait(20, "the first sync finished", || app.events.seen("synced"));
+
+    server.drop_connections();
+    // IDLE reconnects after its two-second wait; the worker's connection stays closed.
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "After the drop", "Body."));
+    wait(20, "the new mail shows", || inbox_has(&app, "After the drop"));
+    wait(20, "the account is in sync again", || {
+        let events = app.events.0.lock().unwrap();
+        let failed = events.iter().rposition(|e| *e == "sync failed");
+        failed.is_some_and(|f| events[f..].contains(&"synced"))
+    });
+}
+
+/// Found on 2026-11-09: while every round failed, the worker waited out its
+/// backoff, up to five minutes, before trying again, so a message sent then
+/// stayed in the outbox past its undo window until Sync now.
+#[test]
+fn a_message_leaves_on_time_while_syncing_fails() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "Question", "Are you coming?"));
+    let app = App::unstarted();
+    let account = server.sign_in(&app);
+    wait(20, "the inbox synced", || inbox_has(&app, "Question"));
+
+    // A Drafts folder that is gone from the server fails every round that saves a draft.
+    app.jolta.store.write(|tx| Ok(tx.execute("UPDATE mailbox SET remote_id = 'Gone' WHERE role = 'drafts'", [])?)).unwrap();
+    let mut draft = app.core.new_compose().unwrap();
+    draft.account_id = Some(account.id.0);
+    draft.subject = "Never saved".into();
+    app.core.save_draft(draft).unwrap();
+    wait(30, "four rounds failed", || count(&app, "sync failed") >= 4);
+
+    let thread = app.list("in:inbox")[0].thread_id;
+    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    reply.subject = format!("On time {}", now());
+    let sent_at = std::time::Instant::now();
+    app.core.send(reply.clone(), None, None).unwrap();
+    wait(40, "Mailpit caught the reply", || caught(&reply.subject).contains("\"MessageID\""));
+    let took = sent_at.elapsed().as_secs_f64();
+    assert!(took < 14.0, "the message left {took:.1} s after Send; the undo window is 10 s");
+}
+
+/// A connection that goes silent without closing, as when a router forgets
+/// it, held up every action and message behind it: the worker waited for
+/// an answer that never came, until macOS gave up on the connection
+/// minutes later.
+#[test]
+fn actions_and_mail_go_out_after_the_connection_goes_silent() {
+    if !available() {
+        return;
+    }
+    let relay = crate::server::Relay::start();
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "Question", "Are you coming?"));
+    let app = App::unstarted();
+    let account = server.add(&app);
+    app.jolta
+        .store
+        .write(|tx| Ok(tx.execute("UPDATE account SET imap_port = ?1 WHERE id = ?2", rusqlite::params![relay.port, account.id.0])?))
+        .unwrap();
+    app.core.start().unwrap();
+    wait(20, "the inbox synced", || inbox_has(&app, "Question"));
+
+    relay.freeze();
+    let thread = app.list("in:inbox")[0].thread_id;
+    app.core.perform(ThreadAction::Flag, vec![thread], ListContext::Inbox).unwrap();
+    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    reply.subject = format!("Through the silence {}", now());
+    app.core.send(reply.clone(), None, None).unwrap();
+    wait(90, "the flag reached the server", || server.flags("INBOX", "Question").iter().any(|f| f.contains("Flagged")));
+    wait(30, "Mailpit caught the reply", || caught(&reply.subject).contains("\"MessageID\""));
+}
+
+/// Found in review: a message that fell due while a failing round still
+/// ran, here one waiting on Dovecot's slow answer about a Drafts folder
+/// that is gone, waited out the retry wait earlier failures built up,
+/// though the next round would send it before failing again.
+#[test]
+fn a_message_due_during_a_failing_round_leaves_when_it_ends() {
+    if !available() {
+        return;
+    }
+    let relay = crate::server::Relay::start();
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "Question", "Are you coming?"));
+    let app = App::unstarted();
+    let account = server.add(&app);
+    app.jolta
+        .store
+        .write(|tx| Ok(tx.execute("UPDATE account SET imap_port = ?1 WHERE id = ?2", rusqlite::params![relay.port, account.id.0])?))
+        .unwrap();
+    app.core.start().unwrap();
+    wait(20, "the inbox synced", || inbox_has(&app, "Question"));
+
+    app.jolta.store.write(|tx| Ok(tx.execute("UPDATE mailbox SET remote_id = 'Gone' WHERE role = 'drafts'", [])?)).unwrap();
+    let mut draft = app.core.new_compose().unwrap();
+    draft.account_id = Some(account.id.0);
+    draft.subject = "Never saved".into();
+    app.core.save_draft(draft).unwrap();
+    wait(40, "four rounds failed", || count(&app, "sync failed") >= 4);
+
+    relay.slow_select(std::time::Duration::from_secs(15));
+    let thread = app.list("in:inbox")[0].thread_id;
+    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    reply.subject = format!("Due mid-round {}", now());
+    let sent_at = std::time::Instant::now();
+    app.core.send(reply.clone(), None, None).unwrap();
+    wait(120, "Mailpit caught the reply", || caught(&reply.subject).contains("\"MessageID\""));
+    let took = sent_at.elapsed().as_secs_f64();
+    assert!(took < 25.0, "the message left {took:.1} s after Send; the round it fell due in failed after about 15 s");
+}

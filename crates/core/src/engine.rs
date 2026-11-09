@@ -413,38 +413,43 @@ impl Engine {
                 }
                 _ => {}
             }
-            match self.round(&account, &wake, &mut conn, started).await {
-                Ok(()) => backoff = Backoff::default(),
+            let round_start = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            let failed = match self.round(&account, &wake, &mut conn, started).await {
+                Ok(()) => {
+                    backoff = Backoff::default();
+                    false
+                }
                 Err(e) => {
                     conn = None;
+                    // The round may have taken sync requests it didn't finish, such
+                    // as new mail from IDLE. A full sync makes up for them, and its
+                    // end tells the app the account is in sync again.
+                    wake.full_sync.store(true, Ordering::SeqCst);
                     (self.sink)(Event::SyncFailed(account.id, e.to_string()));
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff.next()) => {}
-                        _ = wake.notify.notified() => {}
-                    }
-                    continue;
+                    true
                 }
-            }
-            if last_full.elapsed() >= FULL_SYNC_EVERY {
+            };
+            if !failed && last_full.elapsed() >= FULL_SYNC_EVERY {
                 wake.full_sync.store(true, Ordering::SeqCst);
                 last_full = Instant::now();
                 continue;
             }
-            let until_full = FULL_SYNC_EVERY.saturating_sub(last_full.elapsed());
             let account_id = account.id;
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            let until_wake = self.jolta.store.read(|c| store::next_wake(c, account_id)).ok().flatten().map(|t| (t - now).max(0));
-            let until_send = self
-                .jolta
-                .store
-                .read(|c| store::next_send_in(c, account_id))
-                .ok()
-                .flatten()
-                .into_iter()
-                .chain(until_wake)
-                .min()
-                .map_or(until_full, |s| Duration::from_secs(s as u64).min(until_full));
-            let wait = poll.map_or(until_send, |p| p.min(until_send));
+            // After a failure, what was due when the round began waits for the
+            // retry; what fell due since, or falls due before it, goes at its time.
+            let after = if failed { round_start } else { i64::MIN };
+            let until_wake = self.jolta.store.read(|c| store::next_wake(c, account_id, after)).ok().flatten().map(|t| (t - now).max(0));
+            let until_due =
+                self.jolta.store.read(|c| store::next_send_in(c, account_id, after)).ok().flatten().into_iter().chain(until_wake).min();
+            let wait = if failed {
+                let retry = backoff.next();
+                until_due.map_or(retry, |s| Duration::from_secs(s as u64).min(retry))
+            } else {
+                let until_full = FULL_SYNC_EVERY.saturating_sub(last_full.elapsed());
+                let until = until_due.map_or(until_full, |s| Duration::from_secs(s as u64).min(until_full));
+                poll.map_or(until, |p| p.min(until))
+            };
             tokio::select! {
                 _ = wake.notify.notified() => {}
                 _ = tokio::time::sleep(wait) => {

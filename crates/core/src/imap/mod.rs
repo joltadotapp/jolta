@@ -5,6 +5,7 @@
 //! drops expunged ones, and refreshes flags (CHANGEDSINCE when the server has
 //! CONDSTORE). Bodies follow, newest first, in a second pass.
 
+mod deadline;
 #[cfg(test)]
 mod fake_gmail;
 mod gmail;
@@ -40,6 +41,10 @@ const FLAG_SWEEP: usize = 5000;
 /// Bodies larger than this are fetched only when opened.
 pub const MAX_BACKGROUND_BODY: u32 = 10 * 1024 * 1024;
 
+/// How long a server may stay silent while Jolta waits for its answer
+/// before the connection counts as dead, as long as SMTP's limit.
+const ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Where and how to reach a server.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
@@ -47,6 +52,9 @@ pub struct Endpoint {
     pub port: u16,
     pub security: Security,
     pub verify_certs: bool,
+    /// How long the server may stay silent while Jolta waits on it; `None`
+    /// waits as long as it takes, as IDLE does.
+    pub answer_within: Option<std::time::Duration>,
 }
 
 impl Endpoint {
@@ -56,6 +64,7 @@ impl Endpoint {
             port: account.imap_port,
             security: account.imap_security,
             verify_certs: account.verify_certs,
+            answer_within: Some(ANSWER_WITHIN),
         }
     }
 }
@@ -152,7 +161,10 @@ async fn open_stream(endpoint: &Endpoint) -> Result<(Box<dyn Io>, bool)> {
 }
 
 async fn greeted_client(endpoint: &Endpoint) -> Result<async_imap::Client<Box<dyn Io>>> {
-    let (stream, greeted) = open_stream(endpoint).await?;
+    let (mut stream, greeted) = open_stream(endpoint).await?;
+    if let Some(limit) = endpoint.answer_within {
+        stream = Box::new(deadline::Deadline::new(stream, limit));
+    }
     let mut client = async_imap::Client::new(stream);
     if !greeted {
         client
@@ -222,6 +234,7 @@ pub async fn add_account(jolta: &Jolta, setup: ImapSetup) -> Result<Account> {
         port: imap_port,
         security: store::default_security(&imap_host, imap_port, false),
         verify_certs: true,
+        answer_within: Some(ANSWER_WITHIN),
     };
     for u in usernames {
         match connect(&endpoint, &u, &password).await {
@@ -350,12 +363,16 @@ fn server_text(msg: &str) -> &str {
 }
 
 pub async fn connect_account(account: &Account) -> Result<Session> {
+    connect_to(account, &Endpoint::imap(account)).await
+}
+
+async fn connect_to(account: &Account, endpoint: &Endpoint) -> Result<Session> {
     if account.kind == AccountKind::Gmail {
         let token = crate::oauth::access_token(account).await?;
-        return connect_xoauth2(&Endpoint::imap(account), &account.username, &token).await;
+        return connect_xoauth2(endpoint, &account.username, &token).await;
     }
     let password = secrets::password(&account.secret_ref)?;
-    connect(&Endpoint::imap(account), &account.username, &password).await
+    connect(endpoint, &account.username, &password).await
 }
 
 struct XOAuth2(String);
@@ -825,7 +842,7 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, caps: Caps, op: &sto
 /// Holds IDLE on INBOX over its own connection and calls `changed` whenever
 /// the server reports something. Returns only on a connection error.
 pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
-    let mut session = connect_account(account).await?;
+    let mut session = connect_to(account, &Endpoint { answer_within: None, ..Endpoint::imap(account) }).await?;
     session.examine("INBOX").await?;
     loop {
         let mut handle = session.idle();

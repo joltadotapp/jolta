@@ -3,7 +3,9 @@
 //! mailbox and tests can run side by side.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
@@ -39,7 +41,7 @@ impl Mailbox {
     /// Runs `f` on a fresh IMAP session of this user.
     pub fn with<T>(&self, f: impl AsyncFnOnce(&mut Session) -> T) -> T {
         block_on(async {
-            let endpoint = Endpoint { host: "127.0.0.1".into(), port: 31143, security: Security::Plain, verify_certs: false };
+            let endpoint = Endpoint { host: "127.0.0.1".into(), port: 31143, security: Security::Plain, verify_certs: false, answer_within: None };
             let mut session = jolta_core::imap::connect(&endpoint, &self.user, PASSWORD).await.expect("Dovecot signs in");
             let out = f(&mut session).await;
             session.logout().await.ok();
@@ -92,6 +94,16 @@ impl Mailbox {
         });
     }
 
+    /// Closes every connection this user has open, as Gmail does to an
+    /// IMAP connection it considers idle.
+    pub fn drop_connections(&self) {
+        let out = std::process::Command::new("docker")
+            .args(["exec", "jolta-test-dovecot", "doveadm", "kick", &self.user])
+            .output()
+            .expect("docker runs");
+        assert!(out.status.success(), "doveadm kick failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     /// Adds this user as an account and starts the app.
     pub fn sign_in(&self, app: &App) -> Account {
         let account = self.add(app);
@@ -112,6 +124,64 @@ impl Mailbox {
             ..Default::default()
         };
         block_on(jolta_core::imap::add_account(&app.jolta, setup)).expect("the account signs in")
+    }
+}
+
+/// Passes connections through to Dovecot until `freeze`, after which the
+/// ones already open go silent both ways while staying open, as when a
+/// router forgets a connection. Connections opened later pass again.
+/// `slow_select` holds Dovecot's answer to each SELECT for that long.
+pub struct Relay {
+    pub port: u16,
+    generation: Arc<AtomicU64>,
+    select_delay: Arc<AtomicU64>,
+}
+
+impl Relay {
+    pub fn start() -> Relay {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let generation = Arc::new(AtomicU64::new(0));
+        let select_delay = Arc::new(AtomicU64::new(0));
+        let (current, delay) = (generation.clone(), select_delay.clone());
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let Ok(server) = TcpStream::connect(IMAP) else { continue };
+                let born = current.load(Ordering::SeqCst);
+                let selecting = Arc::new(AtomicBool::new(false));
+                let directions = [(client.try_clone().unwrap(), server.try_clone().unwrap(), true), (server, client, false)];
+                for (mut from, mut to, upward) in directions {
+                    let (current, delay, selecting) = (current.clone(), delay.clone(), selecting.clone());
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 65536];
+                        while let Ok(n @ 1..) = from.read(&mut buf) {
+                            if current.load(Ordering::SeqCst) != born {
+                                return std::thread::park();
+                            }
+                            if upward && buf[..n].windows(8).any(|w| w == b" SELECT ") {
+                                selecting.store(true, Ordering::SeqCst);
+                            }
+                            if !upward && selecting.swap(false, Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_secs(delay.load(Ordering::SeqCst)));
+                            }
+                            if to.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                        to.shutdown(std::net::Shutdown::Write).ok();
+                    });
+                }
+            }
+        });
+        Relay { port, generation, select_delay }
+    }
+
+    pub fn freeze(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn slow_select(&self, by: Duration) {
+        self.select_delay.store(by.as_secs(), Ordering::SeqCst);
     }
 }
 
