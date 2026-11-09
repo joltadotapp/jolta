@@ -581,6 +581,12 @@ pub fn core_greeting() -> String {
     jolta_core::greeting()
 }
 
+/// The query a list runs for what the user typed in its search box.
+#[uniffi::export]
+pub fn search_within(list: String, search: String) -> String {
+    search::within(&list, &search)
+}
+
 #[derive(uniffi::Enum)]
 pub enum OAuthProvider {
     Google,

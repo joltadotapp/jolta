@@ -193,7 +193,7 @@ fn a_draft_in_drafts_opens_for_editing() {
     let me = app.account("me@test.invalid");
     let ask = Mail::new("Ann Peeters <ann@test.invalid>", "me@test.invalid", "Quarterly numbers", "Can you send them?");
     let asked = app.deliver(&me, MailboxRole::Inbox, &ask);
-    let mut draft = Mail::reply(&ask, "me@test.invalid", "Here they are, almost.\n\n> Can you send them?");
+    let mut draft = Mail::reply(&ask, "me@test.invalid", "Here they are, almost.\r\n\r\n> Can you send them?");
     draft.cc = "Bob <bob@test.invalid>".into();
     let drafted = app.deliver(&me, MailboxRole::Drafts, &draft);
 
@@ -203,7 +203,7 @@ fn a_draft_in_drafts_opens_for_editing() {
     assert_eq!(addresses(&compose.to), ["ann@test.invalid"]);
     assert_eq!(addresses(&compose.cc), ["bob@test.invalid"]);
     assert_eq!(compose.subject, "Re: Quarterly numbers");
-    assert_eq!(compose.body, "Here they are, almost.\n\n> Can you send them?");
+    assert_eq!(compose.body, "Here they are, almost.\n\n> Can you send them?", "with the editor's line breaks, not the message's CRLF");
     let bare = |m: &Mail| m.id.trim_matches(['<', '>']).to_string();
     assert_eq!(compose.in_reply_to, Some(bare(&ask)));
     assert_eq!(compose.references, [bare(&ask)]);

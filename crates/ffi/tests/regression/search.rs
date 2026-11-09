@@ -62,6 +62,27 @@ fn search_leaves_out_trash_and_spam() {
     assert_eq!(app.subjects(&format!("mailbox:{}", trash.0)), ["Invoice deleted"]);
 }
 
+/// A search typed in a list looks in that list, unless it names a mailbox
+/// itself: `in:anywhere` typed in the Inbox looks everywhere, Spam included.
+#[test]
+fn a_search_that_names_a_mailbox_looks_there_instead_of_the_open_list() {
+    let app = App::new();
+    let me = app.gmail_account("me@test.invalid");
+    let mail = |subject: &str| Mail::new("ann@test.invalid", "me@test.invalid", subject, "Just this once.");
+    app.deliver_gmail(&me, MailboxRole::Inbox, &mail("Once in the inbox"));
+    app.deliver(&me, MailboxRole::All, &mail("Once archived"));
+    app.deliver(&me, MailboxRole::Spam, &mail("Once in spam"));
+
+    let from_inbox = |search: &str| app.subjects(&jolta_ffi::search_within("in:inbox".into(), search.into()));
+    assert_eq!(from_inbox("once"), ["Once in the inbox"], "plain words search the open list");
+    assert_eq!(from_inbox("once in:anywhere"), ["Once in spam", "Once archived", "Once in the inbox"]);
+    assert_eq!(from_inbox("once in:any"), ["Once in spam", "Once archived", "Once in the inbox"]);
+    assert_eq!(from_inbox("once in:spam"), ["Once in spam"]);
+    assert_eq!(from_inbox("once -in:spam"), ["Once in the inbox"], "leaving a mailbox out still searches the open list");
+    let spam = app.mailbox(me.id, MailboxRole::Spam);
+    assert_eq!(from_inbox(&format!("once mailbox:{}", spam.0)), ["Once in spam"]);
+}
+
 /// "Needs reply" shows a message AI marked until the user answers it, and a
 /// category term finds what AI sorted there.
 #[test]

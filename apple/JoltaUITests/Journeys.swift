@@ -1285,8 +1285,9 @@ final class Journeys: XCTestCase {
     /// Compose puts the cursor where the user starts typing, with no click:
     /// the To field of a new message and a forward, the first line of the
     /// body, above the quote, for a reply and reply all (from a key or the
-    /// reader's button), and the body of a draft reopened from Drafts, which
-    /// has its recipient already. The reopened draft keeps what was added.
+    /// reader's button), and for a draft reopened from Drafts, which has its
+    /// recipient already, the end of what it says, above its quote. The
+    /// reopened draft keeps what was added.
     func testComposeFocusesWhereYouType() throws {
         let app = try launch()
         let to = app.textFields["compose-to"]
@@ -1340,13 +1341,18 @@ final class Journeys: XCTestCase {
         XCTAssertEqual(app.textFields["compose-subject"].value as? String, "Re: Lunch on Friday")
         XCTAssertTrue((to.value as? String)?.contains("bob@test.invalid") == true, "with its recipient")
         guard focused(body) else { return XCTFail("a reopened draft: the cursor is in the body") }
-        app.typeText("Great. ")
+        app.typeText(" See you there.")
+        XCTAssertTrue((body.value as? String)?.hasPrefix("Noon works for me. See you there.\n") == true,
+                      "typing goes on after what the draft says, above its quote: \(body.value as? String ?? "")")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(body.waitForNonExistence(timeout: 5), "Esc keeps the draft")
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(body.waitForExistence(timeout: 5), "Return opens the draft again")
-        XCTAssertTrue((body.value as? String)?.hasPrefix("Great. Noon works for me.") == true, "with what was added")
-        XCTAssertTrue(focused(body), "a draft opened again: the cursor is in the body")
+        XCTAssertTrue((body.value as? String)?.hasPrefix("Noon works for me. See you there.\n") == true, "with what was added")
+        guard focused(body) else { return XCTFail("a draft opened again: the cursor is in the body") }
+        app.typeText(" Bob")
+        XCTAssertTrue((body.value as? String)?.hasPrefix("Noon works for me. See you there. Bob\n") == true,
+                      "a draft opened again: typing goes on at its end: \(body.value as? String ?? "")")
         app.typeKey(.escape, modifierFlags: [])
     }
 

@@ -69,6 +69,22 @@ impl Query {
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty()
     }
+
+    /// A term says which mailbox to look in: `in:trash`, `label:work`,
+    /// `in:anywhere` or a sidebar mailbox.
+    pub fn names_mailbox(&self) -> bool {
+        self.terms.iter().any(|t| !t.negated && matches!(t.kind, TermKind::In(_) | TermKind::Label(_) | TermKind::Mailbox(_)))
+    }
+}
+
+/// The query a list runs while the user searches it: the list's own query
+/// and the search together, or the search alone when it names a mailbox
+/// itself, so `in:spam` typed in the Inbox finds Spam.
+pub fn within(list: &str, search: &str) -> String {
+    if parse(search).is_ok_and(|q| q.names_mailbox()) {
+        return search.to_string();
+    }
+    [list, search].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 struct Token {

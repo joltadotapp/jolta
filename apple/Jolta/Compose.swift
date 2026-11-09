@@ -144,10 +144,12 @@ struct ComposeView: View {
                     }
             }
 
-            // The cursor starts where the user types first: To until it names
-            // someone, then the body's first line, above any quote.
+            // The cursor starts where the user types next: To until it names
+            // someone, then the end of what they wrote, above the signature
+            // and any quote.
             RichTextEditor(text: draft.body, core: model.core, isMessageBody: true) { body in
-                if model.compose?.to.isEmpty ?? true { focus = .to } else { body.focusAtStart() }
+                guard let c = model.compose, !c.to.isEmpty else { focus = .to; return }
+                body.focus(after: model.core.written(body: c.body, accountId: c.accountId), core: model.core)
             }
                 .padding(.horizontal, 28)
                 .padding(.top, 14)

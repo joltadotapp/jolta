@@ -168,11 +168,17 @@ fn quote(text: &str) -> String {
     text.lines().map(|l| if l.is_empty() { ">".to_string() } else { format!("> {}", rich::escape(l)) }).collect::<Vec<_>>().join("\n")
 }
 
-/// Where a reply's quote or a forward's copy starts in a body Jolta wrote.
+/// Where a reply's quote or a forward's copy starts in a body Jolta wrote,
+/// or the quote that ends a draft written elsewhere, with no line saying
+/// who wrote it.
 fn quote_start(body: &str) -> Option<usize> {
     let forward = body.find("\n\n---------- Forwarded message ----------");
     let reply = body.match_indices("\n\nOn ").map(|(i, _)| i).find(|&i| body[i..].lines().nth(2).is_some_and(|l| l.ends_with(" wrote:")));
-    forward.into_iter().chain(reply).min()
+    let trailing = std::iter::once(0).chain(body.match_indices('\n').map(|(i, _)| i)).find(|&i| {
+        let mut lines = body[i..].lines().filter(|l| !l.trim().is_empty()).peekable();
+        lines.peek().is_some() && lines.all(|l| l.starts_with('>'))
+    });
+    forward.into_iter().chain(reply).chain(trailing).min()
 }
 
 /// What a message starts with: room to write, the signature, then the
@@ -333,7 +339,7 @@ pub fn from_draft(conn: &Connection, message: MessageId, raw: &[u8]) -> Result<C
         cc: list(root.cc()),
         bcc: list(root.bcc()),
         subject: envelope.subject,
-        body: rich::escape(body.text.trim_end()),
+        body: rich::escape(&body.text.trim_end().replace("\r\n", "\n")),
         in_reply_to,
         references: envelope.references,
         replying_to,
@@ -678,6 +684,18 @@ mod tests {
         assert_eq!(swap_signature(&no_signature, "", "K."), "Thanks!\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
         assert_eq!(swap_signature("Hello", "", "K."), "Hello\n\nK.");
         assert_eq!(swap_signature("Hello\n\nK. (edited)", "K. (gone)", "X"), "Hello\n\nK. (edited)", "an edited signature stays");
+    }
+
+    #[test]
+    fn what_the_writer_typed_ends_at_the_signature_or_the_quote() {
+        assert_eq!(written("Noon.\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi", "K."), "Noon.");
+        assert_eq!(written("Noon works for me.\n\n> Shall we?", ""), "Noon works for me.", "a quote without a line saying who wrote it");
+        assert_eq!(written("Noon.\n> Shall we?", ""), "Noon.", "a quote right below the text");
+        assert_eq!(written("Noon.\n  \n> Shall we?", ""), "Noon.", "a quote below a line of spaces");
+        assert_eq!(swap_signature("Noon.\n> Shall we?", "", "K."), "Noon.\n\nK.\n> Shall we?");
+        assert_eq!(written("> Shall we?", ""), "", "only a quote");
+        assert_eq!(written("> Shall we?\n\nYes.", ""), "> Shall we?\n\nYes.", "an answer below a quote is the writer's");
+        assert_eq!(written("Noon.\n\nK.", "K."), "Noon.");
     }
 
     fn account() -> Account {
