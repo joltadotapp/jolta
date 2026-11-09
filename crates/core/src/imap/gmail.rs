@@ -590,6 +590,24 @@ mod tests {
         assert_eq!(list(&jolta, "in:Work"), ["Keep"]);
     }
 
+    /// Archiving and taking a label off stay label changes in All Mail.
+    #[tokio::test]
+    async fn archive_and_label_removal_reach_gmail() {
+        let server = FakeGmail::default();
+        server.deliver("Done", &["\\Inbox", "Work"]);
+        let (jolta, account, mut session) = signed_in("archive", &server).await;
+        sync_once(&jolta, &mut session, &account).await;
+        let work = jolta.store.read(|c| store::mailboxes(c, account.id)).unwrap().into_iter().find(|m| m.remote_id == "Work").unwrap().id;
+
+        act(&jolta, &mut session, &account, "Done", Action::Archive, Context::Inbox).await;
+        assert!(server.subjects("INBOX").is_empty(), "archived on Gmail");
+        act(&jolta, &mut session, &account, "Done", Action::RemoveLabel(work), Context::Inbox).await;
+        assert!(server.subjects("Work").is_empty(), "the label is off on Gmail");
+        sync_once(&jolta, &mut session, &account).await;
+        assert!(list(&jolta, "in:inbox").is_empty());
+        assert!(list(&jolta, "in:Work").is_empty());
+    }
+
     /// Mail trashed or marked as spam on the web shows in Jolta's Trash and
     /// Spam, and reading it there reaches Gmail.
     #[tokio::test]
