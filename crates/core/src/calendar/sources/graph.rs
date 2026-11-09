@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Change, Gone, Known, SyncBatch, encode, http_client, http_error, provider_url, vanished};
+use crate::calendar::holds::{self, Mark};
 use crate::calendar::meeting::{self, Entry, EntryKind};
 use crate::calendar::rsvp::{Answer, Occurrence, Rsvp, Stored, Target};
 use crate::calendar::{
@@ -46,7 +47,14 @@ const PREFER: &str = r#"outlook.timezone="UTC", IdType="ImmutableId", odata.maxp
 const FIELDS: &str = "id,changeKey,type,seriesMasterId,iCalUId,subject,body,location,start,end,isAllDay,originalStart,\
 originalStartTimeZone,originalEndTimeZone,recurrence,showAs,sensitivity,responseStatus,attendees,organizer,isOrganizer,\
 isReminderOn,reminderMinutesBeforeStart,onlineMeeting,categories,isCancelled,allowNewTimeProposals,responseRequested,\
-hideAttendees";
+hideAttendees,createdDateTime";
+
+/// The query that asks for an event's fields, `extra` included, and
+/// Jolta's markers.
+fn select(extra: &str) -> String {
+    format!("$select={FIELDS}{extra}&{}", holds::graph_expand())
+}
+
 /// Requests per JSON batch, Graph's limit.
 const BATCH: usize = 20;
 
@@ -72,6 +80,10 @@ enum Cursor {
         /// occurrence comes back from delta as a bare id, so these are all
         /// fetched again to find which series lost it.
         masters: BTreeSet<String>,
+        /// The link asks for Jolta's markers (C4 U9). A link from before
+        /// doesn't, so the window is placed again.
+        #[serde(default)]
+        marks: bool,
     },
     /// Graph refused delta for this calendar: list the window each time.
     Poll,
@@ -114,6 +126,15 @@ struct GraphEvent {
     hide_attendees: bool,
     #[serde(rename = "@removed")]
     removed: Option<Value>,
+    single_value_extended_properties: Vec<Property>,
+    created_date_time: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct Property {
+    id: String,
+    value: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -377,7 +398,7 @@ async fn read(api: &impl Api, calendar: &str, cursor: Option<&str>, known: &Know
     let cursor: Option<Cursor> = cursor.and_then(|c| serde_json::from_str(c).ok());
     let (round, earlier) = match cursor {
         Some(Cursor::Poll) => (poll(api, calendar, now).await?, BTreeSet::new()),
-        Some(Cursor::Delta { link, month: m, masters }) if m == month => match pages(api, &link).await? {
+        Some(Cursor::Delta { link, month: m, masters, marks: true }) if m == month => match pages(api, &link).await? {
             Some(round) => (round, masters),
             None => first_round(api, calendar, now).await?,
         },
@@ -390,7 +411,7 @@ async fn read(api: &impl Api, calendar: &str, cursor: Option<&str>, known: &Know
     let masters = fetch_masters(api, calendar, &wanted).await?;
     let (changes, masters) = batch(instances, masters, known, complete, &[me.to_string()], api.zone(), &earlier);
     let cursor = match delta_link {
-        Some(link) => Cursor::Delta { link, month, masters },
+        Some(link) => Cursor::Delta { link, month, masters, marks: true },
         None => Cursor::Poll,
     };
     Ok(SyncBatch { changes, cursor: Some(serde_json::to_string(&cursor).expect("a cursor serializes")), refresh: None })
@@ -405,7 +426,7 @@ async fn read(api: &impl Api, calendar: &str, cursor: Option<&str>, known: &Know
 /// rounds that follow.
 async fn first_round(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<(Round, BTreeSet<String>)> {
     let (from, to) = window(today);
-    let range = format!("startDateTime={from}&endDateTime={to}&$select={FIELDS}");
+    let range = format!("startDateTime={from}&endDateTime={to}&{}", select(""));
     if let Some(round) = pages(api, &format!("/me/calendars/{}/calendarView/delta?{range}", encode(calendar))).await? {
         return Ok((round, BTreeSet::new()));
     }
@@ -421,7 +442,7 @@ async fn first_round(api: &impl Api, calendar: &str, today: NaiveDate) -> Result
 
 async fn poll(api: &impl Api, calendar: &str, today: NaiveDate) -> Result<Round> {
     let (from, to) = window(today);
-    let url = format!("/me/calendars/{}/calendarView?startDateTime={from}&endDateTime={to}&$select={FIELDS}", encode(calendar));
+    let url = format!("/me/calendars/{}/calendarView?startDateTime={from}&endDateTime={to}&{}", encode(calendar), select(""));
     let mut round = pages(api, &url).await?.ok_or_else(|| Error::Other(format!("Microsoft Graph refused the calendar view of {calendar}")))?;
     round.complete = true;
     round.delta_link = None;
@@ -474,7 +495,7 @@ async fn fetch_masters(api: &impl Api, calendar: &str, ids: &BTreeSet<String>) -
                     json!({
                         "id": i.to_string(),
                         "method": "GET",
-                        "url": format!("/me/calendars/{}/events/{}?$select={FIELDS},cancelledOccurrences", encode(calendar), encode(id)),
+                        "url": format!("/me/calendars/{}/events/{}?{}", encode(calendar), encode(id), select(",cancelledOccurrences")),
                         "headers": {"Prefer": PREFER},
                     })
                 })
@@ -860,6 +881,8 @@ fn event(g: &GraphEvent, uid: String, master: Option<&GraphEvent>, me: &[String]
         },
         video: None,
         kind: EventKind::Default,
+        mark: Mark::from_graph(g.single_value_extended_properties.iter().map(|p| (p.id.as_str(), p.value.as_str()))),
+        created: g.created_date_time.as_deref().and_then(|c| DateTime::parse_from_rfc3339(c).ok()).map(|c| c.to_utc()),
     })
 }
 
@@ -1588,5 +1611,71 @@ pub(crate) mod tests {
         assert_eq!(answer_body(&rsvp(Answer::Accept, None, true, None)), json!({ "sendResponse": true }));
         assert!(takes_proposals(br#"{"id":"a"}"#), "a copy stored before Jolta asked");
         assert!(!takes_proposals(br#"{"allowNewTimeProposals":false}"#));
+    }
+
+    const SET: &str = "5b2f8c1e-0d4a-4e8b-9a61-3c7e2d9f4a10";
+
+    fn hold_json() -> Value {
+        json!({
+            "id": "H1", "changeKey": "ckh", "type": "singleInstance", "iCalUId": "040000008200E00074C5B7101A82E008HOLD",
+            "subject": "Hold: Planning", "isAllDay": false, "showAs": "tentative", "sensitivity": "private",
+            "start": {"dateTime": "2026-11-10T15:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-10T15:30:00.0000000", "timeZone": "UTC"},
+            "createdDateTime": "2026-11-09T01:50:03.1234567Z",
+            "singleValueExtendedProperties": [
+                {"id": "String {9D3B2D55-5A0E-4A6E-9B4E-6A6F6C746130} Name JoltaHold", "value": SET},
+                {"id": "String {9d3b2d55-5a0e-4a6e-9b4e-6a6f6c746130} Name JoltaHoldMessage", "value": "<m1@example.com>"}
+            ]
+        })
+    }
+
+    #[test]
+    fn a_hold_reads_its_marker_and_when_it_was_made() {
+        let e = mapped(hold_json());
+        let set = crate::calendar::holds::HoldSetId::parse(SET).unwrap();
+        assert_eq!(e.mark, Some(Mark::Hold { set, message: Some("<m1@example.com>".into()) }), "Graph may change the id's case");
+        assert_eq!(e.created, Some(Utc.with_ymd_and_hms(2026, 11, 9, 1, 50, 3).unwrap() + chrono::Duration::nanoseconds(123_456_700)));
+        let mut away = hold_json();
+        away["singleValueExtendedProperties"] = json!([{"id": "String {9d3b2d55-5a0e-4a6e-9b4e-6a6f6c746130} Name JoltaHold", "value": "away"}]);
+        assert_eq!(mapped(away).mark, Some(Mark::Away));
+        let mut other = hold_json();
+        other["singleValueExtendedProperties"] = json!([{"id": "String {00020329-0000-0000-C000-000000000046} Name JoltaHold", "value": SET}]);
+        assert_eq!(mapped(other).mark, None, "another GUID's property of the same name");
+    }
+
+    /// Lists one hold for any request and remembers the URLs asked.
+    struct Holds(std::sync::Mutex<Vec<String>>);
+
+    impl Api for Holds {
+        async fn request(&self, _: &str, url: &str, _: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            self.0.lock().unwrap().push(url.to_string());
+            Ok((200, json!({ "value": [hold_json()], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta?$deltatoken=new" })))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Microsoft Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Europe::Brussels
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delta_link_from_before_markers_places_the_window_again() {
+        let month = Utc::now().format("%Y-%m").to_string();
+        let old = json!({"mode": "delta", "link": "https://graph.microsoft.com/v1.0/delta?$deltatoken=old", "month": month, "masters": []}).to_string();
+        let api = Holds(Default::default());
+        let batch = read(&api, "C1", Some(&old), &Known::new(), "me@example.com").await.unwrap();
+        let asked = api.0.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].starts_with("/me/calendars/C1/calendarView/delta?startDateTime="), "{asked:?}");
+        assert!(asked[0].contains("&$expand=singleValueExtendedProperties($filter=id%20eq%20'String%20%7B9d3b2d55-"), "{asked:?}");
+        let Change::Upsert { events, .. } = &batch.changes[0] else { panic!("an upsert") };
+        assert!(matches!(events[0].mark, Some(Mark::Hold { .. })));
+
+        let api = Holds(Default::default());
+        read(&api, "C1", batch.cursor.as_deref(), &Known::new(), "me@example.com").await.unwrap();
+        assert_eq!(*api.0.lock().unwrap(), ["https://graph.microsoft.com/v1.0/delta?$deltatoken=new"], "a link that asks for them is followed");
     }
 }

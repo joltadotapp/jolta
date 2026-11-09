@@ -263,11 +263,13 @@ fn event(
         options,
         video: None,
         kind: super::EventKind::Default,
+        mark: super::holds::Mark::from_lines(
+            x_props(comp, super::holds::CALDAV_HOLD).find_map(text).as_deref(),
+            x_props(comp, super::holds::CALDAV_MESSAGE).find_map(text).as_deref(),
+        ),
+        created: utc_of(comp, &Prop::Created),
     };
-    let stamp = comp.property(&Prop::Dtstamp).and_then(|e| match e.values.first() {
-        Some(Value::PartialDateTime(dt)) => utc(dt),
-        _ => None,
-    });
+    let stamp = utc_of(comp, &Prop::Dtstamp);
     Some(Sent { event, dated: start.is_some(), stamp, proposals })
 }
 
@@ -398,6 +400,13 @@ fn span_seconds(span: &Span) -> i64 {
         Span::AllDay { start, end } => (*end - *start).num_seconds(),
         Span::Timed { start, end } if start.zone == end.zone => (end.wall - start.wall).num_seconds(),
         Span::Timed { .. } => 0,
+    }
+}
+
+fn utc_of(comp: &ICalendarComponent, prop: &Prop) -> Option<DateTime<chrono::Utc>> {
+    match comp.property(prop)?.values.first() {
+        Some(Value::PartialDateTime(dt)) => utc(dt),
+        _ => None,
     }
 }
 
@@ -1010,5 +1019,27 @@ pub(super) mod tests {
         assert_eq!(fixed_zone(-5 * 3600, 2026), Tz::Etc__GMTPlus5);
         assert_eq!(fixed_zone(0, 2026), Tz::UTC);
         assert_eq!(fixed_zone(5 * 3600 + 1800, 2026), Tz::Asia__Kolkata);
+    }
+
+    #[test]
+    fn a_hold_reads_back_its_marker_lines() {
+        use crate::calendar::holds::{HoldSetId, Mark};
+        let set = HoldSetId::parse("5B2F8C1E-0D4A-4E8B-9A61-3C7E2D9F4A10").unwrap();
+        for message in ["<probe-u9@jolta.invalid>", "<a,b;c\\d@example.com>"] {
+            let mark = Mark::Hold { set: set.clone(), message: Some(message.into()) };
+            let text = format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Jolta//Jolta 0.1.0//EN\r\nBEGIN:VEVENT\r\nUID:h1@jolta.app\r\n\
+                 DTSTAMP:20261109T015003Z\r\nCREATED:20261109T015003Z\r\nDTSTART:20261110T060000Z\r\nDTEND:20261110T063000Z\r\n\
+                 SUMMARY:Hold: Planning\r\n{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+                mark.caldav_lines().join("\r\n")
+            );
+            let e = &read_events(&text)[0];
+            assert_eq!(e.mark.as_ref(), Some(&mark), "{text}");
+            assert_eq!(e.created, Some(chrono::Utc.with_ymd_and_hms(2026, 11, 9, 1, 50, 3).unwrap()));
+        }
+        let away = read_events("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a1\r\nDTSTART:20261110T060000Z\r\nX-JOLTA-HOLD:away\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+        assert_eq!((away[0].mark.clone(), away[0].created), (Some(Mark::Away), None));
+        let other = read_events("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:o1\r\nDTSTART:20261110T060000Z\r\nX-JOLTA-HOLD:1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+        assert_eq!(other[0].mark, None, "a value that names no set");
     }
 }

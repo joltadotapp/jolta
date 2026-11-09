@@ -926,6 +926,8 @@ mod tests {
             organizer_is_me: false,
             video: None,
             kind: Default::default(),
+            mark: None,
+            created: None,
         }
     }
 

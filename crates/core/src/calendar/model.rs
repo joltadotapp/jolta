@@ -347,6 +347,14 @@ pub struct EventData {
     pub video: Option<MeetingProvider>,
     #[serde(default, skip_serializing_if = "EventKind::is_default")]
     pub kind: EventKind,
+    /// Jolta's hidden marker, on an event Jolta made as a hold or for out
+    /// of office.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<super::holds::Mark>,
+    /// When the provider says the event was made: Google's `created`,
+    /// Graph's `createdDateTime`, CREATED.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<DateTime<Utc>>,
 }
 
 impl EventData {
@@ -378,6 +386,8 @@ impl EventData {
             organizer_is_me: false,
             video: None,
             kind: EventKind::Default,
+            mark: None,
+            created: None,
         }
     }
 

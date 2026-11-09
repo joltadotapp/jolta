@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json, already_written};
 use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
-use super::{Api, FIELDS, GraphCalendar, GraphEvent, event, get_ok, instance};
+use super::{Api, GraphCalendar, GraphEvent, event, get_ok, instance, select};
 use crate::calendar::change::Field;
 use crate::calendar::ops::{Extra, Notify};
 use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, MeetingProvider, Role, ShowAs, Span, Visibility, tz};
@@ -140,7 +140,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
             for e in changed {
                 let (Some(body), Some(rid)) = (occurrence_body(master, e, here)?, e.recurrence_id.as_ref()) else { continue };
                 if let Some(id) = instance_at(api, &series, rid).await? {
-                    let now = version(api, get_ok(api, &format!("/me/events/{}?$select={FIELDS}", encode(&id))).await?, &master.uid, me, here).await?;
+                    let now = version(api, get_ok(api, &format!("/me/events/{}?{}", encode(&id), select(""))).await?, &master.uid, me, here).await?;
                     if now.events.first().is_some_and(|current| already_written(master, e, current, here)) {
                         instances.push(now);
                         continue;
@@ -239,7 +239,7 @@ async fn deleted(api: &impl Api, remote_id: &str) -> Result<bool> {
 
 /// The event as Microsoft 365 has it, None once deleted or cancelled.
 async fn fetch(api: &impl Api, remote_id: &str, uid: &str, me: &str, here: Tz) -> Result<Option<Version>> {
-    let (status, reply) = api.request("GET", &format!("/me/events/{}?$select={FIELDS}", encode(remote_id)), None, &[]).await?;
+    let (status, reply) = api.request("GET", &format!("/me/events/{}?{}", encode(remote_id), select("")), None, &[]).await?;
     match status {
         200..300 if reply["isCancelled"] == true => Ok(None),
         200..300 => Ok(Some(version(api, reply, uid, me, here).await?)),
@@ -255,17 +255,17 @@ async fn fetch(api: &impl Api, remote_id: &str, uid: &str, me: &str, here: Tz) -
 /// clock, so its series comes too.
 async fn version(api: &impl Api, reply: Value, uid: &str, me: &str, here: Tz) -> Result<Version> {
     let reply = match (reply["type"].as_str(), reply["id"].as_str()) {
-        (Some("seriesMaster"), Some(id)) => get_ok(api, &format!("/me/events/{}?$select={FIELDS},cancelledOccurrences", encode(id))).await?,
+        (Some("seriesMaster"), Some(id)) => get_ok(api, &format!("/me/events/{}?{}", encode(id), select(",cancelledOccurrences"))).await?,
         // A PATCH's answer leaves out the `originalStart` that names an
         // instance's occurrence (Microsoft 365 test account, 2026-11-07).
-        (Some("exception" | "occurrence"), Some(id)) if reply["originalStart"].is_null() => get_ok(api, &format!("/me/events/{}?$select={FIELDS}", encode(id))).await?,
+        (Some("exception" | "occurrence"), Some(id)) if reply["originalStart"].is_null() => get_ok(api, &format!("/me/events/{}?{}", encode(id), select(""))).await?,
         _ => reply,
     };
     let raw = serde_json::to_vec(&reply).ok();
     let g: GraphEvent = serde_json::from_value(reply).map_err(|e| Error::Other(format!("Microsoft 365 reply: {e}")))?;
     let master: Option<GraphEvent> = match (&g.series_master_id, g.kind.as_str()) {
         (Some(id), "exception" | "occurrence") => {
-            let m = get_ok(api, &format!("/me/events/{}?$select={FIELDS}", encode(id))).await?;
+            let m = get_ok(api, &format!("/me/events/{}?{}", encode(id), select(""))).await?;
             Some(serde_json::from_value(m).map_err(|e| Error::Other(format!("Microsoft 365 reply: {e}")))?)
         }
         _ => None,

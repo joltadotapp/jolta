@@ -13,6 +13,7 @@ pub mod draft;
 pub mod filing;
 pub mod focus;
 pub mod freebusy;
+pub mod holds;
 pub mod ical;
 pub mod ical_edit;
 pub mod invitation;
