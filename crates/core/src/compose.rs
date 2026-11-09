@@ -174,7 +174,7 @@ fn quote(text: &str) -> String {
 fn quote_start(body: &str) -> Option<usize> {
     let forward = body.find("\n\n---------- Forwarded message ----------");
     let reply = body.match_indices("\n\nOn ").map(|(i, _)| i).find(|&i| body[i..].lines().nth(2).is_some_and(|l| l.ends_with(" wrote:")));
-    let trailing = std::iter::once(0).chain(body.match_indices("\n\n").map(|(i, _)| i)).find(|&i| {
+    let trailing = std::iter::once(0).chain(body.match_indices('\n').map(|(i, _)| i)).find(|&i| {
         let mut lines = body[i..].lines().filter(|l| !l.trim().is_empty()).peekable();
         lines.peek().is_some() && lines.all(|l| l.starts_with('>'))
     });
@@ -690,6 +690,9 @@ mod tests {
     fn what_the_writer_typed_ends_at_the_signature_or_the_quote() {
         assert_eq!(written("Noon.\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi", "K."), "Noon.");
         assert_eq!(written("Noon works for me.\n\n> Shall we?", ""), "Noon works for me.", "a quote without a line saying who wrote it");
+        assert_eq!(written("Noon.\n> Shall we?", ""), "Noon.", "a quote right below the text");
+        assert_eq!(written("Noon.\n  \n> Shall we?", ""), "Noon.", "a quote below a line of spaces");
+        assert_eq!(swap_signature("Noon.\n> Shall we?", "", "K."), "Noon.\n\nK.\n> Shall we?");
         assert_eq!(written("> Shall we?", ""), "", "only a quote");
         assert_eq!(written("> Shall we?\n\nYes.", ""), "> Shall we?\n\nYes.", "an answer below a quote is the writer's");
         assert_eq!(written("Noon.\n\nK.", "K."), "Noon.");
