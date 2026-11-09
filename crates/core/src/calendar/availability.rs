@@ -6,7 +6,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Offset, TimeZon
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
-use super::tz;
+use super::{tz, zones};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -240,19 +240,31 @@ pub fn free_times(own: &[Busy], hours: &WorkingHours, from: DateTime<Utc>, days:
         .collect()
 }
 
-/// "Tue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00", one line per day,
-/// on `zone`'s clock and named with that day's abbreviation.
-pub fn availability_text(free: &[(DateTime<Utc>, DateTime<Utc>)], zone: Tz) -> String {
+/// The user's free stretches as text for a mail, on `theirs`' clock: one
+/// line per day, named with that day's abbreviation, as in "Tue 10 Nov
+/// (EST): 10:00 to 11:30, 14:00 to 16:00". Where their clock differs from
+/// the user's (`mine`) the heading names their zone and each stretch adds
+/// its start on the user's clock: "10:00 to 10:30 (16:00 Brussels)".
+pub fn availability_text(free: &[(DateTime<Utc>, DateTime<Utc>)], theirs: Tz, mine: Tz) -> String {
     let mut lines: Vec<(NaiveDate, String, Vec<String>)> = Vec::new();
+    let mut differs = false;
     for (start, end) in free {
-        let (s, e) = (start.with_timezone(&zone), end.with_timezone(&zone));
-        let span = format!("{} to {}", s.format("%H:%M"), e.format("%H:%M"));
+        let (s, e, m) = (start.with_timezone(&theirs), end.with_timezone(&theirs), start.with_timezone(&mine));
+        let end_text = if e.date_naive() == s.date_naive() { e.format("%H:%M") } else { e.format("%a %H:%M") };
+        let mut span = format!("{} to {end_text}", s.format("%H:%M"));
+        if m.offset().fix() != s.offset().fix() {
+            differs = true;
+            let day = if m.date_naive() == s.date_naive() { String::new() } else { m.format("%a ").to_string() };
+            span.push_str(&format!(" ({day}{} {})", m.format("%H:%M"), zones::city(mine)));
+        }
         match lines.last_mut() {
             Some((day, _, spans)) if *day == s.date_naive() => spans.push(span),
             _ => lines.push((s.date_naive(), s.format("%Z").to_string(), vec![span])),
         }
     }
-    lines.iter().map(|(day, abbr, spans)| format!("{} ({abbr}): {}", day.format("%a %-d %b"), spans.join(", "))).collect::<Vec<_>>().join("\n")
+    let heading = if differs { format!("I'm free at these times ({} time):", zones::city(theirs)) } else { "I'm free at these times:".to_string() };
+    let days = lines.iter().map(|(day, abbr, spans)| format!("{} ({abbr}): {}", day.format("%a %-d %b"), spans.join(", ")));
+    std::iter::once(heading).chain(days).collect::<Vec<_>>().join("\n")
 }
 
 /// "Would Tuesday 10 November, 14:00 to 14:30 (CET) work for you?"
@@ -286,7 +298,7 @@ pub fn note(schedule: &Schedule, windows: &[Window], mine: &WorkingHours) -> Opt
         return None;
     }
     let times = format!("Works {} to {}", theirs.start.format("%H:%M"), theirs.end.format("%H:%M"));
-    Some(if same_clock { times } else { format!("{times} in {}", city(theirs.zone)) })
+    Some(if same_clock { times } else { format!("{times} in {}", zones::city(theirs.zone)) })
 }
 
 /// "Mon", "Thu, Fri" or "Mon to Wed": runs of neighbouring shown days.
@@ -305,11 +317,6 @@ fn day_runs(indices: &[usize], windows: &[Window]) -> String {
         _ => format!("{} to {}", name(a), name(b)),
     };
     runs.iter().map(text).collect::<Vec<_>>().join(", ")
-}
-
-/// "New York" for America/New_York.
-fn city(zone: Tz) -> String {
-    zone.name().rsplit('/').next().unwrap_or(zone.name()).replace('_', " ")
 }
 
 /// The blocking times, sorted and joined where they touch or overlap.
@@ -485,8 +492,8 @@ mod tests {
         ];
         let free = free_times(&own, &hours(), at("2026-11-10 07:00"), 3, Duration::minutes(30));
         assert_eq!(
-            availability_text(&free, Brussels),
-            "Tue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00, 16:30 to 17:00\nThu 12 Nov (CET): 09:00 to 17:00"
+            availability_text(&free, Brussels, Brussels),
+            "I'm free at these times:\nTue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00, 16:30 to 17:00\nThu 12 Nov (CET): 09:00 to 17:00"
         );
     }
 
@@ -494,7 +501,58 @@ mod tests {
     fn availability_names_each_days_own_zone() {
         // Brussels leaves summer time on Sunday 25 October 2026.
         let free = free_times(&[], &hours(), at("2026-10-23 07:00"), 2, Duration::minutes(30));
-        assert_eq!(availability_text(&free, Brussels), "Fri 23 Oct (CEST): 09:00 to 17:00\nMon 26 Oct (CET): 09:00 to 17:00");
+        assert_eq!(availability_text(&free, Brussels, Brussels), "I'm free at these times:\nFri 23 Oct (CEST): 09:00 to 17:00\nMon 26 Oct (CET): 09:00 to 17:00");
+    }
+
+    /// Brussels wall-clock stretches as instants.
+    fn stretches(spans: &[(&str, &str)]) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+        spans.iter().map(|(s, e)| (at(s), at(e))).collect()
+    }
+
+    #[test]
+    fn availability_on_their_clock_gives_mine_in_parentheses() {
+        let free = stretches(&[("2026-11-10 16:00", "2026-11-10 16:30"), ("2026-11-10 16:45", "2026-11-10 17:00"), ("2026-11-12 16:30", "2026-11-12 17:00")]);
+        assert_eq!(
+            availability_text(&free, chrono_tz::America::New_York, Brussels),
+            "I'm free at these times (New York time):\nTue 10 Nov (EST): 10:00 to 10:30 (16:00 Brussels), 10:45 to 11:00 (16:45 Brussels)\nThu 12 Nov (EST): 10:30 to 11:00 (16:30 Brussels)"
+        );
+    }
+
+    #[test]
+    fn availability_in_a_zone_on_my_clock_has_no_parentheses() {
+        let free = stretches(&[("2026-11-10 10:00", "2026-11-10 11:00")]);
+        let mine = availability_text(&free, Brussels, Brussels);
+        assert_eq!(availability_text(&free, chrono_tz::Europe::Paris, Brussels), mine, "Paris keeps Brussels' clock");
+        assert_eq!(mine, "I'm free at these times:\nTue 10 Nov (CET): 10:00 to 11:00");
+    }
+
+    #[test]
+    fn availability_follows_each_clock_change_between_the_days() {
+        // Brussels left summer time on 25 October 2026 and New York on 1
+        // November, so they were 5 hours apart that week and 6 after it.
+        let autumn = stretches(&[("2026-10-23 16:00", "2026-10-23 17:00"), ("2026-10-27 15:00", "2026-10-27 16:00"), ("2026-11-03 16:00", "2026-11-03 17:00")]);
+        assert_eq!(
+            availability_text(&autumn, chrono_tz::America::New_York, Brussels),
+            "I'm free at these times (New York time):\nFri 23 Oct (EDT): 10:00 to 11:00 (16:00 Brussels)\nTue 27 Oct (EDT): 10:00 to 11:00 (15:00 Brussels)\nTue 3 Nov (EST): 10:00 to 11:00 (16:00 Brussels)"
+        );
+        // New York starts summer time on 14 March 2027 and Brussels on 28 March.
+        let spring = stretches(&[("2027-03-12 16:00", "2027-03-12 17:00"), ("2027-03-16 15:00", "2027-03-16 16:00"), ("2027-03-30 16:00", "2027-03-30 17:00")]);
+        assert_eq!(
+            availability_text(&spring, chrono_tz::America::New_York, Brussels),
+            "I'm free at these times (New York time):\nFri 12 Mar (EST): 10:00 to 11:00 (16:00 Brussels)\nTue 16 Mar (EDT): 10:00 to 11:00 (15:00 Brussels)\nTue 30 Mar (EDT): 10:00 to 11:00 (16:00 Brussels)"
+        );
+    }
+
+    #[test]
+    fn availability_south_of_the_equator_changes_clocks_the_other_way() {
+        // Sydney is 10 hours ahead of Brussels until Brussels starts summer
+        // time on 28 March 2027, 9 hours until Sydney ends its own on 4
+        // April, and 8 after. Their morning is the user's evening before.
+        let free = stretches(&[("2027-03-25 22:00", "2027-03-25 23:00"), ("2027-03-30 23:00", "2027-03-31 00:00"), ("2027-04-06 09:00", "2027-04-06 17:00")]);
+        assert_eq!(
+            availability_text(&free, chrono_tz::Australia::Sydney, Brussels),
+            "I'm free at these times (Sydney time):\nFri 26 Mar (AEDT): 08:00 to 09:00 (Thu 22:00 Brussels)\nWed 31 Mar (AEDT): 08:00 to 09:00 (Tue 23:00 Brussels)\nTue 6 Apr (AEST): 17:00 to Wed 01:00 (09:00 Brussels)"
+        );
     }
 
     #[test]

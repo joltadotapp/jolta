@@ -41,5 +41,6 @@ pub mod sync;
 pub mod synth;
 pub mod tz;
 pub mod update;
+pub mod zones;
 
 pub use model::*;

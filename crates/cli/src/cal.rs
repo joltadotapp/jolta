@@ -13,6 +13,7 @@ use jolta_core::calendar::recur::Source as Origin;
 use jolta_core::calendar::series::{self, Horizon};
 use jolta_core::calendar::card::{self, Card, Edit};
 use jolta_core::calendar::availability::{self, Availability, Busy};
+use jolta_core::calendar::zones::{self, ZoneGuess};
 use jolta_core::calendar::{add, away, freebusy, invitation, proposal, remove, respond};
 use jolta_core::calendar::rsvp::{self, Answer, Rsvp, Scope};
 use jolta_core::calendar::{Bounds, CalendarId, EventData, EventId, EventKind, Moment, Zone, ical, sync, synth, tz};
@@ -314,6 +315,16 @@ pub enum CalCommand {
         #[arg(long)]
         dnd: bool,
     },
+    /// The clock Insert my availability writes in for a recipient: the zone
+    /// picked for them, their Microsoft 365 working hours' zone through
+    /// `account`, or a zone with their last mail's offset. `--set` picks one.
+    ZoneOf {
+        account: String,
+        address: String,
+        /// An IANA zone such as America/New_York, remembered for the address.
+        #[arg(long)]
+        set: Option<String>,
+    },
     /// Times everyone known is free for a meeting, as Find a time suggests
     /// them. Reads only.
     FindTime {
@@ -562,6 +573,27 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             for s in &slots {
                 let missing = if s.missing.is_empty() { String::new() } else { format!("  (unknown: {})", s.missing.join(", ")) };
                 println!("{} to {}{missing}", s.start.with_timezone(&here).format("%a %-d %b %H:%M"), s.end.with_timezone(&here).format("%H:%M"));
+            }
+            Ok(())
+        }
+        CalCommand::ZoneOf { account, address, set } => {
+            if let Some(name) = set {
+                let zone = tz::zone(&name).with_context(|| format!("{name} is no time zone"))?;
+                jolta.store.write(|tx| store::set_person_zone(tx, &address, zone, Utc::now().timestamp()))?;
+            }
+            let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            let here = tz::here();
+            let names = |zones: &[chrono_tz::Tz]| zones.iter().map(|z| z.name()).collect::<Vec<_>>().join(", ");
+            match zones::guess(jolta, a.id, &address, here).await? {
+                None => println!("{} (yours): nothing says otherwise", here.name()),
+                Some(ZoneGuess::Picked(zone)) => println!("{}: picked for {address}", zone.name()),
+                Some(ZoneGuess::WorkingHours(h)) => println!("{}: their Outlook working hours, {} to {}", h.zone.name(), h.start.format("%H:%M"), h.end.format("%H:%M")),
+                Some(ZoneGuess::LastMail { offset, zone, others }) => {
+                    println!("{}: {} on their last mail", zone.name(), zones::offset_label(offset));
+                    if !others.is_empty() {
+                        println!("  also {}", names(&others));
+                    }
+                }
             }
             Ok(())
         }

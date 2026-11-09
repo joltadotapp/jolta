@@ -5,6 +5,7 @@
 use chrono::{DateTime, Duration, NaiveTime, Utc, Weekday};
 use jolta_core::calendar::availability::{self, Availability, Busy, Schedule, SuggestOptions, Unknown, Weekdays, WorkingHours};
 use jolta_core::calendar::freebusy::{self, Found, Lookup};
+use jolta_core::calendar::zones::{self, ZoneGuess};
 use jolta_core::calendar::{Person, tz};
 use jolta_core::{AccountId, MessageId, ThreadId, compose, store};
 
@@ -114,6 +115,73 @@ pub struct FindTimeSlot {
     pub missing: Vec<String>,
 }
 
+/// Where Insert my availability got the recipient's zone from.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoneSource {
+    /// The user picked it for this person.
+    Picked,
+    /// Their Microsoft 365 working hours.
+    WorkingHours,
+    /// The offset in their newest mail's Date header.
+    LastMail,
+    /// Nothing says, so the user's own.
+    Mine,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct ZoneChoice {
+    /// "America/New_York".
+    pub zone: String,
+    /// "New York".
+    pub city: String,
+    /// "UTC−05:00", today.
+    pub offset: String,
+}
+
+/// The first recipient's clock, which Insert my availability writes in.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct TheirZone {
+    pub address: String,
+    pub zone: ZoneChoice,
+    pub source: ZoneSource,
+    /// "UTC−05:00", the offset of their last mail, with `LastMail`.
+    pub mail_offset: Option<String>,
+    /// The zones with that offset on the day of the mail, the likeliest first.
+    pub matching: Vec<ZoneChoice>,
+    /// Their working day on their clock, shaded under the user's row.
+    pub hours: WorkingHoursInfo,
+    /// The user's own zone.
+    pub mine: ZoneChoice,
+    /// Every zone Jolta offers, west to east.
+    pub all: Vec<ZoneChoice>,
+}
+
+fn choice(zone: chrono_tz::Tz, now: DateTime<Utc>) -> ZoneChoice {
+    ZoneChoice { zone: zone.name().to_string(), city: zones::city(zone), offset: zones::offset_label(zones::offset_at(zone, now)) }
+}
+
+fn their_zone(address: String, guess: Option<ZoneGuess>, here: chrono_tz::Tz, now: DateTime<Utc>) -> TheirZone {
+    let (zone, hours) = guess.as_ref().map_or((here, WorkingHours::standard(here)), |g| (g.zone(), g.hours()));
+    let (source, mail_offset, matching) = match &guess {
+        None => (ZoneSource::Mine, None, Vec::new()),
+        Some(ZoneGuess::Picked(_)) => (ZoneSource::Picked, None, Vec::new()),
+        Some(ZoneGuess::WorkingHours(_)) => (ZoneSource::WorkingHours, None, Vec::new()),
+        Some(ZoneGuess::LastMail { offset, zone, others }) => {
+            (ZoneSource::LastMail, Some(zones::offset_label(*offset)), std::iter::once(zone).chain(others).map(|z| choice(*z, now)).collect())
+        }
+    };
+    TheirZone {
+        address,
+        zone: choice(zone, now),
+        source,
+        mail_offset,
+        matching,
+        hours: hours_info(&hours),
+        mine: choice(here, now),
+        all: zones::choices(now).into_iter().map(|z| choice(z, now)).collect(),
+    }
+}
+
 fn at(t: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(t, 0).unwrap_or_default()
 }
@@ -137,6 +205,11 @@ pub(crate) fn blocks(busy: &[Busy]) -> Vec<BusyBlock> {
     busy.iter().map(|b| BusyBlock { start: b.start.timestamp(), end: b.end.timestamp(), kind: b.kind.into() }).collect()
 }
 
+/// The time on the shown days outside `hours`, to shade.
+fn outside(hours: &WorkingHours, days: impl Iterator<Item = (DateTime<Utc>, DateTime<Utc>)>) -> Vec<TimeSlot> {
+    days.flat_map(|(start, end)| hours.off(start, end)).map(|(start, end)| TimeSlot { start: start.timestamp(), end: end.timestamp() }).collect()
+}
+
 fn info(found: Found, people: &[Person]) -> FindTimeInfo {
     let name = |address: &str| {
         people.iter().find(|p| p.address.eq_ignore_ascii_case(address)).map(|p| p.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| address.to_string())
@@ -148,12 +221,7 @@ fn info(found: Found, people: &[Person]) -> FindTimeInfo {
             Availability::Known(b) => (blocks(b), None),
             Availability::Unknown(why) => (Vec::new(), Some(why.reason())),
         };
-        let outside_hours = s
-            .hours
-            .iter()
-            .flat_map(|h| found.windows.iter().flat_map(|w| h.off(w.start, w.end)))
-            .map(|(start, end)| TimeSlot { start: start.timestamp(), end: end.timestamp() })
-            .collect();
+        let outside_hours = s.hours.as_ref().map(|h| outside(h, found.windows.iter().map(|w| (w.start, w.end)))).unwrap_or_default();
         PersonRow {
             address: s.person.clone(),
             name: name(&s.person),
@@ -276,11 +344,44 @@ impl Core {
         Ok(free(&info, minutes)?.into_iter().map(|(s, e)| FindTimeSlot { start: s.timestamp(), end: e.timestamp(), missing: Vec::new() }).collect())
     }
 
-    /// The user's free stretches of at least `minutes` as lines for a mail,
-    /// on this Mac's clock: "Tue 10 Nov (CET): 10:00 to 11:30, 14:00 to 16:00".
-    pub fn availability_text(&self, info: FindTimeInfo, minutes: i64) -> Result<String> {
-        let lines = availability::availability_text(&free(&info, minutes)?, tz::here());
-        Ok(format!("I'm free at these times:\n{lines}"))
+    /// The user's free stretches of at least `minutes` as text for a mail,
+    /// on `zone`'s clock (an IANA name), else this Mac's: "Tue 10 Nov
+    /// (EST): 10:00 to 10:30 (16:00 Brussels)".
+    pub fn availability_text(&self, info: FindTimeInfo, minutes: i64, zone: Option<String>) -> Result<String> {
+        let here = tz::here();
+        let theirs = match zone {
+            Some(name) => tz::zone(&name).ok_or_else(|| CoreError::Query { message: format!("{name} is no time zone") })?,
+            None => here,
+        };
+        Ok(availability::availability_text(&free(&info, minutes)?, theirs, here))
+    }
+
+    /// The clock of the first address in `to`, for Insert my availability:
+    /// the zone the user picked for them, else their Microsoft 365 working
+    /// hours' zone through `account_id`, else one with their last mail's
+    /// offset, else this Mac's. None without an address.
+    pub async fn their_zone(&self, account_id: i64, to: String) -> Result<Option<TheirZone>> {
+        let Some((_, address)) = compose::parse_addresses(&to).into_iter().next() else { return Ok(None) };
+        let jolta = self.jolta.clone();
+        let here = tz::here();
+        let person = address.clone();
+        let guess = self
+            .runtime
+            .spawn(async move { zones::guess(&jolta, AccountId(account_id), &person, here).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        Ok(Some(their_zone(address, guess, here, Utc::now())))
+    }
+
+    /// Remembers `zone` (an IANA name) as `address`'s clock.
+    pub fn set_their_zone(&self, address: String, zone: String) -> Result<()> {
+        let zone = tz::zone(&zone).ok_or_else(|| CoreError::Query { message: format!("{zone} is no time zone") })?;
+        Ok(self.jolta.store.write(|tx| store::set_person_zone(tx, &address, zone, Utc::now().timestamp()))?)
+    }
+
+    /// The shown days' time outside `hours`, for the recipient's row.
+    pub fn outside_hours(&self, info: FindTimeInfo, hours: WorkingHoursInfo) -> Result<Vec<TimeSlot>> {
+        Ok(outside(&hours_of(&hours)?, info.days.iter().map(|d| (at(d.start), at(d.end)))))
     }
 
     /// The body with `text` added after what the writer typed, above the
@@ -336,6 +437,23 @@ mod tests {
         assert_eq!(info.days, [true, false, true, false, false, false, true]);
         assert_eq!((info.start, info.end, info.zone.as_str()), (540, 1020, "Europe/Brussels"));
         assert_eq!(hours_of(&info).unwrap(), h);
+    }
+
+    #[test]
+    fn their_zone_offers_the_mails_matches_first_and_falls_back_to_mine() {
+        use chrono::{FixedOffset, TimeZone};
+        let (brussels, new_york) = (chrono_tz::Europe::Brussels, chrono_tz::America::New_York);
+        let now = Utc.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap();
+        let guess = zones::from_offset(FixedOffset::west_opt(5 * 3600).unwrap(), now, brussels);
+        let zone = their_zone("ann@example.com".into(), guess, brussels, now);
+        assert_eq!((zone.source, zone.zone.city.as_str(), zone.mail_offset.as_deref()), (ZoneSource::LastMail, "New York", Some("UTC−05:00")));
+        assert_eq!(zone.matching.first(), Some(&zone.zone));
+        assert_eq!(zone.hours.zone, "America/New_York");
+        assert_eq!((zone.mine.city.as_str(), zone.mine.offset.as_str()), ("Brussels", "UTC+01:00"));
+        let mine = their_zone("bo@example.com".into(), None, brussels, now);
+        assert_eq!((mine.source, mine.zone.zone.as_str()), (ZoneSource::Mine, "Europe/Brussels"));
+        let picked = their_zone("cy@example.com".into(), Some(ZoneGuess::Picked(new_york)), brussels, now);
+        assert_eq!((picked.source, picked.matching.len()), (ZoneSource::Picked, 0));
     }
 
     #[test]

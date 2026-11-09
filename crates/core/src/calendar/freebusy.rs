@@ -141,6 +141,22 @@ pub async fn room_schedules(jolta: &Jolta, account: AccountId, rooms: &[String],
     Ok(out)
 }
 
+/// `person`'s working hours through `account`: only Microsoft 365 gives
+/// them, and only for people in its tenant. A recording answers in place
+/// of the provider, as for Find a time.
+pub async fn person_hours(jolta: &Jolta, account: AccountId, person: &str) -> Result<Option<WorkingHours>> {
+    if let Some(r) = recorded(&jolta.data_dir)? {
+        return Ok(recorded_answer(&r, person).hours);
+    }
+    let a = jolta.store.read_async(move |c| store::account(c, account)).await?;
+    if !a.calendar || a.kind != AccountKind::Graph || person.eq_ignore_ascii_case(&a.address) {
+        return Ok(None);
+    }
+    let now = Utc::now();
+    let answers = sync::account_source(jolta, &a).await?.free_busy(&[person.to_string()], now, now + Duration::days(1)).await?;
+    Ok(answers.into_iter().next().and_then(|s| s.hours))
+}
+
 fn recorded(dir: &Path) -> Result<Option<Recorded>> {
     match std::fs::read(dir.join("free-busy.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| Error::Other(format!("free-busy.json: {e}"))),
