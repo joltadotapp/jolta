@@ -420,3 +420,42 @@ fn actions_and_mail_go_out_after_the_connection_goes_silent() {
     wait(90, "the flag reached the server", || server.flags("INBOX", "Question").iter().any(|f| f.contains("Flagged")));
     wait(30, "Mailpit caught the reply", || caught(&reply.subject).contains("\"MessageID\""));
 }
+
+/// Found in review: a message that fell due while a failing round still
+/// ran, here one waiting on Dovecot's slow answer about a Drafts folder
+/// that is gone, waited out the retry wait earlier failures built up,
+/// though the next round would send it before failing again.
+#[test]
+fn a_message_due_during_a_failing_round_leaves_when_it_ends() {
+    if !available() {
+        return;
+    }
+    let relay = crate::server::Relay::start();
+    let server = Mailbox::new();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "Question", "Are you coming?"));
+    let app = App::unstarted();
+    let account = server.add(&app);
+    app.jolta
+        .store
+        .write(|tx| Ok(tx.execute("UPDATE account SET imap_port = ?1 WHERE id = ?2", rusqlite::params![relay.port, account.id.0])?))
+        .unwrap();
+    app.core.start().unwrap();
+    wait(20, "the inbox synced", || inbox_has(&app, "Question"));
+
+    app.jolta.store.write(|tx| Ok(tx.execute("UPDATE mailbox SET remote_id = 'Gone' WHERE role = 'drafts'", [])?)).unwrap();
+    let mut draft = app.core.new_compose().unwrap();
+    draft.account_id = Some(account.id.0);
+    draft.subject = "Never saved".into();
+    app.core.save_draft(draft).unwrap();
+    wait(40, "four rounds failed", || count(&app, "sync failed") >= 4);
+
+    relay.slow_select(std::time::Duration::from_secs(15));
+    let thread = app.list("in:inbox")[0].thread_id;
+    let mut reply = crate::fixture::block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    reply.subject = format!("Due mid-round {}", now());
+    let sent_at = std::time::Instant::now();
+    app.core.send(reply.clone(), None, None).unwrap();
+    wait(120, "Mailpit caught the reply", || caught(&reply.subject).contains("\"MessageID\""));
+    let took = sent_at.elapsed().as_secs_f64();
+    assert!(took < 25.0, "the message left {took:.1} s after Send; the round it fell due in failed after about 15 s");
+}

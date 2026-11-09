@@ -5,7 +5,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
@@ -130,9 +130,11 @@ impl Mailbox {
 /// Passes connections through to Dovecot until `freeze`, after which the
 /// ones already open go silent both ways while staying open, as when a
 /// router forgets a connection. Connections opened later pass again.
+/// `slow_select` holds Dovecot's answer to each SELECT for that long.
 pub struct Relay {
     pub port: u16,
     generation: Arc<AtomicU64>,
+    select_delay: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -140,18 +142,27 @@ impl Relay {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let generation = Arc::new(AtomicU64::new(0));
-        let current = generation.clone();
+        let select_delay = Arc::new(AtomicU64::new(0));
+        let (current, delay) = (generation.clone(), select_delay.clone());
         std::thread::spawn(move || {
             for client in listener.incoming().flatten() {
                 let Ok(server) = TcpStream::connect(IMAP) else { continue };
                 let born = current.load(Ordering::SeqCst);
-                for (mut from, mut to) in [(client.try_clone().unwrap(), server.try_clone().unwrap()), (server, client)] {
-                    let current = current.clone();
+                let selecting = Arc::new(AtomicBool::new(false));
+                let directions = [(client.try_clone().unwrap(), server.try_clone().unwrap(), true), (server, client, false)];
+                for (mut from, mut to, upward) in directions {
+                    let (current, delay, selecting) = (current.clone(), delay.clone(), selecting.clone());
                     std::thread::spawn(move || {
                         let mut buf = [0u8; 65536];
                         while let Ok(n @ 1..) = from.read(&mut buf) {
                             if current.load(Ordering::SeqCst) != born {
                                 return std::thread::park();
+                            }
+                            if upward && buf[..n].windows(8).any(|w| w == b" SELECT ") {
+                                selecting.store(true, Ordering::SeqCst);
+                            }
+                            if !upward && selecting.swap(false, Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_secs(delay.load(Ordering::SeqCst)));
                             }
                             if to.write_all(&buf[..n]).is_err() {
                                 break;
@@ -162,11 +173,15 @@ impl Relay {
                 }
             }
         });
-        Relay { port, generation }
+        Relay { port, generation, select_delay }
     }
 
     pub fn freeze(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn slow_select(&self, by: Duration) {
+        self.select_delay.store(by.as_secs(), Ordering::SeqCst);
     }
 }
 
