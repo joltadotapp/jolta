@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
 
-pub use query::{Query, Status, Term, TermKind, TextField, parse};
+pub use query::{Query, Status, Term, TermKind, TextField, parse, within};
 
 use crate::model::*;
 use crate::calendar::tz;

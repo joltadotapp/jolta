@@ -232,8 +232,7 @@ final class AppModel {
     var query: String {
         var parts = [source.query]
         if showsSections, let section { parts.append(section.query) }
-        parts.append(search.trimmingCharacters(in: .whitespaces))
-        return parts.filter { !$0.isEmpty }.joined(separator: " ")
+        return searchWithin(list: parts.filter { !$0.isEmpty }.joined(separator: " "), search: search.trimmingCharacters(in: .whitespaces))
     }
 
     init() throws {

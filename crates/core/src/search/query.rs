@@ -71,6 +71,12 @@ impl Query {
     }
 }
 
+/// The query a list runs while the user searches it: the list's own query
+/// and the search together.
+pub fn within(list: &str, search: &str) -> String {
+    [list, search].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
 struct Token {
     negated: bool,
     key: Option<String>,
