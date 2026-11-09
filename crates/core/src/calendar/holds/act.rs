@@ -243,6 +243,9 @@ pub struct Checked {
 /// Runs `decide` on every open set and applies what it says.
 pub fn check(conn: &Connection, blobs: &Blobs, now: DateTime<Utc>, horizon: &Horizon) -> Result<Checked> {
     let mut checked = Checked::default();
+    for id in super::adopt(conn, now, horizon.here)? {
+        checked.threads.extend(thread(conn, &store::hold_set(conn, &id)?)?);
+    }
     for set in store::hold_sets(conn)?.into_iter().filter(|s| s.sent.is_some() && s.is_open()) {
         let decisions = decide(&set, &seen(conn, blobs, &set, horizon.here)?, now);
         if !decisions.iter().any(|d| !matches!(d, Decision::Notice(_))) {
@@ -359,6 +362,8 @@ pub fn undo(conn: &Connection, id: &HoldSetId, releases: &[CalendarOpId], now: D
         }
         if op.state == OpState::Pending && !op.tried {
             ops::undo(conn, op_id, now.timestamp(), horizon)?;
+        } else if matches!(op.state, OpState::Failed | OpState::Conflict) {
+            // The delete never happened, and its event is back in the store.
         } else {
             let key = hold(conn, &calendar, &set, &mark, slot, now, horizon)?;
             store::refile_hold(conn, &set.id, &filed, &key)?;
@@ -714,6 +719,35 @@ mod tests {
         assert!(first.send_after > f.now.timestamp(), "tried again later");
         assert_eq!(check_at(&f, f.now + Duration::minutes(1)), Checked::default(), "its hold is still there meanwhile");
         assert_eq!(states(&f), [SlotState::Held; 3]);
+    }
+
+    #[test]
+    fn undo_after_a_delete_that_failed_for_good_makes_no_second_hold() {
+        let f = fixture("holds-undo-failed");
+        let id = pend(&f);
+        send(&f, &body(&f, &[0]));
+        let at = f.now + Duration::minutes(1);
+        f.j.store
+            .write(|tx| {
+                for op in store::claim_calendar_ops(tx, at.timestamp(), 10)? {
+                    ops::settle(tx, &op, Ok(ops::Sent::Done { version: None, merged: false }), at.timestamp(), &horizon(at))?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let notice = f.j.store.write(|tx| release(tx, &id, at, &horizon(at))).unwrap();
+        let later = at + Duration::minutes(1);
+        f.j.store
+            .write(|tx| {
+                let mut claimed = store::claim_calendar_ops(tx, later.timestamp(), 10)?;
+                claimed[0].attempts = ops::MAX_ATTEMPTS - 1;
+                ops::settle(tx, &claimed[0], Err("refused".into()), later.timestamp(), &horizon(later)).map(|_| ())
+            })
+            .unwrap();
+        assert_eq!(f.j.store.read(|c| store::hold_events(c, Some(&id))).unwrap().len(), 1, "the failed delete put the hold back");
+        f.j.store.write(|tx| undo(tx, &id, &notice.undo, later, &horizon(later))).unwrap();
+        assert_eq!(f.j.store.read(|c| store::hold_events(c, Some(&id))).unwrap().len(), 1, "and Undo makes no second one");
+        assert_eq!(states(&f), [SlotState::Held]);
     }
 
     #[test]

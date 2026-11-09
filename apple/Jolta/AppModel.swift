@@ -561,6 +561,8 @@ final class AppModel {
             reloadAccounts()
             listChanged()
             refreshOpenThread()
+            // A sent copy or a reply changes the holds line.
+            holdsRevision += 1
         case .syncStarted(let id):
             syncing.insert(id)
         case .syncFinished(let id):
@@ -607,6 +609,7 @@ final class AppModel {
             // sync or an accepted proposal changes them.
             listChanged()
             refreshOpenThread()
+            holdsRevision += 1
         case .calendarSynced:
             calendar.reloadCalendars()
         case .calendarOpFailed(let message, _):
