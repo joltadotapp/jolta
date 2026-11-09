@@ -124,9 +124,7 @@ fn plan(conn: &Connection, q: &Query) -> Result<Sql> {
     }
     // As on Gmail, mail in Trash or Spam shows only when the query names a
     // mailbox: `in:trash`, `in:anywhere`, or the Trash list itself.
-    let names_mailbox =
-        q.terms.iter().any(|t| !t.negated && matches!(t.kind, TermKind::In(_) | TermKind::Label(_) | TermKind::Mailbox(_)));
-    if !names_mailbox {
+    if !q.names_mailbox() {
         sql.conds.push(
             "m.id NOT IN (SELECT message_id FROM message_mailbox
                           WHERE mailbox_id IN (SELECT id FROM mailbox WHERE role IN ('trash', 'spam')))"
