@@ -838,13 +838,13 @@ final class Journeys: XCTestCase {
 
     /// Gmail's vacation responder is on. Jolta can read it but not change
     /// it, so the strip and Settings › Calendar offer Gmail's own settings
-    /// and no Edit or Turn off. The data folder's `away.json` stands in for Gmail.
+    /// and no Edit or Turn off. The account is made a Gmail one, and the
+    /// data folder's `away.json` stands in for Gmail's settings.
     func testGmailAutomaticRepliesOpenGmail() throws {
         let app = try launch()
         let strip = app.descendants(matching: .any).matching(identifier: "away-strip").firstMatch
         XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while Gmail's replies are on")
-        let opens = NSPredicate(format: "label BEGINSWITH 'Open '")
-        XCTAssertTrue(strip.buttons.matching(opens).firstMatch.exists, "the strip offers the provider's settings")
+        XCTAssertTrue(strip.buttons["Open Gmail settings"].exists, "the strip offers Gmail's settings")
         XCTAssertFalse(strip.buttons["Turn off"].exists, "and no Turn off")
         XCTAssertFalse(strip.buttons["Edit"].exists, "and no Edit")
 
@@ -855,7 +855,7 @@ final class Journeys: XCTestCase {
         let set = app.buttons["away-set"].firstMatch
         XCTAssertTrue(set.waitForExistence(timeout: 5), "Settings › Calendar shows Out of office")
         XCTAssertTrue(text(app, "On, with no end set.").waitForExistence(timeout: 5), "the account's row says the replies are on")
-        XCTAssertTrue(app.buttons.matching(opens).firstMatch.exists, "the row offers the provider's settings")
+        XCTAssertTrue(app.buttons["Open Gmail settings"].exists, "the row offers Gmail's settings")
         XCTAssertFalse(app.buttons["Turn off"].exists, "and no Turn off")
         app.typeKey("w", modifierFlags: .command)
     }

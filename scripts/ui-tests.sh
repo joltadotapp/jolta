@@ -86,6 +86,7 @@ for t in $TESTS; do
 		printf '{"me@test.invalid": {"automaticRepliesSetting": {"status": "alwaysEnabled", "externalAudience": "all"}}}' >"$dir/away.json"
 	fi
 	if [ "$t" = testGmailAutomaticRepliesOpenGmail ]; then
+		sqlite3 "$dir/jolta.sqlite" "UPDATE account SET kind = 'gmail'"
 		printf '{"me@test.invalid": {"vacation": {"enableAutoReply": true, "responseBodyPlainText": "Back on Monday."}}}' >"$dir/away.json"
 	fi
 	ONLY+=("-only-testing:JoltaUITests/Journeys/$t")
