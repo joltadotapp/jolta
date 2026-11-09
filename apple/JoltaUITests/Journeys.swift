@@ -836,6 +836,30 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(strip.waitForNonExistence(timeout: 5), "and the strip goes")
     }
 
+    /// Gmail's vacation responder is on. Jolta can read it but not change
+    /// it, so the strip and Settings › Calendar offer Gmail's own settings
+    /// and no Edit or Turn off. The data folder's `away.json` stands in for Gmail.
+    func testGmailAutomaticRepliesOpenGmail() throws {
+        let app = try launch()
+        let strip = app.descendants(matching: .any).matching(identifier: "away-strip").firstMatch
+        XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while Gmail's replies are on")
+        let opens = NSPredicate(format: "label BEGINSWITH 'Open '")
+        XCTAssertTrue(strip.buttons.matching(opens).firstMatch.exists, "the strip offers the provider's settings")
+        XCTAssertFalse(strip.buttons["Turn off"].exists, "and no Turn off")
+        XCTAssertFalse(strip.buttons["Edit"].exists, "and no Edit")
+
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("Calendar Settings")
+        XCTAssertTrue(paletteRow(app, "Calendar Settings").waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        let set = app.buttons["away-set"].firstMatch
+        XCTAssertTrue(set.waitForExistence(timeout: 5), "Settings › Calendar shows Out of office")
+        XCTAssertTrue(text(app, "On, with no end set.").waitForExistence(timeout: 5), "the account's row says the replies are on")
+        XCTAssertTrue(app.buttons.matching(opens).firstMatch.exists, "the row offers the provider's settings")
+        XCTAssertFalse(app.buttons["Turn off"].exists, "and no Turn off")
+        app.typeKey("w", modifierFlags: .command)
+    }
+
     /// ⌥-drag over empty time adds focus time there at once, with Undo in
     /// the toast. The palette's Focus time… opens the sheet at the next free
     /// two hours and says what the calendar gets: in the Work calendar,
