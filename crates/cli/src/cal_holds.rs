@@ -1,13 +1,107 @@
 //! `jolta cal holds`: hold sets with their slots, the hold events sync
 //! found for sets this Mac doesn't know, and with `--check` what `decide`
-//! makes of each open set now.
+//! makes of each open set now; `--release` and `--undo` act as the app's
+//! Release all and Undo. `jolta cal hold` and `jolta send --hold` make
+//! holds.
 
-use anyhow::Result;
-use chrono::{DateTime, Utc};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use jolta_core::Jolta;
-use jolta_core::calendar::holds::{self, Booking, Decision, Mark, Notice, Outcome, Release};
+use jolta_core::calendar::holds::act::{self, Notice as Said};
+use jolta_core::calendar::holds::{self, Booking, Decision, HoldSetId, Mark, Notice, Outcome, Release};
+use jolta_core::calendar::ops::CalendarOpId;
+use jolta_core::calendar::series::Horizon;
 use jolta_core::calendar::{Span, tz};
+use jolta_core::compose::{self, Compose};
 use jolta_core::store;
+
+/// The times `jolta send --hold` offers.
+pub struct Offered {
+    pub times: Vec<String>,
+    pub minutes: i64,
+}
+
+fn times(texts: &[String], minutes: i64) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
+    let here = tz::here();
+    texts
+        .iter()
+        .map(|t| {
+            let wall = chrono::NaiveDateTime::parse_from_str(t.trim(), "%Y-%m-%d %H:%M").with_context(|| format!("{t:?} is not a time like \"2026-11-10 16:00\""))?;
+            let start = tz::instant(wall, here);
+            Ok((start, start + Duration::minutes(minutes)))
+        })
+        .collect()
+}
+
+/// Puts the offered times in the message as Insert my availability does,
+/// one line each, and makes its draft's pending set.
+pub fn offer(jolta: &Jolta, c: &mut Compose, offered: &Offered) -> Result<()> {
+    let account = c.account.context("the message has no account")?;
+    let times = times(&offered.times, offered.minutes)?;
+    let here = tz::here();
+    let (text, lines) = act::text(&times, here, here);
+    c.body = format!("{}\n\n{text}\n", c.body.trim_end());
+    let picked: Vec<_> = times.into_iter().zip(lines).map(|((s, e), l)| (s, e, l)).collect();
+    let draft = jolta.store.write(|tx| {
+        let draft = store::save_draft(tx, c)?;
+        act::pending(tx, draft, account, &picked, Utc::now())?;
+        Ok(draft)
+    })?;
+    c.draft = Some(draft);
+    println!("draft {draft} offers {} times; they are held once it left", picked.len());
+    Ok(())
+}
+
+/// `jolta cal hold`: as if a message to `to` offering these times had just left.
+pub fn hold(jolta: &Jolta, account: &str, to: &str, subject: &str, slots: &[String], minutes: i64, message_id: Option<String>) -> Result<()> {
+    let a = jolta.store.read(|c| store::find_account(c, account))?;
+    let mut c = Compose { account: Some(a.id), to: to.into(), subject: subject.into(), ..Compose::default() };
+    offer(jolta, &mut c, &Offered { times: slots.to_vec(), minutes })?;
+    let built = compose::build(&a, &c, true)?;
+    let now = Utc::now();
+    let item = store::OutboxItem {
+        id: 0,
+        account: a.id,
+        draft: c.draft,
+        blob: String::new(),
+        message_id: message_id.unwrap_or(built.message_id),
+        sender: built.from,
+        recipients: built.recipients,
+        replying_to: None,
+        attempts: 0,
+    };
+    let made = jolta.store.write(|tx| {
+        let made = act::sent(tx, &item, &built.raw, now, &Horizon::around(now, tz::here()))?;
+        if let Some(d) = c.draft {
+            store::discard_draft(tx, d)?;
+        }
+        Ok(made)
+    })?;
+    match made {
+        Some(m) => println!("{}", Said::made(&m).text),
+        None => println!("Nothing to hold."),
+    }
+    Ok(())
+}
+
+fn set_id(text: &str) -> Result<HoldSetId> {
+    HoldSetId::parse(text).with_context(|| format!("{text} is no hold set id"))
+}
+
+pub fn release(jolta: &Jolta, set: &str) -> Result<()> {
+    let (id, now) = (set_id(set)?, Utc::now());
+    let notice = jolta.store.write(|tx| act::release(tx, &id, now, &Horizon::around(now, tz::here())))?;
+    let ops: Vec<String> = notice.undo.iter().map(|o| o.0.to_string()).collect();
+    println!("{}  (undo: jolta cal holds --undo {id} --op {})", notice.text, ops.join(" --op "));
+    Ok(())
+}
+
+pub fn undo(jolta: &Jolta, set: &str, ops: &[i64]) -> Result<()> {
+    let (id, now) = (set_id(set)?, Utc::now());
+    let ops: Vec<CalendarOpId> = ops.iter().copied().map(CalendarOpId).collect();
+    println!("{}", jolta.store.write(|tx| act::undo(tx, &id, &ops, now, &Horizon::around(now, tz::here())))?);
+    Ok(())
+}
 
 pub fn holds(jolta: &Jolta, check: bool) -> Result<()> {
     let (here, now) = (tz::here(), Utc::now());
@@ -24,6 +118,14 @@ pub fn holds(jolta: &Jolta, check: bool) -> Result<()> {
         println!("Set {}  \"{}\" to {}, account {}, calendar {}, {sent}{found}", set.id, set.subject, set.recipients.join(", "), set.account, set.calendar);
         for s in &set.slots {
             println!("  {:<9} {}  {}  {}", s.state.as_str(), times(s.start, s.end), s.remote_id.as_deref().unwrap_or("-"), s.line);
+        }
+        let thread = set.message_id.as_deref().map(|m| jolta.store.read(|c| store::sent_mail(c, m))).transpose()?.flatten().map(|m| m.thread);
+        if let Some(t) = thread
+            && let Some(l) = jolta.store.read(|c| act::line(c, &jolta.blobs, t, now, here))?
+            && l.set == set.id
+        {
+            let ask = l.ask.map(|a| format!("  {a}")).unwrap_or_default();
+            println!("  line on conversation {}: {}{ask}", t.0, l.title);
         }
         if !check || !set.is_open() {
             continue;

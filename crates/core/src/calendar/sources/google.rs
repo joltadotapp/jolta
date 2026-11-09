@@ -7,7 +7,7 @@
 
 mod add;
 mod freebusy;
-mod write;
+pub(crate) mod write;
 
 pub(crate) use write::{event_id, writable};
 

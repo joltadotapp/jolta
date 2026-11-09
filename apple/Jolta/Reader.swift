@@ -689,6 +689,11 @@ struct ReaderView: View {
             .padding(.horizontal, 56)
             .padding(.top, 30)
             .padding(.bottom, 16)
+            if let line = model.holdLine {
+                HoldsLineView(line: line, model: model)
+                    .padding(.horizontal, 56)
+                    .padding(.bottom, 12)
+            }
             ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
         }
@@ -717,6 +722,11 @@ struct ReaderView: View {
             if UserDefaults.standard.bool(forKey: "JoltaLoadImages"), imagesBlocked { loadImages() }
         }
         .onChange(of: thread.html) { render() }
+        .task(id: HoldsKey(thread: thread.threadId, revision: model.holdsRevision)) {
+            let line = try? model.core.holdsForThread(threadId: thread.threadId)
+            if line?.setId != model.holdLine?.setId { model.holdCursor = nil }
+            model.holdLine = line
+        }
         .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }
     }
 }
@@ -877,4 +887,97 @@ enum ReaderStyle {
     .jolta-invite-reply b { color: var(--tx); font-weight: 600; }
     .jolta-invite-about { margin-left: auto; color: var(--tx3); }
     """
+}
+
+private struct HoldsKey: Hashable {
+    let thread: Int64
+    let revision: Int
+}
+
+/// The times a sent mail in this conversation holds (C4 U10): booked ones
+/// marked, taken ones struck through, with Book (B) for the picked time
+/// and Release all.
+struct HoldsLineView: View {
+    let line: HoldLine
+    let model: AppModel
+
+    private var held: [HoldSlotRow] { line.slots.filter { $0.state == .held } }
+    private var cursor: HoldSlotRow? { held.first { $0.start == model.holdCursor } ?? held.first }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 2).fill(Color(CalendarColor.color(Self.hue, .bar))).frame(width: 8, height: 8)
+                Text(line.title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                Spacer(minLength: 8)
+                if let slot = cursor {
+                    Button { model.bookHold(slot) } label: {
+                        HStack(spacing: 5) {
+                            Text("Book \(Self.short(slot))")
+                            KeyCap(key: "B")
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                    .help("Open the event editor at this time with the people you wrote to")
+                    .accessibilityIdentifier("holds-book")
+                }
+                Button("Release all") { model.releaseHolds(line.setId) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(Theme.text2))
+                    .help("Delete every hold of this message from your calendar")
+                    .accessibilityIdentifier("holds-release")
+            }
+            if let ask = line.ask {
+                Text(ask).font(.system(size: 12)).foregroundStyle(Color(Theme.text2))
+            }
+            HStack(spacing: 6) {
+                ForEach(line.slots, id: \.start) { slot in
+                    chip(slot)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 720, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("holds-line")
+    }
+
+    /// The holds' own color, between the calendars' hues.
+    static let hue = "#8a7a5a"
+
+    private func chip(_ slot: HoldSlotRow) -> some View {
+        let current = slot.state == .held && slot.start == cursor?.start
+        return Button { model.holdCursor = slot.start } label: {
+            HStack(spacing: 5) {
+                if slot.state == .booked { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
+                Text(slot.label).strikethrough(slot.state == .taken)
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(Color(current || slot.state == .booked ? Theme.text : Theme.text2))
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(current ? Theme.accent : Theme.line), lineWidth: current ? 1.5 : 1))
+            .opacity(slot.state == .taken ? 0.5 : 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(slot.state != .held)
+        .help(slot.state == .taken ? "No longer free" : slot.state == .booked ? "Booked" : "Held")
+    }
+
+    /// "Tue 16:00".
+    private static func short(_ slot: HoldSlotRow) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "EEE HH:mm"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(slot.start)))
+    }
 }

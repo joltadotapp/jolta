@@ -332,6 +332,33 @@ pub enum CalCommand {
     Holds {
         #[arg(long)]
         check: bool,
+        /// Release every held time of this set, as Release all does.
+        #[arg(long, value_name = "SET")]
+        release: Option<String>,
+        /// Take back the releases of these calendar ops, as a toast's Undo does.
+        #[arg(long, value_name = "SET", requires = "ops")]
+        undo: Option<String>,
+        #[arg(long = "op")]
+        ops: Vec<i64>,
+    },
+    /// Hold times as if a message offering them had just left, for checks
+    /// without mail: one tentative, private "Hold: <subject>" event per
+    /// time in the account's calendar. Sent at once.
+    Hold {
+        account: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, default_value = "")]
+        subject: String,
+        /// "2026-11-10 16:00" on this Mac's clock.
+        #[arg(long = "slot", required = true)]
+        slots: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        minutes: i64,
+        /// The Message-ID of a stored sent mail the holds belong to, so its
+        /// conversation shows them.
+        #[arg(long)]
+        message_id: Option<String>,
     },
     /// Times everyone known is free for a meeting, as Find a time suggests
     /// them. Reads only.
@@ -455,7 +482,20 @@ pub enum OnOff {
 pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
     match cmd {
         CalCommand::NewLocal { name, color } => crate::cal_edit::new_local(jolta, &name, color.as_deref()),
-        CalCommand::Holds { check } => crate::cal_holds::holds(jolta, check),
+        CalCommand::Holds { release: Some(set), .. } => {
+            crate::cal_holds::release(jolta, &set)?;
+            send_calendar_ops(jolta).await
+        }
+        CalCommand::Holds { undo: Some(set), ops, .. } => {
+            crate::cal_holds::undo(jolta, &set, &ops)?;
+            send_calendar_ops(jolta).await
+        }
+        CalCommand::Holds { check, .. } => crate::cal_holds::holds(jolta, check),
+        CalCommand::Hold { account, to, subject, slots, minutes, message_id } => {
+            crate::cal_holds::hold(jolta, &account, &to, &subject, &slots, minutes, message_id)?;
+            send_calendar_ops(jolta).await?;
+            crate::cal_holds::holds(jolta, false)
+        }
         CalCommand::Create(a) => crate::cal_edit::create(jolta, a).await,
         CalCommand::Edit(a) => crate::cal_edit::edit(jolta, a).await,
         CalCommand::Copy(a) => crate::cal_edit::copy(jolta, a).await,
@@ -1321,7 +1361,7 @@ async fn add_focus(jolta: &Jolta, calendar: i64, start: &str, minutes: i64, decl
 }
 
 /// Sends the calendar ops due now, as the app's worker would.
-async fn send_calendar_ops(jolta: &Jolta) -> Result<()> {
+pub(crate) async fn send_calendar_ops(jolta: &Jolta) -> Result<()> {
     for settled in jolta_core::calendar::ops::run_due(jolta, Horizon::around(Utc::now(), tz::here())).await? {
         if let Some(f) = settled.failure {
             println!("{}", f.message);

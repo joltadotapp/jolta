@@ -68,6 +68,17 @@ for t in $TESTS; do
 	if [ "$t" = testInsertAvailabilityOnTheirClock ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/11-new-york.eml" >/dev/null
 	fi
+	if [ "$t" = testHoldAndRelease ]; then
+		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/11-new-york.eml" >/dev/null
+		"$JOLTA" --data-dir "$dir" import me@test.invalid sent "$FIXTURES/12-holds-sent.eml" >/dev/null
+		# Two days ahead that are Monday, Tuesday or Friday: the Work calendar's all-day summit takes Wednesday and Thursday.
+		days=()
+		for n in 1 2 3 4 5 6 7 8 9 10; do
+			case $(date -v+${n}d +%u) in 1|2|5) days+=("$(date -v+${n}d +%Y-%m-%d)") ;; esac
+		done
+		"$JOLTA" --data-dir "$dir" cal hold me@test.invalid --to 'Ann Berg <ann@test.invalid>' --subject 'Partnership call' --message-id '<ui-12@test.invalid>' \
+			--slot "${days[0]} 07:00" --slot "${days[1]} 07:00" >/dev/null
+	fi
 	if [ "$t" = testTurnOffAutomaticReplies ]; then
 		printf '{"me@test.invalid": {"automaticRepliesSetting": {"status": "alwaysEnabled", "externalAudience": "all"}}}' >"$dir/away.json"
 	fi

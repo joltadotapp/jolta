@@ -108,6 +108,12 @@ final class AppModel {
     /// Each account's last sync failure, until that account syncs again.
     private(set) var syncErrors: [Int64: String] = [:]
     var openThread: ThreadView?
+    /// The open conversation's holds line (C4 U10), and a count that
+    /// changes whenever holds change, so the reader reads it again.
+    var holdLine: HoldLine?
+    var holdsRevision = 0
+    /// The held time B books: the one picked on the line, else the first.
+    var holdCursor: Int64?
     /// How the open card's next answer goes out, and the answer going out now.
     var answerChoices = AnswerChoices()
     var pendingAnswer: InvitationAnswer?
@@ -555,6 +561,8 @@ final class AppModel {
             reloadAccounts()
             listChanged()
             refreshOpenThread()
+            // A sent copy or a reply changes the holds line.
+            holdsRevision += 1
         case .syncStarted(let id):
             syncing.insert(id)
         case .syncFinished(let id):
@@ -601,6 +609,7 @@ final class AppModel {
             // sync or an accepted proposal changes them.
             listChanged()
             refreshOpenThread()
+            holdsRevision += 1
         case .calendarSynced:
             calendar.reloadCalendars()
         case .calendarOpFailed(let message, _):
@@ -609,6 +618,9 @@ final class AppModel {
             show(Toast(text: message, undo: nil))
         case .awayChanged:
             reloadAway()
+        case .holdsChanged(_, let notice):
+            holdsRevision += 1
+            if let notice { showHolds(notice) }
         }
     }
 
@@ -717,6 +729,13 @@ final class AppModel {
             show(Toast(text: "Undone", undo: nil))
         case .calendar(let token):
             show(Toast(text: calendar.undo(token: token), undo: nil))
+        case .holds(let setId, let ops):
+            do {
+                show(Toast(text: try core.undoHoldRelease(setId: setId, ops: ops), undo: nil))
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+            holdsRevision += 1
         case .send(let token):
             if let back = try? core.cancelSend(token: token) {
                 compose = back
@@ -781,6 +800,49 @@ final class AppModel {
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
             }
+        }
+    }
+
+    /// Hold these times: one line per picked time goes into the message,
+    /// and the draft holds them once it is sent.
+    func insertHeldTimes(_ slots: [TimeSlot], account: Int64, zone: String?) {
+        do {
+            let text = try core.holdText(slots: slots, zone: zone)
+            insertIntoCompose(text)
+            saveDraft()
+            guard let draft = compose?.draftId else { return notify("Write the message first, then insert the times") }
+            try core.holdTimes(draftId: draft, accountId: account, slots: slots, zone: zone)
+        } catch {
+            notify("\(error)")
+        }
+    }
+
+    /// A holds toast: Undo takes back a release, Release releases new holds.
+    func showHolds(_ notice: HoldNotice) {
+        show(Toast(text: notice.text, undo: notice.undo.isEmpty ? nil : .holds(notice.setId, notice.undo), release: notice.release ? notice.setId : nil))
+    }
+
+    /// Release all on the holds line, or Release on the toast.
+    func releaseHolds(_ setId: String) {
+        do {
+            showHolds(try core.releaseHolds(setId: setId))
+            holdsRevision += 1
+        } catch {
+            notify("\(error)")
+        }
+    }
+
+    /// Book (B): the event editor at the held time with the recipients.
+    /// Saving the meeting books it, and Jolta releases the other holds.
+    func bookHold(_ slot: HoldSlotRow? = nil) {
+        let held = holdLine?.slots.filter { $0.state == .held } ?? []
+        guard let line = holdLine, let slot = slot ?? held.first(where: { $0.start == holdCursor }) ?? held.first else {
+            return notify("No held time to book in this conversation")
+        }
+        do {
+            openInvite(try core.bookHold(setId: line.setId, start: slot.start))
+        } catch {
+            notify("\(error)")
         }
     }
 
@@ -917,7 +979,7 @@ final class AppModel {
         self.toast = toast
         let id = toast.id
         Task {
-            try? await Task.sleep(for: .seconds(toast.review != nil ? 12 : toast.undo == nil ? 3 : 6))
+            try? await Task.sleep(for: .seconds(toast.review != nil ? 12 : toast.undo == nil && toast.release == nil ? 3 : 6))
             if self.toast?.id == id { self.toast = nil }
         }
     }
@@ -1013,6 +1075,8 @@ struct Toast: Equatable {
         case calendar(Int64)
         /// Set these senders' VIP mark back to this.
         case vips([String], Bool)
+        /// Bring back the holds of a set that these calendar ops release.
+        case holds(String, [Int64])
     }
 
     let id = UUID()
@@ -1020,6 +1084,8 @@ struct Toast: Equatable {
     let undo: Undo?
     /// A draft to open for review (an agent wrote it).
     var review: Int64?
+    /// A hold set the toast's Release releases.
+    var release: String?
 }
 
 /// Receives core events on the core's threads and hands them to the main actor.

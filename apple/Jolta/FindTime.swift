@@ -77,6 +77,13 @@ struct FindTimePanel: View {
     @State private var theirOff: [TimeSlot] = []
     /// Picking waits for the clock, so the times never go in on the wrong one.
     @State private var lookingUpZone = false
+    /// Hold these times (H): the panel offers slots of the length, Space
+    /// picks up to five, and Return inserts one line per picked time, held
+    /// as tentative events once the message leaves.
+    @State private var holding = false
+    @State private var picked: [FindTimeSlot] = []
+    /// Where the holds would go, or why they can't.
+    @State private var holdChoice: HoldChoice?
     @FocusState private var focused: Bool
 
     private static let lengths: [Int64] = [15, 30, 45, 60, 90]
@@ -87,6 +94,11 @@ struct FindTimePanel: View {
     private var forAvailability: Bool {
         if case .availability = request.purpose { true } else { false }
     }
+
+    /// Insert my availability lists free stretches unless it holds times.
+    private var listsStretches: Bool { forAvailability && !holding }
+
+    private static let maxHolds = 5
 
     private var title: String {
         switch request.purpose {
@@ -101,7 +113,7 @@ struct FindTimePanel: View {
         switch request.purpose {
         case .reply: "Reply with this time"
         case .propose: "Use this time"
-        case .availability: "Insert these times"
+        case .availability: holding ? (picked.count == 1 ? "Insert 1 time" : "Insert \(picked.count) times") : "Insert these times"
         case .editor: "Use this time"
         }
     }
@@ -150,7 +162,8 @@ struct FindTimePanel: View {
             Task { await loadZone() }
             await load()
         }
-        .onChange(of: minutes) { suggest() }
+        .onChange(of: minutes) { picked = []; suggest() }
+        .onChange(of: holding) { suggest() }
         .onChange(of: theirHours) { suggest() }
         .onChange(of: rooms) { suggest() }
     }
@@ -181,6 +194,16 @@ struct FindTimePanel: View {
             .onKeyPress(keys: [KeyEquivalent("o")]) { _ in
                 guard showsHoursToggle else { return .ignored }
                 theirHours.toggle()
+                return .handled
+            }
+            .onKeyPress(keys: [KeyEquivalent("h")]) { _ in
+                guard forAvailability else { return .ignored }
+                toggleHolding()
+                return .handled
+            }
+            .onKeyPress(.space) {
+                guard holding else { return .ignored }
+                togglePick()
                 return .handled
             }
             .accessibilityIdentifier("find-time-keys")
@@ -448,7 +471,8 @@ struct FindTimePanel: View {
             }
             .padding(.bottom, FindTimeSlots.tickRoom)
             .overlay(alignment: .topLeading) {
-                FindTimeSlots(days: info.days, slots: slots, selected: forAvailability ? nil : selected)
+                FindTimeSlots(days: info.days, slots: slots, selected: listsStretches ? nil : selected,
+                              picked: holding ? Set(picked.map(\.start)) : nil)
                     .padding(.leading, nameWidth)
                     .allowsHitTesting(false)
             }
@@ -460,7 +484,10 @@ struct FindTimePanel: View {
     private var footer: some View {
         HStack(spacing: 12) {
             if case .ready = phase {
-                if forAvailability {
+                if holding {
+                    Text(picked.isEmpty ? "Pick up to \(Self.maxHolds) times" : picked.count == 1 ? "1 time picked" : "\(picked.count) times picked")
+                        .foregroundStyle(Color(Theme.text2))
+                } else if forAvailability {
                     Text(slots.isEmpty ? "No free time in the next \(Self.days) working days" : "\(slots.count) free times in the next \(Self.days) working days")
                         .foregroundStyle(Color(Theme.text2))
                 } else if slots.indices.contains(selected) {
@@ -475,8 +502,10 @@ struct FindTimePanel: View {
                     Text("No time in the next \(Self.days) working days suits everyone").foregroundStyle(Color(Theme.text2))
                 }
             }
+            if forAvailability { holdToggle }
             Spacer(minLength: 8)
-            hint("↑↓", forAvailability ? nil : "Move")
+            hint("↑↓", listsStretches ? nil : "Move")
+            hint("Space", holding ? "Pick" : nil)
             hint("− +", "Length")
             Button { pick() } label: {
                 HStack(spacing: 5) {
@@ -491,7 +520,7 @@ struct FindTimePanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone)
+            .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone || (holding && picked.isEmpty))
             .accessibilityIdentifier("find-time-pick")
             if invites {
                 Button { invite() } label: {
@@ -518,6 +547,23 @@ struct FindTimePanel: View {
         .frame(height: 44)
     }
 
+    /// "Hold these times" with H, or why the account's times can't be held.
+    private var holdToggle: some View {
+        let reason = holdChoice?.reason
+        return HStack(spacing: 6) {
+            Toggle("Hold these times", isOn: Binding(get: { holding }, set: { _ in toggleHolding() }))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .disabled(holdChoice == nil || reason != nil)
+                .accessibilityIdentifier("find-time-hold")
+            Text("Hold these times").foregroundStyle(Color(reason == nil ? Theme.text2 : Theme.text3))
+            KeyCap(key: "H")
+        }
+        .fixedSize()
+        .help(reason ?? "Hold the picked times as tentative events in \(holdChoice?.calendar ?? "your calendar") once the message leaves, until someone books one (H)")
+    }
+
     @ViewBuilder private func hint(_ keys: String, _ label: String?) -> some View {
         if let label {
             HStack(spacing: 4) {
@@ -531,6 +577,9 @@ struct FindTimePanel: View {
 
     private func load() async {
         phase = .loading
+        if case .availability(let account, _) = request.purpose {
+            holdChoice = try? model.core.holdChoice(accountId: account)
+        }
         defer { focused = true }
         do {
             let outcome = switch request.purpose {
@@ -577,14 +626,14 @@ struct FindTimePanel: View {
 
     private func suggest() {
         guard case .ready(let info) = phase else { return }
-        slots = (forAvailability
+        slots = (listsStretches
             ? try? model.core.freeTimes(info: info, minutes: minutes)
-            : try? model.core.findTimeSlots(info: withRooms(info), minutes: minutes, respectOthersHours: theirHours)) ?? []
+            : try? model.core.findTimeSlots(info: withRooms(info), minutes: minutes, respectOthersHours: forAvailability ? false : theirHours)) ?? []
         selected = slots.isEmpty ? 0 : min(selected, slots.count - 1)
     }
 
     private func move(_ delta: Int) {
-        guard !slots.isEmpty, !forAvailability else { return }
+        guard !slots.isEmpty, !listsStretches else { return }
         selected = max(0, min(slots.count - 1, selected + delta))
     }
 
@@ -599,6 +648,29 @@ struct FindTimePanel: View {
         model.findTime = nil
     }
 
+    private func toggleHolding() {
+        guard holdChoice?.reason == nil, holdChoice != nil else {
+            return model.notify(holdChoice?.reason ?? "Jolta can't hold times for this account")
+        }
+        holding.toggle()
+        picked = []
+        selected = 0
+    }
+
+    /// Space: picks the time under the cursor, or drops it.
+    private func togglePick() {
+        guard slots.indices.contains(selected) else { return }
+        let slot = slots[selected]
+        if let i = picked.firstIndex(where: { $0.start == slot.start }) {
+            picked.remove(at: i)
+        } else if picked.count < Self.maxHolds {
+            picked.append(slot)
+            picked.sort { $0.start < $1.start }
+        } else {
+            model.notify("Jolta holds up to \(Self.maxHolds) times for one message")
+        }
+    }
+
     private func pick() {
         guard case .ready(let info) = phase, !slots.isEmpty, pendingRooms == 0, !lookingUpZone else { return }
         let slot = slots[min(selected, slots.count - 1)]
@@ -610,6 +682,10 @@ struct FindTimePanel: View {
             close()
             model.proposedSlot = TimeSlot(start: slot.start, end: slot.end)
             if case .propose = model.rsvpPanel {} else { model.proposeFor = message }
+        case .availability(let account, _) where holding:
+            guard !picked.isEmpty else { return }
+            close()
+            model.insertHeldTimes(picked.map { TimeSlot(start: $0.start, end: $0.end) }, account: account, zone: theirZone?.zone.zone)
         case .availability:
             guard let text = try? model.core.availabilityText(info: info, minutes: minutes, zone: theirZone?.zone.zone) else { return }
             close()
@@ -762,6 +838,9 @@ struct FindTimeSlots: View {
     let slots: [FindTimeSlot]
     /// None in Insert my availability, where every free time goes in.
     let selected: Int?
+    /// Hold these times: the starts of the picked slots. Every slot is a
+    /// candidate box, the picked ones tinted and ticked, the cursor ringed.
+    var picked: Set<Int64>? = nil
 
     static let tickRoom: CGFloat = 6
 
@@ -787,7 +866,18 @@ struct FindTimeSlots: View {
                 column.size.height -= Self.tickRoom
                 for (n, s) in slots.enumerated() {
                     guard let r = Self.span(s.start, s.end, day: day, column: column) else { continue }
-                    if selected == nil {
+                    if let picked {
+                        let box = Path(roundedRect: r, cornerRadius: 4)
+                        let on = picked.contains(s.start)
+                        context.fill(box, with: .color(on ? accent.opacity(0.2) : neutral))
+                        context.stroke(Path(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 3.5), with: .color(on ? accent : Color(Theme.line)), lineWidth: on ? 1.5 : 1)
+                        if on {
+                            context.draw(Text("✓").font(.system(size: 10, weight: .bold)).foregroundStyle(accent), at: CGPoint(x: r.midX, y: r.midY))
+                        }
+                        if n == selected {
+                            context.stroke(Path(roundedRect: r.insetBy(dx: -2, dy: -2), cornerRadius: 5.5), with: .color(accent), lineWidth: 2)
+                        }
+                    } else if selected == nil {
                         context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(neutral))
                     } else if n == selected {
                         context.fill(Path(roundedRect: r, cornerRadius: 4), with: .color(accent.opacity(0.26)))

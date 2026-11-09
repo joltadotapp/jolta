@@ -85,7 +85,7 @@ fn encode(id: &str) -> String {
 /// The account's calendar for new meetings: the default calendar when it is
 /// the account's, else its own shown calendar that takes new events, else a
 /// hidden one, before any other account's.
-fn account_calendar(conn: &Connection, account: AccountId) -> Result<Option<Calendar>> {
+pub(crate) fn account_calendar(conn: &Connection, account: AccountId) -> Result<Option<Calendar>> {
     let address = store::account(conn, account)?.address;
     let writable: Vec<Calendar> = store::account_calendars(conn, account)?.into_iter().filter(|c| caps::of(c).writable && c.is_own(&address)).collect();
     Ok(writable.iter().find(|c| c.is_default).or_else(|| writable.iter().find(|c| c.shown)).or(writable.first()).cloned())

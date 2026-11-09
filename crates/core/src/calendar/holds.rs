@@ -25,6 +25,8 @@ use crate::blobs::Blobs;
 use crate::{AccountId, Result, compose, store};
 use crate::model::text_enum;
 
+pub mod act;
+
 pub(crate) const GOOGLE_HOLD: &str = "joltaHold";
 pub(crate) const GOOGLE_MESSAGE: &str = "joltaHoldMessage";
 /// Graph's ids for the two properties, under a GUID of Jolta's own.
@@ -41,6 +43,16 @@ const AWAY: &str = "away";
 pub struct HoldSetId(String);
 
 impl HoldSetId {
+    /// A new random (version 4) UUID.
+    pub fn new() -> Result<HoldSetId> {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).map_err(|e| crate::Error::Other(format!("no randomness: {e}")))?;
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        let h = hex::encode(b);
+        Ok(HoldSetId(format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])))
+    }
+
     pub fn parse(text: &str) -> Option<HoldSetId> {
         let text = text.trim().to_ascii_lowercase();
         let uuid = text.len() == 36
@@ -195,6 +207,9 @@ pub struct HoldSet {
     pub calendar: CalendarId,
     /// When the mail left.
     pub sent: Option<DateTime<Utc>>,
+    /// The user took back the release that followed a booking: a slot
+    /// booked before no longer releases the others.
+    pub kept: bool,
     pub slots: Vec<HeldSlot>,
 }
 
@@ -366,7 +381,8 @@ pub fn decide(set: &HoldSet, seen: &Seen, now: DateTime<Utc>) -> Vec<Decision> {
         outcomes.push((slot.start, booking.map(Outcome::Booked), at));
     }
 
-    let booked = set.slots.iter().any(|s| s.state == SlotState::Booked) || outcomes.iter().any(|(_, o, _)| matches!(o, Some(Outcome::Booked(_))));
+    let booked_before = !set.kept && set.slots.iter().any(|s| s.state == SlotState::Booked);
+    let booked = booked_before || outcomes.iter().any(|(_, o, _)| matches!(o, Some(Outcome::Booked(_))));
     for (_, outcome, at) in outcomes.iter_mut() {
         if outcome.is_some() {
             continue;
@@ -450,9 +466,23 @@ pub fn seen(conn: &Connection, blobs: &Blobs, set: &HoldSet, here: Tz) -> Result
     let (from, to) = (first.with_timezone(&here).date_naive(), last.with_timezone(&here).date_naive() + Duration::days(8));
     let (start, end) = instants(&Span::AllDay { start: from, end: to }, here);
     let window = Window { start, end };
+    let mut organizers: HashMap<CalendarId, Option<String>> = HashMap::new();
     for o in store::occurrences(conn, from, to, here)? {
         let (Some(b), Some(e)) = (freebusy::stored_busy(&o, here), store::event_data(conn, o.event_id)?) else { continue };
-        let (people, mine) = people(&e);
+        let (mut people, mine) = people(&e);
+        // A meeting Jolta made has no organizer until its op leaves the
+        // undo window: the account its calendar belongs to will be.
+        if e.organizer.is_none() && e.attendees.iter().any(|a| !a.is_me) {
+            let organizer = match organizers.get(&o.calendar_id) {
+                Some(known) => known.clone(),
+                None => {
+                    let address = store::calendar_address(conn, &store::calendar(conn, o.calendar_id)?)?;
+                    organizers.insert(o.calendar_id, address.clone());
+                    address
+                }
+            };
+            people.extend(organizer);
+        }
         if own.contains(&o.calendar_id) {
             seen.me.extend(mine);
         }
@@ -509,7 +539,7 @@ pub fn adopt(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Vec<Hold
         }
         slots.sort_by_key(|s| s.start);
         let recipients = compose::parse_addresses(&mail.to).into_iter().chain(compose::parse_addresses(&mail.cc)).map(|(_, a)| a).collect();
-        let set = HoldSet { id: id.clone(), account: mail.account, message_id: message, draft: None, recipients, subject: mail.subject, calendar, sent: Some(mail.date), slots };
+        let set = HoldSet { id: id.clone(), account: mail.account, message_id: message, draft: None, recipients, subject: mail.subject, calendar, sent: Some(mail.date), kept: false, slots };
         store::insert_hold_set(conn, &set, now)?;
         adopted.push(id);
     }
@@ -541,6 +571,7 @@ mod tests {
             subject: "Planning".into(),
             calendar: CalendarId(1),
             sent: Some(t("2026-11-09 09:00")),
+            kept: false,
             slots: SLOTS
                 .iter()
                 .map(|(id, s, e)| HeldSlot { start: t(s), end: t(e), line: format!("{s} to {e}"), state: SlotState::Held, remote_id: Some(id.to_string()) })
@@ -857,6 +888,40 @@ mod tests {
             let set = HoldSet { recipients: vec!["me2@example.net".into()], ..set() };
             let seen = j.store.read(|c| super::super::seen(c, &j.blobs, &set, Brussels)).unwrap();
             assert_eq!(seen.me, [ME]);
+            let booked = Outcome::Booked(Booking::Event { by: "me2@example.net".into() });
+            assert_eq!(outcomes(&decide(&set, &seen, now())), [("h1", booked), ("h2", OTHERS_RELEASED), ("h3", OTHERS_RELEASED)]);
+            let _ = std::fs::remove_dir_all(&j.data_dir);
+        }
+
+        /// A meeting another of the user's accounts made in Jolta has no
+        /// organizer until its op leaves the undo window; its calendar's
+        /// account is the one that books, not something that takes the time.
+        #[test]
+        fn a_meeting_in_its_undo_window_is_booked_by_its_calendars_account() {
+            let (j, work) = jolta("holds-window");
+            let google = j
+                .store
+                .write(|tx| {
+                    tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'gmail', 'me2@example.net', 'me2', 'a2', 0, 1);")?;
+                    let primary = store::RemoteCalendar {
+                        remote_id: "me2@example.net".into(),
+                        name: "me2@example.net".into(),
+                        color: None,
+                        zone: None,
+                        access: Access::Owner,
+                        primary: true,
+                        refresh: None,
+                        video: None,
+                    };
+                    Ok(store::sync_calendar_list(tx, AccountId(2), CalendarSource::Google, &[primary])?[0].id)
+                })
+                .unwrap();
+            holds(&j, work, "<m1@example.com>");
+            let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:new@jolta.app\r\nDTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+            let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap(), Brussels);
+            j.store.write(|tx| store::apply_item(tx, google, "new", None, &ical::read(ics, &["me2@example.net".into()])?, None, &horizon)).unwrap();
+            let set = HoldSet { recipients: vec!["me2@example.net".into()], ..set() };
+            let seen = j.store.read(|c| super::super::seen(c, &j.blobs, &set, Brussels)).unwrap();
             let booked = Outcome::Booked(Booking::Event { by: "me2@example.net".into() });
             assert_eq!(outcomes(&decide(&set, &seen, now())), [("h1", booked), ("h2", OTHERS_RELEASED), ("h3", OTHERS_RELEASED)]);
             let _ = std::fs::remove_dir_all(&j.data_dir);

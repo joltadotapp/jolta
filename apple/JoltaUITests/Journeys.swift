@@ -877,6 +877,9 @@ final class Journeys: XCTestCase {
     /// and shades their working day under the user's row.
     func testInsertAvailabilityOnTheirClock() throws {
         let app = try launch()
+        app.typeKey("g", modifierFlags: [])
+        app.typeKey("i", modifierFlags: [])
+        XCTAssertTrue(text(app, "Dana Reyes").waitForExistence(timeout: 5), "G I shows the inbox")
         text(app, "Dana Reyes").click()
         app.typeKey("r", modifierFlags: [])
         let message = app.textViews.firstMatch
@@ -897,6 +900,71 @@ final class Journeys: XCTestCase {
         let body = message.value as? String ?? ""
         XCTAssertTrue(body.contains("I'm free at these times (New York time):"), "the text names their zone")
         XCTAssertTrue(body.contains("(EST): ") || body.contains("(EDT): "), "each day on New York's clock")
+    }
+
+    /// Hold these times: in Insert my availability H turns on picking, Space
+    /// picks two times and Return inserts one line for each. A conversation
+    /// whose sent mail holds times shows them above its messages: B opens
+    /// the editor at the held time with the person written to, Release all
+    /// releases them with Undo, and Z brings them back.
+    func testHoldAndRelease() throws {
+        let app = try launch()
+        app.typeKey("g", modifierFlags: [])
+        app.typeKey("t", modifierFlags: [])
+        XCTAssertTrue(text(app, "Partnership call").waitForExistence(timeout: 5), "G T shows Sent")
+        text(app, "Partnership call").click()
+        let line = app.descendants(matching: .any).matching(identifier: "holds-line").firstMatch
+        XCTAssertTrue(line.waitForExistence(timeout: 10), "the conversation shows the times its mail holds")
+        XCTAssertTrue(text(app, "Holding 2 times for this conversation").exists)
+
+        app.typeKey("b", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "B opens the editor")
+        XCTAssertEqual(title.value as? String, "Partnership call", "titled after the conversation")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "person-chip").count, 1, "with the person written to")
+        XCTAssertEqual(app.textFields["editor-start"].value as? String, "07:00", "at the first held time")
+        app.typeKey(.escape, modifierFlags: [])
+        let discard = app.buttons["Discard"]
+        if discard.waitForExistence(timeout: 3) { discard.click() }
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+        app.typeKey("1", modifierFlags: .command)
+
+        XCTAssertTrue(line.waitForExistence(timeout: 10))
+        app.buttons["holds-release"].click()
+        XCTAssertTrue(text(app, "Released 2 holds.").waitForExistence(timeout: 5), "Release all says what it did")
+        XCTAssertTrue(line.waitForNonExistence(timeout: 5), "and the line goes")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(text(app, "The 2 holds are back.").waitForExistence(timeout: 5), "Z brings them back")
+        XCTAssertTrue(line.waitForExistence(timeout: 5), "with the line")
+
+        app.typeKey("g", modifierFlags: [])
+        app.typeKey("i", modifierFlags: [])
+        XCTAssertTrue(text(app, "Dana Reyes").waitForExistence(timeout: 5), "G I shows the inbox")
+        text(app, "Dana Reyes").click()
+        app.typeKey("r", modifierFlags: [])
+        let message = app.textViews.firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 5), "R opens a reply")
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
+        app.typeText("Insert my availability")
+        XCTAssertTrue(paletteRow(app, "Insert my availability").waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        let hold = app.descendants(matching: .any).matching(identifier: "find-time-hold").firstMatch
+        XCTAssertTrue(hold.waitForExistence(timeout: 10), "the panel offers Hold these times")
+        let pick = app.descendants(matching: .any).matching(identifier: "find-time-pick").firstMatch
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: pick)], timeout: 10)
+        app.typeKey("h", modifierFlags: [])
+        XCTAssertTrue(text(app, "Pick up to 5 times").waitForExistence(timeout: 5), "H turns on picking")
+        XCTAssertFalse(pick.isEnabled, "nothing to insert before a pick")
+        app.typeKey(.space, modifierFlags: [])
+        app.typeKey(.rightArrow, modifierFlags: [])
+        app.typeKey(.space, modifierFlags: [])
+        XCTAssertTrue(text(app, "2 times picked").waitForExistence(timeout: 5), "Space picks")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(hold.waitForNonExistence(timeout: 5), "Return inserts the times")
+        let body = message.value as? String ?? ""
+        XCTAssertTrue(body.contains("I'm free at these times"), "under the usual heading")
+        XCTAssertEqual(body.components(separatedBy: " to ").count - 1, 2, "one line per picked time")
     }
 
     /// R in Find a time opens the room picker, which offers the room of a

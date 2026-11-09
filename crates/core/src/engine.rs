@@ -74,6 +74,9 @@ pub enum Event {
     /// File responses automatically archived replies with this op, which
     /// `undo` takes back; `text` is the toast's.
     ResponsesFiled { op: OpId, text: String },
+    /// Holds changed: the line of these conversations, and what the user
+    /// hears, if anything (C4 U10).
+    Holds { threads: Vec<ThreadId>, notice: Option<crate::calendar::holds::act::Notice> },
 }
 
 pub type Sink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -320,6 +323,7 @@ impl Engine {
     pub fn discard_draft(&self, id: i64) -> Result<()> {
         let account = self.jolta.store.write(|tx| {
             store::discard_draft(tx, id)?;
+            crate::calendar::holds::act::discarded(tx, id)?;
             Ok(tx.query_row("SELECT account_id FROM draft WHERE id = ?1", [id], |r| r.get::<_, Option<AccountId>>(0))?)
         })?;
         if let Some(a) = account {
@@ -553,6 +557,10 @@ impl Engine {
         }
         self.read_replies(account.id).await;
         self.file_responses(account.id).await;
+        // A reply or an invitation may book a held time.
+        if !report.new_messages.is_empty() {
+            self.calendars.check_holds();
+        }
         self.announce(account.id, report.new_messages, started).await
     }
 
@@ -649,10 +657,19 @@ impl Engine {
             match result {
                 Ok(()) => {
                     let done = item.clone();
-                    self.jolta
+                    let mail = raw.clone();
+                    let made = self
+                        .jolta
                         .store
                         .write_async(move |tx| {
                             store::outbox_sent(tx, &done)?;
+                            let now = chrono::Utc::now();
+                            let horizon = crate::calendar::series::Horizon::around(now, crate::calendar::tz::here());
+                            // A failure to hold must not make a sent message look unsent.
+                            let made = crate::calendar::holds::act::sent(tx, &done, &mail, now, &horizon).unwrap_or_else(|e| {
+                                tracing::warn!("the message's times weren't held: {e}");
+                                None
+                            });
                             if let Some(original) = done.replying_to {
                                 let kind = store::OpKind::Flags { add: Flags::ANSWERED, remove: 0 };
                                 let changed = store::apply_local(tx, &kind, &[original])?;
@@ -660,11 +677,15 @@ impl Engine {
                                     store::insert_op(tx, done.account, &kind, &changed)?;
                                 }
                             }
-                            Ok(())
+                            Ok(made)
                         })
                         .await?;
                     let subject = mime::parse_envelope(&raw).subject;
                     (self.sink)(Event::Sent { account: account_id, subject });
+                    if let Some(made) = made {
+                        self.calendars.ops_queued();
+                        (self.sink)(Event::Holds { threads: Vec::new(), notice: Some(crate::calendar::holds::act::Notice::made(&made)) });
+                    }
                     sent.push(item);
                 }
                 Err(e) => {

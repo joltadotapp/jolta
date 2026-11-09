@@ -521,7 +521,7 @@ struct ListColumn: View {
                 }
                 .overlay(alignment: .bottom) {
                     if let toast = model.toast {
-                        ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) })
+                        ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) }, release: { model.releaseHolds($0) })
                             .padding(.bottom, 14)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
@@ -703,6 +703,7 @@ struct ToastView: View {
     let toast: Toast
     let undo: () -> Void
     var review: (Int64) -> Void = { _ in }
+    var release: (String) -> Void = { _ in }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -715,6 +716,13 @@ struct ToastView: View {
             }
             if let draft = toast.review {
                 Button("Review") { review(draft) }.buttonStyle(.plain).fontWeight(.medium)
+            }
+            if let set = toast.release {
+                Button("Release") { release(set) }
+                    .buttonStyle(.plain)
+                    .fontWeight(.medium)
+                    .help("Release these holds now")
+                    .accessibilityIdentifier("toast-release")
             }
         }
         .font(.system(size: 12.5))

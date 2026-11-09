@@ -339,7 +339,8 @@ pub fn wait_offline_calendar_op(conn: &Connection, id: CalendarOpId, error: &str
     Ok(())
 }
 
-/// Keeps a waiting op from being sent before `until`, for `jolta cal … --hold`.
+/// Keeps a waiting op from being sent before `until`: a hold's release
+/// waits the undo window, and `jolta cal … --hold` longer.
 pub fn hold_calendar_op(conn: &Connection, id: CalendarOpId, until: i64) -> Result<()> {
     conn.execute("UPDATE calendar_op SET send_after = max(send_after, ?2) WHERE id = ?1 AND state = 'pending'", params![id.0, until])?;
     Ok(())

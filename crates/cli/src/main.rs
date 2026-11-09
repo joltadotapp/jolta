@@ -95,6 +95,14 @@ enum Command {
         all: bool,
         #[arg(long)]
         attach: Vec<PathBuf>,
+        /// Offer and hold this time, as Insert my availability with Hold
+        /// these times does: "2026-11-10 16:00" on this Mac's clock. The
+        /// holds are made once the message left.
+        #[arg(long = "hold")]
+        holds: Vec<String>,
+        /// The length of each held time.
+        #[arg(long, default_value_t = 30)]
+        minutes: i64,
     },
     /// Run the engine and the MCP server on a Unix socket (for testing agents).
     McpServe {
@@ -426,8 +434,8 @@ async fn main() -> Result<()> {
         Command::Empty { mailbox, no_wait: false } => {
             list_action(&jolta, |engine| Ok(engine.empty(&[jolta_core::MailboxId(mailbox)]).map(|_| 1)?)).await
         }
-        Command::Send { account, to, subject, body, reply, all, attach } => {
-            send(&jolta, &account, to, subject, body, reply, all, attach).await
+        Command::Send { account, to, subject, body, reply, all, attach, holds, minutes } => {
+            send(&jolta, &account, to, subject, body, reply, all, attach, cal_holds::Offered { times: holds, minutes }).await
         }
     }
 }
@@ -506,6 +514,7 @@ async fn send(
     reply: Option<i64>,
     all: bool,
     attach: Vec<PathBuf>,
+    offered: cal_holds::Offered,
 ) -> Result<()> {
     use jolta_core::compose::{self, AttachmentFile, Compose, ReplyKind};
     let a = jolta.store.read(|c| store::find_account(c, account))?;
@@ -523,7 +532,14 @@ async fn send(
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         c.attachments.push(AttachmentFile { name, mime_type: "application/octet-stream".into(), path: path.display().to_string() });
     }
-    send_compose(jolta, &c).await
+    if !offered.times.is_empty() {
+        cal_holds::offer(jolta, &mut c, &offered)?;
+    }
+    send_compose(jolta, &c).await?;
+    if !offered.times.is_empty() {
+        cal_holds::holds(jolta, false)?;
+    }
+    Ok(())
 }
 
 /// Sends `c` through the engine as the app's Send does, and waits until it left.

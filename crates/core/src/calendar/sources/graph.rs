@@ -16,7 +16,7 @@ pub(crate) use add::pattern;
 mod away;
 mod freebusy;
 mod rooms;
-mod write;
+pub(crate) mod write;
 
 pub use rooms::directory;
 

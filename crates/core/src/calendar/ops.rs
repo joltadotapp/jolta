@@ -1205,6 +1205,7 @@ pub fn settle(conn: &Connection, op: &CalendarOp, sent: std::result::Result<Sent
             land(conn, op, version.as_ref(), !merged, horizon)?;
             if let Some((v, _)) = &version {
                 notice = super::focus::landed(conn, op, &v.events, calendar.account_id, now)?.map(str::to_string);
+                super::holds::act::landed(conn, op, &v.remote_id)?;
             }
         }
         Ok(Sent::Conflict { version, lost }) => {
