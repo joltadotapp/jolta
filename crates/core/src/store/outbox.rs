@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::Result;
-use crate::compose::{AttachmentFile, Compose};
+use crate::compose::{AttachmentFile, Compose, ImageSize};
 use crate::model::*;
 
 fn now() -> i64 {
@@ -30,18 +30,18 @@ pub fn save_draft(conn: &Connection, c: &Compose) -> Result<i64> {
             conn.execute(
                 "UPDATE draft SET account_id = ?2, to_addrs = ?3, cc_addrs = ?4, bcc_addrs = ?5, subject = ?6,
                    body = ?7, in_reply_to = ?8, refs = ?9, replying_to = ?10, attachments = ?11,
-                   state = 'editing', dirty = 1, updated = ?12
+                   state = 'editing', dirty = 1, updated = ?12, image_size = ?13
                  WHERE id = ?1",
-                params![id, c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now()],
+                params![id, c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name()],
             )?;
             Ok(id)
         }
         None => {
             conn.execute(
                 "INSERT INTO draft (account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs,
-                                    replying_to, attachments, dirty, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)",
-                params![c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now()],
+                                    replying_to, attachments, dirty, updated, image_size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12)",
+                params![c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name()],
             )?;
             Ok(conn.last_insert_rowid())
         }
@@ -61,12 +61,12 @@ fn draft_row(r: &Row) -> rusqlite::Result<Compose> {
         references: r.get::<_, String>(8)?.split_whitespace().map(str::to_string).collect(),
         replying_to: r.get(9)?,
         attachments: decode_attachments(&r.get::<_, String>(10)?),
-        image_size: Default::default(),
+        image_size: ImageSize::from_name(&r.get::<_, String>(11)?),
     })
 }
 
 const DRAFT_COLS: &str =
-    "id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs, replying_to, attachments";
+    "id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs, replying_to, attachments, image_size";
 
 pub fn draft(conn: &Connection, id: i64) -> Result<Option<Compose>> {
     Ok(conn.query_row(&format!("SELECT {DRAFT_COLS} FROM draft WHERE id = ?1"), [id], draft_row).optional()?)
@@ -114,7 +114,7 @@ fn saved_draft(conn: &Connection, account: AccountId, server_message_id: Option<
         .query_row(
             &format!("SELECT {DRAFT_COLS}, state FROM draft WHERE account_id = ?1 AND server_message_id = ?2 ORDER BY id DESC LIMIT 1"),
             params![account, id],
-            |r| Ok((draft_row(r)?, r.get(11)?)),
+            |r| Ok((draft_row(r)?, r.get("state")?)),
         )
         .optional()?)
 }
@@ -154,8 +154,8 @@ pub fn dirty_drafts(conn: &Connection, account: AccountId) -> Result<Vec<DirtyDr
         Ok(DirtyDraft {
             id: r.get(0)?,
             compose: draft_row(r)?,
-            deleted: r.get::<_, String>(11)? == "deleted",
-            server_message_id: r.get(12)?,
+            deleted: r.get::<_, String>("state")? == "deleted",
+            server_message_id: r.get("server_message_id")?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

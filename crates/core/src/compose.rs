@@ -66,6 +66,20 @@ pub enum ImageSize {
 impl ImageSize {
     pub const ALL: [ImageSize; 4] = [ImageSize::Small, ImageSize::Medium, ImageSize::Large, ImageSize::Actual];
 
+    /// How a draft stores it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ImageSize::Small => "small",
+            ImageSize::Medium => "medium",
+            ImageSize::Large => "large",
+            ImageSize::Actual => "actual",
+        }
+    }
+
+    pub fn from_name(name: &str) -> ImageSize {
+        ImageSize::ALL.into_iter().find(|s| s.name() == name).unwrap_or_default()
+    }
+
     /// The longest side in pixels, or None for the size as pasted.
     pub fn longest_side(self) -> Option<u32> {
         match self {
@@ -87,13 +101,25 @@ pub struct SizeOption {
     pub fits: bool,
 }
 
-/// The largest message Microsoft Graph's sendMail takes, as Jolta builds it.
+/// The largest message Microsoft Graph's sendMail takes, as Jolta builds it:
+/// the request carries the message in base64, a third larger, and Graph
+/// refuses requests over about 4 MB.
 pub const GRAPH_SEND_LIMIT: u64 = 3_000_000;
 
 /// The message at each image size, smallest first; empty when the body shows
 /// no images.
-pub fn size_options(_account: &Account, _c: &Compose) -> Result<Vec<SizeOption>> {
-    Ok(Vec::new())
+pub fn size_options(account: &Account, c: &Compose) -> Result<Vec<SizeOption>> {
+    if rich::images(&c.body).is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = (account.kind == AccountKind::Graph).then_some(GRAPH_SEND_LIMIT);
+    ImageSize::ALL
+        .into_iter()
+        .map(|size| {
+            let bytes = build(account, &Compose { image_size: size, ..c.clone() }, false)?.raw.len() as u64;
+            Ok(SizeOption { size, bytes, fits: limit.is_none_or(|l| bytes <= l) })
+        })
+        .collect()
 }
 
 /// One address as (name, address).
@@ -429,9 +455,43 @@ struct InlineImage {
     width: Option<u32>,
 }
 
-/// The images `body` shows, one part per distinct image, and which part
-/// each path is.
-fn inline_images(body: &str, domain: &str) -> Result<(Vec<InlineImage>, HashMap<String, usize>)> {
+/// The image as it goes out at `size`, with its new width when it was made
+/// smaller. The smaller copy is made from the original and kept next to it,
+/// so the next build reuses it and going back to Actual Size loses nothing.
+fn sized(name: &str, path: &str, original: Vec<u8>, size: ImageSize) -> Result<(Vec<u8>, Option<u32>)> {
+    let failed = |e: image::ImageError| Error::Other(format!("{name} could not be made smaller: {e}"));
+    let reader = |bytes: &[u8]| image::ImageReader::new(std::io::Cursor::new(bytes.to_vec())).with_guessed_format();
+    let Some(longest) = size.longest_side().filter(|_| !original.starts_with(b"GIF")) else { return Ok((original, None)) };
+    let (width, height) = reader(&original)?.into_dimensions().map_err(failed)?;
+    if width.max(height) <= longest {
+        return Ok((original, None));
+    }
+    let jpeg = original.starts_with(&[0xFF, 0xD8, 0xFF]);
+    let copy = Path::new(path).with_extension(format!("{longest}.{}", if jpeg { "jpg" } else { "png" }));
+    if let Ok(bytes) = std::fs::read(&copy) {
+        let (w, _) = reader(&bytes)?.into_dimensions().map_err(failed)?;
+        return Ok((bytes, Some(w)));
+    }
+    let mut decoder = reader(&original)?.into_decoder().map_err(failed)?;
+    let orientation = image::ImageDecoder::orientation(&mut decoder).map_err(failed)?;
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(failed)?;
+    img.apply_orientation(orientation);
+    let img = img.resize(longest, longest, image::imageops::FilterType::Lanczos3);
+    let mut bytes = Vec::new();
+    if jpeg {
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85).encode_image(&img.to_rgb8()).map_err(failed)?;
+    } else {
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).map_err(failed)?;
+    }
+    let tmp = copy.with_extension("tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, &copy)?;
+    Ok((bytes, Some(img.width())))
+}
+
+/// The images `body` shows at `size`, one part per distinct image, and
+/// which part each path is.
+fn inline_images(body: &str, domain: &str, size: ImageSize) -> Result<(Vec<InlineImage>, HashMap<String, usize>)> {
     let mut parts: Vec<InlineImage> = Vec::new();
     let mut by_path = HashMap::new();
     for (name, path) in rich::images(body) {
@@ -446,7 +506,10 @@ fn inline_images(body: &str, domain: &str) -> Result<(Vec<InlineImage>, HashMap<
         let at = match parts.iter().position(|p| p.cid == cid) {
             Some(at) => at,
             None => {
-                parts.push(InlineImage { cid, name, mime_type, width: retina_width(&bytes), bytes });
+                let on_screen = retina_width(&bytes);
+                let (bytes, sent_width) = sized(&name, &path, bytes, size)?;
+                let width = on_screen.filter(|&w| sent_width.is_none_or(|sent| w < sent));
+                parts.push(InlineImage { cid, name, mime_type, width, bytes });
                 parts.len() - 1
             }
         };
@@ -478,7 +541,7 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
     let list = |l: &[(String, String)]| -> BuilderAddress<'static> {
         BuilderAddress::new_list(l.iter().map(|(n, a)| BuilderAddress::new_address(Some(n.clone()).filter(|n| !n.is_empty()), a.clone())).collect())
     };
-    let (images, image_at) = inline_images(&c.body, domain)?;
+    let (images, image_at) = inline_images(&c.body, domain, c.image_size)?;
     let img = |s: &rich::Span| {
         let image = &images[image_at[s.image.as_deref().unwrap_or_default()]];
         let width = image.width.map(|w| format!(" width=\"{w}\"")).unwrap_or_default();
