@@ -844,8 +844,13 @@ final class Journeys: XCTestCase {
     func testFocusTime() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
         app.typeKey("w", modifierFlags: [])
+        // Next week, as Jolta refuses focus time that has already passed.
+        let week = title.label
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label != week }, "J moves to the next week")
         let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
         let standup = event("Standup, 9:30 to 9:45")
         XCTAssertTrue(standup.waitForExistence(timeout: 5), "Monday's standup marks the column and the hours")
