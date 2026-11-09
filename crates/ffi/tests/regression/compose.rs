@@ -166,3 +166,37 @@ fn drafts_save_and_discard() {
     app.core.discard_draft(id).unwrap();
     assert!(app.core.drafts().unwrap().is_empty());
 }
+
+/// A reply draft written elsewhere opens from Drafts with its recipients,
+/// subject, body and the message it answers. Opening it twice gives the same
+/// draft, and a conversation with no draft opens none.
+#[test]
+fn a_draft_in_drafts_opens_for_editing() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let ask = Mail::new("Ann Peeters <ann@test.invalid>", "me@test.invalid", "Quarterly numbers", "Can you send them?");
+    let asked = app.deliver(&me, MailboxRole::Inbox, &ask);
+    let mut draft = Mail::reply(&ask, "me@test.invalid", "Here they are, almost.\n\n> Can you send them?");
+    draft.cc = "Bob <bob@test.invalid>".into();
+    let drafted = app.deliver(&me, MailboxRole::Drafts, &draft);
+
+    let thread = app.thread_of(drafted).0;
+    let compose = block_on(app.core.open_draft(thread)).unwrap().expect("the conversation holds a draft");
+    assert_eq!(compose.account_id, Some(me.id.0));
+    assert_eq!(addresses(&compose.to), ["ann@test.invalid"]);
+    assert_eq!(addresses(&compose.cc), ["bob@test.invalid"]);
+    assert_eq!(compose.subject, "Re: Quarterly numbers");
+    assert_eq!(compose.body, "Here they are, almost.\n\n> Can you send them?");
+    let bare = |m: &Mail| m.id.trim_matches(['<', '>']).to_string();
+    assert_eq!(compose.in_reply_to, Some(bare(&ask)));
+    assert_eq!(compose.references, [bare(&ask)]);
+    assert_eq!(compose.replying_to, Some(asked.0), "sending it marks the question answered");
+    assert!(compose.draft_id.is_some(), "saving it replaces this draft");
+
+    let again = block_on(app.core.open_draft(thread)).unwrap().expect("still a draft");
+    assert_eq!(again.draft_id, compose.draft_id, "one draft, however often it opens");
+    assert_eq!(app.core.drafts().unwrap().len(), 1);
+
+    let other = app.deliver(&me, MailboxRole::Inbox, &Mail::new("carl@test.invalid", "me@test.invalid", "Hello", "Hi."));
+    assert!(block_on(app.core.open_draft(app.thread_of(other).0)).unwrap().is_none());
+}

@@ -1111,6 +1111,36 @@ impl Core {
         Ok(self.running_engine()?.discard_draft(draft_id)?)
     }
 
+    /// The draft a conversation holds in Drafts, to edit in compose. Saving
+    /// it replaces its server copy. None when there is none to edit.
+    pub async fn open_draft(&self, thread_id: i64) -> Result<Option<ComposeData>> {
+        let jolta = self.jolta.clone();
+        self.runtime
+            .spawn(async move {
+                let found = jolta.store.read_async(move |c| store::thread_draft(c, ThreadId(thread_id))).await?;
+                let message = match found {
+                    None => return Ok(None),
+                    Some(store::ThreadDraft::Saved(c)) => return Ok(Some(c)),
+                    Some(store::ThreadDraft::Elsewhere(m)) => m,
+                };
+                let raw = jolta_core::imap::message_source(&jolta, message).await?;
+                let dir = jolta.data_dir.join("drafts").join(message.0.to_string());
+                let attachments = compose::forward_attachments(&raw, &dir)?;
+                let c = jolta
+                    .store
+                    .write_async(move |tx| {
+                        let c = compose::from_draft(tx, message, &raw)?;
+                        store::adopt_draft(tx, message, &Compose { attachments, ..c })
+                    })
+                    .await?;
+                Ok::<_, jolta_core::Error>(Some(c))
+            })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+            .map(|c| c.map(Into::into))
+            .map_err(Into::into)
+    }
+
     pub fn drafts(&self) -> Result<Vec<ComposeData>> {
         Ok(self.jolta.store.read(store::drafts)?.into_iter().map(Into::into).collect())
     }

@@ -77,6 +77,61 @@ pub fn drafts(conn: &Connection) -> Result<Vec<Compose>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The newest draft a conversation holds in a Drafts mailbox.
+pub enum ThreadDraft {
+    /// Jolta saved it: the draft as written.
+    Saved(Compose),
+    /// Written elsewhere: the message to read it from.
+    Elsewhere(MessageId),
+}
+
+/// None when the conversation has no draft, or its draft is being sent or
+/// discarded.
+pub fn thread_draft(conn: &Connection, thread: ThreadId) -> Result<Option<ThreadDraft>> {
+    let found: Option<(MessageId, AccountId, Option<String>)> = conn
+        .query_row(
+            "SELECT m.id, m.account_id, m.message_id FROM message m
+             JOIN message_mailbox mm ON mm.message_id = m.id
+             JOIN mailbox b ON b.id = mm.mailbox_id AND b.role = 'drafts'
+             WHERE m.thread_id = ?1 ORDER BY m.date DESC, m.id DESC LIMIT 1",
+            [thread],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((message, account, message_id)) = found else { return Ok(None) };
+    Ok(match saved_draft(conn, account, message_id.as_deref())? {
+        Some((c, state)) if state == "editing" => Some(ThreadDraft::Saved(c)),
+        Some(_) => None,
+        None => Some(ThreadDraft::Elsewhere(message)),
+    })
+}
+
+/// The draft whose server copy has this Message-ID, with its state.
+fn saved_draft(conn: &Connection, account: AccountId, server_message_id: Option<&str>) -> Result<Option<(Compose, String)>> {
+    let Some(id) = server_message_id else { return Ok(None) };
+    Ok(conn
+        .query_row(
+            &format!("SELECT {DRAFT_COLS}, state FROM draft WHERE account_id = ?1 AND server_message_id = ?2 ORDER BY id DESC LIMIT 1"),
+            params![account, id],
+            |r| Ok((draft_row(r)?, r.get(11)?)),
+        )
+        .optional()?)
+}
+
+/// Makes `message`, a draft written elsewhere, a local draft holding `c`,
+/// so saving it replaces that server copy. Opening it again returns the same
+/// draft.
+pub fn adopt_draft(conn: &Connection, message: MessageId, c: &Compose) -> Result<Compose> {
+    let (account, message_id): (AccountId, Option<String>) =
+        conn.query_row("SELECT account_id, message_id FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if let Some((existing, _)) = saved_draft(conn, account, message_id.as_deref())? {
+        return Ok(existing);
+    }
+    let id = save_draft(conn, &Compose { account: Some(account), draft: None, ..c.clone() })?;
+    conn.execute("UPDATE draft SET server_message_id = ?2, dirty = 0 WHERE id = ?1", params![id, message_id])?;
+    draft(conn, id)?.ok_or_else(|| crate::Error::NotFound(format!("draft {id}")))
+}
+
 /// Marks a draft gone; the engine deletes its server copy, then the row.
 pub fn discard_draft(conn: &Connection, id: i64) -> Result<()> {
     conn.execute("UPDATE draft SET state = 'deleted', dirty = 1 WHERE id = ?1", [id])?;
@@ -105,8 +160,24 @@ pub fn dirty_drafts(conn: &Connection, account: AccountId) -> Result<Vec<DirtyDr
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Records the server copy, unless the draft changed again meanwhile.
+/// Records the server copy, unless the draft changed again meanwhile. The
+/// copy it replaced leaves Drafts here too, so opening it can't bring back
+/// the old text.
 pub fn draft_synced(conn: &Connection, id: i64, server_message_id: Option<&str>, deleted: bool) -> Result<()> {
+    let old: Option<(AccountId, Option<String>)> =
+        conn.query_row("SELECT account_id, server_message_id FROM draft WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    if let Some((account, Some(old))) = old.filter(|(_, old)| old.as_deref() != server_message_id) {
+        let mut stmt = conn.prepare(
+            "SELECT mm.mailbox_id, m.id FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
+             JOIN mailbox b ON b.id = mm.mailbox_id AND b.role = 'drafts'
+             WHERE m.account_id = ?1 AND m.message_id = ?2",
+        )?;
+        let copies: Vec<(MailboxId, MessageId)> =
+            stmt.query_map(params![account, old], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        for (mailbox, message) in copies {
+            super::unlink_messages(conn, mailbox, &[message])?;
+        }
+    }
     if deleted {
         conn.execute("DELETE FROM draft WHERE id = ?1", [id])?;
     } else {

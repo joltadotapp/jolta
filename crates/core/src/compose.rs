@@ -10,7 +10,7 @@ use mail_builder::headers::address::Address as BuilderAddress;
 use mail_builder::headers::content_type::ContentType;
 use mail_builder::mime::MimePart;
 use mail_parser::MessageParser;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 use crate::model::*;
@@ -218,6 +218,41 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
     let signature = store::account(conn, account)?.signature;
     c.body = opening(&signature, &c.body);
     Ok(c)
+}
+
+/// A draft written elsewhere, from its raw source, ready to edit: its
+/// recipients, subject, text and the message it answers. Attachments come
+/// from `forward_attachments`.
+pub fn from_draft(conn: &Connection, message: MessageId, raw: &[u8]) -> Result<Compose> {
+    let account: AccountId = conn.query_row("SELECT account_id FROM message WHERE id = ?1", [message], |r| r.get(0))?;
+    let msg = MessageParser::new().parse(raw).ok_or_else(|| Error::Other("could not read the draft".into()))?;
+    let root = msg.root();
+    let (envelope, body) = mime::parse_full(raw, String::new());
+    let list = |l: Option<mail_parser::AddressList>| -> String {
+        let pairs: Vec<(String, String)> = l
+            .map(|l| l.mailboxes().filter_map(|m| Some((m.name().unwrap_or_default().to_string(), m.address()?.to_string()))).collect())
+            .unwrap_or_default();
+        format_addresses(&pairs)
+    };
+    let in_reply_to = envelope.in_reply_to.first().cloned();
+    let replying_to = match &in_reply_to {
+        Some(id) => conn
+            .query_row("SELECT id FROM message WHERE account_id = ?1 AND message_id = ?2 ORDER BY id LIMIT 1", params![account, id], |r| r.get(0))
+            .optional()?,
+        None => None,
+    };
+    Ok(Compose {
+        account: Some(account),
+        to: list(root.to()),
+        cc: list(root.cc()),
+        bcc: list(root.bcc()),
+        subject: envelope.subject,
+        body: rich::escape(body.text.trim_end()),
+        in_reply_to,
+        references: envelope.references,
+        replying_to,
+        ..Default::default()
+    })
 }
 
 /// Saves the attachments of a message being forwarded into `dir`, so the
