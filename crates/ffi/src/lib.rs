@@ -1103,6 +1103,11 @@ impl Core {
         Ok(self.running_engine()?.discard_draft(draft_id)?)
     }
 
+    pub async fn open_draft(&self, thread_id: i64) -> Result<Option<ComposeData>> {
+        let _ = thread_id;
+        Ok(None)
+    }
+
     pub fn drafts(&self) -> Result<Vec<ComposeData>> {
         Ok(self.jolta.store.read(store::drafts)?.into_iter().map(Into::into).collect())
     }
