@@ -905,6 +905,26 @@ mod tests {
     }
 
     #[test]
+    fn a_smaller_size_never_makes_a_bigger_file() {
+        let dir = temp_dir("not-bigger");
+        let img = image::RgbImage::from_fn(1500, 1000, |x, y| image::Rgb([(x % 251) as u8, (y % 241) as u8, 120]));
+        let mut rough = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut rough, 20).encode_image(&img).unwrap();
+        let path = save_image(&dir, &rough).unwrap();
+        let c = Compose {
+            to: "bob@example.com".into(),
+            body: rich::markdown(&[image("Rough.jpg", &path)]),
+            image_size: ImageSize::Large,
+            ..Default::default()
+        };
+        let (parts, _) = sent_images(&c);
+        assert!(parts[0].1 == rough, "the original goes when it is the smaller file: {} vs {} bytes", parts[0].1.len(), rough.len());
+        let options = size_options(&account(), &c).unwrap();
+        assert!(options.windows(2).all(|w| w[0].bytes <= w[1].bytes + 64), "no size above Actual Size, give or take a header: {options:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn the_size_menu_shows_what_each_size_comes_to() {
         let dir = temp_dir("estimate");
         let path = save_image(&dir, &retina_png(1600, 800)).unwrap();
