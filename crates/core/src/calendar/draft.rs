@@ -1675,6 +1675,37 @@ mod tests {
         assert_eq!(s.read(|c| default_calendar(c)).unwrap().map(|c| c.id), Some(test), "a chosen default counts even while hidden");
     }
 
+    #[test]
+    fn without_a_choice_new_events_go_to_the_users_own_calendar_not_one_shared_with_them() {
+        let (s, local) = setup("default-own");
+        let (own, edit, manage) = s
+            .write(|tx| {
+                store::set_calendar_shown(tx, local, false)?;
+                tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (1, 'gmail', 'me@work.example', 'me', 'a1', 0, 1);")?;
+                let remote = |remote_id: &str, name: &str, access, primary| store::RemoteCalendar { remote_id: remote_id.into(), name: name.into(), color: None, zone: None, access, primary, refresh: None, video: None };
+                let list = [
+                    remote("ann@work.example", "Ann", Access::Write, false),
+                    remote("bo@work.example", "Bo", Access::Owner, false),
+                    remote("me@work.example", "Me", Access::Owner, true),
+                ];
+                let ids = store::sync_calendar_list(tx, AccountId(1), CalendarSource::Google, &list)?.iter().map(|c| c.id).collect::<Vec<_>>();
+                for id in &ids {
+                    store::set_calendar_shown(tx, *id, true)?;
+                }
+                Ok((ids[2], ids[0], ids[1]))
+            })
+            .unwrap();
+        let default = || s.read(|c| default_calendar(c)).unwrap().map(|c| c.id);
+        assert_eq!(default(), Some(own), "the account's primary, not Ann's calendar it may change nor Bo's it may manage, though both come first");
+        assert_eq!(s.read(|c| draft_for_new(c, None, None, Utc::now(), Brussels)).unwrap().calendar, own, "a new event opens on it");
+        s.write(|tx| store::set_calendar_shown(tx, own, false)).unwrap();
+        assert_eq!(default(), Some(own), "hidden, the user's own calendar still beats one shared with them");
+        s.write(|tx| store::set_default_calendar(tx, Some(edit))).unwrap();
+        assert_eq!(default(), Some(edit), "a shared calendar the user chose in Settings is theirs to choose");
+        s.write(|tx| store::set_default_calendar(tx, Some(manage))).unwrap();
+        assert_eq!(default(), Some(manage));
+    }
+
     fn event_id(s: &Store, cal: CalendarId, uid: &str) -> EventId {
         s.read(|c| Ok(c.query_row("SELECT id FROM event WHERE calendar_id = ?1 AND uid = ?2", rusqlite::params![cal, uid], |r| r.get(0))?)).unwrap()
     }
