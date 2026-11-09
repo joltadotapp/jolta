@@ -11,6 +11,7 @@ use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, crea
 use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
 use super::{Api, GraphCalendar, GraphEvent, event, get_ok, instance, select};
 use crate::calendar::change::Field;
+use crate::calendar::holds::graph_expand;
 use crate::calendar::ops::{Extra, Notify};
 use crate::calendar::{AlarmTrigger, Calendar, EventData, EventStatus, MeetingProvider, Role, ShowAs, Span, Visibility, tz};
 use crate::{Error, Result};
@@ -111,7 +112,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
         OpWrite::Create { events, key, extra } => {
             let (master, changed) = split_series(events)?;
             let body = create_body(std::slice::from_ref(master), key, extra, here)?;
-            let (status, reply) = api.request("POST", &format!("/me/calendars/{}/events", encode(&calendar.remote_id)), Some(&body), &[]).await?;
+            let (status, reply) = api.request("POST", &format!("/me/calendars/{}/events?{}", encode(&calendar.remote_id), graph_expand()), Some(&body), &[]).await?;
             if !(200..300).contains(&status) {
                 return Err(api.failure(status, &reply));
             }
@@ -145,7 +146,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
                         instances.push(now);
                         continue;
                     }
-                    let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[]).await?;
+                    let (status, reply) = api.request("PATCH", &format!("/me/events/{}?{}", encode(&id), graph_expand()), Some(&body), &[]).await?;
                     if !(200..300).contains(&status) {
                         return Err(api.failure(status, &reply));
                     }
@@ -160,7 +161,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
             let Some(id) = instance_at(api, series, rid).await? else { return Ok(Written::Gone) };
             let body = patch_body(base, event, extra, here)?;
             let guard = if_match(etag);
-            let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&id)), Some(&body), &[("If-Match", &guard)]).await?;
+            let (status, reply) = api.request("PATCH", &format!("/me/events/{}?{}", encode(&id), graph_expand()), Some(&body), &[("If-Match", &guard)]).await?;
             match status {
                 200..300 => Ok(Written::Saved(Some(version(api, reply, &event.uid, me, here).await?))),
                 412 => Ok(Written::Stale),
@@ -197,7 +198,7 @@ async fn send(api: &impl Api, calendar: &Calendar, write: &OpWrite<'_>, tell: Te
             let Some(etag) = held.etag.as_deref() else { return Ok(Written::Stale) };
             let body = patch_body(base, event, extra, here)?;
             let guard = if_match(etag);
-            let (status, reply) = api.request("PATCH", &format!("/me/events/{}", encode(&held.remote_id)), Some(&body), &[("If-Match", &guard)]).await?;
+            let (status, reply) = api.request("PATCH", &format!("/me/events/{}?{}", encode(&held.remote_id), graph_expand()), Some(&body), &[("If-Match", &guard)]).await?;
             match status {
                 200..300 => Ok(Written::Saved(Some(version(api, reply, &event.uid, me, here).await?))),
                 412 => Ok(Written::Stale),
@@ -714,4 +715,38 @@ mod tests {
         assert_eq!(seen, ["DELETE /me/events/AAMk1 If-Match W/\"ck1\""], "an event without guests is deleted");
     }
 
+    /// Graph answers a write with the extended properties it asks for,
+    /// as Microsoft 365 did on 2026-11-09, and with none otherwise.
+    struct Expanding;
+
+    impl Api for Expanding {
+        async fn request(&self, _: &str, url: &str, body: Option<&Value>, _: &[(&str, &str)]) -> Result<(u16, Value)> {
+            let mut reply = graph("AAMk1", "ck1");
+            if url.contains("?$expand=singleValueExtendedProperties(") {
+                reply["singleValueExtendedProperties"] = body.unwrap()["singleValueExtendedProperties"].clone();
+            }
+            Ok((201, reply))
+        }
+
+        fn failure(&self, status: u16, _: &Value) -> Error {
+            Error::Other(format!("Graph {status}"))
+        }
+
+        fn zone(&self) -> Tz {
+            Brussels
+        }
+    }
+
+    /// Delta lists an event again only when its change key changes, so a
+    /// hold stored from the create's answer has to carry its marker already.
+    #[tokio::test]
+    async fn a_created_hold_is_stored_with_its_marker() {
+        use crate::calendar::holds::{HoldSetId, Mark};
+        let mark = Mark::Hold { set: HoldSetId::parse("5b2f8c1e-0d4a-4e8b-9a61-3c7e2d9f4a10").unwrap(), message: Some("<m1@example.com>".into()) };
+        let extra = Extra::Json(json!({ "singleValueExtendedProperties": mark.graph_properties() }).as_object().unwrap().clone());
+        let e = standup();
+        let create = OpWrite::Create { events: std::slice::from_ref(&e), key: "tx1", extra: Some(&extra) };
+        let Written::Saved(Some(v)) = send(&Expanding, &calendar(), &create, Tell::NOBODY, "me@example.com", Brussels).await.unwrap() else { panic!("saved") };
+        assert_eq!(v.events[0].mark, Some(mark));
+    }
 }
