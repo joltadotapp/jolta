@@ -92,6 +92,16 @@ impl Mailbox {
         });
     }
 
+    /// Closes every connection this user has open, as Gmail does to an
+    /// IMAP connection it considers idle.
+    pub fn drop_connections(&self) {
+        let out = std::process::Command::new("docker")
+            .args(["exec", "jolta-test-dovecot", "doveadm", "kick", &self.user])
+            .output()
+            .expect("docker runs");
+        assert!(out.status.success(), "doveadm kick failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
     /// Adds this user as an account and starts the app.
     pub fn sign_in(&self, app: &App) -> Account {
         let account = self.add(app);
