@@ -228,6 +228,7 @@ struct ComposeView: View {
         let d = draft.wrappedValue
         return RecipientField(text: text, core: model.core, account: d.accountId,
                               recipients: [d.to, d.cc, d.bcc].joined(separator: ", "), active: focus == field)
+            .accessibilityIdentifier("compose-\(field)")
             .focused($focus, equals: field)
     }
 

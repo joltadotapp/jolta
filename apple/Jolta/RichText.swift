@@ -29,7 +29,10 @@ struct RichTextEditor: NSViewRepresentable {
         view.autoresizingMask = .width
         view.textContainer?.widthTracksTextView = true
         view.base = RichTextView.baseAttributes(size: fontSize)
-        if isMessageBody { RichTextView.messageBody = view }
+        if isMessageBody {
+            RichTextView.messageBody = view
+            view.setAccessibilityIdentifier("compose-body")
+        }
         view.typingAttributes = view.base
         view.delegate = context.coordinator
         let scroll = NSScrollView()

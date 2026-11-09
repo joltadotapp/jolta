@@ -1252,6 +1252,74 @@ final class Journeys: XCTestCase {
         XCTAssertFalse((to.value as? String)?.contains("me@test.invalid") == true, "never the user")
     }
 
+    /// Compose puts the cursor where the user starts typing, with no click:
+    /// the To field of a new message and a forward, the first line of the
+    /// body, above the quote, for a reply and reply all (from a key or the
+    /// reader's button), and the body of a draft reopened from Drafts, which
+    /// has its recipient already. The reopened draft keeps what was added.
+    func testComposeFocusesWhereYouType() throws {
+        let app = try launch()
+        let to = app.textFields["compose-to"]
+        let body = app.textViews["compose-body"]
+        func focused(_ field: XCUIElement) -> Bool {
+            waitUntil { field.exists && (field.value(forKey: "hasKeyboardFocus") as? Bool) == true }
+        }
+        func discard() {
+            app.buttons["⌘⌫"].click()
+            XCTAssertTrue(body.waitForNonExistence(timeout: 5), "compose closed")
+        }
+        func typesIntoTo(_ name: String) {
+            XCTAssertTrue(body.waitForExistence(timeout: 5), "\(name) opens compose")
+            if focused(to) {
+                app.typeText("ann@test.invalid")
+                XCTAssertEqual(to.value as? String, "ann@test.invalid", "\(name): typing goes to To")
+            } else {
+                XCTFail("\(name): the cursor is in To")
+            }
+            discard()
+        }
+        func typesAboveTheQuote(_ name: String) {
+            XCTAssertTrue(body.waitForExistence(timeout: 5), "\(name) opens compose")
+            if focused(body) {
+                app.typeText("Thanks")
+                XCTAssertTrue((body.value as? String)?.hasPrefix("Thanks\n") == true, "\(name): typing starts the first line, above the quote")
+            } else {
+                XCTFail("\(name): the cursor is in the body")
+            }
+            discard()
+        }
+
+        app.typeKey("c", modifierFlags: [])
+        typesIntoTo("c")
+        text(app, "Re: Quarterly numbers").click()
+        app.typeKey("r", modifierFlags: [])
+        typesAboveTheQuote("r")
+        app.typeKey("a", modifierFlags: [])
+        typesAboveTheQuote("a")
+        app.buttons.matching(NSPredicate(format: "label == 'R' OR label BEGINSWITH 'Reply'")).firstMatch.click()
+        typesAboveTheQuote("the Reply button")
+        app.typeKey("f", modifierFlags: [])
+        typesIntoTo("f")
+
+        app.typeKey("g", modifierFlags: [])
+        app.typeKey("d", modifierFlags: [])
+        let draft = text(app, "Re: Lunch on Friday")
+        XCTAssertTrue(draft.waitForExistence(timeout: 5), "Drafts lists the draft")
+        draft.click()
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "a click on a draft opens it in compose")
+        XCTAssertEqual(app.textFields["compose-subject"].value as? String, "Re: Lunch on Friday")
+        XCTAssertTrue((to.value as? String)?.contains("bob@test.invalid") == true, "with its recipient")
+        guard focused(body) else { return XCTFail("a reopened draft: the cursor is in the body") }
+        app.typeText("Great. ")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(body.waitForNonExistence(timeout: 5), "Esc keeps the draft")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "Return opens the draft again")
+        XCTAssertTrue((body.value as? String)?.hasPrefix("Great. Noon works for me.") == true, "with what was added")
+        XCTAssertTrue(focused(body), "a draft opened again: the cursor is in the body")
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
     private func waitUntil(_ done: () -> Bool) -> Bool {
         let deadline = Date() + 5
         while Date() < deadline {
