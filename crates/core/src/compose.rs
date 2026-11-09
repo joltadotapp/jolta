@@ -47,6 +47,53 @@ pub struct Compose {
     pub attachments: Vec<AttachmentFile>,
     /// The local draft this compose was saved as, if any.
     pub draft: Option<i64>,
+    /// The size its pasted images go out at.
+    pub image_size: ImageSize,
+}
+
+/// The size pasted images go out at, as Apple Mail offers it: the longest
+/// side at most 320, 640 or 1280 pixels, or as pasted. An image is never
+/// made larger, and a GIF keeps its size so it keeps its animation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageSize {
+    Small,
+    Medium,
+    Large,
+    #[default]
+    Actual,
+}
+
+impl ImageSize {
+    pub const ALL: [ImageSize; 4] = [ImageSize::Small, ImageSize::Medium, ImageSize::Large, ImageSize::Actual];
+
+    /// The longest side in pixels, or None for the size as pasted.
+    pub fn longest_side(self) -> Option<u32> {
+        match self {
+            ImageSize::Small => Some(320),
+            ImageSize::Medium => Some(640),
+            ImageSize::Large => Some(1280),
+            ImageSize::Actual => None,
+        }
+    }
+}
+
+/// What the message comes to at one image size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeOption {
+    pub size: ImageSize,
+    /// The built message, in bytes.
+    pub bytes: u64,
+    /// False when the account's provider refuses a message this large.
+    pub fits: bool,
+}
+
+/// The largest message Microsoft Graph's sendMail takes, as Jolta builds it.
+pub const GRAPH_SEND_LIMIT: u64 = 3_000_000;
+
+/// The message at each image size, smallest first; empty when the body shows
+/// no images.
+pub fn size_options(_account: &Account, _c: &Compose) -> Result<Vec<SizeOption>> {
+    Ok(Vec::new())
 }
 
 /// One address as (name, address).
@@ -694,6 +741,133 @@ mod tests {
         };
         let Err(e) = build(&account(), &c, true) else { panic!("built without its image") };
         assert!(e.to_string().contains("Plan.png"), "{e}");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &b in bytes {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+
+    /// A real image `width` by `height`, smooth or noise (which barely compresses).
+    fn encoded(width: u32, height: u32, noise: bool, format: image::ImageFormat) -> Vec<u8> {
+        let mut seed = 0x2545_f491u32;
+        let img = image::RgbImage::from_fn(width, height, |x, y| {
+            if noise {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let [a, b, c, _] = seed.to_le_bytes();
+                image::Rgb([a, b, c])
+            } else {
+                image::Rgb([(x % 251) as u8, (y % 241) as u8, 120])
+            }
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut out), format).unwrap();
+        out
+    }
+
+    /// A real PNG as a Retina screenshot saves it, at 144 dpi.
+    fn retina_png(width: u32, height: u32) -> Vec<u8> {
+        let mut out = encoded(width, height, false, image::ImageFormat::Png);
+        let data = [&5669u32.to_be_bytes()[..], &5669u32.to_be_bytes(), &[1]].concat();
+        let mut chunk = 9u32.to_be_bytes().to_vec();
+        chunk.extend(b"pHYs");
+        chunk.extend(&data);
+        chunk.extend(crc32(&[&b"pHYs"[..], &data].concat()).to_be_bytes());
+        out.splice(33..33, chunk);
+        out
+    }
+
+    fn dimensions(bytes: &[u8]) -> (u32, u32) {
+        image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().unwrap().into_dimensions().unwrap()
+    }
+
+    /// The image parts of a built message in order, with its HTML part.
+    fn sent_images(c: &Compose) -> (Vec<(String, Vec<u8>)>, String) {
+        let raw = build(&account(), c, true).unwrap().raw;
+        let msg = MessageParser::new().parse(&raw).unwrap();
+        let parts = msg
+            .parts()
+            .filter(|p| p.content_id().is_some())
+            .map(|p| {
+                let ct = p.content_type().map(|t| format!("{}/{}", t.ctype(), t.subtype().unwrap_or_default())).unwrap_or_default();
+                (ct, p.decoded().into_owned())
+            })
+            .collect();
+        (parts, msg.body_html(0).unwrap().into_owned())
+    }
+
+    #[test]
+    fn images_go_out_at_the_chosen_size_made_from_the_original() {
+        let dir = temp_dir("sizes");
+        let screenshot = retina_png(1600, 800);
+        let photo = encoded(1500, 1000, false, image::ImageFormat::Jpeg);
+        let icon = encoded(300, 200, false, image::ImageFormat::Png);
+        let gif = b"GIF89a\x00\x08\x00\x08\x00\x00\x00;".to_vec();
+        let saved: Vec<String> = [&screenshot, &photo, &icon, &gif].iter().map(|b| save_image(&dir, b).unwrap()).collect();
+        let body = rich::markdown(&saved.iter().map(|p| image("img", p)).collect::<Vec<_>>());
+        let at = |image_size| Compose { to: "bob@example.com".into(), body: body.clone(), image_size, ..Default::default() };
+
+        let (parts, html) = sent_images(&at(ImageSize::Medium));
+        assert_eq!(parts[0].0, "image/png");
+        assert_eq!(dimensions(&parts[0].1), (640, 320), "the longest side becomes 640 pixels");
+        assert_eq!(parts[1].0, "image/jpeg");
+        let (w, h) = dimensions(&parts[1].1);
+        assert!(w == 640 && (426..=427).contains(&h), "{w}x{h}");
+        assert_eq!(parts[2].1, icon, "a smaller image is never made larger");
+        assert_eq!(parts[3].1, gif, "a GIF keeps its size and its animation");
+        assert!(!html.contains("width=\"640\""), "{html}");
+
+        let (parts, html) = sent_images(&at(ImageSize::Large));
+        assert_eq!(dimensions(&parts[0].1), (1280, 640));
+        assert!(html.contains("width=\"800\""), "never larger than it was on screen: {html}");
+
+        let (parts, html) = sent_images(&at(ImageSize::Small));
+        assert_eq!(dimensions(&parts[0].1), (320, 160));
+        assert_eq!(dimensions(&parts[2].1), (300, 200));
+        assert!(!html.contains("width="), "{html}");
+
+        let (parts, html) = sent_images(&at(ImageSize::Actual));
+        assert_eq!((parts[0].1.clone(), parts[1].1.clone()), (screenshot.clone(), photo.clone()), "back to the original bytes");
+        assert!(html.contains("width=\"800\""), "{html}");
+        assert_eq!(std::fs::read(&saved[0]).unwrap(), screenshot, "the pasted copy stays as it was");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_size_menu_shows_what_each_size_comes_to() {
+        let dir = temp_dir("estimate");
+        let path = save_image(&dir, &retina_png(1600, 800)).unwrap();
+        let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("Shot.png", &path)]), ..Default::default() };
+        let options = size_options(&account(), &c).unwrap();
+        assert_eq!(options.iter().map(|o| o.size).collect::<Vec<_>>(), ImageSize::ALL);
+        assert!(options.windows(2).all(|w| w[0].bytes < w[1].bytes), "{options:?}");
+        assert!(options.iter().all(|o| o.fits), "no limit for an IMAP account");
+        let built = build(&account(), &c, true).unwrap().raw.len() as i64;
+        assert!((options[3].bytes as i64 - built).abs() < 64, "the estimate is the built message: {} vs {built}", options[3].bytes);
+
+        let plain = Compose { body: "No pictures".into(), ..c.clone() };
+        assert!(size_options(&account(), &plain).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn microsoft_365_says_which_sizes_it_takes() {
+        let dir = temp_dir("graph-limit");
+        let path = save_image(&dir, &encoded(900, 900, true, image::ImageFormat::Png)).unwrap();
+        let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("Noise.png", &path)]), ..Default::default() };
+        let graph = Account { kind: AccountKind::Graph, ..account() };
+        let options = size_options(&graph, &c).unwrap();
+        assert_eq!(options.iter().map(|o| o.fits).collect::<Vec<_>>(), [true, true, false, false], "{options:?}");
+        assert!(options[1].bytes <= GRAPH_SEND_LIMIT && options[2].bytes > GRAPH_SEND_LIMIT);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -119,9 +119,11 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     compose.to = "bob@test.invalid".into();
     compose.subject = "The chart".into();
     compose.body = app.core.body_markdown(vec![span("Here:\n", None), span("Pasted image.png", Some(&path)), span("\nThanks", None)]);
+    compose.image_size = jolta_ffi::ImageSizeChoice::Medium;
     let id = app.core.save_draft(compose).unwrap();
 
     let reopened = app.core.draft(id).unwrap().expect("the draft is there");
+    assert_eq!(reopened.image_size, jolta_ffi::ImageSizeChoice::Medium, "the draft keeps its image size");
     let spans = app.core.body_spans(reopened.body.clone());
     let images: Vec<_> = spans.iter().filter_map(|s| Some((s.text.as_str(), s.image.as_deref()?))).collect();
     assert_eq!(images, [("Pasted image.png", path.as_str())]);

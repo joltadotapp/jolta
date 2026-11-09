@@ -322,6 +322,7 @@ fn a_pasted_image_comes_back_with_its_draft() {
     compose.to = "bob@test.invalid".into();
     compose.subject = "With a chart".into();
     compose.body = app.core.body_markdown(vec![span("See:\n", None), span("Pasted image.png", Some(&path)), span("\nBye", None)]);
+    compose.image_size = jolta_ffi::ImageSizeChoice::Large;
     let id = app.core.save_draft(compose).unwrap();
     app.core.sync_now();
     let thread = || app.list("in:drafts").into_iter().find(|r| r.subject == "With a chart").map(|r| r.thread_id);
@@ -329,6 +330,7 @@ fn a_pasted_image_comes_back_with_its_draft() {
 
     let opened = block_on(app.core.open_draft(thread().unwrap())).unwrap().expect("a draft");
     assert_eq!(opened.draft_id, Some(id));
+    assert_eq!(opened.image_size, jolta_ffi::ImageSizeChoice::Large, "and its image size");
     let spans = app.core.body_spans(opened.body);
     let texts: Vec<_> = spans.iter().map(|s| (s.text.as_str(), s.image.as_deref())).collect();
     assert_eq!(texts, [("See:\n", None), ("Pasted image.png", Some(path.as_str())), ("\nBye", None)]);

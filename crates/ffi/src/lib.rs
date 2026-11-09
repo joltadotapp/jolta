@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jolta_core::actions::{Action, Context};
-use jolta_core::compose::{self, AttachmentFile, Compose, ReplyKind};
+use jolta_core::compose::{self, AttachmentFile, Compose, ImageSize, ReplyKind};
 use jolta_core::engine::{Engine, Event};
 use jolta_core::store::OpId;
 use jolta_core::people::{self, People};
@@ -291,6 +291,50 @@ pub struct ComposeData {
     pub replying_to: Option<i64>,
     pub attachments: Vec<ComposeFile>,
     pub draft_id: Option<i64>,
+    pub image_size: ImageSizeChoice,
+}
+
+/// The size pasted images go out at: the longest side at most 320, 640 or
+/// 1280 pixels, or as pasted.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageSizeChoice {
+    Small,
+    Medium,
+    Large,
+    Actual,
+}
+
+impl From<ImageSize> for ImageSizeChoice {
+    fn from(s: ImageSize) -> Self {
+        match s {
+            ImageSize::Small => ImageSizeChoice::Small,
+            ImageSize::Medium => ImageSizeChoice::Medium,
+            ImageSize::Large => ImageSizeChoice::Large,
+            ImageSize::Actual => ImageSizeChoice::Actual,
+        }
+    }
+}
+
+impl From<ImageSizeChoice> for ImageSize {
+    fn from(s: ImageSizeChoice) -> Self {
+        match s {
+            ImageSizeChoice::Small => ImageSize::Small,
+            ImageSizeChoice::Medium => ImageSize::Medium,
+            ImageSizeChoice::Large => ImageSize::Large,
+            ImageSizeChoice::Actual => ImageSize::Actual,
+        }
+    }
+}
+
+/// What the message comes to at one image size.
+#[derive(uniffi::Record, Clone)]
+pub struct MessageSize {
+    pub size: ImageSizeChoice,
+    /// The longest side in pixels, or None for the size as pasted.
+    pub longest_side: Option<u32>,
+    pub bytes: u64,
+    /// False when the account's provider refuses a message this large.
+    pub fits: bool,
 }
 
 impl From<Compose> for ComposeData {
@@ -311,6 +355,7 @@ impl From<Compose> for ComposeData {
                 .map(|a| ComposeFile { name: a.name, mime_type: a.mime_type, path: a.path })
                 .collect(),
             draft_id: c.draft,
+            image_size: c.image_size.into(),
         }
     }
 }
@@ -333,6 +378,7 @@ impl From<ComposeData> for Compose {
                 .map(|a| AttachmentFile { name: a.name, mime_type: a.mime_type, path: a.path })
                 .collect(),
             draft: c.draft_id,
+            image_size: c.image_size.into(),
         }
     }
 }
@@ -1051,6 +1097,18 @@ impl Core {
 
     /// Keeps a pasted image (PNG, JPEG or GIF) for the message being
     /// written, and returns the path an image span shows it from.
+    /// The message at each image size, smallest first, for the Image size
+    /// menu; empty when it shows no images.
+    pub fn message_sizes(&self, compose: ComposeData) -> Result<Vec<MessageSize>> {
+        let c: Compose = compose.into();
+        let Some(account) = c.account else { return Ok(Vec::new()) };
+        let account = self.jolta.store.read(|conn| store::account(conn, account))?;
+        Ok(compose::size_options(&account, &c)?
+            .into_iter()
+            .map(|o| MessageSize { size: o.size.into(), longest_side: o.size.longest_side(), bytes: o.bytes, fits: o.fits })
+            .collect())
+    }
+
     pub fn save_pasted_image(&self, data: Vec<u8>) -> Result<String> {
         Ok(compose::save_image(&self.jolta.data_dir.join("images"), &data)?)
     }

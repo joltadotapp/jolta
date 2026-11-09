@@ -302,7 +302,7 @@ private struct SendButton: View {
 
 extension ComposeData {
     static let blank = ComposeData(accountId: nil, to: "", cc: "", bcc: "", subject: "", body: "", inReplyTo: nil,
-                                   references: [], replyingTo: nil, attachments: [], draftId: nil)
+                                   references: [], replyingTo: nil, attachments: [], draftId: nil, imageSize: .actual)
 
     var isEmpty: Bool {
         to.isEmpty && cc.isEmpty && bcc.isEmpty && subject.isEmpty && attachments.isEmpty

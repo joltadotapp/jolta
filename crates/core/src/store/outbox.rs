@@ -61,6 +61,7 @@ fn draft_row(r: &Row) -> rusqlite::Result<Compose> {
         references: r.get::<_, String>(8)?.split_whitespace().map(str::to_string).collect(),
         replying_to: r.get(9)?,
         attachments: decode_attachments(&r.get::<_, String>(10)?),
+        image_size: Default::default(),
     })
 }
 
