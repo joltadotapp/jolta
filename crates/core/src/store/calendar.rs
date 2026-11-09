@@ -154,6 +154,21 @@ pub fn set_working_hours(conn: &Connection, hours: Option<&crate::calendar::avai
     Ok(())
 }
 
+/// The zone the user picked for `address` in Insert my availability.
+pub fn person_zone(conn: &Connection, address: &str) -> Result<Option<chrono_tz::Tz>> {
+    let name: Option<String> = conn.query_row("SELECT zone FROM person_zone WHERE address = ?1", [address], |r| r.get(0)).optional()?;
+    Ok(name.as_deref().and_then(crate::calendar::tz::zone))
+}
+
+pub fn set_person_zone(conn: &Connection, address: &str, zone: chrono_tz::Tz, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO person_zone (address, zone, picked) VALUES (?1, ?2, ?3)
+         ON CONFLICT (address) DO UPDATE SET zone = excluded.zone, picked = excluded.picked",
+        params![address, zone.name(), now],
+    )?;
+    Ok(())
+}
+
 /// Minutes a new event lasts, as Settings › Calendar sets it: 30 unless
 /// changed, Outlook's default.
 pub fn default_event_minutes(conn: &Connection) -> Result<i64> {
