@@ -41,7 +41,7 @@ impl Mailbox {
     /// Runs `f` on a fresh IMAP session of this user.
     pub fn with<T>(&self, f: impl AsyncFnOnce(&mut Session) -> T) -> T {
         block_on(async {
-            let endpoint = Endpoint { host: "127.0.0.1".into(), port: 31143, security: Security::Plain, verify_certs: false };
+            let endpoint = Endpoint { host: "127.0.0.1".into(), port: 31143, security: Security::Plain, verify_certs: false, answer_within: None };
             let mut session = jolta_core::imap::connect(&endpoint, &self.user, PASSWORD).await.expect("Dovecot signs in");
             let out = f(&mut session).await;
             session.logout().await.ok();
