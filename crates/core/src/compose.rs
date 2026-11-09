@@ -952,11 +952,17 @@ mod tests {
     fn microsoft_365_says_which_sizes_it_takes() {
         let dir = temp_dir("graph-limit");
         let path = save_image(&dir, &encoded(900, 900, true, image::ImageFormat::Png)).unwrap();
-        let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("Noise.png", &path)]), ..Default::default() };
-        let graph = Account { kind: AccountKind::Graph, ..account() };
-        let options = size_options(&graph, &c).unwrap();
+        let video = dir.join("talk.mov");
+        std::fs::write(&video, vec![0u8; 25_000_000]).unwrap();
+        let c = Compose {
+            to: "bob@example.com".into(),
+            body: rich::markdown(&[image("Noise.png", &path)]),
+            attachments: vec![AttachmentFile { name: "talk.mov".into(), mime_type: "video/quicktime".into(), path: video.to_string_lossy().into() }],
+            ..Default::default()
+        };
+        let options = size_options(&Account { kind: AccountKind::Graph, ..account() }, &c).unwrap();
         assert_eq!(options.iter().map(|o| o.fits).collect::<Vec<_>>(), [true, true, false, false], "{options:?}");
-        assert!(options[1].bytes <= GRAPH_SEND_LIMIT && options[2].bytes > GRAPH_SEND_LIMIT);
+        assert!(size_options(&account(), &c).unwrap().iter().all(|o| o.fits), "only Microsoft 365 has the limit");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
