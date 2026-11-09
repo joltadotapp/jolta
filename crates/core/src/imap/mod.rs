@@ -5,6 +5,8 @@
 //! drops expunged ones, and refreshes flags (CHANGEDSINCE when the server has
 //! CONDSTORE). Bodies follow, newest first, in a second pass.
 
+#[cfg(test)]
+mod fake_gmail;
 mod gmail;
 mod utf7;
 
