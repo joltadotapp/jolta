@@ -203,6 +203,9 @@ struct CalendarSettings: View {
             SettingsSection("New events") {
                 NewEventDefaults(model: model)
             }
+            SettingsSection("Zoom", footer: "Zoom suggests this link only for people you meet regularly: anyone who has it can join while you're in another meeting on it.") {
+                ZoomLinkRow(core: model.core)
+            }
             SettingsSection("Invitations") {
                 FileResponsesRow(core: model.core)
             }
@@ -226,6 +229,46 @@ struct CalendarSettings: View {
         .onAppear {
             if switches == nil { switches = CalendarSwitches(model: model) }
             cal.reloadCalendars()
+        }
+    }
+}
+
+/// The personal Zoom link Add video call offers as Zoom.
+struct ZoomLinkRow: View {
+    let core: Core
+    @State private var link = ""
+    @State private var saved = ""
+    @State private var failure: String?
+
+    var body: some View {
+        SettingsRow(title: "Zoom personal link",
+                    detail: failure ?? "Add video call offers it as Zoom in every calendar.",
+                    detailColor: failure == nil ? Color(Theme.text3) : .red) {
+            HStack(spacing: 8) {
+                TextField("", text: $link, prompt: Text(verbatim: "https://zoom.us/j/…"))
+                    .settingsField(width: 230)
+                    .onSubmit(save)
+                    .accessibilityIdentifier("settings-zoom-link")
+                Button("Save", action: save)
+                    .fixedSize()
+                    .disabled(link.trimmingCharacters(in: .whitespaces) == saved)
+            }
+        }
+        .onAppear {
+            saved = ((try? core.zoomLink()) ?? nil) ?? ""
+            link = saved
+        }
+    }
+
+    private func save() {
+        let typed = link.trimmingCharacters(in: .whitespaces)
+        do {
+            try core.setZoomLink(link: typed.isEmpty ? nil : typed)
+            saved = ((try? core.zoomLink()) ?? nil) ?? ""
+            link = saved
+            failure = nil
+        } catch {
+            failure = "\(error)"
         }
     }
 }
