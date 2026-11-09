@@ -856,6 +856,7 @@ struct ReaderColumn: View {
             }
             if model.compose != nil {
                 ComposeView(model: model)
+                    .id(model.composeSession)
             } else if model.isMultiSelection {
                 VStack(spacing: 6) {
                     Text("\(model.selectedThreads.count) conversations selected")

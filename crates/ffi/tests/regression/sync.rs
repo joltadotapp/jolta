@@ -244,3 +244,61 @@ fn drafts_reach_the_server() {
     app.core.sync_now();
     wait(20, "the draft left the server", || server.subjects("Drafts").is_empty());
 }
+
+/// A draft saved in Jolta opens again from Drafts as it was written, and
+/// saving it replaces its server copy. Opened again right after, before
+/// Drafts has synced, it is still the same draft. A draft written elsewhere
+/// opens too, saving it replaces that copy, and sending it removes it.
+#[test]
+fn drafts_reopen_from_drafts() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let question = Mail::new("ann@test.invalid", &server.user, "Numbers", "Can you send them?");
+    server.append("INBOX", &question);
+    server.append("Drafts", &Mail::new(&server.user, "bob@test.invalid", "From my phone", "Started on the phone."));
+    let app = App::unstarted();
+    server.sign_in(&app);
+    wait(20, "the inbox synced", || inbox_has(&app, "Numbers"));
+    let drafts_thread = |subject: &str| app.list("in:drafts").into_iter().find(|r| r.subject == subject).map(|r| r.thread_id);
+    // Opening a conversation's draft never makes a second one: it is this draft as last saved, or none while Drafts catches up.
+    let reopen = |thread: i64, id: i64, subject: &str| {
+        if let Some(c) = block_on(app.core.open_draft(thread)).unwrap() {
+            assert_eq!((c.draft_id, c.subject.as_str()), (Some(id), subject), "the same draft, as saved");
+        }
+    };
+
+    let thread = app.list("in:inbox")[0].thread_id;
+    let mut reply = block_on(app.core.reply_compose(thread, jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    reply.body = format!("**Almost** there.{}", reply.body);
+    reply.bcc = "carl@test.invalid".into();
+    let id = app.core.save_draft(reply.clone()).unwrap();
+    wait(20, "the reply draft came back in Drafts", || drafts_thread("Re: Numbers").is_some());
+    let reply_thread = drafts_thread("Re: Numbers").unwrap();
+
+    let mut opened = block_on(app.core.open_draft(reply_thread)).unwrap().expect("a draft");
+    assert_eq!(opened.draft_id, Some(id), "the draft Jolta saved");
+    assert_eq!((opened.body.as_str(), opened.bcc.as_str()), (reply.body.as_str(), "carl@test.invalid"), "as it was written");
+    assert_eq!(opened.in_reply_to, reply.in_reply_to);
+    opened.subject = "Re: Numbers, attached".into();
+    app.core.save_draft(opened).unwrap();
+    wait(20, "the server copy was replaced", || server.subjects("Drafts") == ["From my phone", "Re: Numbers, attached"]);
+    reopen(reply_thread, id, "Re: Numbers, attached");
+    wait(20, "Drafts shows the new copy", || drafts_thread("Re: Numbers, attached").is_some());
+    reopen(reply_thread, id, "Re: Numbers, attached");
+    assert!(drafts_thread("Re: Numbers").is_none(), "and not the old one");
+
+    wait(20, "the phone's draft synced", || drafts_thread("From my phone").is_some());
+    let phone_thread = drafts_thread("From my phone").unwrap();
+    let mut phone = block_on(app.core.open_draft(phone_thread)).unwrap().expect("a draft");
+    assert_eq!((phone.to.as_str(), phone.body.as_str()), ("bob@test.invalid", "Started on the phone."));
+    phone.subject = "From my Mac".into();
+    app.core.save_draft(phone.clone()).unwrap();
+    wait(20, "the phone's copy was replaced", || server.subjects("Drafts") == ["From my Mac", "Re: Numbers, attached"]);
+    reopen(phone_thread, phone.draft_id.unwrap(), "From my Mac");
+    assert_eq!(app.core.drafts().unwrap().len(), 2, "two drafts, however often they open");
+
+    app.core.send(phone, None, None).unwrap();
+    wait(40, "sending removed the draft", || server.subjects("Drafts") == ["Re: Numbers, attached"]);
+}

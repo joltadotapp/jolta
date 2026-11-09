@@ -44,14 +44,6 @@ extension AppModel {
         }
     }
 
-    /// A message the calendar filled in, such as Email guests, in mail's
-    /// compose: the compose pane lives beside the mail list.
-    func openCompose(_ prefilled: ComposeData) {
-        composeReminder = nil
-        composeSchedule = nil
-        compose = prefilled
-    }
-
     /// Email guests for one occurrence of an event, or with `address` a
     /// mail to that person on it.
     func emailGuests(eventID: Int64, time: OccurrenceTime?, address: String? = nil) {

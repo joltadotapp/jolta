@@ -82,6 +82,9 @@ for t in $TESTS; do
 		"$JOLTA" --data-dir "$dir" cal hold me@test.invalid --to 'Ann Berg <ann@test.invalid>' --subject 'Partnership call' --message-id '<ui-12@test.invalid>' \
 			--slot "${days[0]} 07:00" --slot "${days[1]} 07:00" >/dev/null
 	fi
+	if [ "$t" = testComposeFocusesWhereYouType ]; then
+		"$JOLTA" --data-dir "$dir" import me@test.invalid drafts "$FIXTURES/13-draft.eml" >/dev/null
+	fi
 	if [ "$t" = testTurnOffAutomaticReplies ]; then
 		printf '{"me@test.invalid": {"automaticRepliesSetting": {"status": "alwaysEnabled", "externalAudience": "all"}}}' >"$dir/away.json"
 	fi
