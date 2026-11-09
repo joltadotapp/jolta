@@ -177,10 +177,16 @@ impl Engine {
         }
 
         let idle_wake = wake.clone();
-        let idle_account = account.clone();
+        let mut idle_account = account.clone();
+        let jolta = self.jolta.clone();
         self.runtime.spawn(async move {
             let mut backoff = Backoff::default();
             loop {
+                // Settings or a sign-in that took the provider's new address
+                // change the login, so each connection reads the account again.
+                if let Ok(current) = jolta.store.read(|c| store::account(c, idle_account.id)) {
+                    idle_account = current;
+                }
                 let started = Instant::now();
                 let result = imap::idle_inbox(&idle_account, || {
                     idle_wake.inbox_changed.store(true, Ordering::SeqCst);
@@ -724,13 +730,15 @@ impl Engine {
     }
 
     /// Replaces or removes server copies of drafts that changed. Returns the
-    /// Drafts mailbox to sync then, so the new copies show there.
+    /// Drafts mailbox when it changed there, since its list shows the
+    /// server's copies.
     async fn sync_drafts(&self, account: &Account, link: &mut Link) -> Result<Option<MailboxId>> {
         let account_id = account.id;
         let dirty = self.jolta.store.read_async(move |c| store::dirty_drafts(c, account_id)).await?;
         if dirty.is_empty() {
             return Ok(None);
         }
+        let drafts_box = self.role_mailbox(account.id, MailboxRole::Drafts).await?;
         let session = match link {
             Link::Imap(session, _) => session,
             Link::Graph(g) => {
@@ -741,10 +749,10 @@ impl Engine {
                     self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
                 }
                 (self.sink)(Event::ListsChanged);
-                return Ok(None);
+                return Ok(drafts_box.map(|m| m.id));
             }
         };
-        let Some(drafts_box) = self.role_mailbox(account.id, MailboxRole::Drafts).await? else {
+        let Some(drafts_box) = drafts_box else {
             for d in dirty {
                 let (id, deleted) = (d.id, d.deleted);
                 self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, None, deleted)).await?;

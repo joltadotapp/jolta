@@ -254,12 +254,11 @@ struct AccountPage: View {
     }
 
     private func signInAgain() {
-        let provider: OAuthProvider = section.account.kind == "gmail" ? .google : .microsoft
         signingIn = true
         message = ("Continue in your browser…", false)
         Task {
             do {
-                let session = try await model.core.beginSignIn(provider: provider)
+                let session = try await model.core.beginSignInAgain(accountId: section.id)
                 if let url = URL(string: session.url()) { NSWorkspace.shared.open(url) }
                 let account = try await session.finish()
                 message = account.id == section.id

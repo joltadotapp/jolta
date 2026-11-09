@@ -17,7 +17,7 @@ pub struct NewAccount {
 
 const ACCOUNT_COLS: &str =
     "id, kind, address, display_name, username, imap_host, imap_port, smtp_host, smtp_port, secret_ref,
-     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs, signature, calendar";
+     imap_security, smtp_security, smtp_auth, smtp_username, verify_certs, signature, calendar, oauth_user_id";
 
 fn account_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -38,6 +38,7 @@ fn account_row(r: &Row) -> rusqlite::Result<Account> {
         verify_certs: r.get(14)?,
         signature: r.get(15)?,
         calendar: r.get(16)?,
+        oauth_user_id: r.get(17)?,
     })
 }
 
@@ -56,6 +57,16 @@ pub fn update_account(conn: &Connection, id: AccountId, s: &AccountSettings) -> 
             id, s.display_name, s.address, s.username, s.imap_host, s.imap_port, s.imap_security, s.smtp_host,
             s.smtp_port, s.smtp_security, s.smtp_auth, s.smtp_username, s.verify_certs
         ],
+    )?;
+    account(conn, id)
+}
+
+/// Records who signed in to an account: the address the provider gives
+/// now, and its permanent id for the user when it sent one.
+pub fn set_signed_in_as(conn: &Connection, id: AccountId, address: &str, user_id: Option<&str>) -> Result<Account> {
+    conn.execute(
+        "UPDATE account SET address = ?2, username = ?2, oauth_user_id = coalesce(?3, oauth_user_id) WHERE id = ?1",
+        params![id, address, user_id],
     )?;
     account(conn, id)
 }

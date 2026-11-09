@@ -1,7 +1,8 @@
 //! The search language: `from:`, `to:`, `subject:`, `has:attachment`,
 //! `is:unread`, `is:needs-reply`, `is:invite`, `category:`, `in:`, `label:`, `account:`,
 //! `before:`, `after:`, quoted phrases, bare words, and `-` to negate any of
-//! them.
+//! them. Trash and Spam are left out unless a term names a mailbox, such
+//! as `in:trash` or `in:anywhere`.
 
 use crate::{Error, Result};
 

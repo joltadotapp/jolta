@@ -178,6 +178,10 @@ pub struct Account {
     /// Calendar is on. For Google and Microsoft this also means the user
     /// granted calendar access, so token refreshes ask for it.
     pub calendar: bool,
+    /// Google's `sub` or Microsoft's `oid` for the user who signed in, which
+    /// stays when the provider changes the address. None for passwords, and
+    /// for sign-ins older than schema 41 until the next one.
+    pub oauth_user_id: Option<String>,
 }
 
 /// What the account settings screen can change.

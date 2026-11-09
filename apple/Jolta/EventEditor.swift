@@ -645,6 +645,8 @@ struct EventEditorPanel: View {
                     PeopleField(editor: editor, account: cal.calendarInfo(editor.draft.calendarId)?.accountId, focus: $focus)
                 }
             }
+            // Its suggestions hang over the rows below, Find a time among them.
+            .zIndex(1)
             if !editor.draft.responses.isEmpty || emailable != nil || canFindTime {
                 EditorRow(icon: nil) {
                     HStack(spacing: 8) {

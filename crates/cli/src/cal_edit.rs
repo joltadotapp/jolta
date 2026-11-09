@@ -1021,7 +1021,7 @@ pub fn default_calendar(jolta: &Jolta, calendar: Option<i64>, clear: bool) -> Re
         jolta.store.write(|tx| store::set_default_calendar(tx, calendar.map(CalendarId)))?;
     }
     match jolta.store.read(draft::default_calendar)? {
-        Some(c) => println!("New events go to {} ({}){}.", c.name, c.id, if c.is_default { "" } else { ", the first writable calendar" }),
+        Some(c) => println!("New events go to {} ({}){}.", c.name, c.id, if c.is_default { "" } else { ", as none is chosen" }),
         None => println!("No calendar takes new events."),
     }
     Ok(())

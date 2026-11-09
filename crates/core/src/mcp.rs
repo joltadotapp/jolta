@@ -123,7 +123,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search",
-            "description": "Search mail, newest first. Query language: words, \"phrases\", from:, to:, subject:, has:attachment, is:unread, is:starred, is:invite (invitations still to answer), in:inbox (or any mailbox), before:YYYY-MM-DD, after:YYYY-MM-DD, -term to exclude. An empty query lists all mail.",
+            "description": "Search mail, newest first. Query language: words, \"phrases\", from:, to:, subject:, has:attachment, is:unread, is:starred, is:invite (invitations still to answer), in:inbox (or any mailbox), before:YYYY-MM-DD, after:YYYY-MM-DD, -term to exclude. An empty query lists all mail. Trash and Spam are left out unless the query names them (in:trash, in:spam) or says in:anywhere.",
             "inputSchema": {"type": "object", "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}
@@ -343,9 +343,7 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
             let mut c = match reply_to {
                 Some(thread) => {
                     need(thread_account(thread)?, Grant::Draft)?;
-                    let message: MessageId = store
-                        .read(|c| Ok(c.query_row("SELECT max(id) FROM message WHERE thread_id = ?1", [thread], |r| r.get(0))?))
-                        .map_err(|e| e.to_string())?;
+                    let message = store.read(|c| compose::reply_target(c, ThreadId(thread))).map_err(|e| e.to_string())?;
                     let raw = imap::message_source(&ctx.jolta, message).await.map_err(|e| e.to_string())?;
                     let mut c = store
                         .read(|conn| compose::reply(conn, message, &raw, ReplyKind::ReplyAll, local_offset()))

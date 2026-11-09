@@ -837,6 +837,30 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(strip.waitForNonExistence(timeout: 5), "and the strip goes")
     }
 
+    /// Gmail's vacation responder is on. Jolta can read it but not change
+    /// it, so the strip and Settings › Calendar offer Gmail's own settings
+    /// and no Edit or Turn off. The account is made a Gmail one, and the
+    /// data folder's `away.json` stands in for Gmail's settings.
+    func testGmailAutomaticRepliesOpenGmail() throws {
+        let app = try launch()
+        let strip = app.descendants(matching: .any).matching(identifier: "away-strip").firstMatch
+        XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while Gmail's replies are on")
+        XCTAssertTrue(strip.buttons["Open Gmail settings"].exists, "the strip offers Gmail's settings")
+        XCTAssertFalse(strip.buttons["Turn off"].exists, "and no Turn off")
+        XCTAssertFalse(strip.buttons["Edit"].exists, "and no Edit")
+
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("Calendar Settings")
+        XCTAssertTrue(paletteRow(app, "Calendar Settings").waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        let set = app.buttons["away-set"].firstMatch
+        XCTAssertTrue(set.waitForExistence(timeout: 5), "Settings › Calendar shows Out of office")
+        XCTAssertTrue(text(app, "On, with no end set.").waitForExistence(timeout: 5), "the account's row says the replies are on")
+        XCTAssertTrue(app.buttons["Open Gmail settings"].exists, "the row offers Gmail's settings")
+        XCTAssertFalse(app.buttons["Turn off"].exists, "and no Turn off")
+        app.typeKey("w", modifierFlags: .command)
+    }
+
     /// ⌥-drag over empty time adds focus time there at once, with Undo in
     /// the toast. The palette's Focus time… opens the sheet at the next free
     /// two hours and says what the calendar gets: in the Work calendar,
@@ -845,8 +869,13 @@ final class Journeys: XCTestCase {
     func testFocusTime() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
         app.typeKey("w", modifierFlags: [])
+        // Next week, as Jolta refuses focus time that has already passed.
+        let week = title.label
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label != week }, "J moves to the next week")
         let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
         let standup = event("Standup, 9:30 to 9:45")
         XCTAssertTrue(standup.waitForExistence(timeout: 5), "Monday's standup marks the column and the hours")

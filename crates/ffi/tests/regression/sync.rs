@@ -345,3 +345,28 @@ fn a_pasted_image_comes_back_with_its_draft() {
     assert_eq!(&image.decoded()[..], &png()[..]);
     assert!(msg.body_html(0).unwrap().contains(&format!("cid:{}", image.content_id().unwrap())));
 }
+
+/// Found on 2026-11-09: a saved draft reached the server's Drafts, but
+/// Jolta's Drafts, which lists the server's copy, stayed empty until Sync
+/// now or the next full sync ten minutes later. Discarding takes it out
+/// the same way.
+#[test]
+fn a_saved_draft_shows_in_drafts_without_sync_now() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let app = App::unstarted();
+    let account = server.sign_in(&app);
+    wait(20, "the first sync finished", || app.events.seen("synced"));
+
+    let mut compose = app.core.new_compose().unwrap();
+    compose.account_id = Some(account.id.0);
+    compose.to = "bob@test.invalid".into();
+    compose.subject = "Half written".into();
+    compose.body = "Dear Bob,".into();
+    let id = app.core.save_draft(compose).unwrap();
+    wait(20, "the draft shows in Drafts", || app.subjects("in:drafts") == ["Half written"]);
+    app.core.discard_draft(id).unwrap();
+    wait(20, "the draft left Drafts", || app.subjects("in:drafts").is_empty());
+}

@@ -12,7 +12,7 @@ const LANGUAGE: &str = "Query language (all terms must match):
 - is:unread  is:read  is:starred  is:vip  is:newsletter  is:notification  is:needs-reply
 - is:invite (meeting invitations not answered yet)
 - category:personal  category:work  category:finance  category:newsletter  category:notification
-- in:inbox  in:sent  in:archive  in:drafts  in:trash  in:snoozed
+- in:inbox  in:sent  in:archive  in:drafts  in:trash  in:spam  in:snoozed; Trash and Spam are left out unless named, in:anywhere includes them
 - after:YYYY-MM-DD (from that day on)  before:YYYY-MM-DD (until the day before)
 - a - in front excludes a term, as in -is:newsletter";
 

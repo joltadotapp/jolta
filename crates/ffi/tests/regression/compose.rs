@@ -63,6 +63,26 @@ fn reply_to_own_message_goes_to_its_recipients() {
     assert_eq!(addresses(&reply.to), ["bob@test.invalid"]);
 }
 
+/// A reply draft waiting in Drafts isn't what Reply answers: the reply goes
+/// to the newest message that isn't a draft.
+#[test]
+fn reply_skips_the_conversations_draft() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let ask = Mail::new("Ann <ann@test.invalid>", "me@test.invalid", "Portfolio", "Which photos should go in?").at(now() - 7200);
+    let draft = Mail::reply(&ask, "me@test.invalid", "Half-written answer");
+    let first = app.deliver(&me, MailboxRole::Inbox, &ask);
+    app.deliver(&me, MailboxRole::Drafts, &draft);
+
+    let thread = app.thread_of(first).0;
+    let reply = block_on(app.core.reply_compose(thread, ReplyMode::Reply, 0)).unwrap();
+    assert_eq!(addresses(&reply.to), ["ann@test.invalid"]);
+    assert_eq!(reply.in_reply_to, Some(ask.id.trim_matches(['<', '>']).to_string()));
+    assert!(reply.body.contains("> Which photos should go in?"), "the reply quotes Ann's message, not the draft");
+    let forward = block_on(app.core.reply_compose(thread, ReplyMode::Forward, 0)).unwrap();
+    assert!(!forward.body.contains("Half-written answer"), "a forward doesn't carry the draft either");
+}
+
 /// A forward carries the original attachments and doesn't thread.
 #[test]
 fn forward_carries_attachments() {
