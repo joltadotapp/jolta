@@ -343,9 +343,7 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
             let mut c = match reply_to {
                 Some(thread) => {
                     need(thread_account(thread)?, Grant::Draft)?;
-                    let message: MessageId = store
-                        .read(|c| Ok(c.query_row("SELECT max(id) FROM message WHERE thread_id = ?1", [thread], |r| r.get(0))?))
-                        .map_err(|e| e.to_string())?;
+                    let message = store.read(|c| compose::reply_target(c, ThreadId(thread))).map_err(|e| e.to_string())?;
                     let raw = imap::message_source(&ctx.jolta, message).await.map_err(|e| e.to_string())?;
                     let mut c = store
                         .read(|conn| compose::reply(conn, message, &raw, ReplyKind::ReplyAll, local_offset()))
