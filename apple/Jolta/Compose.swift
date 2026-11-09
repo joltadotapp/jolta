@@ -347,14 +347,18 @@ private struct ImageSizeBar: View {
     let changed: () -> Void
     @State private var sizes: [MessageSize] = []
 
+    /// What the built message depends on, apart from the image size.
     private struct Inputs: Equatable {
         let body: String
+        let headers: [String]
         let files: [String]
         let account: Int64?
     }
 
     private var inputs: Inputs? {
-        model.compose.map { Inputs(body: $0.body, files: $0.attachments.map(\.path), account: $0.accountId) }
+        model.compose.map {
+            Inputs(body: $0.body, headers: [$0.to, $0.cc, $0.bcc, $0.subject], files: $0.attachments.map(\.path), account: $0.accountId)
+        }
     }
 
     var body: some View {
