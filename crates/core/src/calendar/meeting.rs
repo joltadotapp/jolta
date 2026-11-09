@@ -704,8 +704,8 @@ mod tests {
             for (shape, m) in [("iCalendar", caldav), ("Google", google), ("a location of the user's", without_location)] {
                 let m = m.unwrap_or_else(|| panic!("{shape} {link}"));
                 assert_eq!((m.provider, m.join_url.as_str()), (P::Zoom, link), "{shape}");
-                assert_eq!(m.meeting_id.as_deref(), id.map(|i| i.replace(' ', "")).as_deref().or(invitation.meeting_id.as_deref()), "{shape}");
-                assert_eq!((m.meeting_id.clone(), m.passcode.as_deref()), (invitation.meeting_id.clone(), passcode), "{shape} as an invitation has it");
+                assert_eq!(m.meeting_id, id.map(|i| i.replace(' ', "")), "{shape}");
+                assert_eq!((&m.meeting_id, m.passcode.as_deref()), (&invitation.meeting_id, passcode), "{shape} as an invitation has it");
                 assert_eq!(app_url(&m), app_url(&invitation), "{shape}: Join opens the Zoom app the same way");
             }
         }

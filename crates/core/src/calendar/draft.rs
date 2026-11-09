@@ -2253,6 +2253,40 @@ mod tests {
         assert!(!change::classify(&base, &event, &[]).meeting.is_empty(), "guests hear the call went");
     }
 
+    /// Exchange gives the block back as HTML, the link wrapped in an
+    /// anchor (captured from the Microsoft 365 test account, 2026-11-09):
+    /// Join reads the same meeting, the editor still finds Jolta's block,
+    /// and removing it leaves the user's text.
+    #[test]
+    fn exchange_html_of_the_zoom_block_reads_back_and_comes_off() {
+        const BODY: &str = include_str!("../../tests/fixtures/descriptions/zoom-graph.html");
+        const LINK: &str = "https://us02web.zoom.us/j/1234567890?pwd=Sm9sdGFQcm9iZVUxMQ.1";
+        let (s, _) = setup("zoom-graph");
+        let graph = provider_calendar(&s, CalendarSource::Graph, Some(vec![MeetingProvider::Teams]));
+        let location = format!("Zoom: {LINK}");
+        let stored = EventData {
+            title: "Jolta U11 probe".into(),
+            meeting: meeting::detect(&[], None, &location, BODY),
+            location,
+            description: BODY.into(),
+            description_html: true,
+            ..EventData::new("z-graph", span("2026-11-12 10:00", "2026-11-12 10:30"))
+        };
+        let m = stored.meeting.clone().expect("a meeting");
+        let invitation = meeting::detect(&[], None, "", &format!("Join Zoom Meeting\n{LINK}\n")).unwrap();
+        assert_eq!((m.provider, &m.join_url, &m.meeting_id, &m.passcode), (MeetingProvider::Zoom, &invitation.join_url, &invitation.meeting_id, &invitation.passcode));
+        assert_eq!(meeting::app_url(&m), meeting::app_url(&invitation));
+        assert_eq!(meeting::detect(&[], None, "", BODY), stored.meeting, "the body alone gives the same meeting");
+
+        s.write(|tx| store::apply_item(tx, graph, "AAk", Some("ck1"), std::slice::from_ref(&stored), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, graph, "z-graph"), None, Brussels)).unwrap();
+        assert_eq!((d.zoom.as_deref(), d.location.as_str(), d.description.as_str()), (Some(LINK), "", "Probe, link removed."));
+        d.zoom = None;
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Update { event, .. } = queued(&s, &saved).write else { panic!("an update") };
+        assert_eq!((event.location.as_str(), event.description.as_str(), event.description_html, event.meeting), ("", "Probe, link removed.", false, None));
+    }
+
     /// The user's own location stays, beside the link in the description,
     /// and stays when the link comes off.
     #[test]
