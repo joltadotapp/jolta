@@ -429,14 +429,23 @@ fn people(e: &EventData) -> (Vec<String>, Vec<String>) {
 }
 
 /// What `decide` reads for `set`: the occurrences on the offered days and
-/// the 7 after, the requests and the conversation's mail since the mail
+/// the 7 after, a moved hold's day among them, the requests and the conversation's mail since the mail
 /// left, and the set's hold events in its calendar. "Me" is the sending
 /// account's address and the ones the copies in its own calendars mark as
 /// its own; another of the user's accounts is someone else here.
 pub fn seen(conn: &Connection, blobs: &Blobs, set: &HoldSet, here: Tz) -> Result<Seen> {
     let mut seen = Seen { me: vec![store::account(conn, set.account)?.address], ..Seen::default() };
     let own: Vec<CalendarId> = store::account_calendars(conn, set.account)?.into_iter().map(|c| c.id).collect();
-    let (Some(first), Some(last)) = (set.slots.iter().map(|s| s.start).min(), set.slots.iter().map(|s| s.end).max()) else { return Ok(seen) };
+    seen.holds = store::hold_events(conn, Some(&set.id))?
+        .into_iter()
+        .filter(|m| m.calendar == set.calendar && m.event.status != EventStatus::Cancelled)
+        .map(|m| {
+            let (start, end) = instants(&m.event.span, here);
+            HoldEvent { remote_id: m.remote_id, start, end, guests: m.event.attendees.iter().any(|a| !a.is_me) }
+        })
+        .collect();
+    let times = set.slots.iter().map(|s| (s.start, s.end)).chain(seen.holds.iter().map(|h| (h.start, h.end)));
+    let (Some(first), Some(last)) = (times.clone().map(|t| t.0).min(), times.map(|t| t.1).max()) else { return Ok(seen) };
     let (from, to) = (first.with_timezone(&here).date_naive(), last.with_timezone(&here).date_naive() + Duration::days(8));
     let (start, end) = instants(&Span::AllDay { start: from, end: to }, here);
     let window = Window { start, end };
@@ -448,14 +457,6 @@ pub fn seen(conn: &Connection, blobs: &Blobs, set: &HoldSet, here: Tz) -> Result
         }
         seen.busy.push(Busy { start: b.start, end: b.end, people, hold: e.mark.as_ref().is_some_and(|m| m.hold_set().is_some()), created: e.created });
     }
-    seen.holds = store::hold_events(conn, Some(&set.id))?
-        .into_iter()
-        .filter(|m| m.calendar == set.calendar && m.event.status != EventStatus::Cancelled)
-        .map(|m| {
-            let (start, end) = instants(&m.event.span, here);
-            HoldEvent { remote_id: m.remote_id, start, end, guests: m.event.attendees.iter().any(|a| !a.is_me) }
-        })
-        .collect();
     let Some(sent) = set.sent else { return Ok(seen) };
     for (from, received, blob) in store::requests_since(conn, set.account, sent)? {
         let Some(raw) = blob.and_then(|b| blobs.get(&b).ok()) else { continue };
