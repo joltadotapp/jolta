@@ -122,6 +122,17 @@ fn plan(conn: &Connection, q: &Query) -> Result<Sql> {
         sql.from = "message m".into();
         sql.order = "m.id DESC";
     }
+    // As on Gmail, mail in Trash or Spam shows only when the query names a
+    // mailbox: `in:trash`, `in:anywhere`, or the Trash list itself.
+    let names_mailbox =
+        q.terms.iter().any(|t| !t.negated && matches!(t.kind, TermKind::In(_) | TermKind::Label(_) | TermKind::Mailbox(_)));
+    if !names_mailbox {
+        sql.conds.push(
+            "m.id NOT IN (SELECT message_id FROM message_mailbox
+                          WHERE mailbox_id IN (SELECT id FROM mailbox WHERE role IN ('trash', 'spam')))"
+                .into(),
+        );
+    }
 
     for (i, t) in q.terms.iter().enumerate() {
         let cond = match &t.kind {
@@ -451,6 +462,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE message (id INTEGER PRIMARY KEY, thread_id INTEGER, from_name TEXT, from_addr TEXT, subject TEXT);
+             CREATE TABLE mailbox (id INTEGER PRIMARY KEY, role TEXT);
+             CREATE TABLE message_mailbox (mailbox_id INTEGER, message_id INTEGER);
              INSERT INTO message VALUES
                (1, 10, 'Zoë', 'z@x', 'Re: Budget'),
                (2, 20, '', 'anna@x', 'Lunch'),

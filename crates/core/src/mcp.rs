@@ -123,7 +123,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search",
-            "description": "Search mail, newest first. Query language: words, \"phrases\", from:, to:, subject:, has:attachment, is:unread, is:starred, is:invite (invitations still to answer), in:inbox (or any mailbox), before:YYYY-MM-DD, after:YYYY-MM-DD, -term to exclude. An empty query lists all mail.",
+            "description": "Search mail, newest first. Query language: words, \"phrases\", from:, to:, subject:, has:attachment, is:unread, is:starred, is:invite (invitations still to answer), in:inbox (or any mailbox), before:YYYY-MM-DD, after:YYYY-MM-DD, -term to exclude. An empty query lists all mail. Trash and Spam are left out unless the query names them (in:trash, in:spam) or says in:anywhere.",
             "inputSchema": {"type": "object", "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}

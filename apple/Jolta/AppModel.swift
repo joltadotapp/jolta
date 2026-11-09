@@ -16,7 +16,7 @@ enum ListSource: Hashable {
     var query: String {
         switch self {
         case .unifiedInbox: "in:inbox"
-        case .starred: "is:starred -in:trash -in:spam"
+        case .starred: "is:starred"
         case .role(let role): "in:\(role)"
         case .mailbox(let id, _): "mailbox:\(id)"
         case .allMail: ""
