@@ -55,3 +55,18 @@ codegen-units = 4
 # without llama.cpp's `common` code.
 [patch.crates-io]
 llama-cpp-2 = { path = "vendor/llama-cpp-2" }
+
+# Pasted images are resized in debug builds too; unoptimized, the size menu
+# of a Retina screenshot takes seconds instead of a fraction of one.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
