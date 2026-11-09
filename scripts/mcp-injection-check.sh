@@ -27,7 +27,7 @@ JOLTA_MCP_SOCKET="$SOCK" python3 -c "
 import sys; sys.path.insert(0, 'tests')
 from mcp_client import Client
 Client('target/release/jolta-mcp', name='Injection check agent').close()"
-ID=$($JOLTA agents | awk '/Injection check agent/ {print $1}')
+ID=$($JOLTA agents | awk '/^ *[0-9]+ +Injection check agent/ {print $1}')
 $JOLTA agents approve "$ID" --grants read,organize,draft >/dev/null
 
 JOLTA_MCP_SOCKET="$SOCK" python3 tests/mcp_injection_check.py target/release/jolta-mcp "$DATA/jolta.sqlite"
