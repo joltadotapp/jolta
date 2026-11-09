@@ -1,8 +1,8 @@
 //! Formatted message bodies. A body is stored and passed around as a small
 //! Markdown subset: `**bold**`, `*italic*`, `~~struck~~`, `[text](url)`,
-//! and per line `- ` or `1. ` list items and `> ` quotes. The editor shows it
-//! as formatted text through `spans`; sending turns it into an HTML part and
-//! a plain-text part.
+//! `![name](file:///path)` for an image shown in the text, and per line `- `
+//! or `1. ` list items and `> ` quotes. The editor shows it as formatted text
+//! through `spans`; sending turns it into an HTML part and a plain-text part.
 
 /// A run of text with one set of styles, as the editor shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -12,11 +12,18 @@ pub struct Span {
     pub italic: bool,
     pub strike: bool,
     pub link: Option<String>,
+    /// The image file shown here, by absolute path; `text` is its name.
+    pub image: Option<String>,
 }
 
 impl Span {
     fn same_style(&self, other: &Span) -> bool {
-        self.bold == other.bold && self.italic == other.italic && self.strike == other.strike && self.link == other.link
+        self.image.is_none()
+            && other.image.is_none()
+            && self.bold == other.bold
+            && self.italic == other.italic
+            && self.strike == other.strike
+            && self.link == other.link
     }
 }
 
@@ -46,6 +53,10 @@ pub fn markdown(spans: &[Span]) -> String {
     }
     let mut out = String::new();
     for span in &merged {
+        if let Some(path) = &span.image {
+            out.push_str(&format!("![{}]({})", escape(&span.text.replace('\n', " ")), file_url(path)));
+            continue;
+        }
         for (i, line) in span.text.split('\n').enumerate() {
             if i > 0 {
                 out.push('\n');
@@ -74,6 +85,30 @@ pub fn markdown(spans: &[Span]) -> String {
             out.push_str(&s);
             out.push_str(trail);
         }
+    }
+    out
+}
+
+/// An image's path as the URL a body names it by.
+fn file_url(path: &str) -> String {
+    reqwest::Url::from_file_path(path).map(|u| u.as_str().replace(')', "%29")).unwrap_or_default()
+}
+
+/// The path a `file:` URL names.
+fn file_path(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok().filter(|u| u.scheme() == "file")?;
+    Some(url.to_file_path().ok()?.to_str()?.to_string())
+}
+
+fn unescape(chars: &[char]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1).is_some_and(|c| SPECIAL.contains(c)) {
+            i += 1;
+        }
+        out.push(chars[i]);
+        i += 1;
     }
     out
 }
@@ -129,6 +164,16 @@ fn inline(line: &str, base: &Span) -> Vec<Span> {
             text.push(chars[i + 1]);
             i += 2;
             continue;
+        }
+        if c == '!' && chars.get(i + 1) == Some(&'[') {
+            let image = link_at(&chars, i + 1).and_then(|(end, url, next)| Some((end, file_path(&url)?, next)));
+            if let Some((label_end, path, next)) = image {
+                flush(&mut text, &style, &mut out);
+                let name = unescape(&chars[i + 2..label_end]);
+                out.push(Span { text: if name.is_empty() { "image".into() } else { name }, image: Some(path), ..Default::default() });
+                i = next;
+                continue;
+            }
         }
         if c == '[' {
             if let Some((label_end, url, next)) = link_at(&chars, i) {
@@ -238,6 +283,7 @@ pub fn to_text(body: &str) -> String {
             inline(line, &Span::default())
                 .into_iter()
                 .map(|s| match s.link {
+                    _ if s.image.is_some() => format!("[image: {}]", s.text),
                     Some(url) if url != s.text && url.trim_start_matches("mailto:") != s.text => format!("{} ({url})", s.text),
                     _ => s.text,
                 })
@@ -247,10 +293,15 @@ pub fn to_text(body: &str) -> String {
         .join("\n")
 }
 
+/// The images a body shows, as (name, path), in order.
+pub fn images(body: &str) -> Vec<(String, String)> {
+    body.split('\n').flat_map(|line| inline(line, &Span::default())).filter_map(|s| Some((s.text, s.image?))).collect()
+}
+
 /// The HTML part: paragraphs, lists, quotes and inline styles, with bare
-/// web addresses made into links.
-pub fn to_html(body: &str) -> String {
-    format!("<div style=\"font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5\">{}</div>", blocks(body))
+/// web addresses made into links. `image` writes the tag for an image span.
+pub fn to_html(body: &str, image: &dyn Fn(&Span) -> String) -> String {
+    format!("<div style=\"font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5\">{}</div>", blocks(body, image))
 }
 
 enum Block {
@@ -260,7 +311,7 @@ enum Block {
     Quote(Vec<String>),
 }
 
-fn blocks(body: &str) -> String {
+fn blocks(body: &str, image: &dyn Fn(&Span) -> String) -> String {
     let mut list: Vec<Block> = Vec::new();
     for line in body.split('\n') {
         let quoted = line.strip_prefix("> ").or_else(|| line.strip_prefix('>'));
@@ -283,40 +334,44 @@ fn blocks(body: &str) -> String {
             Block::Lines(lines) => {
                 // One div per line, as Gmail writes them; an empty line keeps its height.
                 for line in lines {
-                    let h = inline_html(&line);
+                    let h = inline_html(&line, image);
                     html.push_str(&format!("<div>{}</div>", if h.trim().is_empty() { "<br>".into() } else { h }));
                 }
             }
             Block::Bullets(items) => {
                 html.push_str("<ul>");
                 for item in items {
-                    html.push_str(&format!("<li>{}</li>", inline_html(&item)));
+                    html.push_str(&format!("<li>{}</li>", inline_html(&item, image)));
                 }
                 html.push_str("</ul>");
             }
             Block::Numbers(items) => {
                 html.push_str("<ol>");
                 for item in items {
-                    html.push_str(&format!("<li>{}</li>", inline_html(&item)));
+                    html.push_str(&format!("<li>{}</li>", inline_html(&item, image)));
                 }
                 html.push_str("</ol>");
             }
             Block::Quote(lines) => html.push_str(&format!(
                 "<blockquote style=\"margin: 0 0 0 0.8ex; border-left: 1px solid #ccc; padding-left: 1ex; color: #555\">{}</blockquote>",
-                blocks(&lines.join("\n"))
+                blocks(&lines.join("\n"), image)
             )),
         }
     }
     html
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn inline_html(line: &str) -> String {
+fn inline_html(line: &str, image: &dyn Fn(&Span) -> String) -> String {
     let mut out = String::new();
     for s in inline(line, &Span::default()) {
+        if s.image.is_some() {
+            out.push_str(&image(&s));
+            continue;
+        }
         let mut h = match &s.link {
             Some(_) => html_escape(&s.text),
             None => autolink(&s.text),
@@ -365,6 +420,31 @@ mod tests {
         Span { text: text.into(), ..Default::default() }
     }
 
+    fn to_html_plain(body: &str) -> String {
+        to_html(body, &|_| unreachable!("no images"))
+    }
+
+    #[test]
+    fn images_round_trip_and_stand_in_for_themselves_as_text() {
+        let path = "/Users/me/Library/Application Support/Jolta/images/ab (1).png";
+        let image = Span { text: "Pasted image.png".into(), image: Some(path.into()), ..Default::default() };
+        let original = vec![span("Look:\n"), image.clone(), image.clone(), span("\nbye!")];
+        let md = markdown(&original);
+        assert_eq!(spans(&md), original, "{md}");
+        assert_eq!(to_text(&md), "Look:\n[image: Pasted image.png][image: Pasted image.png]\nbye!");
+        assert_eq!(images(&md), vec![("Pasted image.png".to_string(), path.to_string()); 2]);
+        let html = to_html(&md, &|s| format!("<img alt=\"{}\">", s.text));
+        assert!(html.contains("<div><img alt=\"Pasted image.png\"><img alt=\"Pasted image.png\"></div>"), "{html}");
+    }
+
+    #[test]
+    fn only_a_local_file_is_an_image() {
+        let link = Span { text: "site".into(), link: Some("https://x.test/a.png".into()), ..Default::default() };
+        assert_eq!(spans("Wow![site](https://x.test/a.png)"), vec![span("Wow!"), link]);
+        assert!(images("Wow![site](https://x.test/a.png)").is_empty());
+        assert_eq!(spans("Hello! [x]"), vec![span("Hello! [x]")]);
+    }
+
     #[test]
     fn spans_round_trip_through_markdown() {
         let original = vec![
@@ -408,7 +488,7 @@ mod tests {
 
     #[test]
     fn html_part_has_lists_quotes_and_links() {
-        let html = to_html("Hi <you> & **all**\n\n- one\n- two\n1. first\n> On Monday Ann wrote:\n> > deep\nvisit https://x.test/a?b=1.");
+        let html = to_html_plain("Hi <you> & **all**\n\n- one\n- two\n1. first\n> On Monday Ann wrote:\n> > deep\nvisit https://x.test/a?b=1.");
         assert!(html.contains("Hi &lt;you&gt; &amp; <b>all</b>"), "{html}");
         assert!(html.contains("<ul><li>one</li><li>two</li></ul><ol><li>first</li></ol>"), "{html}");
         assert!(html.contains("<blockquote") && html.matches("<blockquote").count() == 2, "{html}");

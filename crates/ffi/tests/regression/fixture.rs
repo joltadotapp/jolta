@@ -331,3 +331,13 @@ fn civil(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
+
+/// A real 1x1 PNG.
+pub fn png() -> Vec<u8> {
+    b"\x89PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDATx\xdacd\xf8\xcfP\x0f\x00\x03\x86\x01\x80Z4}k\x00\x00\x00\x00IEND\xaeB`\x82".to_vec()
+}
+
+/// A run of plain text for `body_markdown`, or an image when `image` is a path.
+pub fn span(text: &str, image: Option<&str>) -> jolta_ffi::TextSpan {
+    jolta_ffi::TextSpan { text: text.into(), bold: false, italic: false, strike: false, link: None, image: image.map(Into::into) }
+}

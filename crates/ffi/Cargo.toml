@@ -21,3 +21,4 @@ serde_json.workspace = true
 [dev-dependencies]
 rusqlite.workspace = true
 futures.workspace = true
+mail-parser.workspace = true

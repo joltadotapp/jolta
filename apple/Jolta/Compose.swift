@@ -129,6 +129,7 @@ struct ComposeView: View {
                     .frame(height: 34)
                     .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
                 }
+                ImageSizeBar(model: model, changed: scheduleSave)
             }
             .padding(.horizontal, 28)
             .textFieldStyle(.plain)
@@ -150,6 +151,7 @@ struct ComposeView: View {
             }
                 .padding(.horizontal, 28)
                 .padding(.top, 14)
+                .environment(\.pasteTarget, PasteTarget(core: model.core, attach: attach, failed: model.notify))
 
             if !draft.wrappedValue.attachments.isEmpty {
                 ScrollView(.horizontal) {
@@ -248,7 +250,11 @@ struct ComposeView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls {
+        attach(panel.urls)
+    }
+
+    private func attach(_ urls: [URL]) {
+        for url in urls {
             let type = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
             model.compose?.attachments.append(ComposeFile(name: url.lastPathComponent, mimeType: type, path: url.path))
         }
@@ -297,7 +303,7 @@ private struct SendButton: View {
 
 extension ComposeData {
     static let blank = ComposeData(accountId: nil, to: "", cc: "", bcc: "", subject: "", body: "", inReplyTo: nil,
-                                   references: [], replyingTo: nil, attachments: [], draftId: nil)
+                                   references: [], replyingTo: nil, attachments: [], draftId: nil, imageSize: .actual)
 
     var isEmpty: Bool {
         to.isEmpty && cc.isEmpty && bcc.isEmpty && subject.isEmpty && attachments.isEmpty
@@ -330,5 +336,95 @@ struct FileIcon: View {
             out = String(format: "#%02x%02x%02x", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
         }
         return out
+    }
+}
+
+/// While the message shows pasted images: what it comes to, and the size its
+/// images go out at, as Apple Mail offers it. Over Microsoft 365's usual
+/// limit, it says so and offers the largest size under it.
+private struct ImageSizeBar: View {
+    @Bindable var model: AppModel
+    let changed: () -> Void
+    @State private var sizes: [MessageSize] = []
+
+    /// What the built message depends on, apart from the image size.
+    private struct Inputs: Equatable {
+        let body: String
+        let headers: [String]
+        let files: [String]
+        let account: Int64?
+    }
+
+    private var inputs: Inputs? {
+        model.compose.map {
+            Inputs(body: $0.body, headers: [$0.to, $0.cc, $0.bcc, $0.subject], files: $0.attachments.map(\.path), account: $0.accountId)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let compose = model.compose, let chosen = sizes.first(where: { $0.size == compose.imageSize }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo").foregroundStyle(Color(Theme.text3))
+                    Text("Message size \(Self.bytes(chosen.bytes))")
+                        .foregroundStyle(Color(Theme.text2))
+                        .accessibilityIdentifier("compose-message-size")
+                    Menu {
+                        ForEach(sizes, id: \.size) { option in
+                            Button(Self.label(option)) { choose(option.size) }
+                        }
+                    } label: {
+                        Text("Image size: \(Self.name(chosen.size))")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .accessibilityIdentifier("compose-image-size")
+                    if !chosen.fits {
+                        let fitting = sizes.last(where: \.fits)
+                        Text(fitting == nil ? "Over Microsoft 365's usual 35 MB limit, even at Small" : "Over Microsoft 365's usual 35 MB limit")
+                            .foregroundStyle(Color(Theme.accent))
+                        if let fitting {
+                            Button("Use \(Self.name(fitting.size))") { choose(fitting.size) }
+                                .buttonStyle(.link)
+                        }
+                    }
+                    Spacer()
+                }
+                .font(.system(size: 12.5))
+                .frame(height: 34)
+                .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+            }
+        }
+        .task(id: inputs) {
+            guard let compose = model.compose else { return sizes = [] }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let core = model.core
+            let measured = await Task.detached(priority: .userInitiated) { (try? core.messageSizes(compose: compose)) ?? [] }.value
+            if !Task.isCancelled { sizes = measured }
+        }
+    }
+
+    private func choose(_ size: ImageSizeChoice) {
+        model.compose?.imageSize = size
+        changed()
+    }
+
+    private static func name(_ size: ImageSizeChoice) -> String {
+        switch size {
+        case .small: "Small"
+        case .medium: "Medium"
+        case .large: "Large"
+        case .actual: "Actual Size"
+        }
+    }
+
+    private static func label(_ option: MessageSize) -> String {
+        let side = option.longestSide.map { " (\($0) px)" } ?? ""
+        return "\(name(option.size))\(side) · \(bytes(option.bytes))" + (option.fits ? "" : " · too large")
+    }
+
+    private static func bytes(_ count: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
     }
 }

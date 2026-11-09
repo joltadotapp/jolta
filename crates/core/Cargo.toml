@@ -24,6 +24,7 @@ hex.workspace = true
 tracing.workspace = true
 ammonia.workspace = true
 mail-builder.workspace = true
+image.workspace = true
 lettre.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

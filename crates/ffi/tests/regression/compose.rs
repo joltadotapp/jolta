@@ -1,7 +1,7 @@
 use jolta_core::MailboxRole;
 use jolta_ffi::ReplyMode;
 
-use crate::fixture::{App, Mail, block_on, now};
+use crate::fixture::{App, Mail, block_on, now, png, span};
 
 fn addresses(field: &str) -> Vec<String> {
     let mut out: Vec<String> = field
@@ -124,6 +124,43 @@ fn undo_send_and_scheduled_send() {
     assert_eq!((scheduled[0].subject.as_str(), scheduled[0].send_at), ("Hello", later));
     app.core.cancel_send(token).unwrap();
     assert!(app.core.scheduled().unwrap().is_empty());
+}
+
+/// A pasted image stays where it was put through autosave and reopening the
+/// draft, and the sent message shows it inline from a part of its own.
+#[test]
+fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let png = png();
+    let path = app.core.save_pasted_image(png.clone()).unwrap();
+    let mut compose = app.core.new_compose().unwrap();
+    compose.account_id = Some(me.id.0);
+    compose.to = "bob@test.invalid".into();
+    compose.subject = "The chart".into();
+    compose.body = app.core.body_markdown(vec![span("Here:\n", None), span("Pasted image.png", Some(&path)), span("\nThanks", None)]);
+    compose.image_size = jolta_ffi::ImageSizeChoice::Medium;
+    let id = app.core.save_draft(compose).unwrap();
+
+    let sizes = app.core.message_sizes(jolta_ffi::ComposeData { account_id: None, ..app.core.draft(id).unwrap().unwrap() }).unwrap();
+    assert_eq!(sizes.len(), 4, "the size menu shows before a sender is chosen");
+
+    let reopened = app.core.draft(id).unwrap().expect("the draft is there");
+    assert_eq!(reopened.image_size, jolta_ffi::ImageSizeChoice::Medium, "the draft keeps its image size");
+    let spans = app.core.body_spans(reopened.body.clone());
+    let images: Vec<_> = spans.iter().filter_map(|s| Some((s.text.as_str(), s.image.as_deref()?))).collect();
+    assert_eq!(images, [("Pasted image.png", path.as_str())]);
+    assert_eq!(std::fs::read(&path).unwrap(), png);
+
+    app.core.send(reopened, None, None).unwrap();
+    let blob: String = app.jolta.store.read(|c| Ok(c.query_row("SELECT blob FROM outbox", [], |r| r.get(0))?)).unwrap();
+    let raw = app.jolta.blobs.get(&blob).unwrap();
+    let msg = mail_parser::MessageParser::new().parse(&raw).unwrap();
+    let image = msg.parts().find(|p| p.content_id().is_some()).expect("the image has its own part");
+    assert_eq!(&image.decoded()[..], &png[..]);
+    let html = msg.body_html(0).unwrap();
+    assert!(html.contains(&format!("src=\"cid:{}\"", image.content_id().unwrap())), "{html}");
+    assert!(msg.body_text(0).unwrap().replace("\r\n", "\n").contains("Here:\n[image: Pasted image.png]\nThanks"));
 }
 
 /// A draft survives saving twice (one row, the newest text) and goes away

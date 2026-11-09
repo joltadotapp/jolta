@@ -21,6 +21,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 rustls-platform-verifier = "0.7"
 mail-parser = { version = "=1.0.0", features = ["full_encoding"] }
 mail-builder = "=2.0.0"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "ring", "rustls-platform-verifier", "hostname"] }
 keyring-core = "1.0.1"
 apple-native-keyring-store = "1.0.2"
@@ -54,3 +55,18 @@ codegen-units = 4
 # without llama.cpp's `common` code.
 [patch.crates-io]
 llama-cpp-2 = { path = "vendor/llama-cpp-2" }
+
+# Pasted images are resized in debug builds too; unoptimized, the size menu
+# of a Retina screenshot takes seconds instead of a fraction of one.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
