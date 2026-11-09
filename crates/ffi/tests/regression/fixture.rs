@@ -331,3 +331,13 @@ fn civil(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
+
+/// The bytes of an 8x8 PNG, enough for Jolta to take it as an image.
+pub fn png() -> Vec<u8> {
+    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x08\0\0\0\x08\x08\x06\0\0\0\0\0\0\0".to_vec()
+}
+
+/// A run of plain text for `body_markdown`, or an image when `image` is a path.
+pub fn span(text: &str, image: Option<&str>) -> jolta_ffi::TextSpan {
+    jolta_ffi::TextSpan { text: text.into(), bold: false, italic: false, strike: false, link: None, image: image.map(Into::into) }
+}

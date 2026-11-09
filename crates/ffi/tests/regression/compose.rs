@@ -1,7 +1,7 @@
 use jolta_core::MailboxRole;
 use jolta_ffi::ReplyMode;
 
-use crate::fixture::{App, Mail, block_on, now};
+use crate::fixture::{App, Mail, block_on, now, png, span};
 
 fn addresses(field: &str) -> Vec<String> {
     let mut out: Vec<String> = field
@@ -112,16 +112,8 @@ fn undo_send_and_scheduled_send() {
 fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     let app = App::new();
     let me = app.account("me@test.invalid");
-    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x08\0\0\0\x08\x08\x06\0\0\0\0\0\0\0".to_vec();
+    let png = png();
     let path = app.core.save_pasted_image(png.clone()).unwrap();
-    let span = |text: &str, image: Option<&str>| jolta_ffi::TextSpan {
-        text: text.into(),
-        bold: false,
-        italic: false,
-        strike: false,
-        link: None,
-        image: image.map(Into::into),
-    };
     let mut compose = app.core.new_compose().unwrap();
     compose.account_id = Some(me.id.0);
     compose.to = "bob@test.invalid".into();

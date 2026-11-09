@@ -2,9 +2,10 @@
 //! (Mailpit). Start them with `scripts/test-servers.sh up`; without them
 //! these tests skip.
 
+use futures::TryStreamExt;
 use jolta_ffi::{ListContext, ThreadAction};
 
-use crate::fixture::{App, Mail, block_on, now};
+use crate::fixture::{App, Mail, block_on, now, png, span};
 use crate::server::{Mailbox, available, caught, wait};
 
 fn inbox_has(app: &App, subject: &str) -> bool {
@@ -301,4 +302,44 @@ fn drafts_reopen_from_drafts() {
 
     app.core.send(phone, None, None).unwrap();
     wait(40, "sending removed the draft", || server.subjects("Drafts") == ["Re: Numbers, attached"]);
+}
+
+/// A pasted image goes to the server with its draft, shown inline there, and
+/// opening the draft again from Drafts brings it back where it was.
+#[test]
+fn a_pasted_image_comes_back_with_its_draft() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let app = App::unstarted();
+    let account = server.sign_in(&app);
+    wait(20, "the first sync finished", || app.events.seen("synced"));
+
+    let path = app.core.save_pasted_image(png()).unwrap();
+    let mut compose = app.core.new_compose().unwrap();
+    compose.account_id = Some(account.id.0);
+    compose.to = "bob@test.invalid".into();
+    compose.subject = "With a chart".into();
+    compose.body = app.core.body_markdown(vec![span("See:\n", None), span("Pasted image.png", Some(&path)), span("\nBye", None)]);
+    let id = app.core.save_draft(compose).unwrap();
+    app.core.sync_now();
+    let thread = || app.list("in:drafts").into_iter().find(|r| r.subject == "With a chart").map(|r| r.thread_id);
+    wait(20, "the draft came back in Drafts", || thread().is_some());
+
+    let opened = block_on(app.core.open_draft(thread().unwrap())).unwrap().expect("a draft");
+    assert_eq!(opened.draft_id, Some(id));
+    let spans = app.core.body_spans(opened.body);
+    let texts: Vec<_> = spans.iter().map(|s| (s.text.as_str(), s.image.as_deref())).collect();
+    assert_eq!(texts, [("See:\n", None), ("Pasted image.png", Some(path.as_str())), ("\nBye", None)]);
+
+    let raw = server.with(async |s| {
+        s.select("Drafts").await.unwrap();
+        let fetched: Vec<_> = s.fetch("1", "BODY.PEEK[]").await.unwrap().try_collect().await.unwrap();
+        fetched[0].body().unwrap().to_vec()
+    });
+    let msg = mail_parser::MessageParser::new().parse(&raw).unwrap();
+    let image = msg.parts().find(|p| p.content_id().is_some()).expect("the server copy carries the image");
+    assert_eq!(&image.decoded()[..], &png()[..]);
+    assert!(msg.body_html(0).unwrap().contains(&format!("cid:{}", image.content_id().unwrap())));
 }
