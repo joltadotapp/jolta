@@ -217,6 +217,15 @@ final class AppModel {
 
     var showsSections: Bool { source == .unifiedInbox && search.isEmpty && !sections.isEmpty }
 
+    /// The list is Drafts, where opening a conversation edits its draft.
+    var showsDrafts: Bool {
+        switch source {
+        case .role(let role): role == "drafts"
+        case .mailbox(let id, _): accounts.flatMap(\.mailboxes).first { $0.id == id }?.role == "drafts"
+        default: false
+        }
+    }
+
     var query: String {
         var parts = [source.query]
         if showsSections, let section { parts.append(section.query) }
@@ -754,6 +763,23 @@ final class AppModel {
         composeReminder = nil
         composeSchedule = nil
         compose = (try? core.newCompose()) ?? .blank
+    }
+
+    /// Edits the conversation's draft in compose, or reads the conversation
+    /// when its draft is being sent or discarded.
+    func openDraft(threadID: Int64) {
+        Task {
+            do {
+                guard let draft = try await core.openDraft(threadId: threadID) else { return open(threadID: threadID) }
+                if compose?.draftId == draft.draftId { return }
+                if compose != nil { closeCompose() }
+                composeReminder = nil
+                composeSchedule = nil
+                compose = draft
+            } catch {
+                show(Toast(text: "\(error)", undo: nil))
+            }
+        }
     }
 
     func reply(_ mode: ReplyMode, threadID: Int64? = nil) {

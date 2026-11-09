@@ -30,6 +30,7 @@ struct MessageList: NSViewRepresentable {
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
         table.target = context.coordinator
+        table.action = #selector(Coordinator.clicked)
         table.doubleAction = #selector(Coordinator.openSelected)
         KeyRouter.shared.handler = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
         context.coordinator.table = table
@@ -204,7 +205,17 @@ struct MessageList: NSViewRepresentable {
 
         @objc func openSelected() {
             guard let table, table.selectedRow >= 0, let r = row(at: table.selectedRow) else { return }
-            model.open(threadID: r.threadId)
+            if model.showsDrafts {
+                model.openDraft(threadID: r.threadId)
+            } else {
+                model.open(threadID: r.threadId)
+            }
+        }
+
+        /// In Drafts a click edits the draft; J and K still read through them.
+        @objc func clicked() {
+            guard model.showsDrafts, let table, table.clickedRow >= 0, table.numberOfSelectedRows == 1 else { return }
+            openSelected()
         }
 
         func move(_ delta: Int) {
