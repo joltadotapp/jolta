@@ -102,11 +102,15 @@ final class RichTextView: NSTextView {
         DispatchQueue.main.async { shown(self) }
     }
 
-    /// Takes the keyboard with the cursor at the start.
-    func focusAtStart() {
+    /// Takes the keyboard with the cursor after `written`, the start of the
+    /// body in the core's format: at the start when it is empty.
+    func focus(after written: String, core: Core) {
         window?.makeFirstResponder(self)
-        setSelectedRange(NSRange(location: 0, length: 0))
-        scrollRangeToVisible(NSRange(location: 0, length: 0))
+        let shown = Self.attributed(core.bodySpans(body: written), base: base).string
+        let found = (string as NSString).range(of: shown)
+        let cursor = NSRange(location: found.location == NSNotFound ? 0 : NSMaxRange(found), length: 0)
+        setSelectedRange(cursor)
+        scrollRangeToVisible(cursor)
     }
 
     /// Puts a body (in the core's format) at the cursor, as one undoable edit.
