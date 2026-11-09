@@ -9,8 +9,9 @@ struct FindTimeRequest: Hashable {
         case reply(thread: Int64)
         /// From Propose new time: the time fills the proposal.
         case propose(message: Int64, organizer: String)
-        /// From compose: the user's free times go into the message.
-        case availability(account: Int64)
+        /// From compose: the user's free times go into the message, on the
+        /// clock of the first address in `to`.
+        case availability(account: Int64, to: String)
         /// From the event editor: the time goes back into the editor it came from.
         case editor(account: Int64, people: [PersonRecord], room: String, editor: ObjectIdentifier)
     }
@@ -35,7 +36,7 @@ extension AppModel {
     /// The compose palette's Insert my availability.
     func insertMyAvailability() {
         guard let account = compose?.accountId else { return notify("Choose who the message is from first") }
-        findTime(for: .availability(account: account))
+        findTime(for: .availability(account: account, to: compose?.to ?? ""))
     }
 }
 
@@ -70,6 +71,10 @@ struct FindTimePanel: View {
     @State private var pickingRoom = false
     /// Rooms whose times are on their way; picking waits for them.
     @State private var pendingRooms = 0
+    /// Insert my availability: the first recipient's clock, and their
+    /// working day's off hours on it.
+    @State private var theirZone: TheirZone?
+    @State private var theirOff: [TimeSlot] = []
     @FocusState private var focused: Bool
 
     private static let lengths: [Int64] = [15, 30, 45, 60, 90]
@@ -139,6 +144,7 @@ struct FindTimePanel: View {
         .accessibilityIdentifier("find-time")
         .task {
             minutes = request.minutes > 0 ? request.minutes : 30
+            Task { await loadZone() }
             await load()
         }
         .onChange(of: minutes) { suggest() }
@@ -211,11 +217,95 @@ struct FindTimePanel: View {
         DispatchQueue.main.async { focused = true }
     }
 
+    /// "Their time: New York · UTC−05:00 on their last mail ▾". Picking a
+    /// zone remembers it for this person.
+    private func zoneMenu(_ zone: TheirZone) -> some View {
+        Menu {
+            if let offset = zone.mailOffset, !zone.matching.isEmpty {
+                Section("\(offset) on their last mail") {
+                    ForEach(zone.matching, id: \.zone) { c in Button(c.city) { pickZone(c.zone, for: zone.address) } }
+                }
+            }
+            Button("My time, \(zone.mine.city)") { pickZone(zone.mine.zone, for: zone.address) }
+            Menu("All zones") {
+                ForEach(zone.all, id: \.zone) { c in Button("\(c.city)   \(c.offset)") { pickZone(c.zone, for: zone.address) } }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text("Their time:").foregroundStyle(Color(Theme.text3))
+                Text(zone.zone.city).foregroundStyle(Color(Theme.text))
+                Text(Self.zoneSource(zone)).foregroundStyle(Color(Theme.text3))
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color(Theme.text3))
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("The clock the times go into the message on, for \(zone.address)")
+        .accessibilityLabel("Their time: \(zone.zone.city) \(Self.zoneSource(zone))")
+        .accessibilityIdentifier("find-time-their-zone")
+    }
+
+    static func zoneSource(_ zone: TheirZone) -> String {
+        switch zone.source {
+        case .picked: "· picked for them"
+        case .workingHours: "· from their Outlook working hours"
+        case .lastMail: "· \(zone.mailOffset ?? "") on their last mail"
+        case .mine: "· same as yours"
+        }
+    }
+
+    private func pickZone(_ name: String, for address: String) {
+        do {
+            try model.core.setTheirZone(address: address, zone: name)
+        } catch {
+            return model.notify("\(error)")
+        }
+        Task { await loadZone() }
+        DispatchQueue.main.async { focused = true }
+    }
+
+    /// The recipient's working day under the user's row, so a time at
+    /// their 03:00 stands out.
+    @ViewBuilder private func theirRow(_ info: FindTimeInfo) -> some View {
+        if let zone = theirZone, zone.source != .mine {
+            HStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(zone.zone.city).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
+                    Text("Their \(Self.minutesClock(zone.hours.start)) to \(Self.minutesClock(zone.hours.end))")
+                        .font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                }
+                .frame(width: nameWidth - 8, alignment: .leading)
+                .padding(.trailing, 8)
+                FindTimeRow(person: PersonRow(address: zone.address, name: "Their day", isMe: false, isRoom: false, busy: [], unknown: nil,
+                                              hours: zone.hours, outsideHours: theirOff, note: nil),
+                            days: info.days)
+                    .frame(height: 12)
+            }
+            .frame(height: 26)
+            .help("\(zone.address)'s working day on their clock")
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    static func minutesClock(_ minutes: UInt32) -> String {
+        String(format: "%02d:%02d", minutes / 60, minutes % 60)
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: "calendar.badge.clock").foregroundStyle(Color(Theme.text3))
             Text(title).font(.system(size: 13, weight: .semibold))
             Spacer()
+            if forAvailability, let zone = theirZone {
+                zoneMenu(zone)
+            }
             if canAddRoom {
                 Button { pickingRoom = true } label: {
                     HStack(spacing: 5) {
@@ -358,6 +448,7 @@ struct FindTimePanel: View {
                     .padding(.leading, nameWidth)
                     .allowsHitTesting(false)
             }
+            if forAvailability { theirRow(info) }
         }
         .accessibilityIdentifier("find-time-grid")
     }
@@ -441,7 +532,7 @@ struct FindTimePanel: View {
             let outcome = switch request.purpose {
             case .reply(let thread): try await model.core.findTimeForThread(threadId: thread, days: Self.days)
             case .propose(let message, _): try await model.core.findTimeForInvitation(messageId: message, days: Self.days)
-            case .availability(let account): try await model.core.findTimeForMe(accountId: account, days: Self.days)
+            case .availability(let account, _): try await model.core.findTimeForMe(accountId: account, days: Self.days)
             case .editor(let account, let people, let room, _):
                 try await model.core.findTimeForPeople(accountId: account, people: people, rooms: room.isEmpty ? [] : [room], days: Self.days)
             }
@@ -451,12 +542,26 @@ struct FindTimePanel: View {
                 rooms = info.people.filter(\.isRoom)
                 info.people.removeAll(where: \.isRoom)
                 phase = .ready(info)
+                shadeTheirDay()
                 suggest()
             case .calendarOff(let id, let address, let needsConsent): phase = .calendarOff(accountId: id, address: address, needsConsent: needsConsent)
             }
         } catch {
             phase = .failed("\(error)")
         }
+    }
+
+    /// The first recipient's clock, for Insert my availability. Without it
+    /// the times go in on this Mac's clock, as before.
+    private func loadZone() async {
+        guard case .availability(let account, let to) = request.purpose else { return }
+        theirZone = try? await model.core.theirZone(accountId: account, to: to)
+        shadeTheirDay()
+    }
+
+    private func shadeTheirDay() {
+        guard case .ready(let info) = phase, let zone = theirZone else { return theirOff = [] }
+        theirOff = (try? model.core.outsideHours(info: info, hours: zone.hours)) ?? []
     }
 
     /// Only when someone's working hours are known, and only for meetings.
@@ -501,7 +606,7 @@ struct FindTimePanel: View {
             model.proposedSlot = TimeSlot(start: slot.start, end: slot.end)
             if case .propose = model.rsvpPanel {} else { model.proposeFor = message }
         case .availability:
-            guard let text = try? model.core.availabilityText(info: info, minutes: minutes) else { return }
+            guard let text = try? model.core.availabilityText(info: info, minutes: minutes, zone: theirZone?.zone.zone) else { return }
             close()
             model.insertIntoCompose(text)
         case .editor(_, _, _, let editor):

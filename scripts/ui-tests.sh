@@ -65,6 +65,9 @@ for t in $TESTS; do
 		"$JOLTA" --data-dir "$dir" dev calendar-as-google Rooms me@test.invalid >/dev/null
 		printf '{"people": {"ann@test.invalid": {"known": []}, "bob@test.invalid": {"known": []}, "carl@test.invalid": {"known": []}, "bruegel@rooms.test.invalid": {"known": []}}}' >"$dir/free-busy.json"
 	fi
+	if [ "$t" = testInsertAvailabilityOnTheirClock ]; then
+		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/11-new-york.eml" >/dev/null
+	fi
 	if [ "$t" = testTurnOffAutomaticReplies ]; then
 		printf '{"me@test.invalid": {"automaticRepliesSetting": {"status": "alwaysEnabled", "externalAudience": "all"}}}' >"$dir/away.json"
 	fi

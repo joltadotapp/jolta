@@ -872,6 +872,33 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// Insert my availability in a reply to someone whose last mail is at
+    /// −05:00 writes on New York's clock with the user's own time beside it,
+    /// and shades their working day under the user's row.
+    func testInsertAvailabilityOnTheirClock() throws {
+        let app = try launch()
+        text(app, "Dana Reyes").click()
+        app.typeKey("r", modifierFlags: [])
+        let message = app.textViews.firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 5), "R opens a reply")
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
+        app.typeText("Insert my availability")
+        XCTAssertTrue(paletteRow(app, "Insert my availability").waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        let zone = app.descendants(matching: .any).matching(identifier: "find-time-their-zone").firstMatch
+        XCTAssertTrue(zone.waitForExistence(timeout: 10), "the header names their clock")
+        XCTAssertEqual(zone.title, "Their time: New York · UTC−05:00 on their last mail", "New York, from the offset of their last mail")
+        XCTAssertTrue(text(app, "New York, Their 09:00 to 17:00").waitForExistence(timeout: 10), "their working day is a row")
+        let pick = app.descendants(matching: .any).matching(identifier: "find-time-pick").firstMatch
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: pick)], timeout: 5)
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(zone.waitForNonExistence(timeout: 5), "Return inserts the times")
+        let body = message.value as? String ?? ""
+        XCTAssertTrue(body.contains("I'm free at these times (New York time):"), "the text names their zone")
+        XCTAssertTrue(body.contains("(EST): ") || body.contains("(EDT): "), "each day on New York's clock")
+    }
+
     /// R in Find a time opens the room picker, which offers the room of a
     /// meeting from last week; Return adds it as a row after the people. A
     /// typed address is offered as itself, and Esc closes the picker before
