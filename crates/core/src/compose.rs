@@ -101,10 +101,10 @@ pub struct SizeOption {
     pub fits: bool,
 }
 
-/// The largest message Microsoft Graph's sendMail takes, as Jolta builds it:
-/// the request carries the message in base64, a third larger, and Graph
-/// refuses requests over about 4 MB.
-pub const GRAPH_SEND_LIMIT: u64 = 3_000_000;
+/// The largest message, as Jolta builds it, that Microsoft 365 takes by
+/// default: 35 MB, unless the organisation set its own limit. Graph's
+/// sendMail itself took every message tried, up to 37.6 MB in a 50 MB request.
+pub const GRAPH_SEND_LIMIT: u64 = 35 << 20;
 
 /// The message at each image size, smallest first; empty when the body shows
 /// no images.
