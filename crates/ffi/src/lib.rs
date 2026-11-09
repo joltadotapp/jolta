@@ -408,17 +408,19 @@ pub struct TextSpan {
     pub italic: bool,
     pub strike: bool,
     pub link: Option<String>,
+    /// An image file shown here, by path; `text` is its name.
+    pub image: Option<String>,
 }
 
 impl From<rich::Span> for TextSpan {
     fn from(s: rich::Span) -> Self {
-        TextSpan { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link }
+        TextSpan { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link, image: s.image }
     }
 }
 
 impl From<TextSpan> for rich::Span {
     fn from(s: TextSpan) -> Self {
-        rich::Span { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link }
+        rich::Span { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link, image: s.image }
     }
 }
 
@@ -1045,6 +1047,12 @@ impl Core {
     /// The editor's styled runs as a body.
     pub fn body_markdown(&self, spans: Vec<TextSpan>) -> String {
         rich::markdown(&spans.into_iter().map(Into::into).collect::<Vec<_>>())
+    }
+
+    /// Keeps a pasted image (PNG, JPEG or GIF) for the message being
+    /// written, and returns the path an image span shows it from.
+    pub fn save_pasted_image(&self, data: Vec<u8>) -> Result<String> {
+        Ok(compose::save_image(&self.jolta.data_dir.join("images"), &data)?)
     }
 
     /// A reply, reply-all or forward of the newest message in a thread.

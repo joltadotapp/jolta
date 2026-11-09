@@ -1442,6 +1442,7 @@ dependencies = [
  "chrono-tz",
  "futures",
  "jolta-core",
+ "mail-parser 1.0.0",
  "rusqlite",
  "serde_json",
  "thiserror 2.0.21",

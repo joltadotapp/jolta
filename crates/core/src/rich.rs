@@ -1,8 +1,8 @@
 //! Formatted message bodies. A body is stored and passed around as a small
 //! Markdown subset: `**bold**`, `*italic*`, `~~struck~~`, `[text](url)`,
-//! and per line `- ` or `1. ` list items and `> ` quotes. The editor shows it
-//! as formatted text through `spans`; sending turns it into an HTML part and
-//! a plain-text part.
+//! `![name](file:///path)` for an image shown in the text, and per line `- `
+//! or `1. ` list items and `> ` quotes. The editor shows it as formatted text
+//! through `spans`; sending turns it into an HTML part and a plain-text part.
 
 /// A run of text with one set of styles, as the editor shows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -12,11 +12,18 @@ pub struct Span {
     pub italic: bool,
     pub strike: bool,
     pub link: Option<String>,
+    /// The image file shown here, by absolute path; `text` is its name.
+    pub image: Option<String>,
 }
 
 impl Span {
     fn same_style(&self, other: &Span) -> bool {
-        self.bold == other.bold && self.italic == other.italic && self.strike == other.strike && self.link == other.link
+        self.image.is_none()
+            && other.image.is_none()
+            && self.bold == other.bold
+            && self.italic == other.italic
+            && self.strike == other.strike
+            && self.link == other.link
     }
 }
 
@@ -247,9 +254,14 @@ pub fn to_text(body: &str) -> String {
         .join("\n")
 }
 
+/// The images a body shows, as (name, path), in order.
+pub fn images(_body: &str) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// The HTML part: paragraphs, lists, quotes and inline styles, with bare
-/// web addresses made into links.
-pub fn to_html(body: &str) -> String {
+/// web addresses made into links. `image` writes the tag for an image span.
+pub fn to_html(body: &str, _image: &dyn Fn(&Span) -> String) -> String {
     format!("<div style=\"font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5\">{}</div>", blocks(body))
 }
 
@@ -365,6 +377,31 @@ mod tests {
         Span { text: text.into(), ..Default::default() }
     }
 
+    fn to_html_plain(body: &str) -> String {
+        to_html(body, &|_| unreachable!("no images"))
+    }
+
+    #[test]
+    fn images_round_trip_and_stand_in_for_themselves_as_text() {
+        let path = "/Users/me/Library/Application Support/Jolta/images/ab (1).png";
+        let image = Span { text: "Pasted image.png".into(), image: Some(path.into()), ..Default::default() };
+        let original = vec![span("Look:\n"), image.clone(), image.clone(), span("\nbye!")];
+        let md = markdown(&original);
+        assert_eq!(spans(&md), original, "{md}");
+        assert_eq!(to_text(&md), "Look:\n[image: Pasted image.png][image: Pasted image.png]\nbye!");
+        assert_eq!(images(&md), vec![("Pasted image.png".to_string(), path.to_string()); 2]);
+        let html = to_html(&md, &|s| format!("<img alt=\"{}\">", s.text));
+        assert!(html.contains("<div><img alt=\"Pasted image.png\"><img alt=\"Pasted image.png\"></div>"), "{html}");
+    }
+
+    #[test]
+    fn only_a_local_file_is_an_image() {
+        let link = Span { text: "site".into(), link: Some("https://x.test/a.png".into()), ..Default::default() };
+        assert_eq!(spans("Wow![site](https://x.test/a.png)"), vec![span("Wow!"), link]);
+        assert!(images("Wow![site](https://x.test/a.png)").is_empty());
+        assert_eq!(spans("Hello! [x]"), vec![span("Hello! [x]")]);
+    }
+
     #[test]
     fn spans_round_trip_through_markdown() {
         let original = vec![
@@ -408,7 +445,7 @@ mod tests {
 
     #[test]
     fn html_part_has_lists_quotes_and_links() {
-        let html = to_html("Hi <you> & **all**\n\n- one\n- two\n1. first\n> On Monday Ann wrote:\n> > deep\nvisit https://x.test/a?b=1.");
+        let html = to_html_plain("Hi <you> & **all**\n\n- one\n- two\n1. first\n> On Monday Ann wrote:\n> > deep\nvisit https://x.test/a?b=1.");
         assert!(html.contains("Hi &lt;you&gt; &amp; <b>all</b>"), "{html}");
         assert!(html.contains("<ul><li>one</li><li>two</li></ul><ol><li>first</li></ol>"), "{html}");
         assert!(html.contains("<blockquote") && html.matches("<blockquote").count() == 2, "{html}");

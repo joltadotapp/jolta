@@ -131,7 +131,7 @@ final class RichTextView: NSTextView {
             }
             out.append(TextSpan(text: (storage.string as NSString).substring(with: range),
                                 bold: traits.contains(.boldFontMask), italic: traits.contains(.italicFontMask),
-                                strike: (attrs[.strikethroughStyle] as? Int ?? 0) != 0, link: link))
+                                strike: (attrs[.strikethroughStyle] as? Int ?? 0) != 0, link: link, image: nil))
         }
         return out
     }

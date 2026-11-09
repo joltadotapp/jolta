@@ -274,6 +274,15 @@ pub fn expand_snippet(body: &str, to: &str) -> String {
     out
 }
 
+/// The largest image paste takes.
+pub const MAX_IMAGE_BYTES: usize = 10 << 20;
+
+/// Keeps a pasted image in `dir` for a message to show, and returns its
+/// path. Only PNG, JPEG and GIF, which every mail app shows inline.
+pub fn save_image(_dir: &Path, _bytes: &[u8]) -> Result<String> {
+    Err(Error::Other("not yet".into()))
+}
+
 /// A built message, ready for the outbox.
 pub struct Built {
     pub raw: Vec<u8>,
@@ -303,7 +312,7 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
         .subject(c.subject.clone())
         .message_id(message_id.clone())
         .text_body(rich::to_text(&c.body))
-        .html_body(rich::to_html(&c.body));
+        .html_body(rich::to_html(&c.body, &|_| String::new()));
     if !to.is_empty() {
         builder = builder.to(list(&to));
     }
@@ -391,6 +400,152 @@ mod tests {
         assert_eq!(swap_signature(&no_signature, "", "K."), "Thanks!\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi");
         assert_eq!(swap_signature("Hello", "", "K."), "Hello\n\nK.");
         assert_eq!(swap_signature("Hello\n\nK. (edited)", "K. (gone)", "X"), "Hello\n\nK. (edited)", "an edited signature stays");
+    }
+
+    fn account() -> Account {
+        Account {
+            id: AccountId(1),
+            kind: AccountKind::Imap,
+            address: "me@example.com".into(),
+            display_name: "Me".into(),
+            username: String::new(),
+            imap_host: String::new(),
+            imap_port: 0,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            secret_ref: String::new(),
+            imap_security: Security::Tls,
+            smtp_security: Security::Tls,
+            smtp_auth: SmtpAuth::SameAsIncoming,
+            smtp_username: String::new(),
+            verify_certs: true,
+            signature: String::new(),
+            calendar: false,
+        }
+    }
+
+    /// A PNG header `width` pixels wide, at `per_meter` pixels per meter.
+    fn png(width: u32, per_meter: Option<u32>) -> Vec<u8> {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut chunk = |kind: &[u8], data: &[u8]| {
+            out.extend((data.len() as u32).to_be_bytes());
+            out.extend(kind);
+            out.extend(data);
+            out.extend([0; 4]);
+        };
+        chunk(b"IHDR", &[&width.to_be_bytes()[..], &10u32.to_be_bytes(), &[8, 6, 0, 0, 0]].concat());
+        if let Some(p) = per_meter {
+            chunk(b"pHYs", &[&p.to_be_bytes()[..], &p.to_be_bytes(), &[1]].concat());
+        }
+        chunk(b"IEND", &[]);
+        out
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jolta-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The MIME tree as `type[child,child]`.
+    fn tree(part: mail_parser::MessagePart) -> String {
+        let ct = part.content_type().map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or_default())).unwrap_or_default();
+        match part.is_multipart() {
+            true => format!("{ct}[{}]", part.children().map(tree).collect::<Vec<_>>().join(",")),
+            false => ct,
+        }
+    }
+
+    fn image(name: &str, path: &str) -> rich::Span {
+        rich::Span { text: name.into(), image: Some(path.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_pasted_image_shows_inline_where_it_was_put() {
+        let dir = temp_dir("inline");
+        let retina = png(800, Some(5669));
+        let path = save_image(&dir.join("images"), &retina).unwrap();
+        assert!(Path::new(&path).starts_with(dir.join("images")), "{path}");
+        assert_eq!(save_image(&dir.join("images"), &retina).unwrap(), path, "the same image is kept once");
+        let pdf = dir.join("offer.pdf");
+        std::fs::write(&pdf, b"%PDF-").unwrap();
+        let body = rich::markdown(&[
+            rich::Span { text: "See below:\n".into(), ..Default::default() },
+            image("Screenshot.png", &path),
+            rich::Span { text: "\nand once more ".into(), ..Default::default() },
+            image("Screenshot.png", &path),
+        ]);
+        let c = Compose {
+            to: "bob@example.com".into(),
+            subject: "Look".into(),
+            body,
+            attachments: vec![AttachmentFile { name: "offer.pdf".into(), mime_type: "application/pdf".into(), path: pdf.to_string_lossy().into() }],
+            ..Default::default()
+        };
+        let built = build(&account(), &c, true).unwrap();
+        let msg = MessageParser::new().parse(&built.raw).unwrap();
+        assert_eq!(
+            tree(msg.root_part()),
+            "multipart/mixed[multipart/related[multipart/alternative[text/plain,text/html],image/png],application/pdf]"
+        );
+        let inline: Vec<_> = msg.parts().filter(|p| p.content_id().is_some()).collect();
+        assert_eq!(inline.len(), 1, "an image shown twice is sent once");
+        let cid = inline[0].content_id().unwrap();
+        assert_eq!(&inline[0].decoded()[..], &retina[..]);
+        assert_eq!(inline[0].content_disposition().map(|d| d.ctype()), Some("inline"));
+        assert_eq!(inline[0].attachment_name(), Some("Screenshot.png"));
+        let html = msg.body_html(0).unwrap();
+        let tag = format!("<img src=\"cid:{cid}\" alt=\"Screenshot.png\" width=\"400\" style=\"max-width: 100%\">");
+        assert_eq!(html.matches(&tag).count(), 2, "a Retina screenshot shows at its size on screen: {html}");
+        let text = msg.body_text(0).unwrap();
+        assert!(text.contains("See below:\n[image: Screenshot.png]\nand once more [image: Screenshot.png]"), "{text}");
+        assert!(!text.contains("file:") && !html.contains("file:"), "the local path stays home");
+        let pdf_part = msg.attachments().find(|p| p.attachment_name() == Some("offer.pdf")).unwrap();
+        assert_eq!(pdf_part.content_disposition().map(|d| d.ctype()), Some("attachment"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_message_without_images_keeps_its_shape() {
+        let c = Compose { to: "bob@example.com".into(), body: "Hi **Bob**".into(), ..Default::default() };
+        let built = build(&account(), &c, true).unwrap();
+        let msg = MessageParser::new().parse(&built.raw).unwrap();
+        assert_eq!(tree(msg.root_part()), "multipart/alternative[text/plain,text/html]");
+        assert!(msg.body_html(0).unwrap().contains("<b>Bob</b>"));
+    }
+
+    #[test]
+    fn an_image_at_normal_density_gets_no_width() {
+        let dir = temp_dir("plain-density");
+        let path = save_image(&dir, &png(300, None)).unwrap();
+        let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("chart.png", &path)]), ..Default::default() };
+        let msg_raw = build(&account(), &c, true).unwrap().raw;
+        let html = MessageParser::new().parse(&msg_raw).unwrap().body_html(0).unwrap().into_owned();
+        assert!(html.contains("alt=\"chart.png\" style=\"max-width: 100%\">"), "{html}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_images_that_mail_apps_show_can_be_pasted() {
+        let dir = temp_dir("paste-kinds");
+        assert!(save_image(&dir, b"GIF89a\x01\x00\x01\x00").unwrap().ends_with(".gif"));
+        assert!(save_image(&dir, b"\xff\xd8\xff\xe0rest").unwrap().ends_with(".jpg"));
+        assert!(save_image(&dir, b"II*\x00 a TIFF").is_err(), "the app converts other formats first");
+        let mut huge = png(10, None);
+        huge.resize(MAX_IMAGE_BYTES + 1, 0);
+        assert!(save_image(&dir, &huge).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_image_that_is_gone_stops_the_send_with_its_name() {
+        let c = Compose {
+            to: "bob@example.com".into(),
+            body: rich::markdown(&[image("Plan.png", "/nonexistent/jolta/Plan.png")]),
+            ..Default::default()
+        };
+        let Err(e) = build(&account(), &c, true) else { panic!("built without its image") };
+        assert!(e.to_string().contains("Plan.png"), "{e}");
     }
 
     #[test]
