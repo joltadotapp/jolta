@@ -143,7 +143,7 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     assert_eq!(&image.decoded()[..], &png[..]);
     let html = msg.body_html(0).unwrap();
     assert!(html.contains(&format!("src=\"cid:{}\"", image.content_id().unwrap())), "{html}");
-    assert!(msg.body_text(0).unwrap().contains("Here:\n[image: Pasted image.png]\nThanks"));
+    assert!(msg.body_text(0).unwrap().replace("\r\n", "\n").contains("Here:\n[image: Pasted image.png]\nThanks"));
 }
 
 /// A draft survives saving twice (one row, the newest text) and goes away

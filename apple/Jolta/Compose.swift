@@ -148,6 +148,7 @@ struct ComposeView: View {
                            focusOnAppear: !(model.compose?.to.isEmpty ?? true), isMessageBody: true)
                 .padding(.horizontal, 28)
                 .padding(.top, 14)
+                .environment(\.pasteTarget, PasteTarget(core: model.core, attach: attach, failed: model.notify))
 
             if !draft.wrappedValue.attachments.isEmpty {
                 ScrollView(.horizontal) {
@@ -246,7 +247,11 @@ struct ComposeView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return }
-        for url in panel.urls {
+        attach(panel.urls)
+    }
+
+    private func attach(_ urls: [URL]) {
+        for url in urls {
             let type = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
             model.compose?.attachments.append(ComposeFile(name: url.lastPathComponent, mimeType: type, path: url.path))
         }

@@ -1,10 +1,13 @@
 @preconcurrency import JoltaFFI
 import AppKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A formatted text editor over the core's body format: bold (⌘B), italic
 /// (⌘I), strikethrough (⇧⌘X) and links (⇧⌘K), from the Format menu.
-/// Pasted text keeps only those styles.
+/// Pasted text keeps only those styles; in a message, a pasted image goes
+/// where the cursor is.
 struct RichTextEditor: NSViewRepresentable {
     @Binding var text: String
     let core: Core
@@ -50,6 +53,7 @@ struct RichTextEditor: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
+        (scroll.documentView as? RichTextView)?.pasteTarget = context.environment.pasteTarget
         guard let view = scroll.documentView as? RichTextView, text != context.coordinator.lastText else { return }
         // Changed from outside (a signature swap, a snippet): reload, keeping the cursor.
         let cursor = view.selectedRange()
@@ -113,7 +117,8 @@ final class RichTextView: NSTextView {
             attrs[.font] = f
             if span.strike { attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
             if let link = span.link, let url = URL(string: link) { attrs[.link] = url }
-            out.append(NSAttributedString(string: span.text, attributes: attrs))
+            if let path = span.image { attrs = base; attrs[.attachment] = ImageAttachment(path: path, name: span.text) }
+            out.append(NSAttributedString(string: span.image == nil ? span.text : "\u{FFFC}", attributes: attrs))
         }
         return out
     }
@@ -123,6 +128,12 @@ final class RichTextView: NSTextView {
         guard let storage = textStorage else { return [] }
         var out: [TextSpan] = []
         storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { attrs, range, _ in
+            if let attachment = attrs[.attachment] {
+                if let image = attachment as? ImageAttachment {
+                    out.append(TextSpan(text: image.name, bold: false, italic: false, strike: false, link: nil, image: image.path))
+                }
+                return
+            }
             let traits = (attrs[.font] as? NSFont).map { NSFontManager.shared.traits(of: $0) } ?? []
             let link: String? = switch attrs[.link] {
             case let url as URL: url.absoluteString
@@ -210,14 +221,28 @@ final class RichTextView: NSTextView {
         }
     }
 
+    /// Where pasted images and files go; only the message being written has one.
+    var pasteTarget: PasteTarget?
+
     /// Pasted text keeps bold, italic, strikethrough and links, in Jolta's
-    /// font and colours.
+    /// font and colours. In a message, a pasted image goes in at the cursor
+    /// and other files become attachments.
     override func paste(_ sender: Any?) {
-        guard let rich = NSPasteboard.general.readObjects(forClasses: [NSAttributedString.self])?.first as? NSAttributedString,
+        let board = NSPasteboard.general
+        if let target = pasteTarget, pasteFilesOrImage(from: board, into: target) { return }
+        guard let rich = board.readObjects(forClasses: [NSAttributedString.self])?.first as? NSAttributedString,
               rich.length > 0 else { return super.paste(sender) }
         let clean = NSMutableAttributedString()
         let font = base[.font] as? NSFont ?? .systemFont(ofSize: 14)
         rich.enumerateAttributes(in: NSRange(location: 0, length: rich.length)) { attrs, range, _ in
+            if let attachment = attrs[.attachment] as? NSTextAttachment {
+                // Pictures in copied rich text, such as one copied from this editor.
+                if let target = pasteTarget, let data = attachment.fileWrapper?.regularFileContents,
+                   let image = imageAttachment(data, name: attachment.fileWrapper?.preferredFilename, target: target) {
+                    clean.append(NSAttributedString(string: "\u{FFFC}", attributes: base.merging([.attachment: image]) { $1 }))
+                }
+                return
+            }
             var kept = base
             let traits = (attrs[.font] as? NSFont).map { NSFontManager.shared.traits(of: $0) } ?? []
             var f = font
@@ -229,5 +254,141 @@ final class RichTextView: NSTextView {
             clean.append(NSAttributedString(string: (rich.string as NSString).substring(with: range), attributes: kept))
         }
         insertText(clean, replacementRange: selectedRange())
+    }
+}
+
+/// What the message being written does with pasted images and files.
+struct PasteTarget {
+    let core: Core
+    /// Files that aren't images, to attach.
+    let attach: ([URL]) -> Void
+    /// Why a paste couldn't go in.
+    let failed: (String) -> Void
+}
+
+extension EnvironmentValues {
+    @Entry var pasteTarget: PasteTarget?
+}
+
+extension RichTextView {
+    /// A copied file, or an image copied from a screenshot, a browser or
+    /// Preview. False when the clipboard holds text to paste instead: a
+    /// copied table or page also carries a picture of itself.
+    fileprivate func pasteFilesOrImage(from board: NSPasteboard, into target: PasteTarget) -> Bool {
+        let files = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if !files.isEmpty {
+            var others: [URL] = []
+            let pasted = NSMutableAttributedString()
+            for file in files {
+                guard UTType(filenameExtension: file.pathExtension)?.conforms(to: .image) ?? false,
+                      let data = try? Data(contentsOf: file), let image = Self.mailImage(data) else {
+                    others.append(file)
+                    continue
+                }
+                guard let attachment = keep(image, name: file.lastPathComponent, target: target) else { continue }
+                pasted.append(NSAttributedString(string: "\u{FFFC}", attributes: base.merging([.attachment: attachment]) { $1 }))
+            }
+            if pasted.length > 0 { insertText(pasted, replacementRange: selectedRange()) }
+            if !others.isEmpty { target.attach(others) }
+            return true
+        }
+        let text = board.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let justALink = !text.contains(where: \.isWhitespace) && URL(string: text)?.scheme?.hasPrefix("http") == true
+        guard text.isEmpty || justALink,
+              let type = board.availableType(from: [.png, NSPasteboard.PasteboardType(UTType.jpeg.identifier),
+                                                    NSPasteboard.PasteboardType(UTType.gif.identifier), .tiff,
+                                                    NSPasteboard.PasteboardType(UTType.heic.identifier)]),
+              let data = board.data(forType: type) else { return false }
+        if let attachment = imageAttachment(data, name: nil, target: target) {
+            insertText(NSAttributedString(string: "\u{FFFC}", attributes: base.merging([.attachment: attachment]) { $1 }),
+                       replacementRange: selectedRange())
+        }
+        return true
+    }
+
+    fileprivate func imageAttachment(_ data: Data, name: String?, target: PasteTarget) -> ImageAttachment? {
+        guard let image = Self.mailImage(data) else {
+            target.failed("That image can't be read.")
+            return nil
+        }
+        return keep(image, name: name, target: target)
+    }
+
+    /// Keeps an image for the message as a file the core sends from.
+    private func keep(_ image: (Data, String), name: String?, target: PasteTarget) -> ImageAttachment? {
+        let (bytes, ext) = image
+        let stem = name.map { ($0 as NSString).deletingPathExtension }.flatMap { $0.isEmpty ? nil : $0 } ?? "Pasted image"
+        do {
+            return ImageAttachment(path: try target.core.savePastedImage(data: bytes), name: "\(stem).\(ext)")
+        } catch {
+            target.failed("\(error)")
+            return nil
+        }
+    }
+
+    /// PNG, JPEG and GIF stay as they are. Other formats (TIFF from Preview,
+    /// HEIC photos) become PNG, or JPEG when that PNG would be over 5 MB and
+    /// the image has no transparency, keeping their orientation and density.
+    static func mailImage(_ data: Data) -> (Data, String)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source).flatMap({ UTType($0 as String) }) else { return nil }
+        for (kept, ext) in [(UTType.png, "png"), (.jpeg, "jpg"), (.gif, "gif")] where type == kept { return (data, ext) }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        let side = max(properties[kCGImagePropertyPixelWidth] as? Int ?? 0, properties[kCGImagePropertyPixelHeight] as? Int ?? 0)
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceCreateThumbnailWithTransform: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: max(side, 1)]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let density = properties.filter { $0.key == kCGImagePropertyDPIWidth || $0.key == kCGImagePropertyDPIHeight }
+        func encode(_ type: UTType, _ extra: [CFString: Any] = [:]) -> Data? {
+            let out = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(out, type.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(destination, image, density.merging(extra) { $1 } as CFDictionary)
+            return CGImageDestinationFinalize(destination) ? out as Data : nil
+        }
+        guard let png = encode(.png) else { return nil }
+        let opaque = [.none, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo)
+        if png.count > 5 << 20, opaque, let jpeg = encode(.jpeg, [kCGImageDestinationLossyCompressionQuality: 0.85]) {
+            return (jpeg, "jpg")
+        }
+        return (png, "png")
+    }
+}
+
+/// An image in a message, shown from the file the core sends it from.
+nonisolated final class ImageAttachment: NSTextAttachment {
+    let path: String
+    let name: String
+
+    init(path: String, name: String) {
+        self.path = path
+        self.name = name
+        super.init(data: nil, ofType: nil)
+        // Copying it within the editor carries the picture along.
+        if let data = FileManager.default.contents(atPath: path) {
+            let file = FileWrapper(regularFileWithContents: data)
+            file.preferredFilename = name
+            fileWrapper = file
+        }
+        image = NSImage(contentsOfFile: path)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    // At the size it had on screen, narrowed to fit the line.
+    override func attachmentBounds(for attributes: [NSAttributedString.Key: Any], location: any NSTextLocation,
+                                   textContainer: NSTextContainer?, proposedLineFragment: CGRect, position: CGPoint) -> CGRect {
+        fitted(to: proposedLineFragment.width)
+    }
+
+    override func attachmentBounds(for textContainer: NSTextContainer?, proposedLineFragment lineFrag: NSRect,
+                                   glyphPosition position: CGPoint, characterIndex charIndex: Int) -> NSRect {
+        fitted(to: lineFrag.width)
+    }
+
+    private func fitted(to width: CGFloat) -> CGRect {
+        guard let size = image?.size, size.width > 0 else { return CGRect(x: 0, y: 0, width: 16, height: 16) }
+        let scale = width > 0 ? min(1, width / size.width) : 1
+        return CGRect(x: 0, y: 0, width: size.width * scale, height: size.height * scale)
     }
 }

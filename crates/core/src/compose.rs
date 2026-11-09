@@ -1,12 +1,14 @@
 //! Writing mail: new messages, replies and forwards, built with
 //! mail-builder into the bytes the outbox sends.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address as BuilderAddress;
+use mail_builder::headers::content_type::ContentType;
+use mail_builder::mime::MimePart;
 use mail_parser::MessageParser;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -277,10 +279,98 @@ pub fn expand_snippet(body: &str, to: &str) -> String {
 /// The largest image paste takes.
 pub const MAX_IMAGE_BYTES: usize = 10 << 20;
 
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// The MIME type and file extension of a PNG, JPEG or GIF.
+fn image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    match bytes {
+        b if b.starts_with(PNG) => Some(("image/png", "png")),
+        [0xFF, 0xD8, 0xFF, ..] => Some(("image/jpeg", "jpg")),
+        b if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") => Some(("image/gif", "gif")),
+        _ => None,
+    }
+}
+
 /// Keeps a pasted image in `dir` for a message to show, and returns its
 /// path. Only PNG, JPEG and GIF, which every mail app shows inline.
-pub fn save_image(_dir: &Path, _bytes: &[u8]) -> Result<String> {
-    Err(Error::Other("not yet".into()))
+pub fn save_image(dir: &Path, bytes: &[u8]) -> Result<String> {
+    let Some((_, ext)) = image_type(bytes) else { return Err(Error::Other("Only PNG, JPEG and GIF images can be pasted.".into())) };
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(Error::Other(format!(
+            "This image is {:.1} MB; pasted images can be up to {} MB.",
+            bytes.len() as f64 / (1 << 20) as f64,
+            MAX_IMAGE_BYTES >> 20
+        )));
+    }
+    let path = dir.join(format!("{}.{ext}", &hex::encode(Sha256::digest(bytes))[..32]));
+    if !path.exists() {
+        std::fs::create_dir_all(dir)?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// The width to show a PNG at when it was taken on a Retina screen, which
+/// records 144 dpi or more: its size on that screen, so it isn't twice as
+/// large in the message. None for a 1x image.
+fn retina_width(bytes: &[u8]) -> Option<u32> {
+    let be = |b: &[u8]| -> Option<u32> { Some(u32::from_be_bytes(b.try_into().ok()?)) };
+    if !bytes.starts_with(PNG) {
+        return None;
+    }
+    let width = be(bytes.get(16..20)?)?;
+    let mut at = PNG.len();
+    while let Some(head) = bytes.get(at..at + 8) {
+        let len = be(&head[..4])? as usize;
+        let data = bytes.get(at + 8..at + 8 + len)?;
+        match &head[4..] {
+            b"pHYs" if len == 9 && data[8] == 1 => {
+                // 2835 pixels per meter is 72 dpi.
+                let per_meter = be(&data[..4])?;
+                return (per_meter >= 5600).then(|| ((u64::from(width) * 2835 + u64::from(per_meter) / 2) / u64::from(per_meter)) as u32);
+            }
+            b"IDAT" | b"IEND" => return None,
+            _ => at += len + 12,
+        }
+    }
+    None
+}
+
+/// An image the body shows, as one part of the message.
+struct InlineImage {
+    cid: String,
+    name: String,
+    mime_type: &'static str,
+    bytes: Vec<u8>,
+    width: Option<u32>,
+}
+
+/// The images `body` shows, one part per distinct image, and which part
+/// each path is.
+fn inline_images(body: &str, domain: &str) -> Result<(Vec<InlineImage>, HashMap<String, usize>)> {
+    let mut parts: Vec<InlineImage> = Vec::new();
+    let mut by_path = HashMap::new();
+    for (name, path) in rich::images(body) {
+        if by_path.contains_key(&path) {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|_| Error::Other(format!("The image {name} is no longer there; paste it again.")))?;
+        let Some((mime_type, _)) = image_type(&bytes) else {
+            return Err(Error::Other(format!("{name} is not a PNG, JPEG or GIF image.")));
+        };
+        let cid = format!("{}@{domain}", &hex::encode(Sha256::digest(&bytes))[..24]);
+        let at = match parts.iter().position(|p| p.cid == cid) {
+            Some(at) => at,
+            None => {
+                parts.push(InlineImage { cid, name, mime_type, width: retina_width(&bytes), bytes });
+                parts.len() - 1
+            }
+        };
+        by_path.insert(path, at);
+    }
+    Ok((parts, by_path))
 }
 
 /// A built message, ready for the outbox.
@@ -306,13 +396,40 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
     let list = |l: &[(String, String)]| -> BuilderAddress<'static> {
         BuilderAddress::new_list(l.iter().map(|(n, a)| BuilderAddress::new_address(Some(n.clone()).filter(|n| !n.is_empty()), a.clone())).collect())
     };
+    let (images, image_at) = inline_images(&c.body, domain)?;
+    let img = |s: &rich::Span| {
+        let image = &images[image_at[s.image.as_deref().unwrap_or_default()]];
+        let width = image.width.map(|w| format!(" width=\"{w}\"")).unwrap_or_default();
+        format!("<img src=\"cid:{}\" alt=\"{}\"{width} style=\"max-width: 100%\">", image.cid, rich::html_escape(&s.text))
+    };
+    let mut body = MimePart::new(
+        "multipart/alternative",
+        vec![MimePart::new("text/plain", rich::to_text(&c.body)), MimePart::new("text/html", rich::to_html(&c.body, &img))],
+    );
+    if !images.is_empty() {
+        let mut parts = vec![body];
+        parts.extend(images.into_iter().map(|i| {
+            MimePart::new(ContentType::new(i.mime_type).attribute("name", i.name.clone()), i.bytes)
+                .header("Content-Disposition", ContentType::new("inline").attribute("filename", i.name))
+                .cid(i.cid)
+        }));
+        body = MimePart::new("multipart/related", parts);
+    }
+    if !c.attachments.is_empty() {
+        let mut parts = vec![body];
+        for a in &c.attachments {
+            let bytes = std::fs::read(&a.path).map_err(|e| Error::Other(format!("could not read {}: {e}", a.name)))?;
+            parts.push(MimePart::new(a.mime_type.clone(), bytes).attachment(a.name.clone()));
+        }
+        body = MimePart::new("multipart/mixed", parts);
+    }
+
     let from_name = (!account.display_name.is_empty()).then(|| account.display_name.clone());
     let mut builder = MessageBuilder::new()
         .from(BuilderAddress::new_address(from_name, account.address.clone()))
         .subject(c.subject.clone())
         .message_id(message_id.clone())
-        .text_body(rich::to_text(&c.body))
-        .html_body(rich::to_html(&c.body, &|_| String::new()));
+        .body(body);
     if !to.is_empty() {
         builder = builder.to(list(&to));
     }
@@ -324,10 +441,6 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
     }
     if !c.references.is_empty() {
         builder = builder.references(c.references.clone());
-    }
-    for a in &c.attachments {
-        let bytes = std::fs::read(&a.path).map_err(|e| Error::Other(format!("could not read {}: {e}", a.name)))?;
-        builder = builder.attachment(a.mime_type.clone(), a.name.clone(), bytes);
     }
     let raw = builder.write_to_vec()?;
     let recipients = to.iter().chain(&cc).chain(&bcc).map(|(_, a)| a.clone()).collect();
@@ -497,7 +610,7 @@ mod tests {
         let html = msg.body_html(0).unwrap();
         let tag = format!("<img src=\"cid:{cid}\" alt=\"Screenshot.png\" width=\"400\" style=\"max-width: 100%\">");
         assert_eq!(html.matches(&tag).count(), 2, "a Retina screenshot shows at its size on screen: {html}");
-        let text = msg.body_text(0).unwrap();
+        let text = msg.body_text(0).unwrap().replace("\r\n", "\n");
         assert!(text.contains("See below:\n[image: Screenshot.png]\nand once more [image: Screenshot.png]"), "{text}");
         assert!(!text.contains("file:") && !html.contains("file:"), "the local path stays home");
         let pdf_part = msg.attachments().find(|p| p.attachment_name() == Some("offer.pdf")).unwrap();
