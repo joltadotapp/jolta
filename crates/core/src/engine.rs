@@ -501,7 +501,7 @@ impl Engine {
             let sent_box = self.role_mailbox(account_id, MailboxRole::Sent).await?;
             touched.extend(sent_box.map(|m| m.id));
         }
-        self.sync_drafts(account, link).await?;
+        touched.extend(self.sync_drafts(account, link).await?);
 
         let scope = if wake.full_sync.swap(false, Ordering::SeqCst) {
             wake.inbox_changed.store(false, Ordering::SeqCst);
@@ -723,13 +723,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Replaces or removes server copies of drafts that changed.
-    async fn sync_drafts(&self, account: &Account, link: &mut Link) -> Result<()> {
+    /// Replaces or removes server copies of drafts that changed. Returns the
+    /// Drafts mailbox when it changed there, since its list shows the
+    /// server's copies.
+    async fn sync_drafts(&self, account: &Account, link: &mut Link) -> Result<Option<MailboxId>> {
         let account_id = account.id;
         let dirty = self.jolta.store.read_async(move |c| store::dirty_drafts(c, account_id)).await?;
         if dirty.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
+        let drafts_box = self.role_mailbox(account.id, MailboxRole::Drafts).await?;
         let session = match link {
             Link::Imap(session, _) => session,
             Link::Graph(g) => {
@@ -739,15 +742,15 @@ impl Engine {
                     let (id, deleted, server_id) = (d.id, d.deleted, built.map(|b| b.message_id));
                     self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
                 }
-                return Ok(());
+                return Ok(drafts_box.map(|m| m.id));
             }
         };
-        let Some(drafts_box) = self.role_mailbox(account.id, MailboxRole::Drafts).await? else {
+        let Some(drafts_box) = drafts_box else {
             for d in dirty {
                 let (id, deleted) = (d.id, d.deleted);
                 self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, None, deleted)).await?;
             }
-            return Ok(());
+            return Ok(None);
         };
         session.select(&drafts_box.remote_id).await?;
         for d in dirty {
@@ -768,7 +771,7 @@ impl Engine {
             let (id, deleted) = (d.id, d.deleted);
             self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
         }
-        Ok(())
+        Ok(Some(drafts_box.id))
     }
 
     /// Tells the app about new, unread inbox mail that arrived after launch.

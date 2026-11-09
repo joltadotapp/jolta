@@ -1,8 +1,8 @@
-//! Gmail over IMAP. Jolta syncs only `[Gmail]/All Mail`: every message once,
-//! with its labels (X-GM-LABELS) mapped onto the label mailboxes, its stable
-//! id (X-GM-MSGID) as remote id and its conversation (X-GM-THRID) as thread.
+//! Gmail over IMAP. Gmail keeps every message in one of `[Gmail]/All Mail`,
+//! Trash and Spam, and Jolta syncs those three: every message once, with
+//! its labels (X-GM-LABELS) mapped onto the label mailboxes, its stable id
+//! (X-GM-MSGID) as remote id and its conversation (X-GM-THRID) as thread.
 //! Archive removes the \Inbox label; filing adds a label; Trash is a move.
-//! Spam and Trash are not in All Mail and are not synced.
 
 use std::collections::{HashMap, HashSet};
 
@@ -168,6 +168,12 @@ fn quote(label: &str) -> String {
     if label.starts_with('\\') { label.to_string() } else { format!("\"{}\"", label.replace('\\', "\\\\").replace('"', "\\\"")) }
 }
 
+/// Gmail keeps each message in exactly one of All Mail, Trash and Spam, with
+/// a UID there; labels are links of All Mail's messages.
+fn is_home(m: &Mailbox) -> bool {
+    matches!(m.role, Some(MailboxRole::All | MailboxRole::Trash | MailboxRole::Spam))
+}
+
 pub async fn sync(
     jolta: &Jolta,
     session: &mut Session,
@@ -181,33 +187,21 @@ pub async fn sync(
     let important = remote.iter().find(|m| m.important).map(|m| m.remote_id.clone());
     let mailboxes = jolta.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?;
     progress(SyncEvent::Mailboxes(mailboxes.len()));
-    let all = mailboxes
-        .iter()
-        .find(|m| m.role == Some(MailboxRole::All))
-        .cloned()
-        .ok_or_else(|| Error::Other("this Gmail account shows no All Mail folder; is it enabled for IMAP?".into()))?;
-    let labels = label_map(&mailboxes, important.as_deref());
-    let label_ids = |names: &[String]| -> Vec<MailboxId> { names.iter().filter_map(|l| labels.get(l).copied()).collect() };
-
-    let selected = if caps.condstore { session.select_condstore(&all.remote_id).await? } else { session.select(&all.remote_id).await? };
-    let all_id = all.id;
-    let mut since = all.highest_modseq;
-    if all.uidvalidity.is_some() && all.uidvalidity != selected.uid_validity {
-        jolta.store.write_async(move |tx| store::clear_mailbox(tx, all_id)).await?;
-        since = None;
+    if !mailboxes.iter().any(|m| m.role == Some(MailboxRole::All)) {
+        return Err(Error::Other("this Gmail account shows no All Mail folder; is it enabled for IMAP?".into()));
     }
-    let local = jolta.store.read_async(move |c| store::mailbox_uids(c, all_id)).await?;
-    let server: HashSet<u32> = if selected.exists == 0 { HashSet::new() } else { session.uid_search("ALL").await? };
+    let labels = label_map(&mailboxes, important.as_deref());
+    // All Mail first, so the inbox fills first.
+    let mut homes: Vec<&Mailbox> = mailboxes.iter().filter(|m| is_home(m) && m.selectable).collect();
+    homes.sort_by_key(|m| m.role != Some(MailboxRole::All));
 
     let mut report = SyncReport { mailboxes: mailboxes.len(), ..Default::default() };
-    let gone: Vec<MessageId> = local.iter().filter(|(u, _)| !server.contains(u)).map(|(_, (id, _))| *id).collect();
-    report.removed = gone.len();
-    if !gone.is_empty() {
-        jolta.store.write_async(move |tx| store::delete_messages(tx, &gone)).await?;
+    for home in homes {
+        sync_home(jolta, session, caps, account_id, home, &labels, &mut report, progress).await?;
     }
-    // A message in no All Mail, Trash or Spam mailbox left Gmail (trashed
-    // from All Mail, deleted elsewhere) and only its label links remain.
-    // Skipped while changes wait to be sent, which may still place it.
+    // A message in no All Mail, Trash or Spam mailbox left Gmail (deleted
+    // for good, or elsewhere) and only its label links remain. Skipped while
+    // changes wait to be sent, which may still place it.
     let orphans = jolta
         .store
         .write_async(move |tx| {
@@ -228,9 +222,61 @@ pub async fn sync(
         .await?;
     report.removed += orphans;
 
+    if opts.bodies {
+        report.bodies = fetch_bodies(jolta, session, account, progress).await?;
+    }
+    Ok(report)
+}
+
+/// Brings one home mailbox in line with Gmail. A message there gets that
+/// home with its UID, and in All Mail its labels; one that left it loses
+/// them and keeps its place in another home.
+#[allow(clippy::too_many_arguments)]
+async fn sync_home(
+    jolta: &Jolta,
+    session: &mut Session,
+    caps: Caps,
+    account_id: AccountId,
+    home: &Mailbox,
+    labels: &HashMap<String, MailboxId>,
+    report: &mut SyncReport,
+    progress: &mut impl FnMut(SyncEvent),
+) -> Result<()> {
+    let in_all = home.role == Some(MailboxRole::All);
+    let label_ids =
+        |names: &[String]| -> Vec<MailboxId> { if in_all { names.iter().filter_map(|l| labels.get(l).copied()).collect() } else { vec![] } };
+    let selected = if caps.condstore { session.select_condstore(&home.remote_id).await? } else { session.select(&home.remote_id).await? };
+    let home_id = home.id;
+    let mut since = home.highest_modseq;
+    if home.uidvalidity.is_some() && home.uidvalidity != selected.uid_validity {
+        jolta.store.write_async(move |tx| store::clear_mailbox(tx, home_id)).await?;
+        since = None;
+    }
+    let local = jolta.store.read_async(move |c| store::mailbox_uids(c, home_id)).await?;
+    let server: HashSet<u32> = if selected.exists == 0 { HashSet::new() } else { session.uid_search("ALL").await? };
+
+    let gone: Vec<MessageId> = local.iter().filter(|(u, _)| !server.contains(u)).map(|(_, (id, _))| *id).collect();
+    let removed = gone.len();
+    if !gone.is_empty() {
+        jolta
+            .store
+            .write_async(move |tx| {
+                let mut unlink = tx.prepare(
+                    "DELETE FROM message_mailbox WHERE message_id = ?1 AND (mailbox_id = ?2 OR mailbox_id NOT IN (
+                         SELECT id FROM mailbox WHERE account_id = ?3 AND role IN ('all', 'trash', 'spam')))",
+                )?;
+                for id in &gone {
+                    unlink.execute(rusqlite::params![id, home_id, account_id])?;
+                }
+                Ok(())
+            })
+            .await?;
+    }
+
     let mut new: Vec<u32> = server.iter().copied().filter(|u| !local.contains_key(u)).collect();
     new.sort_unstable_by(|a, b| b.cmp(a));
     let total = new.len();
+    let mut added = 0;
     for (i, chunk) in new.chunks(BATCH).enumerate() {
         let fetched = fetch(session, &uid_set(chunk), ITEMS).await?;
         let rows: Vec<(NewMessage, Vec<MailboxId>)> = fetched
@@ -240,7 +286,7 @@ pub async fn sync(
                 let message = NewMessage {
                     account_id,
                     remote_id: format!("gm:{}", f.msgid),
-                    mailbox_id: all_id,
+                    mailbox_id: home_id,
                     uid: Some(f.uid),
                     date,
                     envelope: mime::parse_envelope(&f.header),
@@ -258,7 +304,7 @@ pub async fn sync(
                 let mut ids = Vec::new();
                 for (m, labels) in &rows {
                     let inserted = store::insert_message(tx, m)?;
-                    store::set_labels(tx, inserted.id(), all_id, labels)?;
+                    store::set_labels(tx, inserted.id(), home_id, labels)?;
                     if let store::Inserted::New(id) = inserted {
                         ids.push(id);
                     }
@@ -266,13 +312,14 @@ pub async fn sync(
                 Ok(ids)
             })
             .await?;
-        report.new += ids.len();
+        added += ids.len();
         report.new_messages.extend(ids);
-        progress(SyncEvent::Headers { mailbox: all.name.clone(), done: ((i + 1) * BATCH).min(total), total });
+        progress(SyncEvent::Headers { mailbox: home.name.clone(), done: ((i + 1) * BATCH).min(total), total });
     }
 
     // Flag and label changes on messages Jolta already has.
     let known: HashMap<u32, (MessageId, Flags)> = local.into_iter().filter(|(u, _)| server.contains(u)).collect();
+    let mut flag_changes = 0;
     if !known.is_empty() {
         let fetched = match (caps.condstore, since) {
             (true, Some(m)) => fetch(session, "1:*", &format!("(UID FLAGS X-GM-LABELS) (CHANGEDSINCE {m})")).await?,
@@ -287,30 +334,30 @@ pub async fn sync(
             .into_iter()
             .filter_map(|f| known.get(&f.uid).map(|(id, _)| (*id, f.flags, label_ids(&f.labels))))
             .collect();
-        report.flag_changes = changes.len();
+        flag_changes = changes.len();
         jolta.store
             .write_async(move |tx| {
                 let pending = store::pending_messages(tx, account_id)?;
                 for (id, flags, labels) in changes.iter().filter(|(id, ..)| !pending.contains(id)) {
                     store::set_flags(tx, *id, *flags)?;
-                    store::set_labels(tx, *id, all_id, labels)?;
+                    store::set_labels(tx, *id, home_id, labels)?;
                 }
                 Ok(())
             })
             .await?;
     }
     let (uidvalidity, modseq) = (selected.uid_validity, selected.highest_modseq);
-    jolta.store.write_async(move |tx| store::set_mailbox_cursor(tx, all_id, uidvalidity, modseq)).await?;
-    progress(SyncEvent::Mailbox { name: all.name.clone(), new: report.new, removed: report.removed, flag_changes: report.flag_changes });
-
-    if opts.bodies {
-        report.bodies = fetch_bodies(jolta, session, account, progress).await?;
-    }
-    Ok(report)
+    jolta.store.write_async(move |tx| store::set_mailbox_cursor(tx, home_id, uidvalidity, modseq)).await?;
+    report.new += added;
+    report.removed += removed;
+    report.flag_changes += flag_changes;
+    progress(SyncEvent::Mailbox { name: home.name.clone(), new: added, removed, flag_changes });
+    Ok(())
 }
 
-/// Sends one op to Gmail. Everything happens in All Mail by UID: flags with
-/// STORE, label moves with X-GM-LABELS, and Trash with MOVE.
+/// Sends one op to Gmail, by UID in each message's home: flags with STORE,
+/// a move into or out of Trash or Spam with MOVE, and other moves as label
+/// changes in All Mail with X-GM-LABELS.
 pub async fn apply_op(jolta: &Jolta, session: &mut Session, op: &store::Op) -> Result<Vec<MailboxId>> {
     let account = op.account;
     let mailboxes = jolta.store.read_async(move |c| store::mailboxes(c, account)).await?;
@@ -319,69 +366,100 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, op: &store::Op) -> R
         .find(|m| m.role == Some(MailboxRole::All))
         .cloned()
         .ok_or_else(|| Error::Other("no All Mail folder".into()))?;
-    let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
-    let all_id = all.id;
-    // A move out of All Mail already dropped the local All Mail entry; the
-    // op kept its UID there.
-    let uids: Vec<u32> = match op.kind {
-        OpKind::Move { from, .. } if from == all_id => op.messages.iter().filter_map(|(_, u)| *u).collect(),
-        _ => {
-            jolta.store
-                .read_async(move |c| {
-                    Ok(store::server_locations(c, &ids)?.into_iter().filter(|(m, _)| *m == all_id).map(|(_, u)| u).collect())
-                })
-                .await?
-        }
-    };
-    if uids.is_empty() {
-        return Ok(vec![]);
-    }
-    session.select(&all.remote_id).await?;
-    let set = uid_set(&uids);
     let find = |id: MailboxId| mailboxes.iter().find(|m| m.id == id).cloned();
+    let home_of = |id: MailboxId| find(id).filter(is_home);
+
+    let mut by_home: HashMap<MailboxId, Vec<u32>> = HashMap::new();
     match op.kind {
-        OpKind::Flags { add, remove } => {
-            for (sign, bits) in [("+", add), ("-", remove)] {
-                if bits != 0 {
-                    session
-                        .uid_store(&set, format!("{sign}FLAGS.SILENT ({})", super::flag_list(bits)))
-                        .await?
-                        .try_collect::<Vec<_>>()
-                        .await?;
-                }
-            }
-            Ok(vec![])
-        }
-        OpKind::Empty { .. } => unreachable!("imap::apply_op empties folders for Gmail too"),
-        OpKind::Move { from, to } => {
-            let (from, to) = (find(from), find(to));
-            if let Some(t) = to.as_ref().filter(|t| t.role == Some(MailboxRole::Trash)) {
-                session.uid_mv(&set, &t.remote_id).await?;
-                return Ok(vec![]);
-            }
-            let (add, remove) = label_stores(from.as_ref(), to.as_ref());
-            if let Some(add) = add {
-                let stored: std::result::Result<Vec<_>, _> = match session.uid_store(&set, &add).await {
-                    Ok(updates) => updates.try_collect().await,
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = stored {
-                    // A first snooze: the Snoozed label does not exist yet.
-                    let target = to.as_ref().map(|t| t.remote_id.clone()).unwrap_or_default();
-                    if !e.to_string().to_uppercase().contains("NONEXISTENT") && !e.to_string().to_uppercase().contains("TRYCREATE") {
-                        return Err(e.into());
+        // A move out of a home already dropped the local link there; the op
+        // kept its UID. A message moved in before a sync learned its UID
+        // there, as when Undo follows a trash, is found by its Gmail id.
+        OpKind::Move { from, .. } if home_of(from).is_some() => {
+            let mut uids: Vec<u32> = op.messages.iter().filter_map(|(_, u)| *u).collect();
+            let missing: Vec<MessageId> = op.messages.iter().filter(|(_, u)| u.is_none()).map(|(m, _)| *m).collect();
+            if !missing.is_empty() {
+                let gmail_ids: Vec<String> = jolta
+                    .store
+                    .read_async(move |c| {
+                        let mut stmt = c.prepare("SELECT remote_id FROM message WHERE id = ?1")?;
+                        let mut out = Vec::new();
+                        for id in &missing {
+                            let remote: String = stmt.query_row([id], |r| r.get(0))?;
+                            out.extend(remote.strip_prefix("gm:").map(str::to_string));
+                        }
+                        Ok(out)
+                    })
+                    .await?;
+                if !gmail_ids.is_empty() {
+                    let path = home_of(from).map(|m| m.remote_id).unwrap_or_default();
+                    session.select(&path).await?;
+                    for id in gmail_ids {
+                        uids.extend(session.uid_search(format!("X-GM-MSGID {id}")).await?);
                     }
-                    session.create(&target).await?;
-                    session.select(&all.remote_id).await?;
-                    session.uid_store(&set, &add).await?.try_collect::<Vec<_>>().await?;
                 }
             }
-            if let Some(remove) = remove {
-                session.uid_store(&set, remove).await?.try_collect::<Vec<_>>().await?;
+            by_home.insert(from, uids);
+        }
+        _ => {
+            let ids: Vec<MessageId> = op.messages.iter().map(|(m, _)| *m).collect();
+            for (mailbox, uid) in jolta.store.read_async(move |c| store::server_locations(c, &ids)).await? {
+                if home_of(mailbox).is_some() {
+                    by_home.entry(mailbox).or_default().push(uid);
+                }
             }
-            Ok(vec![all_id])
         }
     }
+
+    let mut touched = Vec::new();
+    for (home, uids) in by_home.into_iter().filter(|(_, uids)| !uids.is_empty()) {
+        let path = home_of(home).map(|m| m.remote_id).unwrap_or_default();
+        session.select(&path).await?;
+        let set = uid_set(&uids);
+        match op.kind {
+            OpKind::Flags { add, remove } => {
+                for (sign, bits) in [("+", add), ("-", remove)] {
+                    if bits != 0 {
+                        session
+                            .uid_store(&set, format!("{sign}FLAGS.SILENT ({})", super::flag_list(bits)))
+                            .await?
+                            .try_collect::<Vec<_>>()
+                            .await?;
+                    }
+                }
+            }
+            OpKind::Empty { .. } => unreachable!("imap::apply_op empties folders for Gmail too"),
+            OpKind::Move { from, to } => {
+                let (from, to) = (find(from), find(to));
+                touched.push(all.id);
+                if home != all.id || to.as_ref().is_some_and(is_home) {
+                    let target = to.ok_or_else(|| Error::NotFound("the mailbox to move to".into()))?;
+                    session.uid_mv(&set, &target.remote_id).await?;
+                    continue;
+                }
+                let (add, remove) = label_stores(from.as_ref(), to.as_ref());
+                if let Some(add) = add {
+                    let stored: std::result::Result<Vec<_>, _> = match session.uid_store(&set, &add).await {
+                        Ok(updates) => updates.try_collect().await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = stored {
+                        // A first snooze: the Snoozed label does not exist yet.
+                        let target = to.as_ref().map(|t| t.remote_id.clone()).unwrap_or_default();
+                        if !e.to_string().to_uppercase().contains("NONEXISTENT") && !e.to_string().to_uppercase().contains("TRYCREATE") {
+                            return Err(e.into());
+                        }
+                        session.create(&target).await?;
+                        session.select(&all.remote_id).await?;
+                        session.uid_store(&set, &add).await?.try_collect::<Vec<_>>().await?;
+                    }
+                }
+                if let Some(remove) = remove {
+                    session.uid_store(&set, remove).await?.try_collect::<Vec<_>>().await?;
+                }
+            }
+        }
+    }
+    Ok(touched)
 }
 
 #[cfg(test)]

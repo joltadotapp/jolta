@@ -284,7 +284,7 @@ pub fn mark_read(conn: &Connection, messages: &[MessageId]) -> Result<Vec<(Accou
 
 /// Empties a folder for good: its messages leave the store now, and the
 /// queued op empties the server folder, including mail Jolta never
-/// downloaded (Gmail's Trash is not synced). Not undoable.
+/// downloaded. Not undoable.
 pub fn empty(conn: &Connection, mailbox: MailboxId) -> Result<(AccountId, OpId)> {
     let account: AccountId = conn.query_row("SELECT account_id FROM mailbox WHERE id = ?1", [mailbox], |r| r.get(0))?;
     let messages = ids(conn, "SELECT message_id FROM message_mailbox WHERE mailbox_id = ?1", [mailbox])?;
