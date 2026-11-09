@@ -7,17 +7,22 @@
 //! pure: from what a sync round left in the store and the mail, it says
 //! what happened to each held time. U10 creates and deletes the events.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
+use chrono_tz::Tz;
+use rusqlite::Connection;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::CalendarId;
-use crate::AccountId;
+use super::invitation::{self, Method};
+use super::recur::{self, Window};
+use super::{CalendarId, EventData, EventStatus, Span, freebusy, tz};
+use crate::blobs::Blobs;
+use crate::{AccountId, Result, compose, store};
 use crate::model::text_enum;
 
 pub(crate) const GOOGLE_HOLD: &str = "joltaHold";
@@ -221,8 +226,7 @@ pub struct Seen {
 pub struct Busy {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
-    /// The organizer and the guests, without the attendee the source marks
-    /// as the user.
+    /// The organizer and the guests.
     pub people: Vec<String>,
     /// Any set's hold event, which books nothing and takes nothing.
     pub hold: bool,
@@ -403,6 +407,104 @@ pub fn decide(set: &HoldSet, seen: &Seen, now: DateTime<Utc>) -> Vec<Decision> {
         .chain(outcomes.into_iter().filter_map(|(slot, o, _)| o.map(|outcome| Decision::Slot { slot, outcome })))
         .chain(notices.into_iter().map(Decision::Notice))
         .collect()
+}
+
+/// When a span starts and ends, an all-day one from midnight on `here`.
+fn instants(span: &Span, here: Tz) -> (DateTime<Utc>, DateTime<Utc>) {
+    let midnight = |d: NaiveDate| tz::instant(d.and_time(NaiveTime::MIN), here);
+    match span {
+        Span::Timed { start, end } => (start.instant(here), end.instant(here)),
+        Span::AllDay { start, end } => (midnight(*start), midnight(*end)),
+    }
+}
+
+/// Everyone on an event, and the addresses the source marks as its own
+/// account's: the organizer when it is that account, and its attendee.
+fn people(e: &EventData) -> (Vec<String>, Vec<String>) {
+    let organizer = e.organizer.iter().map(|o| (o.address.clone(), e.organizer_is_me));
+    let attendees = e.attendees.iter().map(|a| (a.person.address.clone(), a.is_me));
+    let everyone: Vec<(String, bool)> = organizer.chain(attendees).collect();
+    let mine = everyone.iter().filter(|(_, me)| *me).map(|(a, _)| a.clone()).collect();
+    (everyone.into_iter().map(|(a, _)| a).collect(), mine)
+}
+
+/// What `decide` reads for `set`: the occurrences on the offered days and
+/// the 7 after, the requests and the conversation's mail since the mail
+/// left, and the set's hold events in its calendar. "Me" is the sending
+/// account's address and the ones the copies in its own calendars mark as
+/// its own; another of the user's accounts is someone else here.
+pub fn seen(conn: &Connection, blobs: &Blobs, set: &HoldSet, here: Tz) -> Result<Seen> {
+    let mut seen = Seen { me: vec![store::account(conn, set.account)?.address], ..Seen::default() };
+    let own: Vec<CalendarId> = store::account_calendars(conn, set.account)?.into_iter().map(|c| c.id).collect();
+    let (Some(first), Some(last)) = (set.slots.iter().map(|s| s.start).min(), set.slots.iter().map(|s| s.end).max()) else { return Ok(seen) };
+    let (from, to) = (first.with_timezone(&here).date_naive(), last.with_timezone(&here).date_naive() + Duration::days(8));
+    let (start, end) = instants(&Span::AllDay { start: from, end: to }, here);
+    let window = Window { start, end };
+    for o in store::occurrences(conn, from, to, here)? {
+        let (Some(b), Some(e)) = (freebusy::stored_busy(&o, here), store::event_data(conn, o.event_id)?) else { continue };
+        let (people, mine) = people(&e);
+        if own.contains(&o.calendar_id) {
+            seen.me.extend(mine);
+        }
+        seen.busy.push(Busy { start: b.start, end: b.end, people, hold: e.mark.as_ref().is_some_and(|m| m.hold_set().is_some()), created: e.created });
+    }
+    seen.holds = store::hold_events(conn, Some(&set.id))?
+        .into_iter()
+        .filter(|m| m.calendar == set.calendar && m.event.status != EventStatus::Cancelled)
+        .map(|m| {
+            let (start, end) = instants(&m.event.span, here);
+            HoldEvent { remote_id: m.remote_id, start, end, guests: m.event.attendees.iter().any(|a| !a.is_me) }
+        })
+        .collect();
+    let Some(sent) = set.sent else { return Ok(seen) };
+    for (from, received, blob) in store::requests_since(conn, set.account, sent)? {
+        let Some(raw) = blob.and_then(|b| blobs.get(&b).ok()) else { continue };
+        for i in invitation::find(&raw, &seen.me).into_iter().filter(|i| i.method == Method::Request && i.dated) {
+            for o in recur::expand(&i.event, &[], window, here) {
+                let (start, end) = instants(&o.span, here);
+                seen.invitations.push(Invited { from: from.clone(), start, end, received });
+            }
+        }
+    }
+    if let Some(mail) = set.message_id.as_deref().map(|m| store::sent_mail(conn, m)).transpose()?.flatten() {
+        seen.replies = store::thread_mail_since(conn, mail.thread, sent)?.into_iter().map(|(from, date)| Reply { from, date }).collect();
+    }
+    Ok(seen)
+}
+
+/// Builds the sets this Mac doesn't know from the hold events sync found,
+/// each from the sent mail its marker names, so either of the user's Macs
+/// can release them. A set whose mail isn't stored here waits.
+pub fn adopt(conn: &Connection, now: DateTime<Utc>, here: Tz) -> Result<Vec<HoldSetId>> {
+    let known: HashSet<HoldSetId> = store::hold_sets(conn)?.into_iter().map(|s| s.id).collect();
+    let mut found: BTreeMap<HoldSetId, Vec<store::MarkedEvent>> = BTreeMap::new();
+    for m in store::hold_events(conn, None)? {
+        if let Some(set) = m.event.mark.as_ref().and_then(Mark::hold_set).filter(|s| !known.contains(*s)) {
+            found.entry(set.clone()).or_default().push(m);
+        }
+    }
+    let mut adopted = Vec::new();
+    for (id, events) in found {
+        let message = events.iter().find_map(|e| match &e.event.mark {
+            Some(Mark::Hold { message: Some(m), .. }) => Some(m.clone()),
+            _ => None,
+        });
+        let Some(mail) = message.as_deref().map(|m| store::sent_mail(conn, m)).transpose()?.flatten() else { continue };
+        let calendar = events[0].calendar;
+        let mut slots: Vec<HeldSlot> = Vec::new();
+        for e in events.iter().filter(|e| e.calendar == calendar && e.event.status != EventStatus::Cancelled) {
+            let (start, end) = instants(&e.event.span, here);
+            if !slots.iter().any(|s| s.start == start) {
+                slots.push(HeldSlot { start, end, line: String::new(), state: SlotState::Held, remote_id: Some(e.remote_id.clone()) });
+            }
+        }
+        slots.sort_by_key(|s| s.start);
+        let recipients = compose::parse_addresses(&mail.to).into_iter().chain(compose::parse_addresses(&mail.cc)).map(|(_, a)| a).collect();
+        let set = HoldSet { id: id.clone(), account: mail.account, message_id: message, draft: None, recipients, subject: mail.subject, calendar, sent: Some(mail.date), slots };
+        store::insert_hold_set(conn, &set, now)?;
+        adopted.push(id);
+    }
+    Ok(adopted)
 }
 
 #[cfg(test)]
@@ -621,5 +723,153 @@ mod tests {
         assert_eq!(Mark::Away.caldav_lines(), ["X-JOLTA-HOLD:away"]);
         assert_eq!(HoldSetId::parse("5b2f8c1e0d4a4e8b9a613c7e2d9f4a10"), None);
         assert_eq!(serde_json::to_value(&mark).unwrap(), json!({ "is": "hold", "set": "5b2f8c1e-0d4a-4e8b-9a61-3c7e2d9f4a10", "message": "<m1@example.com>" }));
+    }
+
+    mod stored {
+        use chrono::TimeZone;
+        use chrono_tz::Europe::Brussels;
+
+        use super::*;
+        use crate::calendar::invitation::tests::{import, jolta};
+        use crate::calendar::series::Horizon;
+        use crate::calendar::{Access, CalendarSource, ical};
+
+        const SET: &str = "5b2f8c1e-0d4a-4e8b-9a61-3c7e2d9f4a10";
+        const SENT: &str = "From: Me <me@example.com>\r\nTo: Ann <ann@example.com>\r\nCc: Bo <bo@example.com>\r\nSubject: Planning\r\n\
+            Date: Mon, 09 Nov 2026 09:00:00 +0000\r\nMessage-ID: <m1@example.com>\r\n\r\nTue 16:00 to 16:30\r\n";
+
+        fn put(j: &crate::Jolta, calendar: CalendarId, remote_id: &str, vevent: &str) {
+            let ics = format!("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:{remote_id}@example.com\r\nDTSTAMP:20261101T080000Z\r\n{vevent}END:VEVENT\r\nEND:VCALENDAR\r\n");
+            let events = ical::read(&ics, &["me@example.com".into()]).unwrap();
+            let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap(), Brussels);
+            j.store.write(|tx| store::apply_item(tx, calendar, remote_id, None, &events, None, &horizon)).unwrap();
+        }
+
+        fn holds(j: &crate::Jolta, calendar: CalendarId, message: &str) {
+            for (id, s, e) in SLOTS {
+                let ics = |at: &str| t(at).format("%Y%m%dT%H%M00Z").to_string();
+                let lines = Mark::Hold { set: HoldSetId::parse(SET).unwrap(), message: Some(message.into()) }.caldav_lines().join("\r\n");
+                put(j, calendar, id, &format!("DTSTART:{}\r\nDTEND:{}\r\nSUMMARY:Hold: Planning\r\nSTATUS:TENTATIVE\r\n{lines}\r\n", ics(s), ics(e)));
+            }
+        }
+
+        #[test]
+        fn the_store_gives_decide_what_a_round_left() {
+            let (j, work) = jolta("holds-seen");
+            let other = |remote_id: &str| store::RemoteCalendar {
+                remote_id: remote_id.into(),
+                name: remote_id.into(),
+                color: None,
+                zone: None,
+                access: Access::Owner,
+                primary: remote_id == "/cal/work/",
+                refresh: None,
+                video: None,
+            };
+            let free = j
+                .store
+                .write(|tx| {
+                    let listed = store::sync_calendar_list(tx, AccountId(1), CalendarSource::CalDav, &[other("/cal/work/"), other("/cal/free/")])?;
+                    let free = listed.iter().find(|c| c.remote_id == "/cal/free/").unwrap().id;
+                    store::set_calendar_shown(tx, free, true)?;
+                    store::set_calendar_busy(tx, free, false)?;
+                    Ok(free)
+                })
+                .unwrap();
+            holds(&j, work, "<m1@example.com>");
+            let ann = "ORGANIZER:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\n";
+            put(&j, free, "not-busy", &format!("DTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\n{ann}"));
+            put(&j, work, "declined", "DTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\nORGANIZER:mailto:ann@example.com\r\nATTENDEE;PARTSTAT=DECLINED:mailto:me@example.com\r\n");
+            put(&j, work, "offsite", "DTSTART;VALUE=DATE:20261111\r\nDTEND;VALUE=DATE:20261112\r\nSUMMARY:Offsite\r\n");
+            let mut set = set();
+            set.slots[0].line = "Tue 10 Nov 16:00 to 16:30".into();
+            j.store.write(|tx| store::insert_hold_set(tx, &set, t("2026-11-09 09:00"))).unwrap();
+            assert_eq!(j.store.read(store::hold_sets).unwrap(), [set.clone()], "a set reads back as stored");
+
+            let seen_now = || j.store.read(|c| super::super::seen(c, &j.blobs, &set, Brussels)).unwrap();
+            let seen = seen_now();
+            assert_eq!(seen.holds, super::seen().holds, "the hold events by remote id");
+            let not_holds: Vec<(DateTime<Utc>, DateTime<Utc>)> = seen.busy.iter().filter(|b| !b.hold).map(|b| (b.start, b.end)).collect();
+            assert_eq!(not_holds, [(t("2026-11-10 23:00"), t("2026-11-11 23:00"))], "the offsite from midnight here; not the declined meeting or a calendar that isn't busy");
+            assert_eq!(decide(&set, &seen, now()), [Decision::Slot { slot: t("2026-11-11 10:00"), outcome: Outcome::Taken }]);
+
+            put(&j, work, "weekly", &format!("DTSTART:20261105T140000Z\r\nDTEND:20261105T143000Z\r\nRRULE:FREQ=WEEKLY;COUNT=4\r\n{ann}"));
+            import(&j, SENT.as_bytes());
+            import(&j, b"From: Ann <ann@example.com>\r\nTo: me@example.com\r\nSubject: Re: Planning\r\nDate: Mon, 09 Nov 2026 10:00:00 +0000\r\n\
+                Message-ID: <r1@example.com>\r\nIn-Reply-To: <m1@example.com>\r\nReferences: <m1@example.com>\r\n\r\nWednesday works.\r\n");
+            import(&j, b"From: Ann <ann@example.com>\r\nTo: me@example.com\r\nSubject: Invitation: Planning\r\nDate: Mon, 09 Nov 2026 11:00:00 +0000\r\n\
+                Message-ID: <i1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n\
+                BEGIN:VEVENT\r\nUID:i1@example.com\r\nDTSTAMP:20261109T110000Z\r\nDTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\nSUMMARY:Planning\r\n\
+                ORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+            let seen = seen_now();
+            let weekly: Vec<(DateTime<Utc>, Vec<String>)> = seen.busy.iter().filter(|b| !b.people.is_empty()).map(|b| (b.start, b.people.clone())).collect();
+            let people = vec![ANN.to_string(), ME.to_string()];
+            assert_eq!(weekly, [(t("2026-11-12 14:00"), people.clone()), (t("2026-11-19 14:00"), people)], "each occurrence on its own");
+            assert_eq!(seen.invitations, [Invited { from: ANN.into(), start: t("2026-11-10 15:00"), end: t("2026-11-10 15:30"), received: t("2026-11-09 11:00") }]);
+            assert_eq!(seen.replies.iter().map(|r| (r.from.as_str(), r.date)).collect::<Vec<_>>(), [(ANN, t("2026-11-09 10:00"))]);
+            let booked = |by: &str| Outcome::Booked(Booking::Event { by: by.into() });
+            assert_eq!(outcomes(&decide(&set, &seen, now())), [("h1", Outcome::Booked(Booking::Invitation { by: ANN.into() })), ("h2", OTHERS_RELEASED), ("h3", booked(ANN))]);
+            let _ = std::fs::remove_dir_all(&j.data_dir);
+        }
+
+        /// The same meeting in two of the user's accounts' calendars is
+        /// stored once, as the organizer's copy, whose own address is that
+        /// account's and not the sending account's (check 1).
+        #[test]
+        fn another_of_the_users_accounts_is_someone_else() {
+            let (j, work) = jolta("holds-accounts");
+            let google = j
+                .store
+                .write(|tx| {
+                    tx.execute_batch("INSERT INTO account (id, kind, address, username, secret_ref, created, calendar) VALUES (2, 'gmail', 'me2@example.net', 'me2', 'a2', 0, 1);")?;
+                    let primary = store::RemoteCalendar {
+                        remote_id: "me2@example.net".into(),
+                        name: "me2@example.net".into(),
+                        color: None,
+                        zone: None,
+                        access: Access::Owner,
+                        primary: true,
+                        refresh: None,
+                        video: None,
+                    };
+                    Ok(store::sync_calendar_list(tx, AccountId(2), CalendarSource::Google, &[primary])?[0].id)
+                })
+                .unwrap();
+            holds(&j, work, "<m1@example.com>");
+            let meeting = "DTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\nORGANIZER:mailto:me2@example.net\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me2@example.net\r\nATTENDEE:mailto:me@example.com\r\n";
+            let ics = format!("BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:shared@example.net\r\n{meeting}END:VEVENT\r\nEND:VCALENDAR\r\n");
+            let horizon = Horizon::around(Utc.with_ymd_and_hms(2026, 11, 9, 12, 0, 0).unwrap(), Brussels);
+            j.store
+                .write(|tx| {
+                    store::apply_item(tx, google, "shared-g", None, &ical::read(&ics, &["me2@example.net".into()])?, None, &horizon)?;
+                    store::apply_item(tx, work, "shared-w", None, &ical::read(&ics, &["me@example.com".into()])?, None, &horizon)
+                })
+                .unwrap();
+            let set = HoldSet { recipients: vec!["me2@example.net".into()], ..set() };
+            let seen = j.store.read(|c| super::super::seen(c, &j.blobs, &set, Brussels)).unwrap();
+            assert_eq!(seen.me, [ME]);
+            let booked = Outcome::Booked(Booking::Event { by: "me2@example.net".into() });
+            assert_eq!(outcomes(&decide(&set, &seen, now())), [("h1", booked), ("h2", OTHERS_RELEASED), ("h3", OTHERS_RELEASED)]);
+            let _ = std::fs::remove_dir_all(&j.data_dir);
+        }
+
+        #[test]
+        fn another_macs_holds_are_built_from_the_sent_mail_their_marker_names() {
+            let (j, work) = jolta("holds-adopt");
+            holds(&j, work, "<m1@example.com>");
+            let adopt = || j.store.write(|tx| adopt(tx, t("2026-11-09 12:00"), Brussels)).unwrap();
+            assert_eq!(adopt(), [], "the sent mail isn't here yet");
+            import(&j, SENT.as_bytes());
+            assert_eq!(adopt(), [HoldSetId::parse(SET).unwrap()]);
+            let sets = j.store.read(store::hold_sets).unwrap();
+            let lineless = |mut s: HoldSet| {
+                s.slots.iter_mut().for_each(|slot| slot.line.clear());
+                s.recipients.push("bo@example.com".into());
+                s
+            };
+            assert_eq!(sets, [lineless(set())]);
+            assert_eq!(adopt(), [], "a set this Mac knows");
+            let _ = std::fs::remove_dir_all(&j.data_dir);
+        }
     }
 }
