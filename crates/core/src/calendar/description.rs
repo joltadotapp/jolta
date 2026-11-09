@@ -57,6 +57,13 @@ impl Parts {
         (format!("{}{text}{gap}{kept}", self.lead), self.html)
     }
 
+    /// Whether the meeting block is `text`, line for line, however the
+    /// server wrapped it in HTML.
+    pub fn kept_is(&self, text: &str) -> bool {
+        let lines = |t: &str| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        self.kept.as_deref().is_some_and(|kept| lines(&plain(kept, self.html)) == lines(text))
+    }
+
     /// Changing the text drops the description's HTML formatting: an HTML
     /// description with no meeting block, which Outlook's editor made.
     pub fn loses_formatting(&self) -> bool {

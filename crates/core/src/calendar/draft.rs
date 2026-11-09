@@ -99,6 +99,10 @@ pub struct EventDraft {
     pub description: String,
     /// A video call to make on save.
     pub video: Option<MeetingProvider>,
+    /// The personal Zoom link on the event: Add Zoom puts the saved link
+    /// here, and an event that has the block Add Zoom writes opens with its
+    /// link. Saving writes or removes that block and location.
+    pub zoom: Option<String>,
     pub show_as: ShowAs,
     pub reminder: Reminder,
     pub visibility: Visibility,
@@ -282,6 +286,7 @@ pub fn draft_for_new(conn: &Connection, calendar: Option<CalendarId>, span: Opti
         location: String::new(),
         description: String::new(),
         video: None,
+        zoom: None,
         show_as: ShowAs::Busy,
         reminder: calendar.default_reminder.map_or(Reminder::Default, Reminder::Before),
         visibility: Visibility::Default,
@@ -405,10 +410,52 @@ pub(crate) fn without_meeting(text: &str, meeting: &Meeting) -> String {
     out.join("\n").trim().to_owned()
 }
 
+/// The block and location Add Zoom wrote on `e`, matched by its text: the
+/// description's meeting block is the one written for the link Join finds.
+fn written_zoom(e: &EventData) -> Option<meeting::ZoomBlock> {
+    let m = e.meeting.as_ref().filter(|m| m.provider == MeetingProvider::Zoom)?;
+    let block = meeting::personal_zoom(&m.join_url)?;
+    description::split(&e.description, e.description_html).kept_is(&block.text).then_some(block)
+}
+
+/// `e` with the personal Zoom link changed from `was` to `now`: the block
+/// and location written for `was` come off, matched by their text, and
+/// `now`'s go on. The user's own text and location stay.
+fn put_zoom(e: &mut EventData, was: Option<&meeting::ZoomBlock>, now: Option<&meeting::ZoomBlock>) {
+    if let Some(was) = was {
+        let mut parts = description::split(&e.description, e.description_html);
+        if parts.kept_is(&was.text) {
+            parts.kept = None;
+            (e.description, e.description_html) = parts.join(&parts.editable.clone());
+        }
+        if e.location.trim() == was.location {
+            e.location.clear();
+        }
+    }
+    if let Some(now) = now {
+        let parts = description::split(&e.description, e.description_html);
+        if parts.kept.is_none() {
+            let own = parts.editable.trim_end();
+            e.description = if own.is_empty() { now.text.clone() } else { format!("{own}\n\n{}", now.text) };
+            e.description_html = false;
+        }
+        if e.location.trim().is_empty() {
+            e.location.clone_from(&now.location);
+        }
+    }
+    e.meeting = meeting::detect(&[], e.url.as_deref(), &e.location, &e.description);
+}
+
 /// The draft fields of a stored event, nothing locked.
 fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
     let parts = description::split(&e.description, e.description_html);
     let (room, room_name) = room_of(e).map(|a| (a.person.address.clone(), a.person.name.clone())).unwrap_or_default();
+    let zoom = written_zoom(e);
+    // A location that only holds the Zoom link Jolta wrote belongs to the call.
+    let location = match &zoom {
+        Some(z) if e.location.trim() == z.location => "",
+        _ => e.location.as_str(),
+    };
     EventDraft {
         calendar,
         base: Some(e.clone()),
@@ -420,7 +467,7 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         options: e.options,
         // A location that only repeats the room, as saving a room puts it
         // there, isn't one of its own.
-        location: if mirrors_room(&e.location, &room, &room_name) { String::new() } else { e.location.clone() },
+        location: if mirrors_room(location, &room, &room_name) { String::new() } else { location.to_string() },
         room,
         room_name,
         description: parts.editable.clone(),
@@ -432,7 +479,9 @@ fn opened(e: &EventData, calendar: CalendarId) -> EventDraft {
         locks: Vec::new(),
         notice: None,
         organizer: e.organizer.clone(),
-        meeting: e.meeting.clone(),
+        // The Zoom link Jolta wrote shows as the call the user can remove.
+        meeting: if zoom.is_some() { None } else { e.meeting.clone() },
+        zoom: zoom.map(|z| z.link),
         repeat: None,
         rule: e.recurrence.clone(),
         rule_was: e.recurrence.clone(),
@@ -565,7 +614,7 @@ fn changed(draft: &EventDraft, base: &EventData) -> Vec<DraftField> {
             DraftField::Options => draft.options != was.options,
             DraftField::Room => !draft.room.trim().eq_ignore_ascii_case(&was.room),
             DraftField::Location => draft.location != was.location,
-            DraftField::Video => draft.video != was.video,
+            DraftField::Video => draft.video != was.video || draft.zoom != was.zoom,
             DraftField::Description => draft.description.trim_end() != was.description,
             DraftField::Calendar => draft.move_to.is_some_and(|to| to != draft.calendar),
             DraftField::ShowAs => draft.show_as != was.show_as,
@@ -652,6 +701,13 @@ fn event_of(draft: &EventDraft) -> EventData {
         let room = room_of(&e).map(|a| if a.person.name.trim().is_empty() { a.person.address.trim() } else { a.person.name.trim() }).unwrap_or_default();
         e.location = if own.is_empty() { room.to_string() } else { own.to_string() };
     }
+    if fields.contains(&DraftField::Video) {
+        let was = draft.base.as_ref().and_then(written_zoom);
+        let now = draft.zoom.as_deref().and_then(meeting::personal_zoom);
+        if was != now {
+            put_zoom(&mut e, was.as_ref(), now.as_ref());
+        }
+    }
     e
 }
 
@@ -721,8 +777,16 @@ pub fn check_draft(conn: &Connection, draft: &EventDraft, here: Tz) -> Result<Ve
             problem(Some(DraftField::People), format!("{} takes at most {max} people.", provider(&calendar)), true);
         }
     }
+    if let Some(link) = draft.zoom.as_deref().filter(|_| touched.contains(&DraftField::Video)) {
+        let other_call = draft.video.is_some() || draft.meeting.is_some() || draft.base.as_ref().is_some_and(|b| b.meeting.is_some() && written_zoom(b).is_none());
+        if other_call {
+            problem(Some(DraftField::Video), format!("{} has a video call already. Remove the Zoom link.", draft.title.trim()), true);
+        } else if meeting::personal_zoom(link).is_none() {
+            problem(Some(DraftField::Video), "This isn't a Zoom meeting link.".into(), true);
+        }
+    }
     if let Some(video) = draft.video {
-        let choice = meeting::video_choices(&calendar).into_iter().find(|c| c.provider == video);
+        let choice = meeting::video_choices(&calendar, false).into_iter().find(|c| c.provider == video);
         if let Some(m) = &draft.meeting {
             problem(Some(DraftField::Video), format!("{} has a video call already: {}.", draft.title.trim(), m.join_url), true);
         } else if let Some(why) = choice.map_or(Some(format!("{} can't have a video call", calendar.name)), |c| c.refusal) {
@@ -1005,7 +1069,8 @@ fn reset(draft: &EventDraft, base: &EventData, lost: &[Field]) -> EventDraft {
             Field::Alarms => out.reminder = was.reminder,
             Field::ShowAs => out.show_as = was.show_as,
             Field::Visibility => out.visibility = was.visibility,
-            Field::MeetingLink | Field::Status | Field::Color | Field::Categories => {}
+            Field::MeetingLink => out.zoom.clone_from(&was.zoom),
+            Field::Status | Field::Color | Field::Categories => {}
         }
     }
     out
@@ -1034,7 +1099,10 @@ fn whole_series(draft: &EventDraft, series: &EventData, here: Tz) -> Result<Even
                 whole.room_name.clone_from(&draft.room_name);
             }
             DraftField::Location => whole.location.clone_from(&draft.location),
-            DraftField::Video => whole.video = draft.video,
+            DraftField::Video => {
+                whole.video = draft.video;
+                whole.zoom.clone_from(&draft.zoom);
+            }
             DraftField::Description => whole.description.clone_from(&draft.description),
             DraftField::ShowAs => whole.show_as = draft.show_as,
             DraftField::Reminder => whole.reminder = draft.reminder,
@@ -1173,7 +1241,10 @@ fn save_moved(conn: &Connection, draft: &EventDraft, base: &EventData, to: Calen
                     fresh.room_name.clone_from(&draft.room_name);
                 }
                 DraftField::Location => fresh.location.clone_from(&draft.location),
-                DraftField::Video => fresh.video = draft.video,
+                DraftField::Video => {
+                    fresh.video = draft.video;
+                    fresh.zoom.clone_from(&draft.zoom);
+                }
                 DraftField::Description => fresh.description.clone_from(&draft.description),
                 DraftField::ShowAs => fresh.show_as = draft.show_as,
                 DraftField::Reminder => fresh.reminder = draft.reminder,
@@ -2139,6 +2210,143 @@ mod tests {
         d.video = Some(MeetingProvider::Meet);
         let p = s.read(|c| check_draft(c, &d, Brussels)).unwrap();
         assert!(p.iter().any(|p| p.field == Some(DraftField::Video) && p.blocking && p.text.contains("has a video call already")), "{p:?}");
+    }
+
+    const ZOOM: &str = "https://us02web.zoom.us/j/4155550123?pwd=bWFkZVVwRm9yVGVzdHM.1";
+    const ZOOM_BLOCK: &str = "Join Zoom meeting: https://us02web.zoom.us/j/4155550123?pwd=bWFkZVVwRm9yVGVzdHM.1\nMeeting ID: 415 555 0123";
+
+    /// U11: Add Zoom writes the location and the block, Join finds the link
+    /// as soon as it is queued, the reopened event shows the call and not
+    /// Jolta's text, the same save twice queues nothing (check 4), and
+    /// removing it takes off exactly what Jolta wrote.
+    #[test]
+    fn the_personal_zoom_link_goes_on_and_comes_off_by_its_text() {
+        let (s, _) = setup("zoom");
+        let google = provider_calendar(&s, CalendarSource::Google, None);
+        let mut d = new_draft(&s, google, "Design review");
+        d.description = "Agenda first.".into();
+        d.zoom = Some(ZOOM.into());
+        assert!(s.read(|c| check_draft(c, &d, Brussels)).unwrap().is_empty());
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Create(events) = queued(&s, &saved).write else { panic!("a create") };
+        let made = &events[0];
+        assert_eq!((made.location.as_str(), made.description.as_str()), (format!("Zoom: {ZOOM}").as_str(), format!("Agenda first.\n\n{ZOOM_BLOCK}").as_str()));
+        assert_eq!(made.video, None, "nothing for the server to make");
+        let m = made.meeting.as_ref().expect("Join before the server answers");
+        assert_eq!((m.provider, m.join_url.as_str(), m.meeting_id.as_deref()), (MeetingProvider::Zoom, ZOOM, Some("4155550123")));
+
+        let id = event_id(&s, google, &d.uid);
+        let reopened = s.read(|c| draft_for_event(c, id, None, Brussels)).unwrap();
+        assert_eq!((reopened.zoom.as_deref(), reopened.location.as_str(), reopened.description.as_str()), (Some(ZOOM), "", "Agenda first."));
+        assert_eq!(reopened.meeting, None, "the call shows as one the user can remove");
+        assert!(s.read(|c| plan_save(c, &reopened, Brussels)).unwrap().unchanged);
+        let again = s.write(|tx| save_draft(tx, &reopened, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        assert_eq!(again.op, None, "the same save again queues nothing");
+
+        s.write(|tx| store::apply_item(tx, google, "abc", Some("\"2\""), std::slice::from_ref(made), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, id, None, Brussels)).unwrap();
+        d.zoom = None;
+        d.description = "Agenda first.\nThen the numbers.".into();
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Update { base, event, .. } = queued(&s, &saved).write else { panic!("an update") };
+        assert_eq!((event.location.as_str(), event.description.as_str(), event.meeting.as_ref()), ("", "Agenda first.\nThen the numbers.", None));
+        assert!(!change::classify(&base, &event, &[]).meeting.is_empty(), "guests hear the call went");
+    }
+
+    /// Exchange gives the block back as HTML, the link wrapped in an
+    /// anchor (captured from the Microsoft 365 test account, 2026-11-09):
+    /// Join reads the same meeting, the editor still finds Jolta's block,
+    /// and removing it leaves the user's text.
+    #[test]
+    fn exchange_html_of_the_zoom_block_reads_back_and_comes_off() {
+        const BODY: &str = include_str!("../../tests/fixtures/descriptions/zoom-graph.html");
+        const LINK: &str = "https://us02web.zoom.us/j/1234567890?pwd=Sm9sdGFQcm9iZVUxMQ.1";
+        let (s, _) = setup("zoom-graph");
+        let graph = provider_calendar(&s, CalendarSource::Graph, Some(vec![MeetingProvider::Teams]));
+        let location = format!("Zoom: {LINK}");
+        let stored = EventData {
+            title: "Jolta U11 probe".into(),
+            meeting: meeting::detect(&[], None, &location, BODY),
+            location,
+            description: BODY.into(),
+            description_html: true,
+            ..EventData::new("z-graph", span("2026-11-12 10:00", "2026-11-12 10:30"))
+        };
+        let m = stored.meeting.clone().expect("a meeting");
+        let invitation = meeting::detect(&[], None, "", &format!("Join Zoom Meeting\n{LINK}\n")).unwrap();
+        assert_eq!((m.provider, &m.join_url, &m.meeting_id, &m.passcode), (MeetingProvider::Zoom, &invitation.join_url, &invitation.meeting_id, &invitation.passcode));
+        assert_eq!(meeting::app_url(&m), meeting::app_url(&invitation));
+        assert_eq!(meeting::detect(&[], None, "", BODY), stored.meeting, "the body alone gives the same meeting");
+
+        s.write(|tx| store::apply_item(tx, graph, "AAk", Some("ck1"), std::slice::from_ref(&stored), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, graph, "z-graph"), None, Brussels)).unwrap();
+        assert_eq!((d.zoom.as_deref(), d.location.as_str(), d.description.as_str()), (Some(LINK), "", "Probe, link removed."));
+        d.zoom = None;
+        let saved = s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let ops::Write::Update { event, .. } = queued(&s, &saved).write else { panic!("an update") };
+        assert_eq!((event.location.as_str(), event.description.as_str(), event.description_html, event.meeting), ("", "Probe, link removed.", false, None));
+    }
+
+    /// The user's own location stays, beside the link in the description,
+    /// and stays when the link comes off.
+    #[test]
+    fn a_location_of_the_users_stays_with_the_zoom_link() {
+        let (s, cal) = setup("zoom-location");
+        let mut d = new_draft(&s, cal, "Workshop");
+        d.location = "Room 4".into();
+        d.zoom = Some("zoom.us/my/jane.doe".into());
+        let saved = event_of(&d);
+        assert_eq!((saved.location.as_str(), saved.description.as_str()), ("Room 4", "Join Zoom meeting: https://zoom.us/my/jane.doe"));
+        assert_eq!(saved.meeting.map(|m| m.join_url).as_deref(), Some("https://zoom.us/my/jane.doe"), "Join reads it from the description");
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, cal, &d.uid), None, Brussels)).unwrap();
+        assert_eq!((d.location.as_str(), d.zoom.as_deref()), ("Room 4", Some("https://zoom.us/my/jane.doe")));
+        d.zoom = None;
+        let gone = event_of(&d);
+        assert_eq!((gone.location.as_str(), gone.description.as_str(), gone.meeting), ("Room 4", "", None));
+    }
+
+    /// A Zoom invitation's own block isn't Jolta's: it stays locked, and
+    /// takes no second call.
+    #[test]
+    fn a_zoom_invitation_is_not_the_personal_link() {
+        let (s, _) = setup("zoom-invitation");
+        let google = provider_calendar(&s, CalendarSource::Google, None);
+        let description = format!("Join Zoom meeting: {ZOOM}\nMeeting ID: 415 555 0123\nPasscode: 482913");
+        let invitation = EventData {
+            title: "Vendor call".into(),
+            meeting: meeting::detect(&[], None, "", &description),
+            description,
+            ..EventData::new("z-inv", span("2026-11-24 09:00", "2026-11-24 09:30"))
+        };
+        s.write(|tx| store::apply_item(tx, google, "inv", Some("\"1\""), std::slice::from_ref(&invitation), None, &horizon())).unwrap();
+        let mut d = s.read(|c| draft_for_event(c, event_id(&s, google, "z-inv"), None, Brussels)).unwrap();
+        assert_eq!((d.zoom.as_deref(), d.meeting.as_ref().map(|m| m.provider)), (None, Some(MeetingProvider::Zoom)));
+        d.zoom = Some(ZOOM.into());
+        d.meeting = None;
+        let p = s.read(|c| check_draft(c, &d, Brussels)).unwrap();
+        assert!(p.iter().any(|p| p.field == Some(DraftField::Video) && p.blocking && p.text.contains("has a video call already")), "{p:?}");
+    }
+
+    /// Check 2: an occurrence of a series with the link opens with it, and
+    /// removing it from all events takes it off the series.
+    #[test]
+    fn the_zoom_link_of_a_series_comes_off_every_occurrence() {
+        let (s, cal) = setup("zoom-series");
+        let mut d = new_draft(&s, cal, "Weekly");
+        d.rule = Some(Recurrence { rules: vec!["FREQ=WEEKLY".into()], ..Default::default() });
+        d.zoom = Some(ZOOM.into());
+        s.write(|tx| save_draft(tx, &d, None, None, None, NOW, &horizon(), Brussels)).unwrap();
+        let id = event_id(&s, cal, &d.uid);
+        let (start, _) = match d.span { Span::Timed { start, end } => (start, end), Span::AllDay { .. } => unreachable!() };
+        let third = start.instant(Brussels) + Duration::weeks(2);
+        let at = Bounds::Utc { start: third, end: third + Duration::minutes(30) };
+        let mut occurrence = s.read(|c| draft_for_event(c, id, Some(at), Brussels)).unwrap();
+        assert_eq!((occurrence.zoom.as_deref(), occurrence.location.as_str()), (Some(ZOOM), ""));
+        occurrence.zoom = None;
+        s.write(|tx| save_draft(tx, &occurrence, Some(Scope::All), None, None, NOW, &horizon(), Brussels)).unwrap();
+        let series = s.read(|c| ops::stored(c, cal, &d.uid, None)).unwrap().expect("the series").event;
+        assert_eq!((series.location.as_str(), series.description.as_str(), series.meeting, series.recurrence.is_some()), ("", "", None, true));
     }
 
     /// A description edit on a Microsoft 365 meeting keeps Exchange's Teams

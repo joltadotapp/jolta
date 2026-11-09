@@ -466,6 +466,41 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// The personal Zoom link (C4 U11): with a link saved, Add video call
+    /// offers Zoom on a calendar on this Mac, ⌘↩ saves it, the reopened
+    /// event shows the call rather than Jolta's text, and ⊗ takes it off.
+    func testAddZoomLink() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Zoom check")
+        let add = app.descendants(matching: .any).matching(identifier: "editor-video").firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 5), "a calendar on this Mac offers Add video call once a Zoom link is saved")
+        add.click()
+        let zoom = app.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "Zoom (personal link)")).firstMatch
+        XCTAssertTrue(zoom.waitForExistence(timeout: 5) && zoom.isEnabled, "the menu offers the saved link")
+        zoom.click()
+        let row = app.descendants(matching: .any).matching(identifier: "editor-zoom").firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the editor shows the Zoom link")
+        app.typeKey(.return, modifierFlags: .command)
+        let created = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Zoom check,")).firstMatch
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "⌘↩ saves it into the week")
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "the reopened event shows the Zoom call")
+        XCTAssertFalse(add.exists, "and offers no second call")
+        app.buttons["Remove the Zoom link"].click()
+        XCTAssertTrue(add.waitForExistence(timeout: 5), "⊗ takes the link off")
+        app.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(created.waitForExistence(timeout: 5))
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(add.waitForExistence(timeout: 5), "saved without the call")
+        XCTAssertFalse(row.exists)
+        app.typeKey(.escape, modifierFlags: [])
+    }
+
     /// A repeating event: ⌘R in the editor opens the repeat popover, ↓ picks
     /// the weekly preset and Return takes it. A new time for the second
     /// occurrence asks which events it is for, and 1 moves only that one;

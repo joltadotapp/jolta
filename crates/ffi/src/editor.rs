@@ -268,6 +268,9 @@ pub struct EventDraft {
     /// The user's own text; a meeting block stays out of it and is kept on save.
     pub description: String,
     pub video: Option<MeetingProvider>,
+    /// The personal Zoom link on the event: `zoom_link()` when Add video
+    /// call picks Zoom, None to remove it.
+    pub zoom: Option<String>,
     pub show_as: ShowAs,
     pub reminder: DraftReminder,
     pub visibility: EventVisibility,
@@ -506,6 +509,7 @@ impl From<draft::EventDraft> for EventDraft {
             location: d.location,
             description: d.description,
             video: d.video.map(Into::into),
+            zoom: d.zoom,
             show_as: d.show_as.into(),
             reminder: match d.reminder {
                 Reminder::Default => DraftReminder::Default,
@@ -582,6 +586,7 @@ impl TryFrom<&EventDraft> for draft::EventDraft {
             location: d.location.clone(),
             description: d.description.clone(),
             video: d.video.map(Into::into),
+            zoom: d.zoom.clone(),
             show_as: d.show_as.into(),
             reminder: match d.reminder {
                 DraftReminder::Default => Reminder::Default,
@@ -820,6 +825,18 @@ impl Core {
         Ok(self.jolta.store.write(|tx| store::set_default_event_minutes(tx, minutes))?)
     }
 
+    /// The personal Zoom link Add video call offers as Zoom, if saved.
+    pub fn zoom_link(&self) -> Result<Option<String>> {
+        Ok(self.jolta.store.read(store::zoom_link)?)
+    }
+
+    /// Saves the personal Zoom link as Settings › Calendar takes it, or
+    /// forgets it with None; anything else is refused with "This isn't a
+    /// Zoom meeting link."
+    pub fn set_zoom_link(&self, link: Option<String>) -> Result<()> {
+        Ok(self.jolta.store.write(|tx| store::set_zoom_link(tx, link.as_deref()))?)
+    }
+
     /// Makes the calendar the one new events go to.
     pub fn set_default_calendar(&self, calendar_id: i64) -> Result<()> {
         self.jolta.store.write(|tx| store::set_default_calendar(tx, Some(CalendarId(calendar_id))))?;
@@ -847,8 +864,8 @@ impl Core {
     /// account's own first, then the others with why not. Empty when it can
     /// have none, and the editor leaves the button out.
     pub fn video_choices(&self, calendar_id: i64) -> Result<Vec<VideoChoice>> {
-        let calendar = self.jolta.store.read(|c| store::calendar(c, CalendarId(calendar_id)))?;
-        Ok(cal::meeting::video_choices(&calendar)
+        let (calendar, zoom) = self.jolta.store.read(|c| Ok((store::calendar(c, CalendarId(calendar_id))?, store::zoom_link(c)?)))?;
+        Ok(cal::meeting::video_choices(&calendar, zoom.is_some())
             .into_iter()
             .map(|v| VideoChoice { provider: v.provider.into(), label: v.label.to_string(), refusal: v.refusal })
             .collect())

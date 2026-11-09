@@ -37,6 +37,16 @@ final class EventEditorModel {
     func videoLabel(_ provider: MeetingProvider) -> String {
         videoChoices.first { $0.provider == provider }?.label ?? "\(provider.name) meeting"
     }
+
+    /// A pick from Add video call: the server makes Teams and Meet on save;
+    /// Zoom is the personal link saved in Settings › Calendar.
+    func addVideo(_ provider: MeetingProvider) {
+        if provider == .zoom {
+            draft.zoom = (try? core.zoomLink()) ?? nil
+        } else {
+            draft.video = provider
+        }
+    }
     /// Where a stored event can move, by calendar: why it can't, or what
     /// the move costs. Empty for a new event, whose calendar is picked freely.
     private(set) var moveChoices: [Int64: MoveChoice] = [:]
@@ -757,12 +767,29 @@ struct EventEditorPanel: View {
                     }
                 }
                 ForEach(editor.problems(.video), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
+            } else if let link = editor.draft.zoom {
+                EditorRow(icon: "video") {
+                    HStack {
+                        Text("Zoom meeting")
+                        Text(Self.shortLink(link)).foregroundStyle(Color(Theme.text2)).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        if !editor.locked(.video) {
+                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color(Theme.text3))
+                                .help("Remove the Zoom link")
+                                .accessibilityLabel("Remove the Zoom link")
+                        }
+                    }
+                    .accessibilityIdentifier("editor-zoom")
+                }
+                ForEach(editor.problems(.video), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
             } else if !editor.locked(.video), !editor.videoChoices.isEmpty {
                 EditorRow(icon: "video") {
                     Menu {
                         ForEach(editor.videoChoices, id: \.provider) { choice in
                             Button {
-                                editor.draft.video = choice.provider
+                                editor.addVideo(choice.provider)
                             } label: {
                                 Text(choice.label)
                                 if let why = choice.refusal { Text(why) }
@@ -780,6 +807,12 @@ struct EventEditorPanel: View {
                 }
             }
         }
+    }
+
+    /// "zoom.us/j/4155550123", without the scheme and the passcode.
+    static func shortLink(_ link: String) -> String {
+        let bare = link.replacingOccurrences(of: "https://", with: "")
+        return String(bare.split(separator: "?").first ?? Substring(bare))
     }
 
     /// The room picker opens from the Room field, on a click or when the

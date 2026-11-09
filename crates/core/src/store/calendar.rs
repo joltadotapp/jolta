@@ -187,6 +187,27 @@ pub fn set_default_event_minutes(conn: &Connection, minutes: i64) -> Result<()> 
     Ok(())
 }
 
+/// The personal Zoom link Settings › Calendar saved, which Add video call
+/// offers as Zoom.
+pub fn zoom_link(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn.query_row("SELECT value FROM setting WHERE key = 'zoom_link'", [], |r| r.get(0)).optional()?)
+}
+
+/// Saves the personal Zoom link, or forgets it with None. Anything that
+/// isn't a personal Zoom link is refused.
+pub fn set_zoom_link(conn: &Connection, link: Option<&str>) -> Result<()> {
+    let Some(link) = link.map(str::trim).filter(|l| !l.is_empty()) else {
+        conn.execute("DELETE FROM setting WHERE key = 'zoom_link'", [])?;
+        return Ok(());
+    };
+    let block = crate::calendar::meeting::personal_zoom(link).ok_or_else(|| Error::Other("This isn't a Zoom meeting link.".into()))?;
+    conn.execute(
+        "INSERT INTO setting (key, value) VALUES ('zoom_link', ?1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [block.link],
+    )?;
+    Ok(())
+}
+
 /// Makes `id` the calendar new events go to, and no other; None goes back
 /// to the first shown calendar Jolta can write to.
 pub fn set_default_calendar(conn: &Connection, id: Option<CalendarId>) -> Result<()> {

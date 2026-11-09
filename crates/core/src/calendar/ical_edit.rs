@@ -811,7 +811,9 @@ pub fn write_field(ev: &mut Component, field: super::change::Field, e: &EventDat
         Field::MeetingLink => {
             ev.remove("CONFERENCE");
             if let Some(m) = &e.meeting {
-                ev.add(Prop::new("CONFERENCE", &m.join_url).with_param("VALUE", "URI").with_param("FEATURE", "VIDEO"));
+                let video = Prop::new("CONFERENCE", &m.join_url).with_param("VALUE", "URI").with_param("FEATURE", "VIDEO");
+                // RFC 7986's label, for the personal Zoom link Jolta writes.
+                ev.add(if m.provider == MeetingProvider::Zoom { video.with_param("LABEL", "Zoom") } else { video });
                 for phone in &m.phones {
                     ev.add(Prop::new("CONFERENCE", phone).with_param("VALUE", "URI").with_param("FEATURE", "PHONE"));
                 }
@@ -1002,6 +1004,25 @@ mod tests {
         let bom = "\u{feff}BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:b\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         assert_eq!(Object::parse(bom).to_string(), bom);
         assert!(Object::parse(bom).event("b", None).is_some());
+    }
+
+    /// U11: on CalDAV the personal Zoom link also goes in as RFC 7986's
+    /// CONFERENCE, labelled, and reads back as the same meeting.
+    #[test]
+    fn a_personal_zoom_link_is_written_as_a_labelled_conference() {
+        let link = "https://zoom.us/j/4155550123";
+        let location = format!("Zoom: {link}");
+        let block = format!("Join Zoom meeting: {link}\nMeeting ID: 415 555 0123");
+        let e = EventData {
+            meeting: meeting::detect(&[], None, &location, &block),
+            location,
+            description: block,
+            ..EventData::new("z@jolta.app", Span::Timed { start: at("2026-11-24 09:00", Zone::Tz(chrono_tz::UTC)), end: at("2026-11-24 09:30", Zone::Tz(chrono_tz::UTC)) })
+        };
+        let text = write_event(&e, "-//Jolta//EN");
+        assert!(text.contains(&format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO;LABEL=Zoom:{link}\r\n")), "{text}");
+        assert_eq!(read_events(&text)[0].location, format!("Zoom: {link}"));
+        assert_eq!(crate::calendar::ical::read(&text, &[]).unwrap()[0].meeting, e.meeting);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use chrono_tz::Tz;
 use reqwest::Url;
 
-use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields};
+use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, zoom_in_text};
 use super::add::resource_name;
 use super::{CalDav, href_key, join, path_escape};
 use crate::calendar::change::Field;
@@ -195,7 +195,7 @@ pub(crate) fn writable(write: &OpWrite<'_>) -> Result<()> {
         OpWrite::Create { events, extra, .. } => created_text(events, *extra).map(drop),
         OpWrite::Update { base, event, extra, .. } | OpWrite::Occurrence { base, event, extra, .. } => {
             lines(*extra)?;
-            changed_fields(base, event).into_iter().try_for_each(|f| editable(f))
+            changed_fields(base, event).into_iter().try_for_each(|f| editable(f, base, event))
         }
         OpWrite::Delete { .. } | OpWrite::Cancel { .. } | OpWrite::Move { .. } => Ok(()),
     }
@@ -230,9 +230,11 @@ pub(crate) fn cancelled_text(text: &str, occurrence: &EventData, here: Tz) -> Re
 
 /// The fields Jolta writes into a resource. Video calls wait for the unit
 /// that makes meetings.
-fn editable(field: Field) -> Result<()> {
+/// A video call changes here only as the personal Zoom link, whose
+/// CONFERENCE line Jolta writes itself.
+fn editable(field: Field, base: &EventData, event: &EventData) -> Result<()> {
     match field {
-        Field::MeetingLink => Err(cannot("Jolta", "change the video call on this calendar yet")),
+        Field::MeetingLink if !zoom_in_text(base, event) => Err(cannot("Jolta", "change the video call on this calendar yet")),
         _ => Ok(()),
     }
 }
@@ -329,7 +331,7 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
             let Some(value) = o.recurrence_id.as_ref().and_then(|r| rid_value(&obj, &o.uid, r, here)) else { continue };
             let Some(component) = obj.event_mut(&o.uid, Some(&value)) else { continue };
             for f in changed_fields(&o, &carried) {
-                editable(f)?;
+                editable(f, &o, &carried)?;
                 write_field(component, f, &carried);
             }
             if organizer::asks_again(&o, &carried, here) {
@@ -339,7 +341,7 @@ pub(crate) fn edited_text(text: &str, base: &EventData, event: &EventData, extra
     }
     let component = obj.event_mut(&event.uid, rid.as_deref()).ok_or_else(|| Error::Other("The calendar's copy no longer has this event.".into()))?;
     for &field in &fields {
-        editable(field)?;
+        editable(field, base, event)?;
         write_field(component, field, event);
     }
     if organizer::asks_again(base, event, here) {
@@ -465,6 +467,23 @@ mod tests {
         assert!(text.contains("DTSTART;TZID=Europe/Brussels:20261124T100000\r\n") && text.contains("SEQUENCE:3\r\n"), "{text}");
         assert!(text.contains("X-APPLE-STRUCTURED-LOCATION;VALUE=URI;X-APPLE-RADIUS=70;X-TITLE=\"Room 1\":geo:50.85,4.35\r\n"));
         assert_eq!(read(&text).iter().find(|e| e.recurrence_id.is_none()).unwrap().span, moved.span);
+    }
+
+    /// U11: on CalDAV the personal Zoom link comes and goes with its
+    /// CONFERENCE line, while any other change of call is still refused.
+    #[test]
+    fn a_personal_zoom_link_writes_and_removes_its_conference_line() {
+        let base = read(APPLE).into_iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        let link = "https://zoom.us/j/4155550123";
+        let description = format!("{}\n\nJoin Zoom meeting: {link}\nMeeting ID: 415 555 0123", base.description);
+        let zoom = EventData { meeting: crate::calendar::meeting::detect(&[], None, &base.location, &description), description, ..base.clone() };
+        let added = edited_text(APPLE, &base, &zoom, None, &[], Brussels).unwrap();
+        assert!(added.contains(&format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO;LABEL=Zoom:{link}\r\n")), "{added}");
+        let stored = read(&added).into_iter().find(|e| e.recurrence_id.is_none()).unwrap();
+        let removed = edited_text(&added, &stored, &base, None, &[], Brussels).unwrap();
+        assert!(!removed.contains("CONFERENCE") && !removed.contains("zoom.us"), "{removed}");
+        let teams = EventData { video: Some(crate::calendar::MeetingProvider::Teams), ..base.clone() };
+        assert!(edited_text(APPLE, &base, &teams, None, &[], Brussels).is_err(), "other calls stay refused");
     }
 
     /// Check 2: an edit of one changed occurrence writes only its VEVENT.
