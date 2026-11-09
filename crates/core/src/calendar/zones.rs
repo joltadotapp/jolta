@@ -128,24 +128,19 @@ pub fn from_offset(offset: FixedOffset, sent: DateTime<Utc>, here: Tz) -> Option
 }
 
 /// The offset of the newest of `address`'s last five stored mails whose
-/// `Date` header has one, with when it was sent.
+/// `Date` header has one, with the time that header gives.
 fn last_mail_offset(conn: &Connection, blobs: &Blobs, address: &str) -> Result<Option<(FixedOffset, DateTime<Utc>)>> {
-    let mut stmt = conn.prepare("SELECT date, blob FROM message WHERE from_addr = ?1 COLLATE NOCASE AND blob IS NOT NULL ORDER BY date DESC LIMIT 5")?;
-    let rows = stmt.query_map([address], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (date, blob) in rows {
-        let Ok(head) = blobs.head(&blob, 64 * 1024) else { continue };
-        if let (Some(offset), Some(sent)) = (date_offset(&head), DateTime::from_timestamp(date, 0)) {
-            return Ok(Some((offset, sent)));
-        }
-    }
-    Ok(None)
+    let mut stmt = conn.prepare("SELECT blob FROM message WHERE from_addr = ?1 COLLATE NOCASE AND blob IS NOT NULL ORDER BY date DESC LIMIT 5")?;
+    let blobs_of = stmt.query_map([address], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(blobs_of.iter().filter_map(|b| blobs.head(b, 64 * 1024).ok()).find_map(|head| date_offset(&head)))
 }
 
-/// The UTC offset in a message's `Date` header. None without one, and for
+/// The UTC offset in a message's `Date` header, with the time it gives.
+/// None without one, and for
 /// UTC itself: Jolta, Exchange Online and many servers write every `Date`
 /// in UTC wherever the writer is, and `-0000` means the zone isn't known
 /// (RFC 5322 section 3.3).
-pub fn date_offset(raw: &[u8]) -> Option<FixedOffset> {
+pub fn date_offset(raw: &[u8]) -> Option<(FixedOffset, DateTime<Utc>)> {
     let message = MessageParser::new().parse_headers(raw)?;
     let date = message.root().date()?;
     let minutes = i32::from(date.tz_hour) * 60 + i32::from(date.tz_minute);
@@ -153,7 +148,7 @@ pub fn date_offset(raw: &[u8]) -> Option<FixedOffset> {
     if seconds == 0 || minutes > 14 * 60 {
         return None;
     }
-    FixedOffset::east_opt(seconds)
+    Some((FixedOffset::east_opt(seconds)?, DateTime::from_timestamp(date.to_timestamp(), 0)?))
 }
 
 /// The zones with `offset` at `at`: from the list Jolta offers, the likeliest
@@ -216,9 +211,9 @@ mod tests {
 
     #[test]
     fn the_date_header_gives_its_offset() {
-        assert_eq!(date_offset(&headers("Date: Tue, 10 Nov 2026 09:12:00 -0500\r\n")), Some(hours(-5)));
-        assert_eq!(date_offset(&headers("Date: Tue, 10 Nov 2026 19:42:00 +0530\r\n")), FixedOffset::east_opt(5 * 3600 + 30 * 60));
-        assert_eq!(date_offset(&headers("Date: Tue,\r\n 10 Nov 2026 09:12:00 -0800 (PST)\r\n")), Some(hours(-8)), "folded, with a comment");
+        assert_eq!(date_offset(&headers("Date: Tue, 10 Nov 2026 09:12:00 -0500\r\n")), Some((hours(-5), day("2026-11-10") + chrono::Duration::minutes(132))));
+        assert_eq!(date_offset(&headers("Date: Tue, 10 Nov 2026 19:42:00 +0530\r\n")).map(|(o, _)| o), FixedOffset::east_opt(5 * 3600 + 30 * 60));
+        assert_eq!(date_offset(&headers("Date: Tue,\r\n 10 Nov 2026 09:12:00 -0800 (PST)\r\n")).map(|(o, _)| o), Some(hours(-8)), "folded, with a comment");
         assert_eq!(date_offset(&headers("")), None, "no Date header");
         assert_eq!(date_offset(&headers("Date: Tue, 10 Nov 2026 14:12:00 GMT\r\n")), None, "GMT says nothing about the writer's clock");
         assert_eq!(date_offset(&headers("Date: Tue, 10 Nov 2026 14:12:00 +0000\r\n")), None, "nor does +0000, Jolta's and Exchange Online's own");

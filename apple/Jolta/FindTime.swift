@@ -75,6 +75,8 @@ struct FindTimePanel: View {
     /// working day's off hours on it.
     @State private var theirZone: TheirZone?
     @State private var theirOff: [TimeSlot] = []
+    /// Picking waits for the clock, so the times never go in on the wrong one.
+    @State private var lookingUpZone = false
     @FocusState private var focused: Bool
 
     private static let lengths: [Int64] = [15, 30, 45, 60, 90]
@@ -144,6 +146,7 @@ struct FindTimePanel: View {
         .accessibilityIdentifier("find-time")
         .task {
             minutes = request.minutes > 0 ? request.minutes : 30
+            if forAvailability { lookingUpZone = true }
             Task { await loadZone() }
             await load()
         }
@@ -267,6 +270,7 @@ struct FindTimePanel: View {
         } catch {
             return model.notify("\(error)")
         }
+        lookingUpZone = true
         Task { await loadZone() }
         DispatchQueue.main.async { focused = true }
     }
@@ -487,7 +491,7 @@ struct FindTimePanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(slots.isEmpty || pendingRooms > 0)
+            .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone)
             .accessibilityIdentifier("find-time-pick")
             if invites {
                 Button { invite() } label: {
@@ -555,6 +559,7 @@ struct FindTimePanel: View {
     /// the times go in on this Mac's clock, as before.
     private func loadZone() async {
         guard case .availability(let account, let to) = request.purpose else { return }
+        defer { lookingUpZone = false }
         theirZone = try? await model.core.theirZone(accountId: account, to: to)
         shadeTheirDay()
     }
@@ -595,7 +600,7 @@ struct FindTimePanel: View {
     }
 
     private func pick() {
-        guard case .ready(let info) = phase, !slots.isEmpty, pendingRooms == 0 else { return }
+        guard case .ready(let info) = phase, !slots.isEmpty, pendingRooms == 0, !lookingUpZone else { return }
         let slot = slots[min(selected, slots.count - 1)]
         switch request.purpose {
         case .reply(let thread):
