@@ -332,9 +332,16 @@ fn created_fields(e: &EventData) -> Vec<Field> {
     std::iter::once(Field::Time).chain(FIELDS.into_iter().filter(|f| f.differs(&blank, e))).collect()
 }
 
-/// The fields `e` changed from `base`.
+/// The fields `e` changed from `base`. A personal Zoom link lives in the
+/// location and description alone, so adding or removing one changes
+/// nothing in the server's own meeting fields.
 fn changed_fields(base: &EventData, e: &EventData) -> Vec<Field> {
-    FIELDS.into_iter().filter(|f| f.differs(base, e)).collect()
+    let in_text = |x: &EventData| x.video.is_none() && super::meeting::in_text(x.meeting.as_ref());
+    FIELDS
+        .into_iter()
+        .filter(|f| f.differs(base, e))
+        .filter(|f| *f != Field::MeetingLink || !(in_text(base) && in_text(e)))
+        .collect()
 }
 
 /// Whether the instance `current` already has every field the changed

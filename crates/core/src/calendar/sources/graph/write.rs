@@ -460,6 +460,20 @@ mod tests {
         assert!(patch_body(&with_meeting, &standup(), None, Brussels).is_err(), "a Teams meeting can't be taken off");
     }
 
+    /// U11: the personal Zoom link goes on and off a stored event in its
+    /// location and body alone; Graph's online meeting holds Teams only.
+    #[test]
+    fn a_personal_zoom_link_patches_the_location_and_body() {
+        let link = "https://zoom.us/j/4155550123";
+        let block = format!("Join Zoom meeting: {link}\nMeeting ID: 415 555 0123");
+        let location = format!("Zoom: {link}");
+        let zoom = EventData { meeting: crate::calendar::meeting::detect(&[], None, &location, &block), location, description: block.clone(), ..standup() };
+        let patch = patch_body(&standup(), &zoom, None, Brussels).unwrap();
+        assert_eq!(patch, json!({ "location": { "displayName": format!("Zoom: {link}") }, "body": { "contentType": "text", "content": block } }));
+        let off = patch_body(&zoom, &standup(), None, Brussels).unwrap();
+        assert_eq!(off, json!({ "location": { "displayName": "" }, "body": { "contentType": "text", "content": "" } }));
+    }
+
     #[test]
     fn a_create_sends_the_transaction_id_the_uid_and_what_the_event_sets() {
         let e = EventData { categories: vec!["Blue category".into()], show_as: ShowAs::Tentative, ..standup() };

@@ -298,6 +298,13 @@ pub enum CalCommand {
         #[arg(long, requires = "account", conflicts_with = "from")]
         off: bool,
     },
+    /// The personal Zoom link Add video call offers, as Settings › Calendar
+    /// saves it: shown without arguments, saved, or cleared.
+    ZoomLink {
+        link: Option<String>,
+        #[arg(long, conflicts_with = "link")]
+        clear: bool,
+    },
     /// Focus time in a calendar, as the app's sheet adds it: Google's own
     /// focus time in a Google account's primary calendar where its edition
     /// offers it, else a busy event titled Focus time. Sent at once.
@@ -526,6 +533,16 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 println!("  {:>4}  [{}] {}", c.id, if c.shown { "x" } else { " " }, c.name);
             }
             println!("Hidden calendars aren't synced. Show one with `jolta cal show <id> on`.");
+            Ok(())
+        }
+        CalCommand::ZoomLink { link, clear } => {
+            if link.is_some() || clear {
+                jolta.store.write(|tx| store::set_zoom_link(tx, link.as_deref()))?;
+            }
+            match jolta.store.read(store::zoom_link)? {
+                Some(link) => println!("Zoom personal link: {link}"),
+                None => println!("No Zoom personal link is saved."),
+            }
             Ok(())
         }
         CalCommand::Focus { calendar, start, minutes, decline, dnd } => add_focus(jolta, calendar, &start, minutes, decline, dnd).await,

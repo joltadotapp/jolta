@@ -609,6 +609,7 @@ fn draft_copy(d: &jolta_ffi::editor::EventDraft) -> jolta_ffi::editor::EventDraf
         location: d.location.clone(),
         description: d.description.clone(),
         video: d.video,
+        zoom: d.zoom.clone(),
         show_as: d.show_as,
         reminder: d.reminder,
         visibility: d.visibility,

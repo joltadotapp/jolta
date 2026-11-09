@@ -34,11 +34,23 @@ pub struct Video {
     #[arg(long, conflicts_with = "meet")]
     teams: bool,
     /// Ask Google for a Meet on save.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "zoom")]
     meet: bool,
+    /// Add the personal Zoom link `jolta cal zoom-link` saved.
+    #[arg(long, conflicts_with = "teams")]
+    zoom: bool,
 }
 
 impl Video {
+    /// The saved personal Zoom link, when --zoom asks for it.
+    fn zoom(&self, jolta: &Jolta) -> Result<Option<String>> {
+        if !self.zoom {
+            return Ok(None);
+        }
+        let link = jolta.store.read(store::zoom_link)?;
+        link.map(Some).context("no Zoom link is saved; `jolta cal zoom-link <link>` saves one")
+    }
+
     fn provider(&self) -> Option<MeetingProvider> {
         match (self.teams, self.meet) {
             (true, _) => Some(MeetingProvider::Teams),
@@ -181,6 +193,9 @@ pub struct EditArgs {
     description: Option<String>,
     #[command(flatten)]
     video: Video,
+    /// Remove the personal Zoom link Jolta wrote, as the editor's ⊗ does.
+    #[arg(long, conflicts_with = "zoom")]
+    no_zoom: bool,
     #[command(flatten)]
     when: When,
     /// Repeat by this RRULE, or "none" for no repeat.
@@ -472,13 +487,14 @@ fn stored_event(jolta: &Jolta, id: i64) -> Result<(CalendarId, String, EventData
 
 pub async fn create(jolta: &Jolta, a: CreateArgs) -> Result<()> {
     let span = a.when.span(None)?.context("--start is needed")?;
-    if !a.with.is_empty() || a.video.provider().is_some() || a.description.is_some() {
+    if !a.with.is_empty() || a.video.provider().is_some() || a.video.zoom || a.description.is_some() {
         let here = tz::here();
         let mut d = jolta.store.read(|c| draft::draft_for_new(c, Some(CalendarId(a.calendar)), Some(span), Utc::now(), here))?;
         d.title = a.title;
         d.location = a.location.unwrap_or_default();
         d.description = a.description.unwrap_or_default();
         d.video = a.video.provider();
+        d.zoom = a.video.zoom(jolta)?;
         d.people = a.with.iter().map(|s| guest(s)).collect();
         d.options.hide_guests = a.people.hide_guests;
         d.options.allow_new_times = !a.people.no_proposals;
@@ -551,7 +567,7 @@ fn print_scopes(plan: &[draft::ScopeChoice]) {
 
 pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
     let meeting = !a.add.is_empty() || !a.remove.is_empty() || a.people.notify.is_some() || a.people.hide_guests || a.people.no_proposals;
-    if a.occurrence.occurrence.is_some() || a.repeat.is_some() || a.description.is_some() || a.video.provider().is_some() || meeting {
+    if a.occurrence.occurrence.is_some() || a.repeat.is_some() || a.description.is_some() || a.video.provider().is_some() || a.video.zoom || a.no_zoom || meeting {
         let here = tz::here();
         let mut d = drafted(jolta, a.event, a.occurrence.occurrence.as_deref())?;
         if let Some(title) = a.title {
@@ -565,6 +581,12 @@ pub async fn edit(jolta: &Jolta, a: EditArgs) -> Result<()> {
         }
         if let Some(video) = a.video.provider() {
             d.video = Some(video);
+        }
+        if let Some(link) = a.video.zoom(jolta)? {
+            d.zoom = Some(link);
+        }
+        if a.no_zoom {
+            d.zoom = None;
         }
         if let Some(span) = a.when.span(Some(&d.span))? {
             d.span = span;
@@ -769,7 +791,8 @@ pub fn print_caps(jolta: &Jolta, calendar: i64) -> Result<()> {
     println!("  Don't send: {:?}, outside only {}, new people only {}, cancel message {}", k.hold_update, k.outside_only, k.new_people_only, k.cancel_message);
     println!("  repeat: hourly {}, BYSETPOS {}, several BYMONTH {}; this and following {}", k.repeat.hourly, k.repeat.set_pos, k.repeat.several_months, k.split_series);
     println!("  move {:?}, video {:?}, remove video {}", k.move_within, k.video, k.remove_video);
-    for v in jolta_core::calendar::meeting::video_choices(&c) {
+    let zoom = jolta.store.read(store::zoom_link)?.is_some();
+    for v in jolta_core::calendar::meeting::video_choices(&c, zoom) {
         println!("  Add video call: {}{}", v.label, v.refusal.map(|r| format!(" (greyed: {r})")).unwrap_or_default());
     }
     println!("  options {:?}", k.options);
@@ -980,6 +1003,8 @@ fn print_draft(d: &draft::EventDraft, problems: &[draft::Problem]) {
         println!("  video call: {} {}", m.provider, m.join_url);
     } else if let Some(v) = d.video {
         println!("  video call: {v}, link made on save");
+    } else if let Some(link) = &d.zoom {
+        println!("  video call: Zoom (personal link) {link}");
     }
     println!("  show as {:?}, reminder {:?}, visibility {:?}", d.show_as, d.reminder, d.visibility);
     match &d.notice {

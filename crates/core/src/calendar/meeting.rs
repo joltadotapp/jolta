@@ -27,10 +27,10 @@ pub struct Entry {
 /// The known meeting links. Adding a provider is one row here plus one case
 /// in `every_row_is_recognised`.
 static ROWS: &[Row] = &[
-    Row::new(P::Zoom, Domain("zoom.us"), Prefix("/j/")).id().passcode("pwd").app(App::Zoom),
+    Row::new(P::Zoom, Domain("zoom.us"), Prefix("/j/")).id().passcode("pwd").app(App::Zoom).personal(),
     Row::new(P::Zoom, Domain("zoom.us"), Prefix("/w/")).id().passcode("pwd").app(App::Zoom),
-    Row::new(P::Zoom, Domain("zoom.us"), Prefix("/my/")).app(App::Zoom),
-    Row::new(P::Zoom, Domain("zoomgov.com"), Prefix("/j/")).id().passcode("pwd").app(App::Zoom),
+    Row::new(P::Zoom, Domain("zoom.us"), Prefix("/my/")).app(App::Zoom).personal(),
+    Row::new(P::Zoom, Domain("zoomgov.com"), Prefix("/j/")).id().passcode("pwd").app(App::Zoom).personal(),
     Row::new(P::Teams, Exact("teams.microsoft.com"), Prefix("/l/meetup-join/")).app(App::Teams),
     Row::new(P::Teams, Exact("teams.microsoft.com"), Prefix("/meet/")).id().passcode("p").app(App::Teams),
     Row::new(P::Teams, Exact("teams.live.com"), Prefix("/meet/")).id().passcode("p"),
@@ -61,16 +61,20 @@ pub struct VideoChoice {
 }
 
 /// A video call the editor offers and when a calendar can have it. Adding
-/// one, such as a personal Zoom link, is one row here.
+/// one is one row here.
 struct VideoRow {
     provider: MeetingProvider,
     label: &'static str,
     refusal: fn(&Calendar, &Capabilities) -> Option<String>,
+    /// Offered only once the user saved a personal link for it.
+    personal: bool,
 }
 
 static VIDEO_ROWS: &[VideoRow] = &[
-    VideoRow { provider: P::Teams, label: "Teams meeting", refusal: |c, caps| made_by_server(P::Teams, c, caps) },
-    VideoRow { provider: P::Meet, label: "Google Meet", refusal: |c, caps| made_by_server(P::Meet, c, caps) },
+    VideoRow { provider: P::Teams, label: "Teams meeting", refusal: |c, caps| made_by_server(P::Teams, c, caps), personal: false },
+    VideoRow { provider: P::Meet, label: "Google Meet", refusal: |c, caps| made_by_server(P::Meet, c, caps), personal: false },
+    // Jolta writes the link into the text, so every calendar it can write takes it.
+    VideoRow { provider: P::Zoom, label: "Zoom (personal link)", refusal: |_, _| None, personal: true },
 ];
 
 /// Why the server of `calendar` won't make `provider`'s meeting on save,
@@ -88,16 +92,20 @@ fn made_by_server(provider: MeetingProvider, calendar: &Calendar, caps: &Capabil
 
 /// The Add video call menu for `calendar`: the calls it can have, its
 /// account's own first (Teams on Microsoft 365, Meet on Google), then the
-/// others greyed with the reason. Empty when it can have none, as on a
-/// read-only calendar, iCloud or a calendar on this Mac, so the editor
-/// leaves the button out.
-pub fn video_choices(calendar: &Calendar) -> Vec<VideoChoice> {
+/// personal Zoom link when `zoom_saved`, then the others greyed with the
+/// reason. Empty when it can have none, as on a read-only calendar, or on
+/// iCloud or a calendar on this Mac without a saved Zoom link, so the
+/// editor leaves the button out.
+pub fn video_choices(calendar: &Calendar, zoom_saved: bool) -> Vec<VideoChoice> {
     let caps = caps::of(calendar);
     if !caps.writable {
         return Vec::new();
     }
-    let mut choices: Vec<VideoChoice> =
-        VIDEO_ROWS.iter().map(|r| VideoChoice { provider: r.provider, label: r.label, refusal: (r.refusal)(calendar, &caps) }).collect();
+    let mut choices: Vec<VideoChoice> = VIDEO_ROWS
+        .iter()
+        .filter(|r| zoom_saved || !r.personal)
+        .map(|r| VideoChoice { provider: r.provider, label: r.label, refusal: (r.refusal)(calendar, &caps) })
+        .collect();
     if choices.iter().all(|c| c.refusal.is_some()) {
         return Vec::new();
     }
@@ -120,11 +128,14 @@ struct Row {
     /// The query parameter that holds the passcode.
     passcode: Option<&'static str>,
     app: App,
+    /// A link someone keeps as their own meeting room, which Settings ›
+    /// Calendar takes as the personal Zoom link.
+    personal: bool,
 }
 
 impl Row {
     const fn new(provider: MeetingProvider, host: Host, shape: Shape) -> Row {
-        Row { provider, host, shape, id: false, passcode: None, app: App::Browser }
+        Row { provider, host, shape, id: false, passcode: None, app: App::Browser, personal: false }
     }
 
     const fn id(mut self) -> Row {
@@ -141,6 +152,62 @@ impl Row {
         self.app = app;
         self
     }
+
+    const fn personal(mut self) -> Row {
+        self.personal = true;
+        self
+    }
+}
+
+/// What Add Zoom writes for the user's personal link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZoomBlock {
+    pub link: String,
+    /// The event's location: "Zoom: https://…".
+    pub location: String,
+    /// The block at the end of the description: "Join Zoom meeting: …",
+    /// and the meeting ID when the link has one.
+    pub text: String,
+}
+
+/// The block for `link` when it is a personal Zoom link: `/j/<id>`, with
+/// or without `pwd=`, or `/my/<name>`, on zoom.us or zoomgov.com. The
+/// passcode stays in the link: its `pwd=` is an encoded form that nobody
+/// types, and the link gives Join the same passcode a Zoom invitation would.
+pub fn personal_zoom(link: &str) -> Option<ZoomBlock> {
+    let link = link.trim();
+    let link = clean(&if link.contains("://") { link.to_string() } else { format!("https://{link}") })?;
+    // The whole link, as the description scan reads it back.
+    if https_runs(&link) != [link.as_str()] {
+        return None;
+    }
+    let parsed = parse(&link)?;
+    let (row, segment) = known(&parsed).filter(|(row, _)| row.personal)?;
+    let id = match row.id {
+        true => Some(segment).filter(|id| (9..=11).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()))?.into(),
+        false => None,
+    };
+    let mut text = format!("Join Zoom meeting: {link}");
+    if let Some(id) = id {
+        text.push_str(&format!("\nMeeting ID: {}", spaced(id)));
+    }
+    Some(ZoomBlock { location: format!("Zoom: {link}"), text, link })
+}
+
+/// Whether `m` is no call or a personal Zoom link, which an event carries
+/// in its location and description only.
+pub fn in_text(m: Option<&Meeting>) -> bool {
+    m.is_none_or(|m| m.provider == P::Zoom && personal_zoom(&m.join_url).is_some())
+}
+
+/// A meeting ID grouped as Zoom's invitations write it: 123 456 789,
+/// 123 456 7890, 123 4567 8901.
+fn spaced(id: &str) -> String {
+    let cut = match id.len() {
+        11 => [3, 7],
+        _ => [3, 6],
+    };
+    format!("{} {} {}", &id[..cut[0]], &id[cut[0]..cut[1]], &id[cut[1]..])
 }
 
 #[derive(Clone, Copy)]
@@ -550,7 +617,7 @@ mod tests {
     }
 
     fn menu(c: &Calendar) -> Vec<(MeetingProvider, Option<String>)> {
-        video_choices(c).into_iter().map(|v| (v.provider, v.refusal)).collect()
+        video_choices(c, false).into_iter().map(|v| (v.provider, v.refusal)).collect()
     }
 
     /// The mockup's menu on Microsoft 365, and Google's the other way round.
@@ -559,7 +626,7 @@ mod tests {
         use Access::*;
         let m365 = calendar(CalendarSource::Graph, Owner, Some(vec![P::Teams]));
         assert_eq!(menu(&m365), [(P::Teams, None), (P::Meet, Some("Not on Microsoft 365 calendars".into()))]);
-        assert_eq!(video_choices(&m365)[0].label, "Teams meeting");
+        assert_eq!(video_choices(&m365, false)[0].label, "Teams meeting");
         let google = calendar(CalendarSource::Google, Write, None);
         assert_eq!(menu(&google), [(P::Meet, None), (P::Teams, Some("Not on Google calendars".into()))], "a list read before U8 allows Meet");
     }
@@ -576,8 +643,95 @@ mod tests {
             calendar(CalendarSource::Local, Owner, None),
             calendar(CalendarSource::Webcal, Owner, None),
         ] {
-            assert!(video_choices(&c).is_empty(), "{:?} {:?} {:?}", c.source, c.access, c.video);
+            assert!(video_choices(&c, false).is_empty(), "{:?} {:?} {:?}", c.source, c.access, c.video);
         }
+    }
+
+    /// U11: the personal Zoom link is offered on every calendar Jolta can
+    /// write once saved, after the account's own call.
+    #[test]
+    fn a_saved_zoom_link_is_offered_on_every_writable_calendar() {
+        use Access::*;
+        let m365 = calendar(CalendarSource::Graph, Owner, Some(vec![P::Teams]));
+        assert_eq!(menu(&m365).len(), 2, "no Zoom row until a link is saved");
+        let zoom = |c: &Calendar| video_choices(c, true).into_iter().map(|v| (v.provider, v.label, v.refusal.is_some())).collect::<Vec<_>>();
+        assert_eq!(zoom(&m365), [(P::Teams, "Teams meeting", false), (P::Zoom, "Zoom (personal link)", false), (P::Meet, "Google Meet", true)]);
+        for c in [
+            calendar(CalendarSource::Graph, Owner, Some(Vec::new())),
+            calendar(CalendarSource::Google, Write, None),
+            calendar(CalendarSource::CalDav, Owner, None),
+            calendar(CalendarSource::Local, Owner, None),
+        ] {
+            assert!(zoom(&c).contains(&(P::Zoom, "Zoom (personal link)", false)), "{:?}", c.source);
+        }
+        for c in [calendar(CalendarSource::Graph, Read, None), calendar(CalendarSource::Webcal, Owner, None)] {
+            assert!(zoom(&c).is_empty(), "{:?} {:?}", c.source, c.access);
+        }
+    }
+
+    /// The link shapes Settings › Calendar takes: (link, meeting ID as the
+    /// block writes it, passcode from the link).
+    const PERSONAL: &[(&str, Option<&str>, Option<&str>)] = &[
+        ("https://us02web.zoom.us/j/4155550123?pwd=bWFkZVVwRm9yVGVzdHM.1", Some("415 555 0123"), Some("bWFkZVVwRm9yVGVzdHM.1")),
+        ("https://zoom.us/j/41555501234", Some("415 5550 1234"), None),
+        ("https://acme.zoom.us/my/jane.doe", None, None),
+        ("https://agency.zoomgov.com/j/160555012", Some("160 555 012"), None),
+    ];
+
+    #[test]
+    fn the_zoom_block_reads_back_as_the_same_meeting_as_an_invitation() {
+        for &(link, id, passcode) in PERSONAL {
+            let block = personal_zoom(link).unwrap_or_else(|| panic!("{link}"));
+            assert_eq!((block.link.as_str(), block.location.clone()), (link, format!("Zoom: {link}")));
+            let mut text = format!("Join Zoom meeting: {link}");
+            if let Some(id) = id {
+                text.push_str(&format!("\nMeeting ID: {id}"));
+            }
+            assert_eq!(block.text, text);
+
+            let invitation = in_description(&format!("Join Zoom Meeting\n{link}\n")).unwrap();
+            let description = format!("Agenda first.\n\n{}", block.text);
+            let ics = format!(
+                "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:z@jolta.app\r\nDTSTART:20261124T090000Z\r\nDTEND:20261124T093000Z\r\n\
+                 LOCATION:{}\r\nDESCRIPTION:{}\r\nCONFERENCE;VALUE=URI;FEATURE=VIDEO;LABEL=Zoom:{link}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+                block.location,
+                description.replace('\n', "\\n"),
+            );
+            let caldav = crate::calendar::ical::read(&ics, &[]).unwrap().remove(0).meeting;
+            // Google and Graph give back the location and the description as text.
+            let google = detect(&[], None, &block.location, &description);
+            let without_location = detect(&[], None, "Room 4", &description);
+            for (shape, m) in [("iCalendar", caldav), ("Google", google), ("a location of the user's", without_location)] {
+                let m = m.unwrap_or_else(|| panic!("{shape} {link}"));
+                assert_eq!((m.provider, m.join_url.as_str()), (P::Zoom, link), "{shape}");
+                assert_eq!(m.meeting_id.as_deref(), id.map(|i| i.replace(' ', "")).as_deref().or(invitation.meeting_id.as_deref()), "{shape}");
+                assert_eq!((m.meeting_id.clone(), m.passcode.as_deref()), (invitation.meeting_id.clone(), passcode), "{shape} as an invitation has it");
+                assert_eq!(app_url(&m), app_url(&invitation), "{shape}: Join opens the Zoom app the same way");
+            }
+        }
+    }
+
+    #[test]
+    fn only_personal_zoom_links_are_taken() {
+        for link in [
+            "",
+            "https://acme.zoom.us/w/91234567890?tk=abc",
+            "https://zoom.us/pricing",
+            "http://zoom.us/j/4155550123",
+            "https://evilzoom.us/j/4155550123",
+            "https://zoom.us.evil.example/j/4155550123",
+            "https://meet.google.com/abc-defg-hij",
+            "https://zoom.us/j/41555abc23",
+            "https://zoom.us/j/12345678",
+            "https://zoom.us/j/415555012345",
+            "https://zoom.us/j/4155550123 extra",
+            "https://zoom.us/my/",
+        ] {
+            assert_eq!(personal_zoom(link), None, "{link}");
+        }
+        let typed = personal_zoom("  zoom.us/my/jane.doe \n").expect("a link typed without https://");
+        assert_eq!(typed.link, "https://zoom.us/my/jane.doe");
+        assert_eq!(personal_zoom("https://zoom.us/j/4155550123?pwd=a&amp;uname=x").map(|b| b.link).as_deref(), Some("https://zoom.us/j/4155550123?pwd=a&uname=x"));
     }
 
     #[test]

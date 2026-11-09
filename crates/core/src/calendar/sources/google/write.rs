@@ -555,6 +555,20 @@ mod tests {
         );
     }
 
+    /// U11: the personal Zoom link goes on and off in the location and
+    /// description alone; conference data takes outside providers only
+    /// through a Workspace add-on.
+    #[test]
+    fn a_personal_zoom_link_patches_the_location_and_description() {
+        let link = "https://zoom.us/my/jane.doe";
+        let block = format!("Join Zoom meeting: {link}");
+        let location = format!("Zoom: {link}");
+        let zoom = EventData { meeting: crate::calendar::meeting::detect(&[], None, &location, &block), location: location.clone(), description: block.clone(), ..standup() };
+        assert_eq!(patch_body(&standup(), &zoom, None, "r", Brussels).unwrap(), json!({ "location": location, "description": block }));
+        assert_eq!(patch_body(&zoom, &standup(), None, "r", Brussels).unwrap(), json!({ "location": "", "description": "" }));
+        assert!(insert_body(std::slice::from_ref(&zoom), None, "r", Brussels).unwrap().get("conferenceData").is_none());
+    }
+
     #[test]
     fn a_patch_sends_only_the_changed_fields() {
         let base = standup();
