@@ -556,7 +556,11 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             println!(
                 "{}: {}; {} out-of-office events ended",
                 a.address,
-                if ended.replies { "automatic replies turned off" } else { "automatic replies unchanged" },
+                match (ended.replies, a.kind) {
+                    (true, _) => "automatic replies turned off",
+                    (false, jolta_core::AccountKind::Gmail) => "Gmail's auto-reply unchanged, as Jolta can't change it; Gmail's settings can",
+                    (false, _) => "automatic replies unchanged",
+                },
                 ended.events
             );
             send_calendar_ops(jolta).await
