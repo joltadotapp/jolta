@@ -680,6 +680,15 @@ mod tests {
         assert_eq!(swap_signature("Hello\n\nK. (edited)", "K. (gone)", "X"), "Hello\n\nK. (edited)", "an edited signature stays");
     }
 
+    #[test]
+    fn what_the_writer_typed_ends_at_the_signature_or_the_quote() {
+        assert_eq!(written("Noon.\n\nK.\n\nOn 1 Nov 2026, 10:00, Ann wrote:\n> hi", "K."), "Noon.");
+        assert_eq!(written("Noon works for me.\n\n> Shall we?", ""), "Noon works for me.", "a quote without a line saying who wrote it");
+        assert_eq!(written("> Shall we?", ""), "", "only a quote");
+        assert_eq!(written("> Shall we?\n\nYes.", ""), "> Shall we?\n\nYes.", "an answer below a quote is the writer's");
+        assert_eq!(written("Noon.\n\nK.", "K."), "Noon.");
+    }
+
     fn account() -> Account {
         Account {
             id: AccountId(1),
