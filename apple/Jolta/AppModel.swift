@@ -950,10 +950,9 @@ final class AppModel {
         awayRevision += 1
     }
 
-    /// Turns automatic replies off where Jolta can (Microsoft 365); Gmail's
-    /// are changed in Gmail, so its setting opens there.
+    /// Turns automatic replies off, for an account whose replies Jolta can
+    /// change (Microsoft 365).
     func turnOffAway(_ info: AwayInfo) {
-        guard info.editable else { return openAwaySettings(info) }
         turningOffAway.insert(info.accountId)
         Task {
             do {

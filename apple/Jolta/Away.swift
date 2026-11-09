@@ -20,11 +20,13 @@ struct AwayStrip: View {
             .layoutPriority(1)
             .help("Automatic replies are on for \(info.address)" + (info.untilText.map { " until \($0)" } ?? ""))
             Spacer(minLength: 6)
-            StripButton(title: "Edit") {
-                if info.editable { model.openAwaySheet(account: info.accountId) } else { model.openAwaySettings(info) }
+            if info.editable {
+                StripButton(title: "Edit") { model.openAwaySheet(account: info.accountId) }
+                StripButton(title: "Turn off") { model.turnOffAway(info) }
+                    .disabled(model.turningOffAway.contains(info.accountId))
+            } else {
+                StripButton(title: info.settingsTitle) { model.openAwaySettings(info) }
             }
-            StripButton(title: "Turn off") { model.turnOffAway(info) }
-                .disabled(model.turningOffAway.contains(info.accountId))
         }
         .font(.system(size: 12.5))
         .foregroundStyle(Color(Theme.text))
@@ -84,19 +86,17 @@ struct OutOfOfficeRows: View {
         ForEach(rows, id: \.accountId) { row in
             SettingsRow(title: row.address, detail: row.detail) {
                 switch row.state {
-                case .on:
-                    Button("Turn off") { model.turnOffAway(row) }
-                        .disabled(model.turningOffAway.contains(row.accountId))
                 case .calendarOff:
                     if let switches, let account = model.calendar.list.accounts.first(where: { $0.account.id == row.accountId }) {
                         Button("Turn on calendar") { switches.set(account, on: true) }
                     }
+                case _ where !row.editable:
+                    Button(row.settingsTitle) { model.openAwaySettings(row) }
+                case .on:
+                    Button("Turn off") { model.turnOffAway(row) }
+                        .disabled(model.turningOffAway.contains(row.accountId))
                 default:
-                    if row.editable {
-                        Button("Edit…") { sheet = AwaySheetRequest(accountId: row.accountId) }
-                    } else {
-                        Button("Open settings") { model.openAwaySettings(row) }
-                    }
+                    Button("Edit…") { sheet = AwaySheetRequest(accountId: row.accountId) }
                 }
             }
         }

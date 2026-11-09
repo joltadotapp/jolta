@@ -35,21 +35,23 @@ pub struct AwayInfo {
     pub until_text: Option<String>,
     /// The Settings line: "On until Fri 13 Nov, 18:00.", "Off."
     pub detail: String,
-    /// Turn off changes them in Jolta: Microsoft 365. Elsewhere the
-    /// provider's own setting opens.
+    /// Jolta can change them: Microsoft 365, which offers Edit and Turn
+    /// off. Gmail's need a scope Jolta doesn't ask for, so its own setting
+    /// opens instead.
     pub editable: bool,
-    /// The provider's own setting, for Edit, and Turn off on Gmail.
+    /// The provider's own setting and the button that opens it.
     pub settings_url: String,
+    pub settings_title: String,
 }
 
 fn moment(t: DateTime<Utc>) -> String {
     t.with_timezone(&tz::here()).format("%a %-d %b, %H:%M").to_string()
 }
 
-fn settings_url(a: &Account) -> String {
+fn settings(a: &Account) -> (String, String) {
     match a.kind {
-        AccountKind::Gmail => format!("https://mail.google.com/mail/u/?authuser={}#settings/general", a.address),
-        _ => "https://outlook.office.com/mail/options/mail/automaticReplies".into(),
+        AccountKind::Gmail => ("Open Gmail settings".into(), format!("https://mail.google.com/mail/u/?authuser={}#settings/general", a.address)),
+        _ => ("Open Outlook settings".into(), "https://outlook.office.com/mail/options/mail/automaticReplies".into()),
     }
 }
 
@@ -78,6 +80,7 @@ fn info(a: &Account, stored: Option<&Away>, now: DateTime<Utc>) -> AwayInfo {
         (AwayState::Unknown, _) => "Jolta hasn't read them yet.".into(),
         _ => "Off.".into(),
     };
+    let (settings_title, settings_url) = settings(a);
     AwayInfo {
         account_id: a.id.0,
         address: a.address.clone(),
@@ -85,7 +88,8 @@ fn info(a: &Account, stored: Option<&Away>, now: DateTime<Utc>) -> AwayInfo {
         until_text,
         detail,
         editable: stored.is_some_and(|s| s.editable),
-        settings_url: settings_url(a),
+        settings_url,
+        settings_title,
     }
 }
 
