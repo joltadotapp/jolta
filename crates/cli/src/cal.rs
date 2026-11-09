@@ -467,7 +467,7 @@ pub enum CalCommand {
         today: Option<String>,
     },
     /// The calendar new events go to, as Settings › Calendar sets it: print
-    /// it, set it, or with --clear go back to the first writable one.
+    /// it, set it, or with --clear go back to the user's own calendar.
     Default {
         calendar: Option<i64>,
         #[arg(long, conflicts_with = "calendar")]

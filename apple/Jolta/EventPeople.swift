@@ -81,7 +81,7 @@ struct PeopleField: View {
             }
         }
         .padding(5)
-        .frame(width: 330)
+        .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
