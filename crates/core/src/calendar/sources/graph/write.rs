@@ -7,7 +7,7 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json, already_written};
+use super::super::{OpWrite, Tell, Version, Written, cannot, created_fields, patched_fields, encode, merge_json, already_written};
 use super::add::{GLOBAL_OBJECT_IDS, global_object_id, if_match, pattern, when};
 use super::{Api, GraphCalendar, GraphEvent, event, get_ok, instance, select};
 use crate::calendar::change::Field;
@@ -299,7 +299,7 @@ pub(crate) fn create_body(events: &[EventData], key: &str, extra: Option<&Extra>
 /// The PATCH's body: only the fields that changed from `base`.
 pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&Extra>, here: Tz) -> Result<Value> {
     let mut v = json!({});
-    for field in changed_fields(base, e) {
+    for field in patched_fields(base, e) {
         set(&mut v, field, e, here, false)?;
     }
     // A room added where the location already says its name.

@@ -6,7 +6,7 @@
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 
-use super::super::{OpWrite, Tell, Version, Written, cannot, changed_fields, created_fields, encode, merge_json, already_written};
+use super::super::{OpWrite, Tell, Version, Written, cannot, created_fields, patched_fields, encode, merge_json, already_written};
 use super::add::when;
 use super::{BASE, Google, GoogleEvent, Reminder, event, failure};
 use crate::calendar::change::Field;
@@ -356,7 +356,7 @@ pub(crate) fn insert_body(events: &[EventData], extra: Option<&crate::calendar::
 /// `events.patch`'s body: only the fields that changed from `base`.
 pub(crate) fn patch_body(base: &EventData, e: &EventData, extra: Option<&crate::calendar::ops::Extra>, request: &str, here: Tz) -> Result<Value> {
     let mut v = json!({});
-    for field in changed_fields(base, e) {
+    for field in patched_fields(base, e) {
         set(&mut v, field, e, request, here, false)?;
     }
     merge_json(&mut v, extra, GOOGLE)?;
