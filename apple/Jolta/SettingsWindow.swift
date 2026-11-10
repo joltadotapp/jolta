@@ -456,6 +456,7 @@ struct GeneralSettings: View {
                 }
             }
             SettingsSection("Writing", footer: "Jolta suggests people you've written to or replied to as you type in To, Cc and Bcc, the most frequent and recent first. Hover over a suggestion and click × to stop suggesting it.") {
+                DefaultSenderRow(model: model)
                 SettingsRow(title: "Suggest people from Contacts",
                             detail: contactsRefused
                                 ? "Jolta can't read Contacts. Allow it in System Settings › Privacy & Security › Contacts."

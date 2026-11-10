@@ -1373,6 +1373,9 @@ final class Journeys: XCTestCase {
         app.typeText("Sales Desk")
         app.buttons["alias-add"].click()
         XCTAssertTrue(app.descendants(matching: .any)["alias-sales@test.invalid"].waitForExistence(timeout: 5), "Add Address lists it")
+        XCTAssertFalse(app.popUpButtons["default-sender"].exists, "an account's page doesn't hold the app-wide default")
+        app.buttons.matching(NSPredicate(format: "label == 'General'")).firstMatch.click()
+        XCTAssertTrue(app.popUpButtons["default-sender"].waitForExistence(timeout: 5), "General › Writing picks who new messages are from")
         app.typeKey("w", modifierFlags: .command)
 
         let from = app.popUpButtons["compose-from"]

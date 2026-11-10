@@ -275,13 +275,11 @@ struct AccountPage: View {
 }
 
 /// Settings › an account › Send mail as: the other addresses the account
-/// sends from, and who new messages are from where accounts mix.
+/// sends from.
 private struct SendAsSection: View {
     let model: AppModel
     let account: AccountInfo
     @State private var aliases: [AliasInfo] = []
-    @State private var senders: [MailSender] = []
-    @State private var defaultSender: SenderKey?
     @State private var address = ""
     @State private var name = ""
     @State private var error: String?
@@ -328,16 +326,6 @@ private struct SendAsSection: View {
                     Text("Jolta couldn't read \(account.provider)'s list: \(fetchError)").foregroundStyle(Color(Theme.text3)).font(.system(size: 12))
                 }
             }
-            if senders.count > 1 {
-                SettingsRow(title: "New messages from",
-                            detail: "In one account's folders, a new message is from that account. In the combined Inbox, Starred and other views that mix accounts, it is from this address.") {
-                    Picker("New messages from", selection: Binding(get: { defaultSender }, set: setDefault)) {
-                        SenderMenuItems(senders: senders)
-                    }
-                    .settingsMenu()
-                    .accessibilityIdentifier("default-sender")
-                }
-            }
         }
         .task(id: account.id) {
             load()
@@ -366,9 +354,7 @@ private struct SendAsSection: View {
     }
 
     private func loadSenders() {
-        senders = (try? model.core.senders()) ?? []
         model.sendersRevision += 1
-        defaultSender = (try? model.core.defaultSender()).flatMap { $0 }.map { SenderKey(accountId: $0.accountId, alias: $0.alias) }
     }
 
     private func add() {
@@ -386,6 +372,35 @@ private struct SendAsSection: View {
     private func remove(_ alias: AliasInfo) {
         try? model.core.removeAlias(aliasId: alias.id)
         load()
+    }
+
+}
+
+/// Settings › General › Writing: who new messages are from in views that
+/// mix accounts. One account's folders always write from that account.
+struct DefaultSenderRow: View {
+    let model: AppModel
+    @State private var senders: [MailSender] = []
+    @State private var defaultSender: SenderKey?
+
+    var body: some View {
+        // A ZStack, not a Group: an empty Group has no view to run .task on.
+        ZStack {
+            if senders.count > 1 {
+                SettingsRow(title: "New messages from",
+                            detail: "In one account's folders, a new message is from that account. In the combined Inbox, Starred and other views that mix accounts, it is from this address.") {
+                    Picker("New messages from", selection: Binding(get: { defaultSender }, set: setDefault)) {
+                        SenderMenuItems(senders: senders)
+                    }
+                    .settingsMenu()
+                    .accessibilityIdentifier("default-sender")
+                }
+            }
+        }
+        .task(id: "\(model.accounts.map(\.id)) \(model.sendersRevision)") {
+            senders = (try? model.core.senders()) ?? []
+            defaultSender = (try? model.core.defaultSender()).flatMap { $0 }.map { SenderKey(accountId: $0.accountId, alias: $0.alias) }
+        }
     }
 
     private func setDefault(_ key: SenderKey?) {

@@ -285,8 +285,9 @@ final class AppModel {
                 }
             }
         }
-        // `-JoltaSettings ai|calendar|appearance` opens the settings window on that page, for screenshots.
+        // `-JoltaSettings general|ai|calendar|appearance` opens the settings window on that page, for screenshots.
         switch defaults.string(forKey: "JoltaSettings") {
+        case "general": settingsRequest = .general
         case "ai": settingsRequest = .ai
         case "appearance": settingsRequest = .appearance
         case "calendar": settingsRequest = .calendar
