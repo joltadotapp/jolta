@@ -606,8 +606,8 @@ final class AppModel {
             }
         case .sent(_, let subject):
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
-        case .sendFailed(let message):
-            show(Toast(text: "Not sent yet: \(message)", undo: nil))
+        case .sendFailed(let message, let gaveUp):
+            show(Toast(text: "\(gaveUp ? "Not sent" : "Not sent yet"): \(message)", undo: nil))
         case .responsesFiled(let text, let tokens):
             show(Toast(text: text, undo: .action(tokens)))
         case .modelChanged(let id, let state):

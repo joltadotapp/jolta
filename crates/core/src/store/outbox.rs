@@ -304,7 +304,14 @@ pub fn outbox_sent(conn: &Connection, item: &OutboxItem) -> Result<()> {
     Ok(())
 }
 
+/// Records a failed attempt. Giving up puts the message back in Drafts.
 pub fn outbox_failed(conn: &Connection, id: i64, error: &str, give_up: bool) -> Result<()> {
+    if give_up {
+        conn.execute(
+            "UPDATE draft SET state = 'editing', dirty = 1, updated = ?2 WHERE id = (SELECT draft_id FROM outbox WHERE id = ?1) AND state = 'sending'",
+            params![id, now()],
+        )?;
+    }
     conn.execute(
         "UPDATE outbox SET attempts = attempts + 1, error = ?2,
            state = CASE WHEN ?3 THEN 'failed' ELSE state END,

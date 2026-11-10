@@ -233,7 +233,7 @@ fn drafts_reach_the_server() {
     let account = server.sign_in(&app);
     wait(20, "the first sync finished", || app.events.seen("synced"));
 
-    let mut compose = app.core.new_compose().unwrap();
+    let mut compose = app.core.new_compose(None).unwrap();
     compose.account_id = Some(account.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "Half written".into();
@@ -317,7 +317,7 @@ fn a_pasted_image_comes_back_with_its_draft() {
     wait(20, "the first sync finished", || app.events.seen("synced"));
 
     let path = app.core.save_pasted_image(png()).unwrap();
-    let mut compose = app.core.new_compose().unwrap();
+    let mut compose = app.core.new_compose(None).unwrap();
     compose.account_id = Some(account.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "With a chart".into();
@@ -360,7 +360,7 @@ fn a_saved_draft_shows_in_drafts_without_sync_now() {
     let account = server.sign_in(&app);
     wait(20, "the first sync finished", || app.events.seen("synced"));
 
-    let mut compose = app.core.new_compose().unwrap();
+    let mut compose = app.core.new_compose(None).unwrap();
     compose.account_id = Some(account.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "Half written".into();
@@ -417,7 +417,7 @@ fn a_message_leaves_on_time_while_syncing_fails() {
 
     // A Drafts folder that is gone from the server fails every round that saves a draft.
     app.jolta.store.write(|tx| Ok(tx.execute("UPDATE mailbox SET remote_id = 'Gone' WHERE role = 'drafts'", [])?)).unwrap();
-    let mut draft = app.core.new_compose().unwrap();
+    let mut draft = app.core.new_compose(None).unwrap();
     draft.account_id = Some(account.id.0);
     draft.subject = "Never saved".into();
     app.core.save_draft(draft).unwrap();
@@ -486,7 +486,7 @@ fn a_message_due_during_a_failing_round_leaves_when_it_ends() {
     wait(20, "the inbox synced", || inbox_has(&app, "Question"));
 
     app.jolta.store.write(|tx| Ok(tx.execute("UPDATE mailbox SET remote_id = 'Gone' WHERE role = 'drafts'", [])?)).unwrap();
-    let mut draft = app.core.new_compose().unwrap();
+    let mut draft = app.core.new_compose(None).unwrap();
     draft.account_id = Some(account.id.0);
     draft.subject = "Never saved".into();
     app.core.save_draft(draft).unwrap();

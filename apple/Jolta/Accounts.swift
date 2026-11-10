@@ -285,6 +285,7 @@ private struct SendAsSection: View {
     @State private var address = ""
     @State private var name = ""
     @State private var error: String?
+    @State private var fetchError: String?
 
     var body: some View {
         SettingsSection("Send mail as", footer: footer) {
@@ -322,6 +323,11 @@ private struct SendAsSection: View {
             if let error {
                 SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
             }
+            if let fetchError {
+                SettingsBlock {
+                    Text("Jolta couldn't read \(account.provider)'s list: \(fetchError)").foregroundStyle(Color(Theme.text3)).font(.system(size: 12))
+                }
+            }
             if senders.count > 1 {
                 SettingsRow(title: "New messages from",
                             detail: "In one account's folders, a new message is from that account. In the combined Inbox, Starred and other views that mix accounts, it is from this address.") {
@@ -336,9 +342,12 @@ private struct SendAsSection: View {
         .task(id: account.id) {
             load()
             guard account.kind != "imap" else { return }
-            if let fresh = try? await model.core.refreshAliases(accountId: account.id) {
-                aliases = fresh
+            do {
+                aliases = try await model.core.refreshAliases(accountId: account.id)
+                fetchError = nil
                 loadSenders()
+            } catch {
+                fetchError = "\(error)"
             }
         }
     }

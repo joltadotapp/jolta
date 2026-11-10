@@ -1217,7 +1217,7 @@ impl Outgoing {
             while let Some(e) = self.events.recv().await {
                 match e {
                     jolta_core::engine::Event::Sent { subject, .. } => return Ok(subject),
-                    jolta_core::engine::Event::SendFailed(m) => bail!("the mail failed: {m}"),
+                    jolta_core::engine::Event::SendFailed { message: m, .. } => bail!("the mail failed: {m}"),
                     _ => {}
                 }
             }

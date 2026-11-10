@@ -633,6 +633,9 @@ fn inline_images(body: &str, domain: &str, size: ImageSize) -> Result<(Vec<Inlin
 pub struct Built {
     pub raw: Vec<u8>,
     pub message_id: String,
+    /// The SMTP envelope sender: the From address, an alias included, as
+    /// Apple Mail and Thunderbird send it. Gmail and iCloud judge the From
+    /// header whatever this says (tried on 2026-11-10).
     pub from: String,
     pub recipients: Vec<String>,
 }
@@ -700,7 +703,7 @@ pub fn build(account: &Account, from: &Sender, c: &Compose, for_sending: bool) -
     }
     let raw = builder.write_to_vec()?;
     let recipients = to.iter().chain(&cc).chain(&bcc).map(|(_, a)| a.clone()).collect();
-    Ok(Built { raw, message_id, from: account.address.clone(), recipients })
+    Ok(Built { raw, message_id, from: from.address.clone(), recipients })
 }
 
 #[cfg(test)]
@@ -827,8 +830,9 @@ mod tests {
         assert_eq!(sent_as(None), ("Me".into(), "me@example.com".into()));
 
         let c = Compose { to: "bob@example.com".into(), body: "Hi".into(), ..Default::default() };
-        let raw = build(&account(), &sender(&account(), &aliases, Some("sales@example.com")), &c, true).unwrap().raw;
-        let msg = MessageParser::new().parse(&raw).unwrap();
+        let built = build(&account(), &sender(&account(), &aliases, Some("sales@example.com")), &c, true).unwrap();
+        assert_eq!(built.from, "Sales@Example.com", "the envelope is from the alias too");
+        let msg = MessageParser::new().parse(&built.raw).unwrap();
         let from = msg.from().unwrap().first().unwrap();
         assert_eq!((from.name(), from.address()), (Some("Example Sales"), Some("Sales@Example.com")));
     }

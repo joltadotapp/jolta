@@ -247,7 +247,8 @@ pub enum CoreEvent {
     AgentDraft { draft_id: i64, subject: String },
     /// An agent used a tool; the audit log changed.
     AgentActivity,
-    SendFailed { message: String },
+    /// `gave_up`: Jolta won't try again; the message is back in Drafts.
+    SendFailed { message: String, gave_up: bool },
     /// The server refused an action for good; the change was rolled back.
     ActionFailed { message: String },
     /// A local model's download moved on, finished, stopped or was removed.
@@ -1030,7 +1031,7 @@ impl Core {
                 Event::AgentRequest { agent, name } => CoreEvent::AgentRequest { agent_id: agent, name },
                 Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
                 Event::AgentActivity => CoreEvent::AgentActivity,
-                Event::SendFailed(message) => CoreEvent::SendFailed { message },
+                Event::SendFailed { message, gave_up } => CoreEvent::SendFailed { message, gave_up },
                 Event::CalendarsChanged(ids) => {
                     *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() }

@@ -44,7 +44,11 @@ fn http_error(e: impl std::fmt::Display) -> Error {
 
 /// A failed sendMail: a refusal that sending again can't change is final.
 fn send_failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
-    failure(status, bytes)
+    let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    match json["error"]["code"].as_str() {
+        Some("ErrorSendAsDenied") => Error::Refused("Microsoft 365 doesn't let this mailbox send as that address".into()),
+        _ => failure(status, bytes),
+    }
 }
 
 fn failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
@@ -380,7 +384,10 @@ impl Graph {
 
     /// Sends a message Jolta built; Graph keeps a copy in Sent Items.
     pub async fn send_mime(&self, raw: &[u8]) -> Result<()> {
-        self.send(reqwest::Method::POST, "/me/sendMail", Some(("text/plain", STANDARD.encode(raw).into_bytes()))).await?;
+        let (status, bytes) = self.respond(reqwest::Method::POST, "/me/sendMail", Some(("text/plain", STANDARD.encode(raw).into_bytes()))).await?;
+        if !status.is_success() {
+            return Err(send_failure(status, &bytes));
+        }
         Ok(())
     }
 

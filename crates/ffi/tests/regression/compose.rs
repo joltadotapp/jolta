@@ -104,7 +104,7 @@ fn forward_carries_attachments() {
 fn undo_send_and_scheduled_send() {
     let app = App::new();
     let me = app.account("me@test.invalid");
-    let mut compose = app.core.new_compose().unwrap();
+    let mut compose = app.core.new_compose(None).unwrap();
     compose.account_id = Some(me.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "Hello".into();
@@ -134,7 +134,7 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     let me = app.account("me@test.invalid");
     let png = png();
     let path = app.core.save_pasted_image(png.clone()).unwrap();
-    let mut compose = app.core.new_compose().unwrap();
+    let mut compose = app.core.new_compose(None).unwrap();
     compose.account_id = Some(me.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "The chart".into();
@@ -169,7 +169,7 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
 fn drafts_save_and_discard() {
     let app = App::new();
     let me = app.account("me@test.invalid");
-    let mut compose = app.core.new_compose().unwrap();
+    let mut compose = app.core.new_compose(None).unwrap();
     compose.account_id = Some(me.id.0);
     compose.subject = "Draft".into();
     compose.body = "First try.".into();

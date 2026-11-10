@@ -558,7 +558,7 @@ async fn send_compose(jolta: &Jolta, c: &jolta_core::compose::Compose) -> Result
                 println!("sent {subject:?} after {:.1} s (undo window {} s)", t0.elapsed().as_secs_f64(), jolta_core::engine::UNDO_SEND_SECONDS);
                 break;
             }
-            jolta_core::engine::Event::SendFailed(m) => anyhow::bail!("send failed: {m}"),
+            jolta_core::engine::Event::SendFailed { message: m, .. } => anyhow::bail!("send failed: {m}"),
             _ => {}
         }
     }
