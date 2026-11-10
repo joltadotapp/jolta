@@ -25,7 +25,7 @@ struct ComposeView: View {
 
     /// Each account that can send, with its aliases.
     @State private var senders: [MailSender] = []
-    @AppStorage("showsFormatBar") private var showsFormatBar = true
+    @AppStorage(AppModel.key("showsFormatBar")) private var showsFormatBar = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

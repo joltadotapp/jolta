@@ -245,7 +245,7 @@ enum FormatTool: CaseIterable {
 /// The Format menu: every tool with its key, for the message and for
 /// signatures, plus showing or hiding compose's formatting bar.
 struct FormatMenu: View {
-    @AppStorage("showsFormatBar") private var showsBar = true
+    @AppStorage(AppModel.key("showsFormatBar")) private var showsBar = true
     private var state: FormatState { FormatState.shared }
 
     var body: some View {
@@ -317,7 +317,7 @@ struct FormatMenu: View {
 /// Compose's formatting bar above the message. It drops the less used tools
 /// into a More menu as the pane narrows.
 struct FormatBar: View {
-    @AppStorage("showsFormatBar") private var showsBar = true
+    @AppStorage(AppModel.key("showsFormatBar")) private var showsBar = true
     private var state: FormatState { FormatState.shared }
 
     private enum Part { case font, styles, strike, colors, highlight, align, alignMenu, lists, indents, extras }
