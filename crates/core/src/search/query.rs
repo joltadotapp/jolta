@@ -39,6 +39,8 @@ pub enum Status {
     NeedsReply,
     /// An invitation the user still has to answer.
     Invite,
+    /// Mail worth a notification: `notify::important`.
+    Important,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,8 +192,9 @@ pub fn parse(input: &str) -> Result<Query> {
                 "notification" | "notifications" => Status::Notification,
                 "needs-reply" | "needsreply" | "needs_reply" => Status::NeedsReply,
                 "invite" | "invites" | "invitation" | "invitations" => Status::Invite,
+                "important" => Status::Important,
                 v => return Err(Error::Query(format!(
-                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter, is:notification, is:needs-reply or is:invite"
+                    "is:{v} is not supported; try is:unread, is:read, is:starred, is:vip, is:newsletter, is:notification, is:needs-reply, is:invite or is:important"
                 ))),
             }),
             Some("category") => {

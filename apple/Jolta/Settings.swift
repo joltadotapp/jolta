@@ -11,7 +11,7 @@ struct SectionsSettings: View {
     var body: some View {
         SettingsScroll {
             SettingsSection("Inbox sections",
-                            footer: "Each section is a tab over the inbox showing the conversations its query matches. Queries use the search language: from:, to:, subject:, has:attachment, has:list, is:unread, is:vip, is:newsletter, is:notification, is:invite.") {
+                            footer: "Each section is a tab over the inbox showing the conversations its query matches. Queries use the search language: from:, to:, subject:, has:attachment, has:list, is:unread, is:vip, is:newsletter, is:notification, is:invite, is:important.") {
                 ForEach($sections) { $s in
                     SettingsBlock {
                         HStack(spacing: 10) {
