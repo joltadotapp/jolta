@@ -1491,7 +1491,7 @@ final class Journeys: XCTestCase {
     }
 
     /// Tahoma has no italic face on the Mac; text set in it still turns
-    /// italic, lights Italic and is saved italic.
+    /// italic, lights Italic, is saved italic and pastes italic.
     func testItalicInAFontWithoutItalics() throws {
         let app = try launch()
         app.typeKey("c", modifierFlags: [])
@@ -1506,9 +1506,15 @@ final class Journeys: XCTestCase {
         app.menuBars.menuItems["Tahoma"].click()
         app.typeKey("i", modifierFlags: .command)
         XCTAssertTrue(waitUntil { app.buttons["format-italic"].value as? String == "on" }, "Italic lights for Tahoma text")
+        app.typeKey("c", modifierFlags: .command)
+        app.typeKey(.rightArrow, modifierFlags: .command)
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey("v", modifierFlags: .command)
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(body.waitForNonExistence(timeout: 5), "Esc keeps the draft")
-        XCTAssertEqual(draftBodies(app).filter { $0.contains("Slanted") }, ["<span style=\"font-family: Tahoma, Verdana, sans-serif\">*Slanted*</span>"])
+        XCTAssertEqual(draftBodies(app).filter { $0.contains("Slanted") },
+                       ["<span style=\"font-family: Tahoma, Verdana, sans-serif\">*Slanted*</span>\n<span style=\"font-family: Tahoma, Verdana, sans-serif\">*Slanted*</span>"],
+                       "a copy pasted in the editor keeps its font and stays italic")
     }
 
     /// The bodies of the drafts saved in this test's data folder.

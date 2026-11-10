@@ -691,7 +691,7 @@ final class RichTextView: NSTextView {
             let traits = (attrs[.font] as? NSFont).map { NSFontManager.shared.traits(of: $0) } ?? []
             var f = font
             if traits.contains(.boldFontMask) { f = NSFontManager.shared.convert(f, toHaveTrait: .boldFontMask) }
-            if traits.contains(.italicFontMask) { f = NSFontManager.shared.convert(f, toHaveTrait: .italicFontMask) }
+            if InlineStyle(attrs).italic { f = NSFontManager.shared.convert(f, toHaveTrait: .italicFontMask) }
             kept[.font] = f
             if let strike = attrs[.strikethroughStyle] as? Int, strike != 0 { kept[.strikethroughStyle] = strike }
             if let underline = attrs[.underlineStyle] as? Int, underline != 0, attrs[.link] == nil { kept[.underlineStyle] = underline }
