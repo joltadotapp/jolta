@@ -55,6 +55,10 @@ pub enum Error {
     /// no connection. Sending it again later can't do anything twice.
     #[error("{0}")]
     Offline(String),
+    /// The server refused for good: sending the same again can only fail
+    /// again.
+    #[error("{0}")]
+    Refused(String),
     #[error("{0}")]
     Other(String),
 }

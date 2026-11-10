@@ -368,6 +368,26 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A message the outbox gives up on goes back to Drafts, to be fixed
+    /// and sent again, instead of staying as being sent for good.
+    #[test]
+    fn a_message_given_up_on_goes_back_to_drafts() {
+        let (dir, store) = store();
+        store
+            .write(|c| {
+                let id = save_draft(c, &compose("Refused"))?;
+                let queued = queue_outbox(c, AccountId(1), Some(id), "blob", "<m@x>", "a@x", &["b@x".into()], None, 0)?;
+                outbox_failed(c, queued, "refused", false)?;
+                assert!(drafts(c)?.is_empty(), "a message tried again stays out of Drafts");
+                outbox_failed(c, queued, "refused", true)?;
+                assert_eq!(drafts(c)?.iter().map(|d| d.subject.as_str()).collect::<Vec<_>>(), ["Refused"]);
+                assert_eq!(dirty_drafts(c, AccountId(1))?.len(), 1, "and goes to the server's Drafts");
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// A draft's id is how the app and agents open and save it. A draft
     /// gone for good never hands that id to a new one, so a compose window
     /// or an agent's note left over from it can't open or overwrite

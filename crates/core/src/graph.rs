@@ -42,6 +42,11 @@ fn http_error(e: impl std::fmt::Display) -> Error {
     Error::Other(format!("Microsoft Graph: {e}"))
 }
 
+/// A failed sendMail: a refusal that sending again can't change is final.
+fn send_failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
+    failure(status, bytes)
+}
+
 fn failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
     let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     let message = json["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
@@ -575,6 +580,16 @@ struct Delta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exchange refuses a From the mailbox may not send as with 403
+    /// ErrorSendAsDenied; sending it again can only fail again.
+    #[test]
+    fn a_send_as_refusal_is_final() {
+        let body = br#"{"error":{"code":"ErrorSendAsDenied","message":"The user account which was used to submit this request does not have the right to send mail on behalf of the specified sending account., Cannot submit message."}}"#;
+        assert!(matches!(send_failure(reqwest::StatusCode::FORBIDDEN, body), Error::Refused(_)));
+        let throttled = br#"{"error":{"code":"ErrorServerBusy","message":"busy"}}"#;
+        assert!(matches!(send_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, throttled), Error::Other(_)), "anything else is tried again");
+    }
 
     #[test]
     fn parses_graph_times() {
