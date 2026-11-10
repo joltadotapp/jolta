@@ -685,6 +685,21 @@ mod tests {
     }
 
     #[test]
+    fn mail_from_while_away_joins_its_conversations_banner() {
+        let mut p = planner(Scope::Important);
+        let mut out = p.arrive(vec![mail(1, 1, "Ann", T0 - 3600), mail(2, 1, "Ann", T0)], T0);
+        out.extend(p.tick(T0 + QUIET));
+        assert_eq!(ids(&out), ["mail-1"], "no summary beside the conversation's banner: {out:?}");
+        assert_eq!(shows(&out)[0].title, "Ann, 2 new messages");
+
+        let mut out = p.arrive(vec![mail(3, 2, "Vera", T0 - 3600)], T0 + 100);
+        out.extend(p.arrive(vec![mail(4, 2, "Vera", T0 + 101).vip().urgent()], T0 + 101));
+        out.extend(p.tick(T0 + 101 + QUIET));
+        assert!(!ids(&out).contains(&"mail-summary".to_string()), "{out:?}");
+        assert_eq!(shows(&out).last().unwrap().title, "Vera, 2 new messages");
+    }
+
+    #[test]
     fn urgent_banners_count_toward_the_rolling_limit() {
         let mut p = planner(Scope::Important);
         assert_eq!(ids(&p.arrive(vec![mail(1, 1, "Vera", T0).vip().urgent()], T0)), ["mail-1"]);
