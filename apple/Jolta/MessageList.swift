@@ -81,10 +81,14 @@ struct MessageList: NSViewRepresentable {
         init(model: AppModel) { self.model = model }
 
         /// A new list starts at the top. A changed list keeps the selected
-        /// threads selected wherever they moved; when they left it (archived,
-        /// moved), the cursor stays at the same height, on the next thread.
+        /// threads selected wherever they moved. When the user's own change
+        /// took them out (archived, moved), the cursor stays at the same
+        /// height, on the next thread. Mail that comes or goes by itself never
+        /// gets the cursor, which would open it and mark it read.
         func reload(full: Bool, resorted: Bool = false) {
             guard let table else { return }
+            let userChanged = model.userChangedList
+            model.userChangedList = false
             pages.removeAll(keepingCapacity: true)
             let previous = count
             let anchor = table.selectedRowIndexes.first ?? 0
@@ -125,7 +129,14 @@ struct MessageList: NSViewRepresentable {
             }
             guard count > 0 else { return }
             var kept = model.rows(of: model.selectedThreads)
-            if kept.isEmpty { kept = [min(anchor, count - 1)] }
+            if kept.isEmpty {
+                guard userChanged else {
+                    table.deselectAll(nil)
+                    if model.selectedThreadID != nil || !model.selectedThreads.isEmpty { model.closeThread() }
+                    return
+                }
+                kept = [min(anchor, count - 1)]
+            }
             if kept != table.selectedRowIndexes {
                 table.selectRowIndexes(kept, byExtendingSelection: false)
             }

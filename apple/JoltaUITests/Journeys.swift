@@ -57,8 +57,43 @@ final class Journeys: XCTestCase {
         text(app, "Lunch on Friday").click()
         app.typeKey("e", modifierFlags: [])
         XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "e archives the selected conversation")
+        let next = app.webViews.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "Got them, thanks a lot!")).firstMatch
+        XCTAssertTrue(next.waitForExistence(timeout: 5), "the cursor moves on to the next conversation and opens it")
         app.typeKey("z", modifierFlags: [])
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
+    }
+
+    /// Mail that arrives at inbox zero stays unread and unopened until it is
+    /// opened, so it can notify. The data folder also has an account on the
+    /// local Dovecot (`scripts/test-servers.sh up`), and `scripts/ui-tests.sh`
+    /// delivers a message there once the inbox is empty. The account's
+    /// password goes in through Settings, so the Keychain item is Jolta's own.
+    func testNewMailAtInboxZeroStaysUnread() throws {
+        let app = try launch()
+        app.typeKey(",", modifierFlags: .command)
+        let page = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'inbox-zero-'")).firstMatch
+        guard page.waitForExistence(timeout: 5) else {
+            throw XCTSkip("No account on the local Dovecot; start it with scripts/test-servers.sh up")
+        }
+        page.click()
+        let password = app.secureTextFields.firstMatch
+        XCTAssertTrue(password.waitForExistence(timeout: 5), "the account page asks for its password")
+        password.click()
+        password.typeText("jolta-test")
+        app.buttons["Save"].firstMatch.click()
+        XCTAssertTrue(text(app, "Saved.").waitForExistence(timeout: 15), "the server takes the password")
+        app.typeKey("w", modifierFlags: .command)
+
+        text(app, "Lunch on Friday").click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 10), "archiving everything empties the inbox")
+        XCTAssertTrue(text(app, "Quarterly plan").waitForExistence(timeout: 60), "new mail arrives")
+        XCTAssertTrue(text(app, "1 unread").waitForExistence(timeout: 5), "the list counts it unread")
+        RunLoop.current.run(until: Date() + 3)
+        XCTAssertTrue(text(app, "1 unread").exists, "it stays unread")
+        let body = app.webViews.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "look at the plan")).firstMatch
+        XCTAssertFalse(body.exists, "the reader leaves it unopened")
     }
 
     func testOpenConversation() throws {

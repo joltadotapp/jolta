@@ -881,7 +881,7 @@ struct ReaderColumn: View {
                 ReaderView(thread: thread, model: model, onAttachment: model.openAttachment,
                            onSaveAll: { model.saveAttachments(message: $0) }, onUnsubscribe: model.unsubscribe)
             } else {
-                Text(model.cursor.count == 0 ? "Nothing here" : "")
+                Text(model.listCount == 0 ? "Nothing here" : "")
                     .foregroundStyle(Color(Theme.text3))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
