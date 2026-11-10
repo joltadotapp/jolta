@@ -130,10 +130,19 @@ impl Planner {
             }
             if self.urgent_now(&c, now) {
                 self.urgent_times.push_back((c.sender_address.to_lowercase(), now));
+                if !self.banners.contains_key(&c.thread) {
+                    self.banner_times.push_back(now);
+                }
+                let moved = self.out_of_summary(c.thread);
                 let sound = self.sound(now);
                 let thread = self.banners.entry(c.thread).or_default();
+                let shrunk = !moved.is_empty();
+                thread.extend(moved);
                 thread.push(c);
                 out.push(Notice::Show(banner(thread, Level::Urgent, sound)));
+                if shrunk {
+                    out.push(self.summary_shrunk());
+                }
                 continue;
             }
             if self.gather.is_empty() {
@@ -205,7 +214,8 @@ impl Planner {
         }
         self.banner_times.retain(|t| now - t < BANNER_WINDOW);
         let room = BANNERS_AT_ONCE.min(BANNERS_PER_WINDOW.saturating_sub(self.banner_times.len()));
-        for (i, mail) in fresh.into_iter().enumerate() {
+        let mut shrunk = false;
+        for (i, mut mail) in fresh.into_iter().enumerate() {
             if i >= room {
                 to_summary.extend(mail.into_iter().map(|c| (c, false)));
                 continue;
@@ -213,12 +223,17 @@ impl Planner {
             self.banner_times.push_back(now);
             let sound = self.sound(now);
             let thread = mail[0].thread;
+            let moved = self.out_of_summary(thread);
+            shrunk |= !moved.is_empty();
+            mail.extend(moved);
             out.push(Notice::Show(banner(&mail, Level::Normal, sound)));
             self.banners.insert(thread, mail);
         }
         if !to_summary.is_empty() {
             self.summary.extend(to_summary);
             out.push(Notice::Show(self.summary_notification(false)));
+        } else if shrunk {
+            out.push(self.summary_shrunk());
         }
         out
     }
@@ -299,6 +314,23 @@ impl Planner {
                 })
             })
             .collect()
+    }
+
+    /// Takes a conversation's mail out of the summary, when it gets a
+    /// banner of its own: one conversation, one notification.
+    fn out_of_summary(&mut self, thread: ThreadId) -> Vec<Candidate> {
+        let (moved, kept) = std::mem::take(&mut self.summary).into_iter().partition(|(c, _)| c.thread == thread);
+        self.summary = kept;
+        moved.into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// The summary after it lost mail: quieter, or gone when empty.
+    fn summary_shrunk(&self) -> Notice {
+        if self.summary.is_empty() {
+            Notice::Withdraw(vec![SUMMARY.into()])
+        } else {
+            Notice::Show(self.summary_notification(true))
+        }
     }
 
     fn reach(&self, c: &Candidate) -> Option<Reach> {

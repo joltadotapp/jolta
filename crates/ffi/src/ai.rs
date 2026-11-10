@@ -190,6 +190,8 @@ impl Core {
         self.jolta.store.write(|tx| ai::save_settings(tx, &s))?;
         // Switching sorting on (or to a model that sorts) catches up on two weeks of inbox.
         self.background.catch_up(&self.jolta);
+        // Sorting decides part of what is important, and so the badge.
+        self.changed();
         Ok(())
     }
 
