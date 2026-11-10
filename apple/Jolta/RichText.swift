@@ -1,5 +1,6 @@
 @preconcurrency import JoltaFFI
 import AppKit
+import Carbon.HIToolbox
 import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
@@ -201,6 +202,19 @@ final class RichTextView: NSTextView {
         let resigned = super.resignFirstResponder()
         if resigned { FormatState.shared.refreshEditing() }
         return resigned
+    }
+
+    /// ⇧⌘7 and ⇧⌘8 arrive as ⇧⌘& and ⇧⌘* (or another character, by
+    /// layout), which no menu item matches, so they go by the key pressed.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift] {
+            switch Int(event.keyCode) {
+            case kVK_ANSI_7: toggleBlock(.number); return true
+            case kVK_ANSI_8: toggleBlock(.bullet); return true
+            default: break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     /// Takes the keyboard with the cursor after `written`, the start of the
@@ -420,12 +434,24 @@ final class RichTextView: NSTextView {
         }
     }
 
+    /// The parts of `range` outside list and quote markers. A marker stays
+    /// plain: inside `**` it would be text.
+    private func styleable(_ range: NSRange) -> [NSRange] {
+        lineRanges().compactMap { line in
+            let m = Int(marker(of: line).length)
+            let piece = NSIntersectionRange(NSRange(location: line.location + m, length: line.length - m), range)
+            return piece.length > 0 ? piece : nil
+        }
+    }
+
     private func allOfSelection(_ test: (InlineStyle) -> Bool) -> Bool {
-        let range = selectedRange()
-        guard range.length > 0, let storage = textStorage else { return test(InlineStyle(typingAttributes)) }
+        let pieces = styleable(selectedRange())
+        guard !pieces.isEmpty, let storage = textStorage else { return test(InlineStyle(typingAttributes)) }
         var all = true
-        storage.enumerateAttributes(in: range) { attrs, _, stop in
-            if attrs[.attachment] == nil, !test(InlineStyle(attrs)) { all = false; stop.pointee = true }
+        for piece in pieces where all {
+            storage.enumerateAttributes(in: piece) { attrs, _, stop in
+                if attrs[.attachment] == nil, !test(InlineStyle(attrs)) { all = false; stop.pointee = true }
+            }
         }
         return all
     }
@@ -433,7 +459,8 @@ final class RichTextView: NSTextView {
     /// Changes the inline style of the selection, or of what is typed next.
     private func restyle(_ change: (inout InlineStyle) -> Void) {
         let range = selectedRange()
-        guard range.length > 0, let storage = textStorage else {
+        let pieces = styleable(range)
+        guard !pieces.isEmpty, let storage = textStorage else {
             var style = InlineStyle(typingAttributes)
             change(&style)
             typingAttributes = style.applied(to: typingAttributes, base: base)
@@ -441,11 +468,13 @@ final class RichTextView: NSTextView {
         }
         guard shouldChangeText(in: range, replacementString: nil) else { return }
         storage.beginEditing()
-        storage.enumerateAttributes(in: range) { attrs, sub, _ in
-            guard attrs[.attachment] == nil else { return }
-            var style = InlineStyle(attrs)
-            change(&style)
-            storage.setAttributes(style.applied(to: attrs, base: base), range: sub)
+        for piece in pieces {
+            storage.enumerateAttributes(in: piece) { attrs, sub, _ in
+                guard attrs[.attachment] == nil else { return }
+                var style = InlineStyle(attrs)
+                change(&style)
+                storage.setAttributes(style.applied(to: attrs, base: base), range: sub)
+            }
         }
         storage.endEditing()
         didChangeText()
@@ -453,9 +482,10 @@ final class RichTextView: NSTextView {
 
     /// The style at the start of the selection, or what is typed next.
     func currentStyle() -> InlineStyle {
-        let range = selectedRange()
-        guard range.length > 0, let storage = textStorage, range.location < storage.length else { return InlineStyle(typingAttributes) }
-        return InlineStyle(storage.attributes(at: range.location, effectiveRange: nil))
+        guard selectedRange().length > 0, let storage = textStorage, let first = styleable(selectedRange()).first else {
+            return InlineStyle(typingAttributes)
+        }
+        return InlineStyle(storage.attributes(at: first.location, effectiveRange: nil))
     }
 
     // MARK: Paragraphs

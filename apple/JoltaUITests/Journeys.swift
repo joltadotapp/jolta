@@ -1,4 +1,5 @@
 import AppKit
+import SQLite3
 import XCTest
 
 /// Journeys through the real app. Run them with `scripts/ui-tests.sh`, which
@@ -1433,6 +1434,77 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil { label(menu).contains("Medium") }, "the menu shows the size chosen: \(label(menu))")
         XCTAssertNotEqual(label(size), actual, "the message size follows the choice")
         app.buttons["⌘⌫"].click()
+    }
+
+    /// Formatting from the bar and from keys: the bar lights what the
+    /// selection has, and the draft keeps bold, underline, a color, a
+    /// numbered list and its nested item as the body format writes them.
+    /// The bar hides and comes back from its button, the header and ⌥⌘T.
+    func testFormatBar() throws {
+        let app = try launch()
+        app.typeKey("c", modifierFlags: [])
+        let body = app.textViews["compose-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "c opens compose")
+        app.typeText("ann@test.invalid")
+        body.click()
+        app.typeText("Plan\nfirst\nsecond")
+        func lit(_ id: String) -> Bool { waitUntil { app.buttons[id].value as? String == "on" } }
+
+        app.typeKey(.leftArrow, modifierFlags: [.command, .shift])
+        app.typeKey("b", modifierFlags: .command)
+        app.typeKey("u", modifierFlags: .command)
+        XCTAssertTrue(lit("format-bold") && lit("format-underline"), "⌘B and ⌘U style the selection and light their buttons")
+        app.typeKey(.upArrow, modifierFlags: .shift)
+        app.typeKey("8", modifierFlags: [.command, .shift])
+        XCTAssertTrue(lit("format-bullets"), "⇧⌘8 makes the two lines a list")
+        // ⇧⌘7 works the same way, but a global shortcut on the Mac mini takes it.
+        app.buttons["format-numbers"].click()
+        XCTAssertTrue(lit("format-numbers"), "the bar's Numbered List numbers them instead")
+        app.typeKey(.downArrow, modifierFlags: [])
+        app.typeKey("]", modifierFlags: .command)
+
+        app.typeKey(.upArrow, modifierFlags: .command)
+        app.typeKey(.rightArrow, modifierFlags: [.command, .shift])
+        XCTAssertFalse(app.buttons["format-bold"].value as? String == "on", "Plan isn't bold")
+        app.buttons["format-underline"].click()
+        app.buttons["format-color"].click()
+        app.buttons["format-color-red"].click()
+        XCTAssertTrue(lit("format-underline"), "the bar's Underline styles the selection")
+
+        app.buttons["format-hide"].click()
+        XCTAssertTrue(app.buttons["format-bold"].waitForNonExistence(timeout: 5), "the bar hides")
+        app.buttons["format-show"].click()
+        XCTAssertTrue(app.buttons["format-bold"].waitForExistence(timeout: 5), "the header's button brings it back")
+        app.typeKey("t", modifierFlags: [.command, .option])
+        XCTAssertTrue(app.buttons["format-bold"].waitForNonExistence(timeout: 5), "⌥⌘T hides it")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(body.waitForNonExistence(timeout: 5), "Esc keeps the draft")
+        app.typeKey("c", modifierFlags: [])
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["format-bold"].exists, "a new message remembers the bar hidden")
+        app.typeKey("t", modifierFlags: [.command, .option])
+        XCTAssertTrue(app.buttons["format-bold"].waitForExistence(timeout: 5), "⌥⌘T shows it again")
+        app.buttons["⌘⌫"].click()
+
+        let expected = "<span style=\"color: #d93b3b\"><u>Plan</u></span>\n1. first\n  1. <u>**second**</u>"
+        XCTAssertEqual(draftBodies(app).filter { $0.contains("Plan") }, [expected])
+    }
+
+    /// The bodies of the drafts saved in this test's data folder.
+    private func draftBodies(_ app: XCUIApplication, _ test: String = #function) -> [String] {
+        let home = getpwuid(getuid()).map { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
+        let name = "UITest-" + test.replacingOccurrences(of: "()", with: "")
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(home + "/Library/Application Support/Jolta/\(name)/jolta.sqlite", &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT body FROM draft ORDER BY id", -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var out: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            out.append(String(cString: sqlite3_column_text(statement, 0)))
+        }
+        return out
     }
 
     private func waitUntil(_ done: () -> Bool) -> Bool {
