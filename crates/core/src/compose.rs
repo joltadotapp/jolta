@@ -35,6 +35,10 @@ pub struct AttachmentFile {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Compose {
     pub account: Option<AccountId>,
+    /// The alias of `account` it is from; None for the account's own
+    /// address. An address that isn't one of its aliases sends from the
+    /// account's own.
+    pub from: Option<String>,
     pub to: String,
     pub cc: String,
     pub bcc: String,
@@ -108,7 +112,7 @@ pub const GRAPH_SEND_LIMIT: u64 = 35 << 20;
 
 /// The message at each image size, smallest first; empty when the body shows
 /// no images.
-pub fn size_options(account: &Account, c: &Compose) -> Result<Vec<SizeOption>> {
+pub fn size_options(account: &Account, from: &Sender, c: &Compose) -> Result<Vec<SizeOption>> {
     if rich::images(&c.body).is_empty() {
         return Ok(Vec::new());
     }
@@ -116,10 +120,73 @@ pub fn size_options(account: &Account, c: &Compose) -> Result<Vec<SizeOption>> {
     ImageSize::ALL
         .into_iter()
         .map(|size| {
-            let bytes = build(account, &Compose { image_size: size, ..c.clone() }, false)?.raw.len() as u64;
+            let bytes = build(account, from, &Compose { image_size: size, ..c.clone() }, false)?.raw.len() as u64;
             Ok(SizeOption { size, bytes, fits: limit.is_none_or(|l| bytes <= l) })
         })
         .collect()
+}
+
+/// The name and address a message goes out with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sender {
+    pub name: String,
+    pub address: String,
+}
+
+/// Who a message from `account` is from: the alias `from` names, with its
+/// name or the account's, or else the account itself. Never an address
+/// that isn't the account's.
+pub fn sender(account: &Account, aliases: &[store::Alias], from: Option<&str>) -> Sender {
+    let alias = from.and_then(|from| aliases.iter().find(|a| a.account == account.id && a.address.eq_ignore_ascii_case(from)));
+    match alias {
+        Some(a) if !a.display_name.is_empty() => Sender { name: a.display_name.clone(), address: a.address.clone() },
+        Some(a) => Sender { name: account.display_name.clone(), address: a.address.clone() },
+        None => Sender { name: account.display_name.clone(), address: account.address.clone() },
+    }
+}
+
+/// `sender` with the account's aliases from the store.
+pub fn sender_from_store(conn: &Connection, account: &Account, from: Option<&str>) -> Result<Sender> {
+    Ok(sender(account, &store::aliases(conn, account.id)?, from))
+}
+
+/// Who new messages are from in a view that mixes accounts: the default
+/// sender while its account and alias are there, else the first account
+/// that can send.
+pub fn default_sender(conn: &Connection) -> Result<Option<store::SenderChoice>> {
+    let accounts: Vec<Account> = store::accounts(conn)?.into_iter().filter(Account::can_send).collect();
+    if let Some(chosen) = store::default_sender(conn)?
+        && accounts.iter().any(|a| a.id == chosen.account)
+    {
+        let aliases = store::aliases(conn, chosen.account)?;
+        if chosen.alias.as_ref().is_none_or(|from| aliases.iter().any(|a| a.address.eq_ignore_ascii_case(from))) {
+            return Ok(Some(chosen));
+        }
+    }
+    Ok(accounts.first().map(|a| store::SenderChoice { account: a.id, alias: None }))
+}
+
+/// A blank message. In one account's mailbox it is from that account, or
+/// from the default sender when that is one of its aliases; elsewhere from
+/// the default sender.
+pub fn new_message(conn: &Connection, mailbox: Option<MailboxId>) -> Result<Compose> {
+    let fallback = default_sender(conn)?;
+    let viewed = match mailbox {
+        // A mailbox gone since the app last listed them is no context.
+        Some(m) => match store::mailbox(conn, m) {
+            Ok(m) => Some(store::account(conn, m.account_id)?).filter(Account::can_send),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let choice = match viewed {
+        Some(a) if fallback.as_ref().is_some_and(|f| f.account == a.id) => fallback,
+        Some(a) => Some(store::SenderChoice { account: a.id, alias: None }),
+        None => fallback,
+    };
+    let Some(choice) = choice else { return Ok(Compose::default()) };
+    let account = store::account(conn, choice.account)?;
+    Ok(Compose { account: Some(account.id), from: choice.alias, body: opening(&account.signature, ""), ..Default::default() })
 }
 
 /// One address as (name, address).
@@ -249,7 +316,10 @@ pub fn reply_target(conn: &Connection, thread: ThreadId) -> Result<MessageId> {
 pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind, utc_offset: i32) -> Result<Compose> {
     let (account, date): (AccountId, i64) =
         conn.query_row("SELECT account_id, date FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let me = store::account(conn, account)?.address.to_lowercase();
+    let own = store::account(conn, account)?;
+    let aliases = store::aliases(conn, account)?;
+    let alias_of = |a: &str| aliases.iter().find(|x| x.address.eq_ignore_ascii_case(a));
+    let mine = |a: &str| a.eq_ignore_ascii_case(&own.address) || alias_of(a).is_some();
     let msg = MessageParser::new().parse(raw).ok_or_else(|| Error::Other("could not read the message".into()))?;
     let root = msg.root();
     let (envelope, body) = mime::parse_full(raw, String::new());
@@ -260,16 +330,32 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
         l.map(|l| l.mailboxes().filter_map(pair).collect()).unwrap_or_default()
     };
     let not_me = |list: Vec<(String, String)>| -> Vec<(String, String)> {
-        list.into_iter().filter(|(_, a)| a.to_lowercase() != me).collect()
+        list.into_iter().filter(|(_, a)| !mine(a)).collect()
     };
+    let from_me = from.iter().any(|(_, a)| mine(a));
+    let delivered_to = root
+        .headers()
+        .iter()
+        .filter(|h| h.raw_name().eq_ignore_ascii_case("Delivered-To"))
+        .flat_map(|h| parse_addresses(&String::from_utf8_lossy(h.raw_value())))
+        .collect::<Vec<_>>();
+    // The first of the user's addresses on the message is the one to answer from.
+    let answered_as = from
+        .iter()
+        .filter(|_| from_me)
+        .cloned()
+        .chain(others(root.to()))
+        .chain(others(root.cc()))
+        .chain(delivered_to)
+        .find(|(_, a)| mine(a))
+        .and_then(|(_, a)| alias_of(a.as_str()).map(|x| x.address.clone()));
     let sender_name = from.first().map(|(n, a)| if n.is_empty() { a.clone() } else { n.clone() }).unwrap_or_default();
     let when = reader::format_date(date, utc_offset);
 
-    let mut c = Compose { account: Some(account), ..Default::default() };
+    let mut c = Compose { account: Some(account), from: answered_as, ..Default::default() };
     match kind {
         ReplyKind::Reply | ReplyKind::ReplyAll => {
             let primary = if reply_to.is_empty() { from.clone() } else { reply_to };
-            let from_me = from.iter().any(|(_, a)| a.to_lowercase() == me);
             // Replying to your own message goes to its original recipients.
             let to = match from_me {
                 true => Some(not_me(others(root.to()))).filter(|t| !t.is_empty()).unwrap_or(primary),
@@ -307,8 +393,7 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
             c.references = envelope.message_id.iter().cloned().collect();
         }
     }
-    let signature = store::account(conn, account)?.signature;
-    c.body = opening(&signature, &c.body);
+    c.body = opening(&own.signature, &c.body);
     Ok(c)
 }
 
@@ -326,6 +411,11 @@ pub fn from_draft(conn: &Connection, message: MessageId, raw: &[u8]) -> Result<C
             .unwrap_or_default();
         format_addresses(&pairs)
     };
+    let from = root.from().and_then(|l| l.first()).and_then(|m| m.address()).map(str::to_string);
+    let from = match from {
+        Some(a) => store::aliases(conn, account)?.into_iter().find(|x| x.address.eq_ignore_ascii_case(&a)).map(|x| x.address),
+        None => None,
+    };
     let in_reply_to = envelope.in_reply_to.first().cloned();
     let replying_to = match &in_reply_to {
         Some(id) => conn
@@ -335,6 +425,7 @@ pub fn from_draft(conn: &Connection, message: MessageId, raw: &[u8]) -> Result<C
     };
     Ok(Compose {
         account: Some(account),
+        from,
         to: list(root.to()),
         cc: list(root.cc()),
         bcc: list(root.bcc()),
@@ -548,12 +639,15 @@ fn inline_images(body: &str, domain: &str, size: ImageSize) -> Result<(Vec<Inlin
 pub struct Built {
     pub raw: Vec<u8>,
     pub message_id: String,
+    /// The SMTP envelope sender: the From address, an alias included, as
+    /// Apple Mail and Thunderbird send it. Gmail and iCloud judge the From
+    /// header whatever this says (tried on 2026-11-10).
     pub from: String,
     pub recipients: Vec<String>,
 }
 
 /// Builds the message. Drafts may have no recipients yet; sending needs one.
-pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built> {
+pub fn build(account: &Account, from: &Sender, c: &Compose, for_sending: bool) -> Result<Built> {
     let to = parse_addresses(&c.to);
     let cc = parse_addresses(&c.cc);
     let bcc = parse_addresses(&c.bcc);
@@ -595,9 +689,9 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
         body = MimePart::new("multipart/mixed", parts);
     }
 
-    let from_name = (!account.display_name.is_empty()).then(|| account.display_name.clone());
+    let from_name = (!from.name.is_empty()).then(|| from.name.clone());
     let mut builder = MessageBuilder::new()
-        .from(BuilderAddress::new_address(from_name, account.address.clone()))
+        .from(BuilderAddress::new_address(from_name, from.address.clone()))
         .subject(c.subject.clone())
         .message_id(message_id.clone())
         .body(body);
@@ -615,7 +709,7 @@ pub fn build(account: &Account, c: &Compose, for_sending: bool) -> Result<Built>
     }
     let raw = builder.write_to_vec()?;
     let recipients = to.iter().chain(&cc).chain(&bcc).map(|(_, a)| a.clone()).collect();
-    Ok(Built { raw, message_id, from: account.address.clone(), recipients })
+    Ok(Built { raw, message_id, from: from.address.clone(), recipients })
 }
 
 #[cfg(test)]
@@ -721,6 +815,179 @@ mod tests {
         }
     }
 
+    fn me() -> Sender {
+        Sender { name: "Me".into(), address: "me@example.com".into() }
+    }
+
+    fn alias(address: &str, name: &str) -> store::Alias {
+        store::Alias { id: 0, account: AccountId(1), address: address.into(), display_name: name.into(), source: store::AliasSource::Manual }
+    }
+
+    #[test]
+    fn a_message_goes_out_from_an_alias_of_its_account() {
+        let aliases = [alias("Sales@Example.com", "Example Sales"), alias("plain@example.com", "")];
+        let sent_as = |from: Option<&str>| {
+            let s = sender(&account(), &aliases, from);
+            (s.name, s.address)
+        };
+        assert_eq!(sent_as(Some("sales@example.com")), ("Example Sales".into(), "Sales@Example.com".into()), "with the alias's name");
+        assert_eq!(sent_as(Some("plain@example.com")), ("Me".into(), "plain@example.com".into()), "an alias without a name has the account's");
+        assert_eq!(sent_as(Some("someone@else.test")), ("Me".into(), "me@example.com".into()), "never an address that isn't the account's");
+        assert_eq!(sent_as(None), ("Me".into(), "me@example.com".into()));
+
+        let c = Compose { to: "bob@example.com".into(), body: "Hi".into(), ..Default::default() };
+        let built = build(&account(), &sender(&account(), &aliases, Some("sales@example.com")), &c, true).unwrap();
+        assert_eq!(built.from, "Sales@Example.com", "the envelope is from the alias too");
+        let msg = MessageParser::new().parse(&built.raw).unwrap();
+        let from = msg.from().unwrap().first().unwrap();
+        assert_eq!((from.name(), from.address()), (Some("Example Sales"), Some("Sales@Example.com")));
+    }
+
+    /// A store with an iCloud account (1), a Google one (2), a Microsoft 365
+    /// one (3) and the synthetic mailbox (4), each with an inbox.
+    fn senders_store(name: &str) -> (store::Store, Vec<MailboxId>, std::path::PathBuf) {
+        let dir = temp_dir(&format!("senders-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = store::Store::open(&dir.join("jolta.sqlite")).unwrap();
+        let inboxes = s
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account (id, kind, address, display_name, username, imap_host, smtp_host, secret_ref, signature, created) VALUES
+                       (1, 'imap', 'me@icloud.test', 'Me', 'me', 'imap.mail.me.com', 'smtp.mail.me.com', 'a1', 'From iCloud', 0),
+                       (2, 'gmail', 'me@gmail.test', 'Me', 'me', 'imap.gmail.com', 'smtp.gmail.com', 'a2', 'From Google', 0),
+                       (3, 'graph', 'me@work.test', 'Me', 'me', '', '', 'a3', 'From work', 0),
+                       (4, 'imap', 'synthetic@x.invalid', '', '', '', '', 'a4', '', 0);",
+                )?;
+                (1..=4)
+                    .map(|a| {
+                        let inbox = store::RemoteMailbox {
+                            important: false,
+                            remote_id: "INBOX".into(),
+                            name: "Inbox".into(),
+                            role: Some(MailboxRole::Inbox),
+                            delimiter: None,
+                            selectable: true,
+                        };
+                        Ok(store::sync_mailbox_list(tx, AccountId(a), &[inbox])?[0].id)
+                    })
+                    .collect()
+            })
+            .unwrap();
+        (s, inboxes, dir)
+    }
+
+    fn from_of(s: &store::Store, mailbox: Option<MailboxId>) -> (i64, Option<String>, String) {
+        let c = s.read(|conn| new_message(conn, mailbox)).unwrap();
+        (c.account.unwrap().0, c.from, c.body)
+    }
+
+    #[test]
+    fn a_new_message_is_from_the_account_being_looked_at() {
+        let (s, inboxes, dir) = senders_store("context");
+        assert_eq!(from_of(&s, None), (1, None, "\n\nFrom iCloud".into()), "unset, the first account that can send");
+        assert_eq!(from_of(&s, Some(inboxes[1])), (2, None, "\n\nFrom Google".into()), "in Google's inbox, from Google");
+        assert_eq!(from_of(&s, Some(inboxes[2])).0, 3, "Microsoft 365 sends without an SMTP server");
+        assert_eq!(from_of(&s, Some(inboxes[3])).0, 1, "the synthetic mailbox can't send");
+
+        s.write(|tx| store::add_alias(tx, AccountId(2), "sales@gmail.test", "Sales").map(|_| ())).unwrap();
+        s.write(|tx| store::set_default_sender(tx, &store::SenderChoice { account: AccountId(2), alias: Some("sales@gmail.test".into()) })).unwrap();
+        assert_eq!(from_of(&s, None), (2, Some("sales@gmail.test".into()), "\n\nFrom Google".into()), "mixed views use the default sender");
+        assert_eq!(from_of(&s, Some(inboxes[1])).1.as_deref(), Some("sales@gmail.test"), "the default alias in its own account");
+        assert_eq!(from_of(&s, Some(inboxes[0])), (1, None, "\n\nFrom iCloud".into()), "another account's inbox is that account");
+        assert_eq!(from_of(&s, Some(inboxes[3])).0, 2, "a mailbox that can't send falls back to the default");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_default_sender_that_is_gone_falls_back_to_the_first_account() {
+        let (s, _, dir) = senders_store("gone");
+        let alias = s.write(|tx| store::add_alias(tx, AccountId(2), "sales@gmail.test", "")).unwrap();
+        s.write(|tx| store::set_default_sender(tx, &store::SenderChoice { account: AccountId(2), alias: Some(alias.address.clone()) })).unwrap();
+        s.write(|tx| store::remove_alias(tx, alias.id)).unwrap();
+        assert_eq!(from_of(&s, None).0, 1, "its alias was removed");
+
+        s.write(|tx| store::set_default_sender(tx, &store::SenderChoice { account: AccountId(3), alias: None })).unwrap();
+        assert_eq!(from_of(&s, None).0, 3);
+        s.write(|tx| store::delete_account(tx, AccountId(3))).unwrap();
+        assert_eq!(from_of(&s, None).0, 1, "its account was removed");
+        assert_eq!(s.read(default_sender).unwrap(), Some(store::SenderChoice { account: AccountId(1), alias: None }));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_removed_provider_alias_sends_from_the_account() {
+        let (s, _, dir) = senders_store("hidden");
+        let list = [store::ProviderAlias { address: "sales@gmail.test".into(), display_name: "Sales".into() }];
+        s.write(|tx| store::set_provider_aliases(tx, AccountId(2), &list)).unwrap();
+        let google = s.read(|c| store::account(c, AccountId(2))).unwrap();
+        let address = |s: &store::Store| s.read(|c| sender_from_store(c, &google, Some("sales@gmail.test"))).unwrap().address;
+        assert_eq!(address(&s), "sales@gmail.test");
+        let id = s.read(|c| store::aliases(c, AccountId(2))).unwrap()[0].id;
+        s.write(|tx| store::remove_alias(tx, id)).unwrap();
+        assert_eq!(address(&s), "me@gmail.test", "a draft from it goes out from the account");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Replies to a message in the Google account, which has two aliases.
+    fn reply_from(name: &str, headers: &str, kind: ReplyKind) -> Compose {
+        let (s, _, dir) = senders_store(name);
+        s.write(|tx| {
+            store::add_alias(tx, AccountId(2), "sales@gmail.test", "")?;
+            store::add_alias(tx, AccountId(2), "help@gmail.test", "")?;
+            tx.execute_batch(
+                "INSERT INTO thread (id, account_id) VALUES (1, 2);
+                 INSERT INTO message (id, account_id, remote_id, thread_id, date) VALUES (1, 2, 'm', 1, 0);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let raw = format!("{headers}\r\nSubject: Hello\r\nMessage-ID: <m@x.test>\r\n\r\nHi\r\n");
+        let c = s.read(|conn| reply(conn, MessageId(1), raw.as_bytes(), kind, 0)).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        c
+    }
+
+    #[test]
+    fn a_draft_written_elsewhere_keeps_its_alias() {
+        let (s, _, dir) = senders_store("draft-alias");
+        s.write(|tx| {
+            store::add_alias(tx, AccountId(2), "sales@gmail.test", "")?;
+            tx.execute_batch(
+                "INSERT INTO thread (id, account_id) VALUES (1, 2);
+                 INSERT INTO message (id, account_id, remote_id, thread_id, date) VALUES (1, 2, 'm', 1, 0), (2, 2, 'n', 1, 0);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let draft = |from: &str| {
+            let raw = format!("From: {from}\r\nTo: ann@x.test\r\nSubject: Offer\r\n\r\nHi\r\n");
+            s.read(|c| from_draft(c, MessageId(1), raw.as_bytes())).unwrap().from
+        };
+        assert_eq!(draft("Sales <SALES@gmail.test>").as_deref(), Some("sales@gmail.test"));
+        assert_eq!(draft("me@gmail.test"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_reply_is_from_the_alias_the_mail_was_sent_to() {
+        let to_alias = reply_from("to-alias", "From: Ann <ann@x.test>\r\nTo: bob@x.test, Help <HELP@gmail.test>", ReplyKind::Reply);
+        assert_eq!((to_alias.account, to_alias.from.as_deref()), (Some(AccountId(2)), Some("help@gmail.test")));
+        assert_eq!(to_alias.to, "Ann <ann@x.test>");
+
+        let cc_first = reply_from("cc-first", "From: ann@x.test\r\nTo: bob@x.test\r\nCc: sales@gmail.test\r\nDelivered-To: help@gmail.test", ReplyKind::ReplyAll);
+        assert_eq!(cc_first.from.as_deref(), Some("sales@gmail.test"), "To, then Cc, then Delivered-To");
+        assert_eq!(cc_first.cc, "bob@x.test", "reply all leaves the alias out");
+
+        let delivered = reply_from("delivered", "From: ann@x.test\r\nTo: list@x.test\r\nDelivered-To: help@gmail.test", ReplyKind::Forward);
+        assert_eq!(delivered.from.as_deref(), Some("help@gmail.test"), "a forward too, and through Delivered-To");
+
+        let main_first = reply_from("main-first", "From: ann@x.test\r\nTo: me@gmail.test, sales@gmail.test", ReplyKind::Reply);
+        assert_eq!(main_first.from, None, "the account's own address came first");
+
+        let own = reply_from("own", "From: Sales <sales@gmail.test>\r\nTo: bob@x.test", ReplyKind::Reply);
+        assert_eq!((own.to.as_str(), own.from.as_deref()), ("bob@x.test", Some("sales@gmail.test")), "mail sent from an alias is the user's own");
+    }
+
     /// A PNG header `width` pixels wide, at `per_meter` pixels per meter.
     fn png(width: u32, per_meter: Option<u32>) -> Vec<u8> {
         let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -779,7 +1046,7 @@ mod tests {
             attachments: vec![AttachmentFile { name: "offer.pdf".into(), mime_type: "application/pdf".into(), path: pdf.to_string_lossy().into() }],
             ..Default::default()
         };
-        let built = build(&account(), &c, true).unwrap();
+        let built = build(&account(), &me(), &c, true).unwrap();
         let msg = MessageParser::new().parse(&built.raw).unwrap();
         assert_eq!(
             tree(msg.root_part()),
@@ -805,7 +1072,7 @@ mod tests {
     #[test]
     fn a_message_without_images_keeps_its_shape() {
         let c = Compose { to: "bob@example.com".into(), body: "Hi **Bob**".into(), ..Default::default() };
-        let built = build(&account(), &c, true).unwrap();
+        let built = build(&account(), &me(), &c, true).unwrap();
         let msg = MessageParser::new().parse(&built.raw).unwrap();
         assert_eq!(tree(msg.root_part()), "multipart/alternative[text/plain,text/html]");
         assert!(msg.body_html(0).unwrap().contains("<b>Bob</b>"));
@@ -816,7 +1083,7 @@ mod tests {
         let dir = temp_dir("plain-density");
         let path = save_image(&dir, &png(300, None)).unwrap();
         let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("chart.png", &path)]), ..Default::default() };
-        let msg_raw = build(&account(), &c, true).unwrap().raw;
+        let msg_raw = build(&account(), &me(), &c, true).unwrap().raw;
         let html = MessageParser::new().parse(&msg_raw).unwrap().body_html(0).unwrap().into_owned();
         assert!(html.contains("alt=\"chart.png\" style=\"max-width: 100%\">"), "{html}");
         std::fs::remove_dir_all(dir).unwrap();
@@ -841,7 +1108,7 @@ mod tests {
             body: rich::markdown(&[image("Plan.png", "/nonexistent/jolta/Plan.png")]),
             ..Default::default()
         };
-        let Err(e) = build(&account(), &c, true) else { panic!("built without its image") };
+        let Err(e) = build(&account(), &me(), &c, true) else { panic!("built without its image") };
         assert!(e.to_string().contains("Plan.png"), "{e}");
     }
 
@@ -893,7 +1160,7 @@ mod tests {
 
     /// The image parts of a built message in order, with its HTML part.
     fn sent_images(c: &Compose) -> (Vec<(String, Vec<u8>)>, String) {
-        let raw = build(&account(), c, true).unwrap().raw;
+        let raw = build(&account(), &me(), c, true).unwrap().raw;
         let msg = MessageParser::new().parse(&raw).unwrap();
         let parts = msg
             .parts()
@@ -958,7 +1225,7 @@ mod tests {
         };
         let (parts, _) = sent_images(&c);
         assert!(parts[0].1 == rough, "the original goes when it is the smaller file: {} vs {} bytes", parts[0].1.len(), rough.len());
-        let options = size_options(&account(), &c).unwrap();
+        let options = size_options(&account(), &me(), &c).unwrap();
         assert!(options.windows(2).all(|w| w[0].bytes <= w[1].bytes + 64), "no size above Actual Size, give or take a header: {options:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -968,15 +1235,15 @@ mod tests {
         let dir = temp_dir("estimate");
         let path = save_image(&dir, &retina_png(1600, 800)).unwrap();
         let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("Shot.png", &path)]), ..Default::default() };
-        let options = size_options(&account(), &c).unwrap();
+        let options = size_options(&account(), &me(), &c).unwrap();
         assert_eq!(options.iter().map(|o| o.size).collect::<Vec<_>>(), ImageSize::ALL);
         assert!(options.windows(2).all(|w| w[0].bytes < w[1].bytes), "{options:?}");
         assert!(options.iter().all(|o| o.fits), "no limit for an IMAP account");
-        let built = build(&account(), &c, true).unwrap().raw.len() as i64;
+        let built = build(&account(), &me(), &c, true).unwrap().raw.len() as i64;
         assert!((options[3].bytes as i64 - built).abs() < 64, "the estimate is the built message: {} vs {built}", options[3].bytes);
 
         let plain = Compose { body: "No pictures".into(), ..c.clone() };
-        assert!(size_options(&account(), &plain).unwrap().is_empty());
+        assert!(size_options(&account(), &me(), &plain).unwrap().is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -992,9 +1259,9 @@ mod tests {
             attachments: vec![AttachmentFile { name: "talk.mov".into(), mime_type: "video/quicktime".into(), path: video.to_string_lossy().into() }],
             ..Default::default()
         };
-        let options = size_options(&Account { kind: AccountKind::Graph, ..account() }, &c).unwrap();
+        let options = size_options(&Account { kind: AccountKind::Graph, ..account() }, &me(), &c).unwrap();
         assert_eq!(options.iter().map(|o| o.fits).collect::<Vec<_>>(), [true, true, false, false], "{options:?}");
-        assert!(size_options(&account(), &c).unwrap().iter().all(|o| o.fits), "only Microsoft 365 has the limit");
+        assert!(size_options(&account(), &me(), &c).unwrap().iter().all(|o| o.fits), "only Microsoft 365 has the limit");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

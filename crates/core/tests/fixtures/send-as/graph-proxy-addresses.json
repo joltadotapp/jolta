@@ -1,0 +1,11 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users(proxyAddresses)/$entity",
+  "proxyAddresses": [
+    "smtp:me@example.onmicrosoft.com",
+    "SMTP:me@example.com",
+    "smtp:sales@example.com",
+    "SIP:me@example.com",
+    "smtp:Me.Second@Example.org",
+    "x500:/o=ExchangeLabs/ou=Exchange Administrative Group/cn=Recipients/cn=abc-me"
+  ]
+}

@@ -63,8 +63,7 @@ impl People {
     /// Reads sent and replied-to mail. `book` is (name, address) pairs from
     /// an address book.
     pub fn build(conn: &Connection, now: i64, book: &[(String, String)]) -> Result<People> {
-        let accounts = store::accounts(conn)?;
-        let mine: Vec<String> = accounts.iter().map(|a| a.address.to_lowercase()).collect();
+        let mine: Vec<String> = store::own_addresses(conn)?.iter().map(|a| a.to_lowercase()).collect();
         let forgotten: HashMap<String, i64> = conn
             .prepare("SELECT lower(address), at FROM forgotten_address")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -100,7 +99,7 @@ impl People {
 
         let mut sent = conn.prepare(
             "SELECT m.account_id, m.date, m.to_addrs, m.cc_addrs FROM message m
-             JOIN account a ON a.id = m.account_id WHERE m.from_addr = a.address COLLATE NOCASE",
+             WHERE EXISTS (SELECT 1 FROM own_address a WHERE a.account_id = m.account_id AND a.address = m.from_addr COLLATE NOCASE)",
         )?;
         let mut rows = sent.query([])?;
         while let Some(r) = rows.next()? {
@@ -222,6 +221,25 @@ mod tests {
 
     fn addresses(list: Vec<Person>) -> Vec<String> {
         list.into_iter().map(|p| p.address).collect()
+    }
+
+    #[test]
+    fn an_alias_is_the_user_and_mail_from_it_counts_as_sent() {
+        let (dir, s) = store_with_mail();
+        s.write(|tx| {
+            store::add_alias(tx, AccountId(1), "shop@home.test", "")?;
+            tx.execute(
+                "INSERT INTO message (id, account_id, remote_id, thread_id, from_addr, to_addrs, date, flags)
+                 VALUES (7, 1, 7, 7, 'Shop@home.test', 'Greta <greta@example.com>, shop@home.test', ?1, 0)",
+                [NOW - DAY],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let people = s.read(|c| People::build(c, NOW, &[])).unwrap();
+        assert_eq!(addresses(people.suggest("gre", None, &[], 5)), ["greta@example.com"], "written to from the alias");
+        assert!(people.suggest("shop", None, &[], 5).is_empty(), "the alias itself is never suggested");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

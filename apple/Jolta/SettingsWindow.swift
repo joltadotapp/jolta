@@ -29,7 +29,7 @@ struct SettingsView: View {
         let all = model?.accounts ?? []
         let accounts = all.map { a in
             Item(page: .account(a.id), title: a.title, icon: Self.icon(a.account.provider),
-                 keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove")
+                 keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove send mail as alias aliases from default sender new messages")
         }
         return [
             (nil, [
@@ -456,6 +456,7 @@ struct GeneralSettings: View {
                 }
             }
             SettingsSection("Writing", footer: "Jolta suggests people you've written to or replied to as you type in To, Cc and Bcc, the most frequent and recent first. Hover over a suggestion and click × to stop suggesting it.") {
+                DefaultSenderRow(model: model)
                 SettingsRow(title: "Suggest people from Contacts",
                             detail: contactsRefused
                                 ? "Jolta can't read Contacts. Allow it in System Settings › Privacy & Security › Contacts."

@@ -84,6 +84,7 @@ struct AccountPage: View {
                     SettingsValueRow(title: "Email address", value: section.account.address)
                 }
             }
+            SendAsSection(model: model, account: section.account)
             SettingsSection("Signature", footer: "Added below new messages, replies and forwards from this account. ⌘B, ⌘I and ⇧⌘K format it. Saved as you type.") {
                 SettingsBlock { SignatureEditor(core: model.core, accountID: section.account.id) }
             }
@@ -269,6 +270,194 @@ struct AccountPage: View {
                 message = ("Sign-in failed: \(error)", true)
             }
             signingIn = false
+        }
+    }
+}
+
+/// Settings › an account › Send mail as: the other addresses the account
+/// sends from.
+private struct SendAsSection: View {
+    let model: AppModel
+    let account: AccountInfo
+    @State private var aliases: [AliasInfo] = []
+    @State private var address = ""
+    @State private var name = ""
+    @State private var error: String?
+    @State private var fetchError: String?
+
+    var body: some View {
+        SettingsSection("Send mail as", footer: footer) {
+            ForEach(aliases, id: \.id) { alias in
+                SettingsBlock {
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(alias.address)
+                            Text(alias.fromProvider ? "From \(account.provider)" : "Added by you")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Color(Theme.text3))
+                        }
+                        Spacer()
+                        AliasNameField(model: model, alias: alias, placeholder: account.displayName)
+                        Button("Remove") { remove(alias) }
+                    }
+                }
+                .accessibilityIdentifier("alias-\(alias.address)")
+            }
+            SettingsBlock {
+                HStack(spacing: 10) {
+                    TextField("", text: $address, prompt: Text("name@example.com"))
+                        .settingsField(width: nil)
+                        .accessibilityIdentifier("alias-address")
+                        .onSubmit(add)
+                    TextField("", text: $name, prompt: Text("Name (optional)"))
+                        .settingsField(width: 150)
+                        .accessibilityIdentifier("alias-name")
+                        .onSubmit(add)
+                    Button("Add Address", action: add)
+                        .disabled(!address.contains("@"))
+                        .accessibilityIdentifier("alias-add")
+                }
+            }
+            if let error {
+                SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
+            }
+            if let fetchError {
+                SettingsBlock {
+                    Text("Jolta couldn't read \(account.provider)'s list: \(fetchError)").foregroundStyle(Color(Theme.text3)).font(.system(size: 12))
+                }
+            }
+        }
+        .task(id: account.id) {
+            load()
+            guard account.kind != "imap" else { return }
+            do {
+                aliases = try await model.core.refreshAliases(accountId: account.id)
+                fetchError = nil
+                loadSenders()
+            } catch {
+                fetchError = "\(error)"
+            }
+        }
+    }
+
+    private var footer: String {
+        switch account.kind {
+        case "gmail": "Jolta reads these from Gmail's Send mail as setting. A reply is from the address the message was sent to. Gmail sends mail from an address it doesn't list from \(account.address) instead."
+        case "graph": "Jolta reads these from the addresses your organization gave this mailbox. A reply is from the address the message was sent to. Sending from one needs your administrator to allow it."
+        default: "Add the addresses your provider lets this account send from, such as iCloud Mail aliases. A reply is from the address the message was sent to."
+        }
+    }
+
+    private func load() {
+        aliases = (try? model.core.aliases(accountId: account.id)) ?? []
+        loadSenders()
+    }
+
+    private func loadSenders() {
+        model.sendersRevision += 1
+    }
+
+    private func add() {
+        do {
+            _ = try model.core.addAlias(accountId: account.id, address: address, name: name)
+            address = ""
+            name = ""
+            error = nil
+        } catch {
+            self.error = "\(error)"
+        }
+        load()
+    }
+
+    private func remove(_ alias: AliasInfo) {
+        try? model.core.removeAlias(aliasId: alias.id)
+        load()
+    }
+
+}
+
+/// Settings › General › Writing: who new messages are from in views that
+/// mix accounts. One account's folders always write from that account.
+struct DefaultSenderRow: View {
+    let model: AppModel
+    @State private var senders: [MailSender] = []
+    @State private var defaultSender: SenderKey?
+
+    var body: some View {
+        // A ZStack, not a Group: an empty Group has no view to run .task on.
+        ZStack {
+            if senders.count > 1 {
+                SettingsRow(title: "New messages from",
+                            detail: "In one account's folders, a new message is from that account. In the combined Inbox, Starred and other views that mix accounts, it is from this address.") {
+                    Picker("New messages from", selection: Binding(get: { defaultSender }, set: setDefault)) {
+                        SenderMenuItems(senders: senders)
+                    }
+                    .settingsMenu()
+                    .accessibilityIdentifier("default-sender")
+                }
+            }
+        }
+        .task(id: "\(model.accounts.map(\.id)) \(model.sendersRevision)") {
+            senders = (try? model.core.senders()) ?? []
+            defaultSender = (try? model.core.defaultSender()).flatMap { $0 }.map { SenderKey(accountId: $0.accountId, alias: $0.alias) }
+        }
+    }
+
+    private func setDefault(_ key: SenderKey?) {
+        guard let key else { return }
+        try? model.core.setDefaultSender(sender: SenderChoice(accountId: key.accountId, alias: key.alias))
+        defaultSender = key
+    }
+}
+
+/// An alias's name, saved a moment after each edit.
+private struct AliasNameField: View {
+    let model: AppModel
+    let alias: AliasInfo
+    let placeholder: String
+    @State private var text = ""
+    @State private var saveTask: Task<Void, Never>?
+
+    var body: some View {
+        TextField("", text: $text, prompt: Text(placeholder.isEmpty ? "Name" : placeholder))
+            .settingsField(width: 150)
+            .onAppear { text = alias.name }
+            .onChange(of: text) {
+                saveTask?.cancel()
+                saveTask = Task {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard !Task.isCancelled else { return }
+                    try? model.core.renameAlias(aliasId: alias.id, name: text)
+                }
+            }
+    }
+}
+
+/// Who a message is from, as a menu's tag: an account and maybe an alias.
+struct SenderKey: Hashable {
+    let accountId: Int64
+    let alias: String?
+
+    init(accountId: Int64, alias: String?) {
+        self.accountId = accountId
+        self.alias = alias?.lowercased()
+    }
+
+    init(_ sender: MailSender) {
+        self.init(accountId: sender.accountId, alias: sender.alias)
+    }
+}
+
+/// The menu items of a From menu: each account, then its aliases, a line
+/// between accounts. The menu shows the chosen item as it is, so aliases
+/// aren't indented.
+struct SenderMenuItems: View {
+    let senders: [MailSender]
+
+    var body: some View {
+        ForEach(Array(senders.enumerated()), id: \.offset) { index, sender in
+            if sender.alias == nil && index > 0 { Divider() }
+            Text(sender.address).tag(Optional(SenderKey(sender)))
         }
     }
 }

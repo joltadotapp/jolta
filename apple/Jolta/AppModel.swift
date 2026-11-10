@@ -178,6 +178,8 @@ final class AppModel {
     private var summaryTask: Task<Void, Never>?
     /// A settings page something asked to show; the window opens on it.
     var settingsRequest: SettingsPage?
+    /// Goes up when an account's aliases change, so an open From menu lists them again.
+    var sendersRevision = 0
     /// The search field has the keyboard, so ⌘J searches with AI.
     var searchFocused = false
     private(set) var aiSearching = false
@@ -283,8 +285,9 @@ final class AppModel {
                 }
             }
         }
-        // `-JoltaSettings ai|calendar|appearance` opens the settings window on that page, for screenshots.
+        // `-JoltaSettings general|ai|calendar|appearance` opens the settings window on that page, for screenshots.
         switch defaults.string(forKey: "JoltaSettings") {
+        case "general": settingsRequest = .general
         case "ai": settingsRequest = .ai
         case "appearance": settingsRequest = .appearance
         case "calendar": settingsRequest = .calendar
@@ -606,8 +609,8 @@ final class AppModel {
             }
         case .sent(_, let subject):
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
-        case .sendFailed(let message):
-            show(Toast(text: "Not sent yet: \(message)", undo: nil))
+        case .sendFailed(let message, let gaveUp):
+            show(Toast(text: "\(gaveUp ? "Not sent" : "Not sent yet"): \(message)", undo: nil))
         case .responsesFiled(let text, let tokens):
             show(Toast(text: text, undo: .action(tokens)))
         case .modelChanged(let id, let state):
@@ -770,8 +773,10 @@ final class AppModel {
         composeSession += 1
     }
 
+    /// A new message, from the account whose mailbox is in view.
     func startCompose() {
-        openCompose((try? core.newCompose()) ?? .blank)
+        let mailbox: Int64? = if case .mailbox(let id, _) = source { id } else { nil }
+        openCompose((try? core.newCompose(mailboxId: mailbox)) ?? .blank)
     }
 
     /// Edits the conversation's draft in compose, or reads the conversation

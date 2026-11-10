@@ -56,7 +56,7 @@ fn check_reminder(conn: &Connection, account: AccountId, message_id: &str, sent_
     let Some((thread, subject)) = found else { return Ok(ReminderCheck::NotYetSynced) };
     let replied: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM message m WHERE m.thread_id = ?1 AND m.date > ?2
-                AND NOT EXISTS (SELECT 1 FROM account a WHERE a.address = m.from_addr COLLATE NOCASE))",
+                AND NOT EXISTS (SELECT 1 FROM own_address a WHERE a.address = m.from_addr COLLATE NOCASE))",
         params![thread, sent_at],
         |r| r.get(0),
     )?;

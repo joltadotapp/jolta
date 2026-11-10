@@ -58,7 +58,8 @@ pub enum Event {
     AgentDraft { draft: i64, subject: String },
     /// An agent called a tool (the audit log changed).
     AgentActivity,
-    SendFailed(String),
+    /// `gave_up`: the outbox won't try again; the message is back in Drafts.
+    SendFailed { message: String, gave_up: bool },
     /// The occurrences of these calendars changed.
     CalendarsChanged(Vec<crate::calendar::CalendarId>),
     /// A calendar sync ended; `error` says why it failed.
@@ -167,6 +168,12 @@ impl Engine {
         if account.imap_host.is_empty() && !graph {
             return;
         }
+        let (jolta, id) = (self.jolta.clone(), account.id);
+        self.runtime.spawn(async move {
+            if let Err(e) = crate::send_as::refresh(&jolta, id).await {
+                tracing::debug!("account {id}'s aliases weren't read: {e}");
+            }
+        });
         let wake = Arc::new(Wake::default());
         wake.full_sync.store(true, Ordering::SeqCst);
         self.wakes.lock().unwrap_or_else(|e| e.into_inner()).insert(account.id, wake.clone());
@@ -288,8 +295,12 @@ impl Engine {
     /// inbox then unless someone replies. Returns a token for `cancel_send`.
     pub fn send(&self, compose: &Compose, send_at: Option<i64>, remind_at: Option<i64>) -> Result<i64> {
         let account_id = compose.account.ok_or_else(|| crate::Error::Other("Choose an account to send from.".into()))?;
-        let account = self.jolta.store.read(|c| store::account(c, account_id))?;
-        let built = compose::build(&account, compose, true)?;
+        let (account, from) = self.jolta.store.read(|c| {
+            let account = store::account(c, account_id)?;
+            let from = compose::sender_from_store(c, &account, compose.from.as_deref())?;
+            Ok((account, from))
+        })?;
+        let built = compose::build(&account, &from, compose, true)?;
         let blob = self.jolta.blobs.put(&built.raw)?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let delay = send_at.map_or(UNDO_SEND_SECONDS, |at| (at - now).max(UNDO_SEND_SECONDS));
@@ -700,10 +711,15 @@ impl Engine {
                     sent.push(item);
                 }
                 Err(e) => {
-                    let give_up = item.attempts + 1 >= MAX_ATTEMPTS;
-                    let (id, message) = (item.id, e.to_string());
-                    self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &message, give_up)).await?;
-                    (self.sink)(Event::SendFailed(e.to_string()));
+                    let refused = matches!(e, crate::Error::Refused(_));
+                    let give_up = refused || item.attempts + 1 >= MAX_ATTEMPTS;
+                    let message = match &e {
+                        crate::Error::Refused(reason) => refusal(account, &item.sender, reason, item.draft.is_some()),
+                        e => e.to_string(),
+                    };
+                    let (id, stored) = (item.id, message.clone());
+                    self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &stored, give_up)).await?;
+                    (self.sink)(Event::SendFailed { message, gave_up: give_up });
                 }
             }
         }
@@ -743,12 +759,14 @@ impl Engine {
         if dirty.is_empty() {
             return Ok(None);
         }
+        let aliases = self.jolta.store.read_async(move |c| store::aliases(c, account_id)).await?;
+        let from = |c: &Compose| compose::sender(account, &aliases, c.from.as_deref());
         let drafts_box = self.role_mailbox(account.id, MailboxRole::Drafts).await?;
         let session = match link {
             Link::Imap(session, _) => session,
             Link::Graph(g) => {
                 for d in dirty {
-                    let built = (!d.deleted).then(|| compose::build(account, &d.compose, false)).transpose()?;
+                    let built = (!d.deleted).then(|| compose::build(account, &from(&d.compose), &d.compose, false)).transpose()?;
                     g.save_draft(built.as_ref().map(|b| b.raw.as_slice()), d.server_message_id.as_deref()).await?;
                     let (id, deleted, server_id) = (d.id, d.deleted, built.map(|b| b.message_id));
                     self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
@@ -777,7 +795,7 @@ impl Engine {
             }
             let mut server_id = None;
             if !d.deleted {
-                let built = compose::build(account, &d.compose, false)?;
+                let built = compose::build(account, &from(&d.compose), &d.compose, false)?;
                 session.append(&drafts_box.remote_id, Some("(\\Draft \\Seen)"), None, &built.raw).await?;
                 server_id = Some(built.message_id);
             }
@@ -915,5 +933,55 @@ fn scan_list_headers(jolta: &Jolta) -> Result<usize> {
             }
             Ok(())
         })?;
+    }
+}
+
+/// What the user reads when the server refused a message for good. A
+/// message from an alias names it: the provider may not let the account
+/// send as that address.
+fn refusal(account: &Account, sender: &str, reason: &str, has_draft: bool) -> String {
+    let back = if has_draft { " The message is back in Drafts." } else { "" };
+    if sender.eq_ignore_ascii_case(&account.address) {
+        return format!("{reason}.{back}");
+    }
+    format!(
+        "{} refused to send from {sender}: {reason}. Choose {} in From, or let the account send as {sender} at {} first.{back}",
+        account.provider_label(),
+        account.address,
+        account.provider_label()
+    )
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_alias_is_named_with_the_way_out() {
+        let account = Account {
+            id: AccountId(1),
+            kind: AccountKind::Graph,
+            address: "me@work.test".into(),
+            display_name: String::new(),
+            username: String::new(),
+            imap_host: String::new(),
+            imap_port: 0,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            secret_ref: String::new(),
+            imap_security: Security::Tls,
+            smtp_security: Security::Tls,
+            smtp_auth: SmtpAuth::SameAsIncoming,
+            smtp_username: String::new(),
+            verify_certs: true,
+            signature: String::new(),
+            calendar: false,
+            oauth_user_id: None,
+        };
+        let text = refusal(&account, "sales@work.test", "no right to send as it", true);
+        for part in ["sales@work.test", "Choose me@work.test in From", "back in Drafts"] {
+            assert!(text.contains(part), "{part:?} in {text:?}");
+        }
+        assert!(!refusal(&account, "ME@work.test", "mailbox full", false).contains("From"), "the account's own address names no alias");
     }
 }

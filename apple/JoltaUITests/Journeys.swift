@@ -1356,6 +1356,48 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
     }
 
+    /// Settings › an account adds an address it sends as, compose's From menu
+    /// offers it under the account, and c in another account's inbox writes
+    /// from that account.
+    func testSendFromAnAlias() throws {
+        let app = try launch()
+        app.typeKey(",", modifierFlags: .command)
+        let page = app.buttons.matching(NSPredicate(format: "label == 'me@test.invalid'")).firstMatch
+        XCTAssertTrue(page.waitForExistence(timeout: 5), "settings lists the account")
+        page.click()
+        let address = app.textFields["alias-address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 5), "the account's page offers Send mail as")
+        address.click()
+        app.typeText("sales@test.invalid")
+        app.textFields["alias-name"].click()
+        app.typeText("Sales Desk")
+        app.buttons["alias-add"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["alias-sales@test.invalid"].waitForExistence(timeout: 5), "Add Address lists it")
+        XCTAssertFalse(app.popUpButtons["default-sender"].exists, "an account's page doesn't hold the app-wide default")
+        app.buttons.matching(NSPredicate(format: "label == 'General'")).firstMatch.click()
+        XCTAssertTrue(app.popUpButtons["default-sender"].waitForExistence(timeout: 5), "General › Writing picks who new messages are from")
+        app.typeKey("w", modifierFlags: .command)
+
+        let from = app.popUpButtons["compose-from"]
+        func sender() -> String { [from.value as? String ?? "", from.title, from.label].joined(separator: " ") }
+        app.typeKey("c", modifierFlags: [])
+        XCTAssertTrue(from.waitForExistence(timeout: 5), "with two accounts, compose has a From menu")
+        XCTAssertTrue(sender().contains("me@test.invalid"), "the combined Inbox writes from the first account: \(sender())")
+        from.click()
+        let alias = app.menuItems.matching(NSPredicate(format: "title CONTAINS 'sales@test.invalid'")).firstMatch
+        XCTAssertTrue(alias.waitForExistence(timeout: 5), "the From menu lists the alias")
+        alias.click()
+        XCTAssertTrue(waitUntil { sender().contains("sales@test.invalid") }, "the From menu shows the alias: \(sender())")
+        app.buttons["⌘⌫"].click()
+        XCTAssertTrue(from.waitForNonExistence(timeout: 5), "compose closed")
+
+        app.descendants(matching: .any)["mailbox-other@test.invalid/INBOX"].click()
+        app.typeKey("c", modifierFlags: [])
+        XCTAssertTrue(from.waitForExistence(timeout: 5), "c opens compose")
+        XCTAssertTrue(waitUntil { sender().contains("other@test.invalid") }, "c in the other account's inbox writes from it: \(sender())")
+        app.buttons["⌘⌫"].click()
+    }
+
     /// A pasted image goes in where the cursor is, and the Image size menu
     /// shows what the message comes to at the size chosen.
     func testPastedImageSize() throws {

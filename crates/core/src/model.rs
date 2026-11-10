@@ -237,6 +237,12 @@ impl Account {
         }
     }
 
+    /// Whether mail can go out through it: Graph, or an SMTP server. The
+    /// synthetic test mailbox has neither.
+    pub fn can_send(&self) -> bool {
+        self.kind == AccountKind::Graph || !self.smtp_host.is_empty()
+    }
+
     /// Who hosts the account, for display: "iCloud", "Fastmail", "Google".
     pub fn provider_label(&self) -> &'static str {
         let host = self.imap_host.to_ascii_lowercase();

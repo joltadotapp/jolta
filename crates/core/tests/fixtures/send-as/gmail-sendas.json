@@ -1,0 +1,43 @@
+{
+  "sendAs": [
+    {
+      "sendAsEmail": "me@example.com",
+      "displayName": "",
+      "replyToAddress": "",
+      "signature": "",
+      "isPrimary": true,
+      "isDefault": true
+    },
+    {
+      "sendAsEmail": "sales@example.com",
+      "displayName": "Example Sales",
+      "replyToAddress": "",
+      "signature": "",
+      "isDefault": false,
+      "treatAsAlias": true
+    },
+    {
+      "sendAsEmail": "me@example.org",
+      "displayName": "",
+      "replyToAddress": "",
+      "signature": "",
+      "isDefault": false,
+      "treatAsAlias": false,
+      "smtpMsa": {
+        "host": "smtp.example.org",
+        "port": 587,
+        "securityMode": "starttls"
+      },
+      "verificationStatus": "accepted"
+    },
+    {
+      "sendAsEmail": "pending@example.net",
+      "displayName": "Not yet",
+      "replyToAddress": "",
+      "signature": "",
+      "isDefault": false,
+      "treatAsAlias": true,
+      "verificationStatus": "pending"
+    }
+  ]
+}

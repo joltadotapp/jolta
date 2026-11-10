@@ -531,7 +531,7 @@ mod tests {
     /// The mail with `body` leaves the outbox now, as the engine records it.
     fn send(f: &Fixture, body: &str) -> Option<Made> {
         let account = f.j.store.read(|c| store::account(c, AccountId(1))).unwrap();
-        let built = compose::build(&account, &compose(Some(f.draft), body), true).unwrap();
+        let built = compose::build(&account, &compose::sender(&account, &[], None), &compose(Some(f.draft), body), true).unwrap();
         f.j.store
             .write(|tx| {
                 let id = store::queue_outbox(tx, AccountId(1), Some(f.draft), "blob", &built.message_id, &built.from, &built.recipients, None, 0)?;
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(sets[0].slots.iter().map(|s| s.state).collect::<Vec<_>>(), [SlotState::Pending; 3]);
 
         let account = f.j.store.read(|c| store::account(c, AccountId(1))).unwrap();
-        let built = compose::build(&account, &compose(Some(f.draft), &body(&f, &[0, 1, 2])), true).unwrap();
+        let built = compose::build(&account, &compose::sender(&account, &[], None), &compose(Some(f.draft), &body(&f, &[0, 1, 2])), true).unwrap();
         f.j.store
             .write(|tx| {
                 let id = store::queue_outbox(tx, AccountId(1), Some(f.draft), "blob", &built.message_id, &built.from, &built.recipients, None, 10)?;

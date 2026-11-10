@@ -1,6 +1,6 @@
-//! Gmail's vacation responder, read with the mail sign-in. Changing it
-//! needs `gmail.settings.basic`, a restricted scope Jolta doesn't ask for,
-//! so Jolta links to Gmail's own setting instead.
+//! Gmail's vacation responder and Send mail as addresses, read with the
+//! mail sign-in. Changing them needs `gmail.settings.basic`, a restricted
+//! scope Jolta doesn't ask for, so Jolta links to Gmail's own setting instead.
 
 use serde_json::Value;
 
@@ -8,13 +8,23 @@ use crate::calendar::sources::{http_client, provider_url};
 use crate::{Account, Error, Result, oauth};
 
 const VACATION: &str = "https://www.googleapis.com/gmail/v1/users/me/settings/vacation";
+const SEND_AS: &str = "https://www.googleapis.com/gmail/v1/users/me/settings/sendAs";
 
 /// `users.settings.vacation`. A refusal names the vacation responder, not
 /// the calendar as the calendar requests' errors do.
 pub async fn vacation(account: &Account) -> Result<Value> {
+    get(account, VACATION, "the vacation responder").await
+}
+
+/// `users.settings.sendAs.list`: the addresses the account sends mail as.
+pub async fn send_as(account: &Account) -> Result<Value> {
+    get(account, SEND_AS, "its Send mail as addresses").await
+}
+
+async fn get(account: &Account, url: &str, what: &str) -> Result<Value> {
     let token = oauth::access_token(account).await?;
     let resp = http_client(true)?
-        .get(provider_url(VACATION, "www.googleapis.com")?)
+        .get(provider_url(url, "www.googleapis.com")?)
         .bearer_auth(&token)
         .send()
         .await
@@ -26,7 +36,7 @@ pub async fn vacation(account: &Account) -> Result<Value> {
         200 => Ok(body),
         401 => Err(Error::Auth(format!("Google refused the sign-in for {}. Sign in again.", account.address))),
         _ => Err(Error::Other(format!(
-            "Gmail didn't give the vacation responder for {} ({status}: {})",
+            "Gmail didn't give {what} for {} ({status}: {})",
             account.address,
             body["error"]["message"].as_str().unwrap_or("no reason given")
         ))),

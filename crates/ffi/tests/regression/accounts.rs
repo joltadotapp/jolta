@@ -28,7 +28,7 @@ fn removing_an_account_leaves_nothing_behind() {
     let thread = app.thread_of(message);
     app.core.perform(ThreadAction::Archive, vec![thread.0], ListContext::Inbox).unwrap();
     app.core.perform(ThreadAction::Snooze { until: now() + 86_400 }, vec![app.thread_of(other).0], ListContext::Inbox).unwrap();
-    let mut draft = app.core.new_compose().unwrap();
+    let mut draft = app.core.new_compose(None).unwrap();
     draft.account_id = Some(gone.id.0);
     draft.subject = "Unfinished".into();
     app.core.save_draft(draft).unwrap();

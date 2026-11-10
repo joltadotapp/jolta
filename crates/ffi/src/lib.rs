@@ -247,7 +247,8 @@ pub enum CoreEvent {
     AgentDraft { draft_id: i64, subject: String },
     /// An agent used a tool; the audit log changed.
     AgentActivity,
-    SendFailed { message: String },
+    /// `gave_up`: Jolta won't try again; the message is back in Drafts.
+    SendFailed { message: String, gave_up: bool },
     /// The server refused an action for good; the change was rolled back.
     ActionFailed { message: String },
     /// A local model's download moved on, finished, stopped or was removed.
@@ -281,6 +282,8 @@ pub struct ComposeFile {
 #[derive(uniffi::Record, Clone)]
 pub struct ComposeData {
     pub account_id: Option<i64>,
+    /// The alias of the account it is from; None for the account's own address.
+    pub from: Option<String>,
     pub to: String,
     pub cc: String,
     pub bcc: String,
@@ -292,6 +295,39 @@ pub struct ComposeData {
     pub attachments: Vec<ComposeFile>,
     pub draft_id: Option<i64>,
     pub image_size: ImageSizeChoice,
+}
+
+/// One address a message can be from.
+#[derive(uniffi::Record, Clone)]
+pub struct MailSender {
+    pub account_id: i64,
+    /// None for the account's own address.
+    pub alias: Option<String>,
+    pub address: String,
+    /// The name it sends with.
+    pub name: String,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct SenderChoice {
+    pub account_id: i64,
+    pub alias: Option<String>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct AliasInfo {
+    pub id: i64,
+    pub address: String,
+    /// Empty sends with the account's name.
+    pub name: String,
+    /// True when it came from Gmail or Microsoft 365.
+    pub from_provider: bool,
+}
+
+impl From<store::Alias> for AliasInfo {
+    fn from(a: store::Alias) -> Self {
+        AliasInfo { id: a.id, address: a.address, name: a.display_name, from_provider: a.source == store::AliasSource::Provider }
+    }
 }
 
 /// The size pasted images go out at: the longest side at most 320, 640 or
@@ -341,6 +377,7 @@ impl From<Compose> for ComposeData {
     fn from(c: Compose) -> Self {
         ComposeData {
             account_id: c.account.map(|a| a.0),
+            from: c.from,
             to: c.to,
             cc: c.cc,
             bcc: c.bcc,
@@ -364,6 +401,7 @@ impl From<ComposeData> for Compose {
     fn from(c: ComposeData) -> Self {
         Compose {
             account: c.account_id.map(AccountId),
+            from: c.from,
             to: c.to,
             cc: c.cc,
             bcc: c.bcc,
@@ -993,7 +1031,7 @@ impl Core {
                 Event::AgentRequest { agent, name } => CoreEvent::AgentRequest { agent_id: agent, name },
                 Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
                 Event::AgentActivity => CoreEvent::AgentActivity,
-                Event::SendFailed(message) => CoreEvent::SendFailed { message },
+                Event::SendFailed { message, gave_up } => CoreEvent::SendFailed { message, gave_up },
                 Event::CalendarsChanged(ids) => {
                     *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     CoreEvent::CalendarChanged { calendar_ids: ids.into_iter().map(|c| c.0).collect() }
@@ -1046,16 +1084,68 @@ impl Core {
         Ok(self.running_engine()?.undo(&ops)?)
     }
 
-    /// A blank message from the first account that can send.
-    pub fn new_compose(&self) -> Result<ComposeData> {
-        let account = self
-            .jolta
-            .store
-            .read(store::accounts)?
-            .into_iter()
-            .find(|a| !a.smtp_host.is_empty() && a.provider_label() != "Synthetic");
-        let body = account.as_ref().map(|a| compose::opening(&a.signature, "")).unwrap_or_default();
-        Ok(Compose { account: account.map(|a| a.id), body, ..Default::default() }.into())
+    /// A blank message. From the account whose mailbox is in view, or else
+    /// from the default sender.
+    pub fn new_compose(&self, mailbox_id: Option<i64>) -> Result<ComposeData> {
+        Ok(self.jolta.store.read(|c| compose::new_message(c, mailbox_id.map(MailboxId)))?.into())
+    }
+
+    /// Who a message can be from: each account that can send, followed by
+    /// its aliases.
+    pub fn senders(&self) -> Result<Vec<MailSender>> {
+        Ok(self.jolta.store.read(|c| {
+            let mut out = Vec::new();
+            for a in store::accounts(c)?.into_iter().filter(jolta_core::Account::can_send) {
+                let aliases = store::aliases(c, a.id)?;
+                out.push(MailSender { account_id: a.id.0, alias: None, address: a.address.clone(), name: a.display_name.clone() });
+                out.extend(aliases.into_iter().map(|x| {
+                    let name = if x.display_name.is_empty() { a.display_name.clone() } else { x.display_name };
+                    MailSender { account_id: a.id.0, alias: Some(x.address.clone()), address: x.address, name }
+                }));
+            }
+            Ok(out)
+        })?)
+    }
+
+    /// Who new messages are from in views that mix accounts.
+    pub fn default_sender(&self) -> Result<Option<SenderChoice>> {
+        let chosen = self.jolta.store.read(compose::default_sender)?;
+        Ok(chosen.map(|s| SenderChoice { account_id: s.account.0, alias: s.alias }))
+    }
+
+    pub fn set_default_sender(&self, sender: SenderChoice) -> Result<()> {
+        let choice = store::SenderChoice { account: AccountId(sender.account_id), alias: sender.alias };
+        Ok(self.jolta.store.write(|tx| store::set_default_sender(tx, &choice))?)
+    }
+
+    /// The account's aliases, as last read from its provider or added by
+    /// the user.
+    pub fn aliases(&self, account_id: i64) -> Result<Vec<AliasInfo>> {
+        Ok(self.jolta.store.read(|c| store::aliases(c, AccountId(account_id)))?.into_iter().map(Into::into).collect())
+    }
+
+    /// Reads the account's aliases from Gmail or Microsoft 365 again.
+    pub async fn refresh_aliases(&self, account_id: i64) -> Result<Vec<AliasInfo>> {
+        let jolta = self.jolta.clone();
+        self.runtime
+            .spawn(async move { jolta_core::send_as::refresh(&jolta, AccountId(account_id)).await })
+            .await
+            .map_err(|e| CoreError::Failed { message: e.to_string() })??;
+        self.aliases(account_id)
+    }
+
+    pub fn add_alias(&self, account_id: i64, address: String, name: String) -> Result<AliasInfo> {
+        Ok(self.jolta.store.write(|tx| store::add_alias(tx, AccountId(account_id), &address, &name))?.into())
+    }
+
+    pub fn rename_alias(&self, alias_id: i64, name: String) -> Result<()> {
+        Ok(self.jolta.store.write(|tx| store::rename_alias(tx, alias_id, &name))?)
+    }
+
+    /// Removes an alias; one from the provider stays away when its list is
+    /// read again.
+    pub fn remove_alias(&self, alias_id: i64) -> Result<()> {
+        Ok(self.jolta.store.write(|tx| store::remove_alias(tx, alias_id))?)
     }
 
     /// The body with the old sender's signature swapped for the new one's.
@@ -1116,7 +1206,8 @@ impl Core {
             None => self.jolta.store.read(store::accounts)?.into_iter().next(),
         };
         let Some(account) = account else { return Ok(Vec::new()) };
-        Ok(compose::size_options(&account, &c)?
+        let from = self.jolta.store.read(|conn| compose::sender_from_store(conn, &account, c.from.as_deref()))?;
+        Ok(compose::size_options(&account, &from, &c)?
             .into_iter()
             .map(|o| MessageSize { size: o.size.into(), longest_side: o.size.longest_side(), bytes: o.bytes, fits: o.fits })
             .collect())

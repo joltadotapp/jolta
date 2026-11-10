@@ -68,6 +68,9 @@ pub async fn send(account: &Account, sender: &str, recipients: &[String], raw: &
         recipients.iter().map(|r| r.parse()).collect::<std::result::Result<_, _>>().map_err(smtp_error)?,
     )
     .map_err(smtp_error)?;
-    transport.send_raw(&envelope, raw).await.map_err(smtp_error)?;
+    transport
+        .send_raw(&envelope, raw)
+        .await
+        .map_err(|e| if e.is_permanent() { Error::Refused(format!("{} said: {e}", account.smtp_host)) } else { smtp_error(e) })?;
     Ok(())
 }

@@ -30,18 +30,18 @@ pub fn save_draft(conn: &Connection, c: &Compose) -> Result<i64> {
             conn.execute(
                 "UPDATE draft SET account_id = ?2, to_addrs = ?3, cc_addrs = ?4, bcc_addrs = ?5, subject = ?6,
                    body = ?7, in_reply_to = ?8, refs = ?9, replying_to = ?10, attachments = ?11,
-                   state = 'editing', dirty = 1, updated = ?12, image_size = ?13
+                   state = 'editing', dirty = 1, updated = ?12, image_size = ?13, from_addr = ?14
                  WHERE id = ?1",
-                params![id, c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name()],
+                params![id, c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name(), c.from],
             )?;
             Ok(id)
         }
         None => {
             conn.execute(
                 "INSERT INTO draft (account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs,
-                                    replying_to, attachments, dirty, updated, image_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12)",
-                params![c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name()],
+                                    replying_to, attachments, dirty, updated, image_size, from_addr)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13)",
+                params![c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name(), c.from],
             )?;
             Ok(conn.last_insert_rowid())
         }
@@ -62,11 +62,12 @@ fn draft_row(r: &Row) -> rusqlite::Result<Compose> {
         replying_to: r.get(9)?,
         attachments: decode_attachments(&r.get::<_, String>(10)?),
         image_size: ImageSize::from_name(&r.get::<_, String>(11)?),
+        from: r.get(12)?,
     })
 }
 
 const DRAFT_COLS: &str =
-    "id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs, replying_to, attachments, image_size";
+    "id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs, replying_to, attachments, image_size, from_addr";
 
 pub fn draft(conn: &Connection, id: i64) -> Result<Option<Compose>> {
     Ok(conn.query_row(&format!("SELECT {DRAFT_COLS} FROM draft WHERE id = ?1"), [id], draft_row).optional()?)
@@ -303,7 +304,14 @@ pub fn outbox_sent(conn: &Connection, item: &OutboxItem) -> Result<()> {
     Ok(())
 }
 
+/// Records a failed attempt. Giving up puts the message back in Drafts.
 pub fn outbox_failed(conn: &Connection, id: i64, error: &str, give_up: bool) -> Result<()> {
+    if give_up {
+        conn.execute(
+            "UPDATE draft SET state = 'editing', dirty = 1, updated = ?2 WHERE id = (SELECT draft_id FROM outbox WHERE id = ?1) AND state = 'sending'",
+            params![id, now()],
+        )?;
+    }
     conn.execute(
         "UPDATE outbox SET attempts = attempts + 1, error = ?2,
            state = CASE WHEN ?3 THEN 'failed' ELSE state END,
@@ -361,6 +369,26 @@ mod tests {
                 assert_ne!(newer, taken_back, "the token is not given out again");
                 assert_eq!(cancel_send(c, taken_back)?, None, "a stale Undo send takes back nothing");
                 assert_eq!(scheduled(c, 0)?.len(), 1, "the newer message still waits");
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A message the outbox gives up on goes back to Drafts, to be fixed
+    /// and sent again, instead of staying as being sent for good.
+    #[test]
+    fn a_message_given_up_on_goes_back_to_drafts() {
+        let (dir, store) = store();
+        store
+            .write(|c| {
+                let id = save_draft(c, &compose("Refused"))?;
+                let queued = queue_outbox(c, AccountId(1), Some(id), "blob", "<m@x>", "a@x", &["b@x".into()], None, 0)?;
+                outbox_failed(c, queued, "refused", false)?;
+                assert!(drafts(c)?.is_empty(), "a message tried again stays out of Drafts");
+                outbox_failed(c, queued, "refused", true)?;
+                assert_eq!(drafts(c)?.iter().map(|d| d.subject.as_str()).collect::<Vec<_>>(), ["Refused"]);
+                assert_eq!(dirty_drafts(c, AccountId(1))?.len(), 1, "and goes to the server's Drafts");
                 Ok(())
             })
             .unwrap();

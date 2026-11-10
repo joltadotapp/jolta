@@ -23,9 +23,8 @@ struct ComposeView: View {
         })
     }
 
-    private var senders: [AccountInfo] {
-        model.accounts.map(\.account).filter { $0.provider != "Synthetic" }
-    }
+    /// Each account that can send, with its aliases.
+    @State private var senders: [MailSender] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -63,9 +62,10 @@ struct ComposeView: View {
                 if senders.count > 1 {
                     FieldRow(label: "From") {
                         Picker("", selection: sender) {
-                            ForEach(senders, id: \.id) { Text($0.address).tag(Optional($0.id)) }
+                            SenderMenuItems(senders: senders)
                         }
                         .labelsHidden()
+                        .accessibilityIdentifier("compose-from")
                         .pickerStyle(.menu)
                         .fixedSize()
                     }
@@ -199,6 +199,7 @@ struct ComposeView: View {
             }
         }
         .onDisappear { saveTask?.cancel() }
+        .task(id: "\(model.accounts.map(\.id)) \(model.sendersRevision)") { senders = (try? model.core.senders()) ?? [] }
     }
 
     /// ⌘J: opens the AI bar, or writes again from the same instruction.
@@ -218,13 +219,20 @@ struct ComposeView: View {
         scheduleSave()
     }
 
-    /// The From account; changing it swaps the signature in the body.
-    private var sender: Binding<Int64?> {
-        Binding(get: { model.compose?.accountId }, set: { account in
-            guard let compose = model.compose, compose.accountId != account else { return }
-            let body = (try? model.core.swapSignature(body: compose.body, fromAccount: compose.accountId, toAccount: account)) ?? compose.body
-            model.compose?.accountId = account
-            model.compose?.body = body
+    /// The From account or alias; another account swaps the signature in the body.
+    private var sender: Binding<SenderKey?> {
+        Binding(get: {
+            guard let compose = model.compose, let account = compose.accountId else { return nil }
+            // A draft from an alias removed since sends from the account.
+            let key = SenderKey(accountId: account, alias: compose.from)
+            return senders.contains { SenderKey($0) == key } ? key : SenderKey(accountId: account, alias: nil)
+        }, set: { key in
+            guard let key, let compose = model.compose else { return }
+            if compose.accountId != key.accountId {
+                model.compose?.body = (try? model.core.swapSignature(body: compose.body, fromAccount: compose.accountId, toAccount: key.accountId)) ?? compose.body
+            }
+            model.compose?.accountId = key.accountId
+            model.compose?.from = senders.first { SenderKey($0) == key }?.alias
             scheduleSave()
         })
     }
@@ -304,7 +312,7 @@ private struct SendButton: View {
 }
 
 extension ComposeData {
-    static let blank = ComposeData(accountId: nil, to: "", cc: "", bcc: "", subject: "", body: "", inReplyTo: nil,
+    static let blank = ComposeData(accountId: nil, from: nil, to: "", cc: "", bcc: "", subject: "", body: "", inReplyTo: nil,
                                    references: [], replyingTo: nil, attachments: [], draftId: nil, imageSize: .actual)
 
     var isEmpty: Bool {
