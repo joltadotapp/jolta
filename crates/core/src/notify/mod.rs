@@ -2,12 +2,27 @@
 //! is worth a notification and words it; each shell only delivers.
 
 pub mod planner;
+mod service;
 
-use rusqlite::{Connection, params};
+use std::collections::HashSet;
 
+use chrono::{DateTime, Duration, Utc};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::json;
+
+pub use planner::{Candidate, Reminder};
+pub use service::Notices;
+
+use crate::calendar::{Bounds, EventData, series, tz};
 use crate::model::*;
 use crate::search::NOTIFICATION;
-use crate::{Result, compose};
+use crate::{Result, compose, search};
+
+/// New mail older than this is never announced: mail moved back into the
+/// inbox keeps its old arrival time.
+const MAX_AGE: i64 = 24 * 3600;
+/// An invitation for a meeting starting this soon is urgent.
+const MEETING_SOON: i64 = 4 * 3600;
 
 /// SQL: the message `alias` is from one of the user's addresses.
 fn from_me(alias: &str) -> String {
@@ -169,4 +184,162 @@ pub enum Notice {
     Show(Notification),
     Withdraw(Vec<String>),
     Badge(u32),
+}
+
+impl Settings {
+    /// The settings in the store; the defaults until the user picks.
+    pub fn read(conn: &Connection) -> Result<Settings> {
+        let raw: Option<String> = conn.query_row("SELECT value FROM setting WHERE key = 'notify'", [], |r| r.get(0)).optional()?;
+        let Some(v) = raw.and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok()) else { return Ok(Settings::default()) };
+        let defaults = Settings::default();
+        Ok(Settings {
+            scope: match v["scope"].as_str() {
+                Some("all") => Scope::All,
+                Some("vips") => Scope::Vips,
+                Some("none") => Scope::Nothing,
+                Some("important") => Scope::Important,
+                _ => defaults.scope,
+            },
+            sound: v["sound"].as_bool().unwrap_or(defaults.sound),
+            badge: match v["badge"].as_str() {
+                Some("all") => Badge::All,
+                Some("none") => Badge::Nothing,
+                Some("important") => Badge::Important,
+                _ => defaults.badge,
+            },
+        })
+    }
+
+    pub fn save(&self, conn: &Connection) -> Result<()> {
+        let scope = match self.scope {
+            Scope::Important => "important",
+            Scope::All => "all",
+            Scope::Vips => "vips",
+            Scope::Nothing => "none",
+        };
+        let badge = match self.badge {
+            Badge::All => "all",
+            Badge::Important => "important",
+            Badge::Nothing => "none",
+        };
+        let value = json!({"scope": scope, "sound": self.sound, "badge": badge}).to_string();
+        conn.execute("INSERT INTO setting (key, value) VALUES ('notify', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1", [value])?;
+        Ok(())
+    }
+
+    /// Moves the Mac app's old "New mail banners" value (`all`, `vips`,
+    /// `none`) in, unless settings are stored already. Only VIPs and None
+    /// were chosen on purpose and stay; Every new message was the old
+    /// default and becomes Important mail, the default now. Returns whether
+    /// it moved anything.
+    pub fn migrate(conn: &Connection, old: &str) -> Result<bool> {
+        let stored: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM setting WHERE key = 'notify')", [], |r| r.get(0))?;
+        if stored {
+            return Ok(false);
+        }
+        let scope = match old {
+            "vips" => Scope::Vips,
+            "none" => Scope::Nothing,
+            _ => Scope::Important,
+        };
+        Settings { scope, ..Settings::default() }.save(conn)?;
+        Ok(true)
+    }
+}
+
+/// The Dock badge's number: unread inbox conversations, all of them or
+/// those `is:important` finds.
+pub fn badge_count(conn: &Connection, settings: &Settings) -> Result<u32> {
+    let query = match settings.badge {
+        Badge::Nothing => return Ok(0),
+        Badge::All => "in:inbox is:unread",
+        Badge::Important => "in:inbox is:unread is:important",
+    };
+    search::query_count(conn, &search::parse(query)?)
+}
+
+/// The messages among `ids` that may still be announced, as they are now:
+/// unread, in an inbox, not from the user, and arrived within a day.
+/// `sorting` says whether AI sorting is running, so mail it hasn't sorted
+/// yet waits for it.
+pub fn candidates(conn: &Connection, ids: &[MessageId], now: DateTime<Utc>, sorting: bool) -> Result<Vec<Candidate>> {
+    let sql = format!(
+        "SELECT m.thread_id, m.account_id, CASE m.from_name WHEN '' THEN m.from_addr ELSE m.from_name END, m.from_addr,
+                m.subject, m.snippet, m.date, {important},
+                EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr),
+                {to_me}, {cc_me}, {NOTIFICATION},
+                EXISTS (SELECT 1 FROM message f WHERE f.id = (SELECT min(id) FROM message WHERE thread_id = m.thread_id) AND {first_mine}),
+                (SELECT i.timing FROM invitation i WHERE i.message_id = m.id AND i.method IN ('REQUEST', 'CANCEL') AND i.timing != '' LIMIT 1),
+                EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id)
+         FROM message m
+         WHERE m.id = ?1 AND (m.flags & ?2) = 0 AND m.date >= ?3 AND NOT {mine}
+           AND EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id
+                       WHERE mm.message_id = m.id AND b.role = 'inbox')",
+        important = important(conn)?,
+        to_me = mine_in("m.to_addrs"),
+        cc_me = mine_in("m.cc_addrs"),
+        first_mine = from_me("f"),
+        mine = from_me("m"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut out = Vec::new();
+    for &id in ids {
+        let row = stmt
+            .query_row(params![id, Flags::SEEN, now.timestamp() - MAX_AGE], |r| {
+                let vip: bool = r.get(8)?;
+                let (to_me, cc_me, automated, started): (bool, bool, bool, bool) = (r.get(9)?, r.get(10)?, r.get(11)?, r.get(12)?);
+                let invitation: Option<String> = r.get(13)?;
+                let important: bool = r.get(7)?;
+                let sorted: bool = r.get(14)?;
+                Ok(Candidate {
+                    message: id,
+                    thread: r.get(0)?,
+                    account: r.get(1)?,
+                    sender: r.get(2)?,
+                    sender_address: r.get(3)?,
+                    subject: r.get(4)?,
+                    first_line: r.get(5)?,
+                    arrived: r.get(6)?,
+                    important,
+                    vip,
+                    urgent: (vip && (to_me || cc_me))
+                        || (to_me && started && !automated)
+                        || invitation.is_some_and(|t| meeting_soon(&t, now)),
+                    sorting: sorting && !important && !sorted,
+                })
+            })
+            .optional()?;
+        out.extend(row);
+    }
+    Ok(out)
+}
+
+/// The messages among `ids` still unread in an inbox.
+pub fn still_waiting(conn: &Connection, ids: &[MessageId]) -> Result<HashSet<MessageId>> {
+    let list = serde_json::to_string(&ids.iter().map(|m| m.0).collect::<Vec<_>>()).expect("numbers");
+    let mut stmt = conn.prepare_cached(
+        "SELECT m.id FROM message m WHERE m.id IN (SELECT value FROM json_each(?1)) AND (m.flags & ?2) = 0
+           AND EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id
+                       WHERE mm.message_id = m.id AND b.role = 'inbox')",
+    )?;
+    let ids = stmt.query_map(params![list, Flags::SEEN], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// An invitation's event, or for a series the occurrence it shows next,
+/// starts within `MEETING_SOON`.
+fn meeting_soon(timing: &str, now: DateTime<Utc>) -> bool {
+    let Ok(event) = serde_json::from_str::<EventData>(timing) else { return false };
+    let here = tz::here();
+    let span = if event.recurrence.is_some() { series::shown_occurrence(&event, &[], now, here).map(|o| o.span) } else { Some(event.span) };
+    match span.map(|s| s.bounds(here)) {
+        Some(Bounds::Utc { start, .. }) => start >= now && start <= now + Duration::seconds(MEETING_SOON),
+        _ => false,
+    }
+}
+
+/// The conversation a notification's id names: "mail-12", "snooze-12", "noreply-12".
+pub fn thread_of(id: &str) -> Option<ThreadId> {
+    let (kind, thread) = id.split_once('-')?;
+    matches!(kind, "mail" | "snooze" | "noreply").then(|| thread.parse().ok().map(ThreadId)).flatten()
 }

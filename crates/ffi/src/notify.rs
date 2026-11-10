@@ -2,6 +2,7 @@
 //! sends as `CoreEvent::Notice`, and what a banner's buttons do. The app
 //! only delivers; every decision is the core's (`jolta_core::notify`).
 
+use jolta_core::actions::{Action, Context};
 use jolta_core::notify;
 
 use crate::{Core, Result};
@@ -72,44 +73,135 @@ pub enum Notice {
 
 impl From<notify::Notice> for Notice {
     fn from(n: notify::Notice) -> Notice {
-        let _ = n;
-        todo!()
+        match n {
+            notify::Notice::Show(n) => Notice::Show {
+                content: NoticeContent {
+                    id: n.id,
+                    group: n.group,
+                    title: n.title,
+                    subtitle: n.subtitle,
+                    body: n.body,
+                    level: match n.level {
+                        notify::Level::Quiet => NoticeLevel::Quiet,
+                        notify::Level::Normal => NoticeLevel::Normal,
+                        notify::Level::Urgent => NoticeLevel::Urgent,
+                    },
+                    sound: n.sound,
+                    thread_id: match n.open {
+                        notify::Target::Thread(t) => Some(t.0),
+                        notify::Target::UnifiedInbox => None,
+                    },
+                    actions: n.actions.into_iter().map(Into::into).collect(),
+                    account_id: n.account.map(|a| a.0),
+                    arrived: n.arrived,
+                },
+            },
+            notify::Notice::Withdraw(ids) => Notice::Withdraw { ids },
+            notify::Notice::Badge(count) => Notice::Badge { count },
+        }
+    }
+}
+
+impl From<notify::Action> for NoticeAction {
+    fn from(a: notify::Action) -> NoticeAction {
+        match a {
+            notify::Action::Archive => NoticeAction::Archive,
+            notify::Action::MarkRead => NoticeAction::MarkRead,
+            notify::Action::Reply => NoticeAction::Reply,
+        }
+    }
+}
+
+impl From<notify::Settings> for NotifySettings {
+    fn from(s: notify::Settings) -> NotifySettings {
+        NotifySettings {
+            scope: match s.scope {
+                notify::Scope::Important => NotifyScope::Important,
+                notify::Scope::All => NotifyScope::AllNewMail,
+                notify::Scope::Vips => NotifyScope::Vips,
+                notify::Scope::Nothing => NotifyScope::Nothing,
+            },
+            sound: s.sound,
+            badge: match s.badge {
+                notify::Badge::All => BadgeScope::AllUnread,
+                notify::Badge::Important => BadgeScope::ImportantUnread,
+                notify::Badge::Nothing => BadgeScope::Nothing,
+            },
+        }
+    }
+}
+
+impl From<NotifySettings> for notify::Settings {
+    fn from(s: NotifySettings) -> notify::Settings {
+        notify::Settings {
+            scope: match s.scope {
+                NotifyScope::Important => notify::Scope::Important,
+                NotifyScope::AllNewMail => notify::Scope::All,
+                NotifyScope::Vips => notify::Scope::Vips,
+                NotifyScope::Nothing => notify::Scope::Nothing,
+            },
+            sound: s.sound,
+            badge: match s.badge {
+                BadgeScope::AllUnread => notify::Badge::All,
+                BadgeScope::ImportantUnread => notify::Badge::Important,
+                BadgeScope::Nothing => notify::Badge::Nothing,
+            },
+        }
     }
 }
 
 #[uniffi::export]
 impl Core {
     pub fn notify_settings(&self) -> Result<NotifySettings> {
-        todo!()
+        Ok(self.jolta.store.read(notify::Settings::read)?.into())
     }
 
     pub fn set_notify_settings(&self, settings: NotifySettings) -> Result<()> {
-        let _ = settings;
-        todo!()
+        let settings: notify::Settings = settings.into();
+        self.jolta.store.write(|tx| settings.save(tx))?;
+        self.tell_engine_settings_changed()
     }
 
     /// Moves the setting the app kept before ("all", "vips", "none") into
     /// the core, unless the core has one. Returns whether it did.
     pub fn migrate_new_mail_banners(&self, old: String) -> Result<bool> {
-        let _ = old;
-        todo!()
+        let moved = self.jolta.store.write(|tx| notify::Settings::migrate(tx, &old))?;
+        if moved {
+            self.tell_engine_settings_changed()?;
+        }
+        Ok(moved)
     }
 
     /// The app became the active app, or stopped being it.
     pub fn set_foreground(&self, active: bool) {
-        let _ = active;
-        todo!()
+        if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            engine.notices().set_foreground(active);
+        }
     }
 
     /// A banner's Archive or Mark as Read. Returns the tokens for `undo`;
     /// Reply and notifications that aren't one conversation's change nothing.
     pub fn notice_action(&self, id: String, action: NoticeAction) -> Result<Vec<i64>> {
-        let _ = (id, action);
-        todo!()
+        let Some(thread) = notify::thread_of(&id) else { return Ok(Vec::new()) };
+        let action = match action {
+            NoticeAction::Archive => Action::Archive,
+            NoticeAction::MarkRead => Action::MarkRead,
+            NoticeAction::Reply => return Ok(Vec::new()),
+        };
+        Ok(self.running_engine()?.perform(&[thread], action, Context::Inbox)?.into_iter().map(|op| op.0).collect())
     }
 
     /// The Dock badge's number now.
     pub fn badge_count(&self) -> Result<u32> {
-        todo!()
+        Ok(self.jolta.store.read(|c| notify::badge_count(c, &notify::Settings::read(c)?))?)
+    }
+}
+
+impl Core {
+    fn tell_engine_settings_changed(&self) -> Result<()> {
+        if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            engine.notices().settings_changed()?;
+        }
+        Ok(())
     }
 }

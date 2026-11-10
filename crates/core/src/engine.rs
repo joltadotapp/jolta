@@ -15,11 +15,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 use crate::actions::{self, Action, Context};
+use crate::ai::background::Background;
 use crate::calendar::scheduler::Scheduler;
 use crate::compose::{self, Compose};
 use crate::graph::Graph;
 use crate::imap::{self, Caps, Scope, Session, SyncOptions};
 use crate::model::*;
+use crate::notify::{Notices, Reminder};
 use crate::store::{self, OpId};
 use crate::{Jolta, Result, mime};
 use futures::TryStreamExt;
@@ -37,8 +39,6 @@ enum Link {
 pub const MAX_ATTEMPTS: u32 = 5;
 /// How long a sent message waits in the outbox so it can be taken back.
 pub const UNDO_SEND_SECONDS: i64 = 10;
-/// Mail that arrived longer ago than this is not announced as new.
-const NEW_MAIL_WINDOW: i64 = 15 * 60;
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -46,7 +46,8 @@ pub enum Event {
     SyncStarted(AccountId),
     SyncFinished(AccountId),
     SyncFailed(AccountId, String),
-    NewMail { account: AccountId, thread: ThreadId, from: String, subject: String, vip: bool },
+    /// Show or withdraw a notification, or set the badge (`notify`).
+    Notice(crate::notify::Notice),
     ActionFailed(String),
     Sent { account: AccountId, subject: String },
     Woke { account: AccountId, thread: ThreadId, subject: String },
@@ -106,13 +107,35 @@ pub struct Engine {
     runtime: tokio::runtime::Handle,
     wakes: Mutex<HashMap<AccountId, Arc<Wake>>>,
     calendars: Arc<Scheduler>,
+    notices: Arc<Notices>,
+    background: Mutex<Option<Arc<Background>>>,
 }
 
 impl Engine {
     /// Starts a worker and an IDLE task for every account that has a server.
     pub fn start(jolta: Jolta, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
+        let notices = Notices::start(jolta.clone(), sink.clone(), &runtime)?;
+        // Every change to stored mail may take a notification back or change the badge.
+        let sink: Sink = {
+            let notices = notices.clone();
+            Arc::new(move |event| {
+                let lists = matches!(event, Event::ListsChanged);
+                sink(event);
+                if lists {
+                    notices.changed();
+                }
+            })
+        };
         let calendars = Scheduler::start(jolta.clone(), sink.clone(), &runtime);
-        let engine = Arc::new(Engine { jolta, sink, runtime, wakes: Mutex::new(HashMap::new()), calendars });
+        let engine = Arc::new(Engine {
+            jolta,
+            sink,
+            runtime,
+            wakes: Mutex::new(HashMap::new()),
+            calendars,
+            notices,
+            background: Mutex::new(None),
+        });
         let weak = Arc::downgrade(&engine);
         engine.calendars.on_mail(Box::new(move |account| {
             if let Some(engine) = weak.upgrade() {
@@ -397,6 +420,16 @@ impl Engine {
         &self.calendars
     }
 
+    pub fn notices(&self) -> &Arc<Notices> {
+        &self.notices
+    }
+
+    /// AI's background queue, which sorts every new inbox message.
+    pub fn set_background(&self, background: Arc<Background>) {
+        self.notices.set_background(background.clone());
+        *self.background.lock().unwrap_or_else(|e| e.into_inner()) = Some(background);
+    }
+
     /// Syncs every account now, all mailboxes, and every shown calendar.
     pub fn sync_now(&self) {
         self.calendars.sync_now();
@@ -407,7 +440,6 @@ impl Engine {
     }
 
     async fn work(self: Arc<Self>, mut account: Account, wake: Arc<Wake>) {
-        let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let mut conn: Option<Link> = None;
         let poll = (account.kind == AccountKind::Graph).then_some(GRAPH_POLL);
         let mut backoff = Backoff::default();
@@ -431,7 +463,7 @@ impl Engine {
                 _ => {}
             }
             let round_start = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            let failed = match self.round(&account, &wake, &mut conn, started).await {
+            let failed = match self.round(&account, &wake, &mut conn).await {
                 Ok(()) => {
                     backoff = Backoff::default();
                     false
@@ -479,7 +511,7 @@ impl Engine {
     }
 
     /// One pass: connect if needed, send ops, sync.
-    async fn round(&self, account: &Account, wake: &Wake, conn: &mut Option<Link>, started: i64) -> Result<()> {
+    async fn round(&self, account: &Account, wake: &Wake, conn: &mut Option<Link>) -> Result<()> {
         if conn.is_none() {
             *conn = Some(if account.kind == AccountKind::Graph {
                 let graph = Graph::new(account)?;
@@ -585,11 +617,21 @@ impl Engine {
         }
         self.read_replies(account.id).await;
         self.file_responses(account.id).await;
-        // A reply or an invitation may book a held time.
-        if !report.new_messages.is_empty() {
-            self.calendars.check_holds();
+        if report.new_messages.is_empty() {
+            return Ok(());
         }
-        self.announce(account.id, report.new_messages, started).await
+        // A reply or an invitation may book a held time.
+        self.calendars.check_holds();
+        let (jolta, notices, ids) = (self.jolta.clone(), self.notices.clone(), report.new_messages);
+        let background = self.background.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(background) = background {
+                background.arrived(&jolta, &ids);
+            }
+            notices.arrived(&ids);
+        })
+        .await;
+        Ok(())
     }
 
     /// Takes the guests' answers to meetings this account organizes in a
@@ -634,6 +676,7 @@ impl Engine {
         }
         if !fired.is_empty() {
             (self.sink)(Event::ListsChanged);
+            self.notices.remind(Reminder::NoReply, fired.into_iter().map(|(thread, subject)| (account, thread, subject)).collect());
         }
         Ok(())
     }
@@ -642,6 +685,7 @@ impl Engine {
     async fn wake_snoozed(&self, account: AccountId) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let due = self.jolta.store.read_async(move |c| store::due_snoozes(c, account, now)).await?;
+        let mut woke = Vec::new();
         for (id, thread) in due {
             let subject: Option<String> = self
                 .jolta
@@ -657,9 +701,13 @@ impl Engine {
                 })
                 .await?;
             if let Some(subject) = subject {
-                (self.sink)(Event::Woke { account, thread, subject });
+                (self.sink)(Event::Woke { account, thread, subject: subject.clone() });
+                woke.push((account, thread, subject));
             }
             (self.sink)(Event::ListsChanged);
+        }
+        if !woke.is_empty() {
+            self.notices.remind(Reminder::Snooze, woke);
         }
         Ok(())
     }
@@ -810,39 +858,6 @@ impl Engine {
         }
         (self.sink)(Event::ListsChanged);
         Ok(Some(drafts_box.id))
-    }
-
-    /// Tells the app about new, unread inbox mail that arrived after launch.
-    async fn announce(&self, account: AccountId, ids: Vec<MessageId>, started: i64) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-        let fresh = self
-            .jolta
-            .store
-            .read_async(move |c| {
-                let mut stmt = c.prepare(
-                    "SELECT m.thread_id, CASE m.from_name WHEN '' THEN m.from_addr ELSE m.from_name END, m.subject,
-                            EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)
-                     FROM message m JOIN message_mailbox mm ON mm.message_id = m.id
-                     JOIN mailbox b ON b.id = mm.mailbox_id AND b.role = 'inbox'
-                     WHERE m.id = ?1 AND (m.flags & 1) = 0 AND m.date >= ?2",
-                )?;
-                let mut out = Vec::new();
-                for id in ids.iter().take(5) {
-                    if let Ok(row) = stmt.query_row(rusqlite::params![id, started - NEW_MAIL_WINDOW], |r| {
-                        Ok((r.get::<_, ThreadId>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?))
-                    }) {
-                        out.push(row);
-                    }
-                }
-                Ok(out)
-            })
-            .await?;
-        for (thread, from, subject, vip) in fresh {
-            (self.sink)(Event::NewMail { account, thread, from, subject, vip });
-        }
-        Ok(())
     }
 }
 
