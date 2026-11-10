@@ -770,8 +770,10 @@ final class AppModel {
         composeSession += 1
     }
 
+    /// A new message, from the account whose mailbox is in view.
     func startCompose() {
-        openCompose((try? core.newCompose()) ?? .blank)
+        let mailbox: Int64? = if case .mailbox(let id, _) = source { id } else { nil }
+        openCompose((try? core.newCompose(mailboxId: mailbox)) ?? .blank)
     }
 
     /// Edits the conversation's draft in compose, or reads the conversation

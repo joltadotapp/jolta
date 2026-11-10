@@ -260,6 +260,7 @@ struct Sidebar: View {
                                        selected: model.source == .mailbox(id: box.id, name: box.name), indent: 26) {
                                     model.source = .mailbox(id: box.id, name: box.name)
                                 }
+                                .accessibilityIdentifier("mailbox-\(section.account.address)/\(box.name)")
                                 .contextMenu {
                                     ListActions(model: model, list: .mailbox(id: box.id, name: box.name))
                                     if box.role != "inbox" {

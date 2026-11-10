@@ -29,7 +29,7 @@ struct SettingsView: View {
         let all = model?.accounts ?? []
         let accounts = all.map { a in
             Item(page: .account(a.id), title: a.title, icon: Self.icon(a.account.provider),
-                 keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove")
+                 keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove send mail as alias aliases from default sender new messages")
         }
         return [
             (nil, [
