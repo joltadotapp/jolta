@@ -91,6 +91,22 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(list.tableRows.firstMatch.isSelected, "the top one")
     }
 
+    /// A list switched to while calendar mode shows opens at its top once
+    /// mail mode is back, as any list switch does.
+    func testListSwitchedInCalendarOpensItsTop() throws {
+        let app = try launch()
+        let list = app.tables.firstMatch
+        XCTAssertTrue(list.tableRows.firstMatch.waitForExistence(timeout: 10), "the list shows")
+        app.typeKey("2", modifierFlags: .command)
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("Go to Sent")
+        XCTAssertTrue(paletteRow(app, "Go to Sent").waitForExistence(timeout: 5), "the palette offers Sent")
+        app.typeKey(.return, modifierFlags: [])
+        if !list.waitForExistence(timeout: 3) { app.typeKey("1", modifierFlags: .command) }
+        XCTAssertTrue(list.tableRows.firstMatch.waitForExistence(timeout: 5), "Sent shows its mail")
+        XCTAssertTrue(waitUntil { list.tableRows.firstMatch.isSelected }, "Sent opens at its top")
+    }
+
     /// Return right after launch opens the top conversation, as j does.
     func testReturnAtLaunchOpensTheTop() throws {
         let app = try launch()
