@@ -63,6 +63,21 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
     }
 
+    /// Launch opens no conversation, as opening one marks it read: the
+    /// unread count holds until the user opens something, and j opens the top.
+    func testLaunchOpensNothing() throws {
+        let app = try launch()
+        let unread = app.staticTexts.matching(NSPredicate(format: "value ENDSWITH ' unread' OR label ENDSWITH ' unread'")).firstMatch
+        XCTAssertTrue(unread.waitForExistence(timeout: 10), "the inbox shows its unread count")
+        let before = unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label
+        RunLoop.current.run(until: Date() + 3)
+        let after = unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label
+        XCTAssertEqual(after, before, "nothing is marked read at launch")
+        XCTAssertFalse(app.webViews.firstMatch.exists, "the reader shows no conversation")
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "j opens the top conversation")
+    }
+
     /// Mail that arrives at inbox zero stays unread and unopened until it is
     /// opened, so it can notify. The data folder also has an account on the
     /// local Dovecot (`scripts/test-servers.sh up`), and `scripts/ui-tests.sh`
@@ -172,7 +187,8 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(visible(app, "Lunch on Friday"), "typing in the palette didn't archive")
         app.typeKey(.escape, modifierFlags: [])
         app.typeKey("e", modifierFlags: [])
-        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
+        let row = app.tables.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", "Lunch on Friday", "Lunch on Friday")).firstMatch
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
     }
 
     /// The color of the empty list below the rows, as 0–255 sRGB channels,
