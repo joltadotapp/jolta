@@ -1,8 +1,11 @@
 //! New-mail notifications and the Dock badge. The core decides which mail
 //! is worth a notification and words it; each shell only delivers.
 
+pub mod planner;
+
 use rusqlite::{Connection, params};
 
+use crate::model::*;
 use crate::search::NOTIFICATION;
 use crate::{Result, compose};
 
@@ -81,4 +84,89 @@ pub fn fill_correspondents(conn: &Connection) -> Result<()> {
         note_correspondents(conn, &from, &to, &cc)?;
     }
     Ok(())
+}
+
+/// Which new inbox mail gets a notification while Jolta runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scope {
+    #[default]
+    Important,
+    All,
+    Vips,
+    Nothing,
+}
+
+/// What the Dock badge counts: unread inbox conversations, all of them or
+/// the important ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Badge {
+    All,
+    #[default]
+    Important,
+    Nothing,
+}
+
+/// Settings › General › Notifications, kept in the `setting` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settings {
+    pub scope: Scope,
+    pub sound: bool,
+    pub badge: Badge,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings { scope: Scope::Important, sound: true, badge: Badge::Important }
+    }
+}
+
+/// How loudly the shell delivers: macOS passive, active and Time Sensitive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Quiet,
+    Normal,
+    Urgent,
+}
+
+/// What a click on a notification opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Thread(ThreadId),
+    UnifiedInbox,
+}
+
+/// A notification's buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Archive,
+    MarkRead,
+    Reply,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    /// Stable: "mail-<thread>", "mail-summary", "snooze-<thread>",
+    /// "noreply-<thread>", "reminders". Showing an id again replaces it.
+    pub id: String,
+    /// Groups notifications in Notification Center.
+    pub group: String,
+    pub title: String,
+    pub subtitle: String,
+    pub body: String,
+    pub level: Level,
+    pub sound: bool,
+    pub open: Target,
+    pub actions: Vec<Action>,
+    /// None for a summary.
+    pub account: Option<AccountId>,
+    /// When the newest message behind it arrived.
+    pub arrived: i64,
+}
+
+/// What the shell does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Show(Notification),
+    Withdraw(Vec<String>),
+    Badge(u32),
 }
