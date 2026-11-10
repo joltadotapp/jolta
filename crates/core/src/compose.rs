@@ -1020,6 +1020,11 @@ mod tests {
         }
     }
 
+    /// The body for these spans, as the editor writes it.
+    fn body_of(spans: &[rich::Span]) -> String {
+        rich::body(&[rich::Line { spans: spans.to_vec(), ..Default::default() }])
+    }
+
     fn image(name: &str, path: &str) -> rich::Span {
         rich::Span { text: name.into(), image: Some(path.into()), ..Default::default() }
     }
@@ -1033,7 +1038,7 @@ mod tests {
         assert_eq!(save_image(&dir.join("images"), &retina).unwrap(), path, "the same image is kept once");
         let pdf = dir.join("offer.pdf");
         std::fs::write(&pdf, b"%PDF-").unwrap();
-        let body = rich::markdown(&[
+        let body = body_of(&[
             rich::Span { text: "See below:\n".into(), ..Default::default() },
             image("Screenshot.png", &path),
             rich::Span { text: "\nand once more ".into(), ..Default::default() },
@@ -1082,7 +1087,7 @@ mod tests {
     fn an_image_at_normal_density_gets_no_width() {
         let dir = temp_dir("plain-density");
         let path = save_image(&dir, &png(300, None)).unwrap();
-        let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("chart.png", &path)]), ..Default::default() };
+        let c = Compose { to: "bob@example.com".into(), body: body_of(&[image("chart.png", &path)]), ..Default::default() };
         let msg_raw = build(&account(), &me(), &c, true).unwrap().raw;
         let html = MessageParser::new().parse(&msg_raw).unwrap().body_html(0).unwrap().into_owned();
         assert!(html.contains("alt=\"chart.png\" style=\"max-width: 100%\">"), "{html}");
@@ -1105,7 +1110,7 @@ mod tests {
     fn an_image_that_is_gone_stops_the_send_with_its_name() {
         let c = Compose {
             to: "bob@example.com".into(),
-            body: rich::markdown(&[image("Plan.png", "/nonexistent/jolta/Plan.png")]),
+            body: body_of(&[image("Plan.png", "/nonexistent/jolta/Plan.png")]),
             ..Default::default()
         };
         let Err(e) = build(&account(), &me(), &c, true) else { panic!("built without its image") };
@@ -1181,7 +1186,7 @@ mod tests {
         let icon = encoded(300, 200, false, image::ImageFormat::Png);
         let gif = b"GIF89a\x00\x08\x00\x08\x00\x00\x00;".to_vec();
         let saved: Vec<String> = [&screenshot, &photo, &icon, &gif].iter().map(|b| save_image(&dir, b).unwrap()).collect();
-        let body = rich::markdown(&saved.iter().map(|p| image("img", p)).collect::<Vec<_>>());
+        let body = body_of(&saved.iter().map(|p| image("img", p)).collect::<Vec<_>>());
         let at = |image_size| Compose { to: "bob@example.com".into(), body: body.clone(), image_size, ..Default::default() };
 
         let (parts, html) = sent_images(&at(ImageSize::Medium));
@@ -1219,7 +1224,7 @@ mod tests {
         let path = save_image(&dir, &rough).unwrap();
         let c = Compose {
             to: "bob@example.com".into(),
-            body: rich::markdown(&[image("Rough.jpg", &path)]),
+            body: body_of(&[image("Rough.jpg", &path)]),
             image_size: ImageSize::Large,
             ..Default::default()
         };
@@ -1234,7 +1239,7 @@ mod tests {
     fn the_size_menu_shows_what_each_size_comes_to() {
         let dir = temp_dir("estimate");
         let path = save_image(&dir, &retina_png(1600, 800)).unwrap();
-        let c = Compose { to: "bob@example.com".into(), body: rich::markdown(&[image("Shot.png", &path)]), ..Default::default() };
+        let c = Compose { to: "bob@example.com".into(), body: body_of(&[image("Shot.png", &path)]), ..Default::default() };
         let options = size_options(&account(), &me(), &c).unwrap();
         assert_eq!(options.iter().map(|o| o.size).collect::<Vec<_>>(), ImageSize::ALL);
         assert!(options.windows(2).all(|w| w[0].bytes < w[1].bytes), "{options:?}");
@@ -1255,7 +1260,7 @@ mod tests {
         std::fs::write(&video, vec![0u8; 25_000_000]).unwrap();
         let c = Compose {
             to: "bob@example.com".into(),
-            body: rich::markdown(&[image("Noise.png", &path)]),
+            body: body_of(&[image("Noise.png", &path)]),
             attachments: vec![AttachmentFile { name: "talk.mov".into(), mime_type: "video/quicktime".into(), path: video.to_string_lossy().into() }],
             ..Default::default()
         };
