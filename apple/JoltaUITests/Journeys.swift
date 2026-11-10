@@ -1490,6 +1490,27 @@ final class Journeys: XCTestCase {
         XCTAssertEqual(draftBodies(app).filter { $0.contains("Plan") }, [expected])
     }
 
+    /// Tahoma has no italic face on the Mac; text set in it still turns
+    /// italic, lights Italic and is saved italic.
+    func testItalicInAFontWithoutItalics() throws {
+        let app = try launch()
+        app.typeKey("c", modifierFlags: [])
+        let body = app.textViews["compose-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "c opens compose")
+        app.typeText("ann@test.invalid")
+        body.click()
+        app.typeText("Slanted")
+        app.typeKey(.leftArrow, modifierFlags: [.command, .shift])
+        app.menuBars.menuBarItems["Format"].click()
+        app.menuBars.menuItems["Font"].hover()
+        app.menuBars.menuItems["Tahoma"].click()
+        app.typeKey("i", modifierFlags: .command)
+        XCTAssertTrue(waitUntil { app.buttons["format-italic"].value as? String == "on" }, "Italic lights for Tahoma text")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(body.waitForNonExistence(timeout: 5), "Esc keeps the draft")
+        XCTAssertEqual(draftBodies(app).filter { $0.contains("Slanted") }, ["<span style=\"font-family: Tahoma, Verdana, sans-serif\">*Slanted*</span>"])
+    }
+
     /// The bodies of the drafts saved in this test's data folder.
     private func draftBodies(_ app: XCUIApplication, _ test: String = #function) -> [String] {
         let home = getpwuid(getuid()).map { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
