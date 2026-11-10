@@ -52,7 +52,7 @@ struct MessageList: NSViewRepresentable {
         let c = context.coordinator
         _ = model.listRevision
         if c.lastQuery != model.query {
-            c.reload(full: true)
+            c.reload(full: true, opensTop: true)
         } else if c.lastRevision != model.listRevision {
             c.reload(full: false, resorted: c.lastSort != model.sort)
         }
@@ -72,9 +72,6 @@ struct MessageList: NSViewRepresentable {
         var lastRevision = -1
         var focusRequest = 0
         private var reportedLaunch = false
-        /// Whether a list has been shown since launch. The list view is made
-        /// again when the palette or calendar mode gives way, so this outlives it.
-        private static var shownOnce = false
         private var count = 0
         private var pages: [Int: [ThreadRow]] = [:]
         private let pageSize = 100
@@ -86,7 +83,10 @@ struct MessageList: NSViewRepresentable {
         /// took them out (archived, moved), the cursor stays at the same
         /// height, on the next thread. Mail that comes or goes by itself never
         /// gets the cursor, which would open it and mark it read.
-        func reload(full: Bool, resorted: Bool = false) {
+        /// `opensTop`: the user switched lists, so the new one opens at its
+        /// top. A list view made at launch, or again when the palette or
+        /// calendar mode gives way, opens only what was already open.
+        func reload(full: Bool, resorted: Bool = false, opensTop: Bool = false) {
             guard let table else { return }
             let userChanged = model.userChangedList
             model.userChangedList = false
@@ -102,16 +102,14 @@ struct MessageList: NSViewRepresentable {
             if full {
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
-                // notification while calendar mode showed, keeps its row. At
-                // launch nothing else opens, as opening marks it read; a list
-                // the user switched to opens at the top.
+                // notification while calendar mode showed, keeps its row.
+                // Nothing else opens by itself, as opening marks it read.
                 let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
                 let row = opened ?? 0
                 table.scrollRowToVisible(row)
-                if count > 0, opened != nil || Self.shownOnce {
+                if count > 0, opened != nil || opensTop {
                     table.selectRowIndexes([row], byExtendingSelection: false)
                 }
-                Self.shownOnce = true
                 if !reportedLaunch, count > 0 {
                     reportedLaunch = true
                     DispatchQueue.main.async {
@@ -280,7 +278,10 @@ struct MessageList: NSViewRepresentable {
                 return true
             }
             switch event.keyCode {
-            case 36, 76: openSelected(); return true
+            case 36, 76:
+                // With nothing open yet, Return opens the top, as j does.
+                if (table?.selectedRow ?? 0) < 0 { move(1) } else { openSelected() }
+                return true
             case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true
             default: break
             }
