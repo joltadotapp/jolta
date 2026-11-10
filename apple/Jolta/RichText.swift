@@ -119,7 +119,7 @@ struct InlineStyle: Equatable {
     init(_ attrs: [NSAttributedString.Key: Any]) {
         let traits = (attrs[.font] as? NSFont).map { NSFontManager.shared.traits(of: $0) } ?? []
         bold = traits.contains(.boldFontMask)
-        italic = traits.contains(.italicFontMask)
+        italic = traits.contains(.italicFontMask) || (attrs[.obliqueness] as? NSNumber)?.doubleValue ?? 0 > 0
         underline = (attrs[.underlineStyle] as? Int ?? 0) != 0
         strike = (attrs[.strikethroughStyle] as? Int ?? 0) != 0
         font = attrs[.joltaFont] as? TextFont
@@ -148,6 +148,8 @@ struct InlineStyle: Equatable {
         if bold { f = manager.convert(f, toHaveTrait: .boldFontMask) }
         if italic { f = manager.convert(f, toHaveTrait: .italicFontMask) }
         out[.font] = f
+        // A font with no italic face (Tahoma) slants instead.
+        out[.obliqueness] = italic && !manager.traits(of: f).contains(.italicFontMask) ? 0.2 : nil
         out[.underlineStyle] = underline ? NSUnderlineStyle.single.rawValue : nil
         out[.strikethroughStyle] = strike ? NSUnderlineStyle.single.rawValue : nil
         out[.joltaFont] = font
