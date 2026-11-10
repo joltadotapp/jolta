@@ -184,6 +184,9 @@ final class AppModel {
     var searchFocused = false
     private(set) var aiSearching = false
     private var markReadTask: Task<Void, Never>?
+    /// The user archived, moved or undid something, so the list's next
+    /// change may move the cursor on to the next conversation.
+    @ObservationIgnored var userChangedList = false
     let notifier = Notifier()
     /// The Dock badge's number, which the menu bar item shows too.
     private(set) var badgeCount: UInt32 = 0
@@ -727,6 +730,7 @@ final class AppModel {
     func act(_ action: ThreadAction, label: String, threadID: Int64? = nil) {
         let threads = threadID.map { [$0] } ?? (isMultiSelection ? selectedThreads : selectedThreadID.map { [$0] } ?? [])
         guard !threads.isEmpty else { return }
+        userChangedList = true
         do {
             let tokens = try core.perform(action: action, threadIds: threads, context: source.actionContext)
             let text = threads.count > 1 ? "\(label): \(threads.count) conversations" : label
@@ -790,6 +794,7 @@ final class AppModel {
     func undo() {
         switch toast?.undo {
         case .action(let tokens):
+            userChangedList = true
             try? core.undo(tokens: tokens)
             show(Toast(text: "Undone", undo: nil))
         case .vips(let addresses, let vip):

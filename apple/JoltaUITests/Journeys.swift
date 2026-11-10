@@ -57,6 +57,8 @@ final class Journeys: XCTestCase {
         text(app, "Lunch on Friday").click()
         app.typeKey("e", modifierFlags: [])
         XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "e archives the selected conversation")
+        let next = app.webViews.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "Got them, thanks a lot!")).firstMatch
+        XCTAssertTrue(next.waitForExistence(timeout: 5), "the cursor moves on to the next conversation and opens it")
         app.typeKey("z", modifierFlags: [])
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
     }
