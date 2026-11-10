@@ -22,7 +22,11 @@ DATA="$HOME/Library/Application Support/Jolta"
 TESTS=$(sed -n 's/^ *func \(test[A-Za-z0-9]*\)().*/\1/p' apple/JoltaUITests/*.swift)
 if [ $# -gt 0 ]; then TESTS="$*"; fi
 
+WATCHERS=()
+SECRETS=()
 cleanup() {
+	for pid in ${WATCHERS[@]+"${WATCHERS[@]}"}; do kill "$pid" 2>/dev/null || true; done
+	for ref in ${SECRETS[@]+"${SECRETS[@]}"}; do security delete-generic-password -s app.jolta.mac -a "$ref" >/dev/null 2>&1 || true; done
 	for t in $TESTS; do rm -rf "$DATA/UITest-$t"; done
 }
 trap cleanup EXIT
@@ -85,6 +89,31 @@ for t in $TESTS; do
 	if [ "$t" = testSendFromAnAlias ]; then
 		"$JOLTA" --data-dir "$dir" dev local-account other@test.invalid >/dev/null
 		sqlite3 "$dir/jolta.sqlite" "UPDATE account SET smtp_host = 'smtp.test.invalid'"
+	fi
+	if [ "$t" = testNewMailAtInboxZeroStaysUnread ]; then
+		# An account on the local Dovecot (scripts/test-servers.sh up). The CLI's
+		# Keychain item goes again: the journey enters the password in Settings so
+		# Jolta makes its own, which it reads without a dialog.
+		server="inbox-zero-$(date +%s)@test.invalid"
+		if echo jolta-test | "$JOLTA" --data-dir "$dir" account add "$server" --imap-host 127.0.0.1 --imap-port 31143 \
+			--smtp-host 127.0.0.1 --smtp-port 31025 --password-stdin >/dev/null 2>&1; then
+			ref=$(sqlite3 "$dir/jolta.sqlite" "SELECT secret_ref FROM account WHERE address = '$server'")
+			security delete-generic-password -s app.jolta.mac -a "$ref" >/dev/null 2>&1
+			SECRETS+=("$ref")
+			printf 'From: Ann Berg <ann@test.invalid>\r\nTo: <%s>\r\nSubject: Quarterly plan\r\nDate: %s\r\nMessage-ID: <%s.plan@test.invalid>\r\n\r\nCan you look at the plan today?\r\n' \
+				"$server" "$(date -R)" "$(date +%s)" >"$dir/new-mail.eml"
+			# Delivers the message once the journey has emptied the inbox.
+			(
+				until [ "$(sqlite3 "$dir/jolta.sqlite" "SELECT count(*) FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id WHERE b.role = 'inbox'" 2>/dev/null)" = 0 ]; do
+					sleep 0.5
+				done
+				python3 -I -c 'import imaplib, sys
+m = imaplib.IMAP4("127.0.0.1", 31143)
+m.login(sys.argv[1], sys.argv[2])
+m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-test "$dir/new-mail.eml"
+			) &
+			WATCHERS+=($!)
+		fi
 	fi
 	if [ "$t" = testComposeFocusesWhereYouType ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid drafts "$FIXTURES/13-draft.eml" >/dev/null
