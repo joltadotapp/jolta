@@ -63,8 +63,7 @@ impl People {
     /// Reads sent and replied-to mail. `book` is (name, address) pairs from
     /// an address book.
     pub fn build(conn: &Connection, now: i64, book: &[(String, String)]) -> Result<People> {
-        let accounts = store::accounts(conn)?;
-        let mine: Vec<String> = accounts.iter().map(|a| a.address.to_lowercase()).collect();
+        let mine: Vec<String> = store::own_addresses(conn)?.iter().map(|a| a.to_lowercase()).collect();
         let forgotten: HashMap<String, i64> = conn
             .prepare("SELECT lower(address), at FROM forgotten_address")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -100,7 +99,7 @@ impl People {
 
         let mut sent = conn.prepare(
             "SELECT m.account_id, m.date, m.to_addrs, m.cc_addrs FROM message m
-             JOIN account a ON a.id = m.account_id WHERE m.from_addr = a.address COLLATE NOCASE",
+             WHERE EXISTS (SELECT 1 FROM own_address a WHERE a.account_id = m.account_id AND a.address = m.from_addr COLLATE NOCASE)",
         )?;
         let mut rows = sent.query([])?;
         while let Some(r) = rows.next()? {

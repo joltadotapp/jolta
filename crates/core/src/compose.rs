@@ -137,8 +137,12 @@ pub struct Sender {
 /// name or the account's, or else the account itself. Never an address
 /// that isn't the account's.
 pub fn sender(account: &Account, aliases: &[store::Alias], from: Option<&str>) -> Sender {
-    let _ = (aliases, from);
-    Sender { name: account.display_name.clone(), address: account.address.clone() }
+    let alias = from.and_then(|from| aliases.iter().find(|a| a.account == account.id && a.address.eq_ignore_ascii_case(from)));
+    match alias {
+        Some(a) if !a.display_name.is_empty() => Sender { name: a.display_name.clone(), address: a.address.clone() },
+        Some(a) => Sender { name: account.display_name.clone(), address: a.address.clone() },
+        None => Sender { name: account.display_name.clone(), address: account.address.clone() },
+    }
 }
 
 /// `sender` with the account's aliases from the store.
@@ -150,16 +154,37 @@ pub fn sender_from_store(conn: &Connection, account: &Account, from: Option<&str
 /// sender while its account and alias are there, else the first account
 /// that can send.
 pub fn default_sender(conn: &Connection) -> Result<Option<store::SenderChoice>> {
-    let first = store::accounts(conn)?.into_iter().find(Account::can_send);
-    Ok(first.map(|a| store::SenderChoice { account: a.id, alias: None }))
+    let accounts: Vec<Account> = store::accounts(conn)?.into_iter().filter(Account::can_send).collect();
+    if let Some(chosen) = store::default_sender(conn)?
+        && accounts.iter().any(|a| a.id == chosen.account)
+    {
+        let aliases = store::aliases(conn, chosen.account)?;
+        if chosen.alias.as_ref().is_none_or(|from| aliases.iter().any(|a| a.address.eq_ignore_ascii_case(from))) {
+            return Ok(Some(chosen));
+        }
+    }
+    Ok(accounts.first().map(|a| store::SenderChoice { account: a.id, alias: None }))
 }
 
 /// A blank message. In one account's mailbox it is from that account, or
 /// from the default sender when that is one of its aliases; elsewhere from
 /// the default sender.
 pub fn new_message(conn: &Connection, mailbox: Option<MailboxId>) -> Result<Compose> {
-    let _ = mailbox;
-    let Some(choice) = default_sender(conn)? else { return Ok(Compose::default()) };
+    let fallback = default_sender(conn)?;
+    let viewed = match mailbox {
+        // A mailbox gone since the app last listed them is no context.
+        Some(m) => match store::mailbox(conn, m) {
+            Ok(m) => Some(store::account(conn, m.account_id)?).filter(Account::can_send),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let choice = match viewed {
+        Some(a) if fallback.as_ref().is_some_and(|f| f.account == a.id) => fallback,
+        Some(a) => Some(store::SenderChoice { account: a.id, alias: None }),
+        None => fallback,
+    };
+    let Some(choice) = choice else { return Ok(Compose::default()) };
     let account = store::account(conn, choice.account)?;
     Ok(Compose { account: Some(account.id), from: choice.alias, body: opening(&account.signature, ""), ..Default::default() })
 }
@@ -291,7 +316,10 @@ pub fn reply_target(conn: &Connection, thread: ThreadId) -> Result<MessageId> {
 pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind, utc_offset: i32) -> Result<Compose> {
     let (account, date): (AccountId, i64) =
         conn.query_row("SELECT account_id, date FROM message WHERE id = ?1", [message], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    let me = store::account(conn, account)?.address.to_lowercase();
+    let own = store::account(conn, account)?;
+    let aliases = store::aliases(conn, account)?;
+    let alias_of = |a: &str| aliases.iter().find(|x| x.address.eq_ignore_ascii_case(a));
+    let mine = |a: &str| a.eq_ignore_ascii_case(&own.address) || alias_of(a).is_some();
     let msg = MessageParser::new().parse(raw).ok_or_else(|| Error::Other("could not read the message".into()))?;
     let root = msg.root();
     let (envelope, body) = mime::parse_full(raw, String::new());
@@ -302,16 +330,32 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
         l.map(|l| l.mailboxes().filter_map(pair).collect()).unwrap_or_default()
     };
     let not_me = |list: Vec<(String, String)>| -> Vec<(String, String)> {
-        list.into_iter().filter(|(_, a)| a.to_lowercase() != me).collect()
+        list.into_iter().filter(|(_, a)| !mine(a)).collect()
     };
+    let from_me = from.iter().any(|(_, a)| mine(a));
+    let delivered_to = root
+        .headers()
+        .iter()
+        .filter(|h| h.raw_name().eq_ignore_ascii_case("Delivered-To"))
+        .flat_map(|h| parse_addresses(&String::from_utf8_lossy(h.raw_value())))
+        .collect::<Vec<_>>();
+    // The first of the user's addresses on the message is the one to answer from.
+    let answered_as = from
+        .iter()
+        .filter(|_| from_me)
+        .cloned()
+        .chain(others(root.to()))
+        .chain(others(root.cc()))
+        .chain(delivered_to)
+        .find(|(_, a)| mine(a))
+        .and_then(|(_, a)| alias_of(a.as_str()).map(|x| x.address.clone()));
     let sender_name = from.first().map(|(n, a)| if n.is_empty() { a.clone() } else { n.clone() }).unwrap_or_default();
     let when = reader::format_date(date, utc_offset);
 
-    let mut c = Compose { account: Some(account), ..Default::default() };
+    let mut c = Compose { account: Some(account), from: answered_as, ..Default::default() };
     match kind {
         ReplyKind::Reply | ReplyKind::ReplyAll => {
             let primary = if reply_to.is_empty() { from.clone() } else { reply_to };
-            let from_me = from.iter().any(|(_, a)| a.to_lowercase() == me);
             // Replying to your own message goes to its original recipients.
             let to = match from_me {
                 true => Some(not_me(others(root.to()))).filter(|t| !t.is_empty()).unwrap_or(primary),
@@ -349,8 +393,7 @@ pub fn reply(conn: &Connection, message: MessageId, raw: &[u8], kind: ReplyKind,
             c.references = envelope.message_id.iter().cloned().collect();
         }
     }
-    let signature = store::account(conn, account)?.signature;
-    c.body = opening(&signature, &c.body);
+    c.body = opening(&own.signature, &c.body);
     Ok(c)
 }
 

@@ -167,6 +167,12 @@ impl Engine {
         if account.imap_host.is_empty() && !graph {
             return;
         }
+        let (jolta, id) = (self.jolta.clone(), account.id);
+        self.runtime.spawn(async move {
+            if let Err(e) = crate::send_as::refresh(&jolta, id).await {
+                tracing::debug!("account {id}'s aliases weren't read: {e}");
+            }
+        });
         let wake = Arc::new(Wake::default());
         wake.full_sync.store(true, Ordering::SeqCst);
         self.wakes.lock().unwrap_or_else(|e| e.into_inner()).insert(account.id, wake.clone());

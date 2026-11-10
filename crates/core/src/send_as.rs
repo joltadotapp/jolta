@@ -4,36 +4,49 @@
 
 use serde_json::Value;
 
+use crate::graph::Graph;
 use crate::store::{self, ProviderAlias};
-use crate::{Account, AccountId, AccountKind, Jolta, Result};
+use crate::{Account, AccountId, AccountKind, Jolta, Result, gmail_settings};
 
 /// `users.settings.sendAs.list`, without the account's own address and
 /// the ones Gmail hasn't verified.
 pub fn gmail_aliases(body: &Value) -> Vec<ProviderAlias> {
-    let _ = body;
-    Vec::new()
+    let list = body["sendAs"].as_array().map(Vec::as_slice).unwrap_or_default();
+    list.iter()
+        .filter(|a| a["isPrimary"] != true && a["verificationStatus"].as_str().is_none_or(|s| s == "accepted"))
+        .filter_map(|a| {
+            let address = a["sendAsEmail"].as_str()?.trim();
+            let display_name = a["displayName"].as_str().unwrap_or_default().trim();
+            Some(ProviderAlias { address: address.to_string(), display_name: display_name.to_string() })
+        })
+        .collect()
 }
 
 /// `proxyAddresses` from Graph's `/me`: the `smtp:` ones, without the
 /// primary (`SMTP:`) and the tenant's `onmicrosoft.com` routing addresses.
 pub fn graph_aliases(body: &Value) -> Vec<ProviderAlias> {
-    let _ = body;
-    Vec::new()
+    let list = body["proxyAddresses"].as_array().map(Vec::as_slice).unwrap_or_default();
+    list.iter()
+        .filter_map(|p| p.as_str()?.strip_prefix("smtp:"))
+        .filter(|a| !a.to_ascii_lowercase().ends_with(".onmicrosoft.com"))
+        .map(|a| ProviderAlias { address: a.to_string(), display_name: String::new() })
+        .collect()
 }
 
 /// The provider's aliases for the account, or None when it has no list.
 pub async fn fetch(account: &Account) -> Result<Option<Vec<ProviderAlias>>> {
-    let _ = account;
-    Ok(None)
+    Ok(match account.kind {
+        AccountKind::Gmail => Some(gmail_aliases(&gmail_settings::send_as(account).await?)),
+        AccountKind::Graph => Some(graph_aliases(&Graph::new(account)?.get("/me?$select=proxyAddresses").await?)),
+        AccountKind::Imap => None,
+    })
 }
 
 /// Reads the provider's aliases and stores them in place of the last list.
 pub async fn refresh(jolta: &Jolta, account: AccountId) -> Result<()> {
     let account = jolta.store.read_async(move |c| store::account(c, account)).await?;
-    if account.kind == AccountKind::Imap {
-        return Ok(());
-    }
-    if let Some(list) = fetch(&account).await? {
+    if let Some(mut list) = fetch(&account).await? {
+        list.retain(|a| !a.address.eq_ignore_ascii_case(&account.address));
         jolta.store.write_async(move |tx| store::set_provider_aliases(tx, account.id, &list)).await?;
     }
     Ok(())

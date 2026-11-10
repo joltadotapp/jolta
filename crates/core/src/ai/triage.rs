@@ -69,7 +69,7 @@ pub fn unsorted_inbox(conn: &Connection, since: i64) -> Result<Vec<MessageId>> {
          JOIN mailbox b ON b.id = mm.mailbox_id AND b.role = 'inbox'
          WHERE m.date >= ?1
            AND NOT EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id)
-           AND NOT EXISTS (SELECT 1 FROM account a WHERE a.address = m.from_addr COLLATE NOCASE)
+           AND NOT EXISTS (SELECT 1 FROM own_address a WHERE a.address = m.from_addr COLLATE NOCASE)
          GROUP BY m.id ORDER BY m.date DESC",
     )?;
     let ids = stmt.query_map([since], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -87,7 +87,7 @@ pub async fn sort(jolta: &Jolta, ai: &Ai, message: MessageId, cancel: &Cancel) -
             let meta: Option<(String, String, String, bool)> = c
                 .query_row(
                     "SELECT from_name, from_addr, subject,
-                            EXISTS (SELECT 1 FROM account a WHERE a.address = from_addr COLLATE NOCASE)
+                            EXISTS (SELECT 1 FROM own_address a WHERE a.address = from_addr COLLATE NOCASE)
                      FROM message WHERE id = ?1",
                     [message],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),

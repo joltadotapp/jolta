@@ -98,7 +98,7 @@ impl Background {
             let mut stmt = c.prepare(
                 "SELECT m.id FROM message m WHERE m.thread_id = ?1
                    AND NOT EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id)
-                   AND NOT EXISTS (SELECT 1 FROM account a WHERE a.address = m.from_addr COLLATE NOCASE)
+                   AND NOT EXISTS (SELECT 1 FROM own_address a WHERE a.address = m.from_addr COLLATE NOCASE)
                  ORDER BY m.date DESC LIMIT 3",
             )?;
             let ids: Vec<MessageId> = stmt.query_map([thread], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;

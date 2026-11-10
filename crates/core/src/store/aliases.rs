@@ -74,27 +74,60 @@ pub fn aliases(conn: &Connection, account: AccountId) -> Result<Vec<Alias>> {
 /// Adds an address the account sends from. One the user removed from the
 /// provider's list comes back.
 pub fn add_alias(conn: &Connection, account: AccountId, address: &str, display_name: &str) -> Result<Alias> {
-    let _ = (conn, account, address, display_name);
-    todo!()
+    let address = address.trim();
+    let own: String = conn.query_row("SELECT address FROM account WHERE id = ?1", [account], |r| r.get(0))?;
+    let parsed = crate::compose::parse_addresses(address);
+    if parsed.len() != 1 || parsed[0].1 != address || address.contains(char::is_whitespace) {
+        return Err(Error::Other(format!("“{address}” is not an email address.")));
+    }
+    if address.eq_ignore_ascii_case(&own) {
+        return Err(Error::Other(format!("{address} is this account's own address.")));
+    }
+    let added = conn.execute(
+        "INSERT INTO account_alias (account_id, address, display_name, source) VALUES (?1, ?2, ?3, 'manual')
+         ON CONFLICT (account_id, address) DO UPDATE SET address = excluded.address,
+           display_name = excluded.display_name, source = 'manual', hidden = 0
+         WHERE hidden",
+        params![account, address, display_name.trim()],
+    )?;
+    if added == 0 {
+        return Err(Error::Other(format!("{address} is already one of this account's addresses.")));
+    }
+    Ok(aliases(conn, account)?.into_iter().find(|a| a.address.eq_ignore_ascii_case(address)).expect("the alias was just written"))
 }
 
 pub fn rename_alias(conn: &Connection, id: i64, display_name: &str) -> Result<()> {
-    let _ = (conn, id, display_name);
-    todo!()
+    conn.execute("UPDATE account_alias SET display_name = ?2 WHERE id = ?1", params![id, display_name.trim()])?;
+    Ok(())
 }
 
 /// Removes an alias. A provider's stays hidden, so its next list doesn't
 /// bring it back.
 pub fn remove_alias(conn: &Connection, id: i64) -> Result<()> {
-    let _ = (conn, id);
-    todo!()
+    conn.execute("DELETE FROM account_alias WHERE id = ?1 AND source = 'manual'", [id])?;
+    conn.execute("UPDATE account_alias SET hidden = 1 WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 /// Replaces the account's provider aliases with the provider's list. The
 /// user's own stay, and so do the ones they removed.
 pub fn set_provider_aliases(conn: &Connection, account: AccountId, list: &[ProviderAlias]) -> Result<()> {
-    let _ = (conn, account, list);
-    todo!()
+    for a in list {
+        conn.execute(
+            "INSERT INTO account_alias (account_id, address, display_name, source) VALUES (?1, ?2, ?3, 'provider')
+             ON CONFLICT (account_id, address) DO UPDATE SET display_name = excluded.display_name WHERE source = 'provider'",
+            params![account, a.address, a.display_name],
+        )?;
+    }
+    let listed: Vec<String> = list.iter().map(|a| a.address.to_lowercase()).collect();
+    let mut stmt = conn.prepare("SELECT id, address FROM account_alias WHERE account_id = ?1 AND source = 'provider'")?;
+    let stored = stmt.query_map([account], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, address) in stored {
+        if !listed.contains(&address.to_lowercase()) {
+            conn.execute("DELETE FROM account_alias WHERE id = ?1", [id])?;
+        }
+    }
+    Ok(())
 }
 
 /// The sender new messages get in views that mix accounts, as stored. It
@@ -124,10 +157,6 @@ pub fn own_addresses(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare_cached("SELECT address FROM own_address")?;
     let rows = stmt.query_map([], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-fn invalid(address: &str) -> Error {
-    Error::Other(format!("“{address}” is not an email address."))
 }
 
 #[cfg(test)]
