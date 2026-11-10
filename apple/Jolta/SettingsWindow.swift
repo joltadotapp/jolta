@@ -1,5 +1,6 @@
 @preconcurrency import JoltaFFI
 import SwiftUI
+import UserNotifications
 
 /// One page of the settings window.
 enum SettingsPage: Hashable {
@@ -439,20 +440,42 @@ extension View {
 
 struct GeneralSettings: View {
     let model: AppModel
-    @AppStorage("NewMailBanners") private var banners = NewMailBanners.all
     @AppStorage(AddressBook.key) private var contacts = false
     @State private var contactsRefused = false
+    /// Whether macOS offers Time Sensitive for Jolta: only builds signed with its entitlement.
+    @State private var timeSensitive = false
+
+    private var notificationsFooter: String {
+        let about = "Important mail is mail from your VIPs, replies in conversations you wrote in, mail sent to you by people you've written to, and invitations. With AI sorting on, it also includes mail that asks you for a reply. Several messages at once arrive as one notification."
+        return timeSensitive ? about + " To let urgent mail through a Focus, allow Time Sensitive notifications for Jolta in System Settings." : about
+    }
 
     var body: some View {
         SettingsScroll {
-            SettingsSection("Notifications") {
-                SettingsRow(title: "New mail banners", detail: "Which new inbox mail gets a macOS banner while Jolta runs.") {
-                    Picker("New mail banners", selection: $banners) {
-                        Text("Every new message").tag(NewMailBanners.all)
-                        Text("Only from VIPs").tag(NewMailBanners.vips)
-                        Text("None").tag(NewMailBanners.none)
+            SettingsSection("Notifications", footer: notificationsFooter) {
+                SettingsRow(title: "Notify me about", detail: "Which new inbox mail gets a notification while Jolta runs.") {
+                    Picker("Notify me about", selection: Binding(get: { model.notifySettings.scope }, set: { model.notifySettings.scope = $0 })) {
+                        Text("Important mail").tag(NotifyScope.important)
+                        Text("All new mail").tag(NotifyScope.allNewMail)
+                        Text("Only VIPs").tag(NotifyScope.vips)
+                        Text("None").tag(NotifyScope.nothing)
                     }
                     .settingsMenu()
+                    .accessibilityIdentifier("notify-scope")
+                }
+                SettingsRow(title: "Play a sound", detail: "At most once a minute. A notification that bundles several messages is silent.") {
+                    Toggle("Play a sound", isOn: Binding(get: { model.notifySettings.sound }, set: { model.notifySettings.sound = $0 }))
+                        .settingsSwitch()
+                        .accessibilityIdentifier("notify-sound")
+                }
+                SettingsRow(title: "Dock badge", detail: "Counts unread conversations in your inboxes. The menu bar shows the same number.") {
+                    Picker("Dock badge", selection: Binding(get: { model.notifySettings.badge }, set: { model.notifySettings.badge = $0 })) {
+                        Text("All unread").tag(BadgeScope.allUnread)
+                        Text("Important unread").tag(BadgeScope.importantUnread)
+                        Text("None").tag(BadgeScope.nothing)
+                    }
+                    .settingsMenu()
+                    .accessibilityIdentifier("dock-badge")
                 }
             }
             SettingsSection("Writing", footer: "Jolta suggests people you've written to or replied to as you type in To, Cc and Bcc, the most frequent and recent first. Hover over a suggestion and click × to stop suggesting it.") {
@@ -468,6 +491,7 @@ struct GeneralSettings: View {
                 }
             }
         }
+        .task { timeSensitive = await UNUserNotificationCenter.current().notificationSettings().timeSensitiveSetting != .notSupported }
     }
 
     private func toggleContacts(_ on: Bool) {

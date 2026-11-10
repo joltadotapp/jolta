@@ -1,29 +1,20 @@
 @preconcurrency import JoltaFFI
 import Foundation
+import OSLog
 import UserNotifications
 
-/// Which new mail gets a banner, set in Settings › People.
-enum NewMailBanners: String, CaseIterable {
-    case all, vips, none
-
-    static var current: NewMailBanners {
-        UserDefaults.standard.string(forKey: "NewMailBanners").flatMap(Self.init) ?? .all
-    }
-
-    func shows(vip: Bool) -> Bool {
-        switch self {
-        case .all: true
-        case .vips: vip
-        case .none: false
-        }
-    }
-}
-
-/// New-mail banners and calendar reminders. Clicking a mail banner opens its
-/// thread; a reminder offers Join (online meetings), Snooze 5 minutes and Open.
+/// Delivers the notices the core decides (new mail, snooze and no-reply
+/// reminders, the Dock badge) and schedules calendar reminders. Clicking a
+/// mail notification opens its conversation, or the unified inbox for a
+/// summary; its buttons are Archive, Mark as Read and Reply. A reminder
+/// offers Join (online meetings), Snooze 5 minutes and Open.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
-    var onOpen: ((Int64) -> Void)?
+    /// A conversation to show, or nil for the unified inbox.
+    var onOpen: ((Int64?) -> Void)?
+    /// Archive or Mark as Read on a notification, by its id.
+    var onAction: ((String, NoticeAction) -> Void)?
+    var onReply: ((Int64) -> Void)?
     /// An occurrence to show in calendar mode, by event id and time.
     /// A reminder's id and fire time; the app looks the event up again.
     var onOpenEvent: ((String, Int64) -> Void)?
@@ -37,15 +28,22 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// 2026-11-04); ten stay free for snoozes.
     static let reminderLimit = 90
 
+    /// The core's notices have ids starting with these.
+    private static let noticePrefixes = ["mail-", "snooze-", "noreply-", "reminders"]
+
     private enum Category {
         static let meeting = "calendar-meeting"
         static let event = "calendar-event"
+        static let mail = "mail"
     }
 
     private enum Action {
         static let join = "join"
         static let snooze = "snooze"
         static let open = "open"
+        static let archive = "archive"
+        static let markRead = "mark-read"
+        static let reply = "reply"
     }
 
     override init() {
@@ -55,25 +53,63 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let join = UNNotificationAction(identifier: Action.join, title: "Join", options: [.foreground])
         let snooze = UNNotificationAction(identifier: Action.snooze, title: "Snooze 5 Minutes", options: [])
         let open = UNNotificationAction(identifier: Action.open, title: "Open", options: [.foreground])
+        let archive = UNNotificationAction(identifier: Action.archive, title: "Archive", options: [])
+        let markRead = UNNotificationAction(identifier: Action.markRead, title: "Mark as Read", options: [])
+        let reply = UNNotificationAction(identifier: Action.reply, title: "Reply", options: [.foreground])
         center.setNotificationCategories([
             UNNotificationCategory(identifier: Category.meeting, actions: [join, snooze, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: Category.event, actions: [snooze, open], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Category.mail, actions: [archive, markRead, reply], intentIdentifiers: []),
         ])
     }
 
+    /// Asks once, then logs what macOS allows, Time Sensitive included,
+    /// which needs the entitlement: `log show --predicate 'subsystem == "app.jolta.mac"'`.
     func requestPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+            UNUserNotificationCenter.current().getNotificationSettings { s in
+                Logger(subsystem: "app.jolta.mac", category: "notifications").notice(
+                    "notifications: authorization \(s.authorizationStatus.rawValue), alerts \(s.alertSetting.rawValue), time sensitive \(s.timeSensitiveSetting.rawValue)")
+            }
+        }
     }
 
-    func post(threadID: Int64, from: String, subject: String) {
-        let content = UNMutableNotificationContent()
-        content.title = from
-        content.body = subject.isEmpty ? "(no subject)" : subject
-        content.sound = .default
-        content.threadIdentifier = "thread-\(threadID)"
-        content.userInfo = ["thread": threadID]
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+    /// Does what the core decided: shows a notification (replacing one with
+    /// the same id), takes some away, or sets the Dock badge.
+    func deliver(_ notice: Notice) {
+        let center = UNUserNotificationCenter.current()
+        switch notice {
+        case .show(let n):
+            let content = UNMutableNotificationContent()
+            content.title = n.title
+            content.subtitle = n.subtitle
+            content.body = n.body
+            content.threadIdentifier = n.group
+            content.sound = n.sound ? .default : nil
+            content.interruptionLevel = switch n.level {
+            case .quiet: .passive
+            case .normal: .active
+            case .urgent: .timeSensitive
+            }
+            if !n.actions.isEmpty { content.categoryIdentifier = Category.mail }
+            var info: [String: Any] = ["notice": n.id]
+            if let thread = n.threadId { info["thread"] = thread }
+            content.userInfo = info
+            center.add(UNNotificationRequest(identifier: n.id, content: content, trigger: nil))
+        case .withdraw(let ids):
+            center.removeDeliveredNotifications(withIdentifiers: ids)
+        case .badge(let count):
+            center.setBadgeCount(Int(count))
+        }
+    }
+
+    /// Notifications from an earlier run stand for mail the core no longer
+    /// tracks, so they go at launch. Calendar reminders stay.
+    func clearEarlierNotices() async {
+        let center = UNUserNotificationCenter.current()
+        let earlier = await center.deliveredNotifications().map(\.request.identifier)
+            .filter { id in Self.noticePrefixes.contains { id.hasPrefix($0) } }
+        center.removeDeliveredNotifications(withIdentifiers: earlier)
     }
 
     /// Makes the pending reminders match `reminders`: each is added under its
@@ -103,6 +139,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             content.title = r.title.isEmpty ? "(no title)" : r.title
             content.body = Self.body(r)
             content.sound = .default
+            content.interruptionLevel = .timeSensitive
             content.threadIdentifier = "calendar"
             content.categoryIdentifier = r.joinUrl == nil ? Category.event : Category.meeting
             content.userInfo = ["reminder": r.id, "fireAt": r.fireAt]
@@ -136,8 +173,18 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
-        if let thread = info["thread"] as? Int64 {
-            await MainActor.run { onOpen?(thread) }
+        if let id = info["notice"] as? String {
+            let thread = (info["thread"] as? NSNumber)?.int64Value
+            let action = response.actionIdentifier
+            await MainActor.run {
+                switch action {
+                case Action.archive: onAction?(id, .archive)
+                case Action.markRead: onAction?(id, .markRead)
+                case Action.reply: if let thread { onReply?(thread) }
+                case UNNotificationDefaultActionIdentifier: onOpen?(thread)
+                default: break
+                }
+            }
             return
         }
         guard let (id, fireAt) = Self.reminder(info) else { return }
@@ -154,7 +201,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// The core already left out what shouldn't show while Jolta is in
+    /// front; a quiet notification only goes to Notification Center.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        notification.request.content.interruptionLevel == .passive ? [.list] : [.banner, .list, .sound]
     }
 }

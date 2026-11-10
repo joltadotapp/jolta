@@ -53,7 +53,7 @@ fn fts_term(field: Option<TextField>, text: &str, phrase: bool, prefix: bool) ->
 }
 
 /// Automated senders. LIKE ignores ASCII case.
-const NOTIFICATION: &str = "(m.from_addr LIKE 'noreply%' OR m.from_addr LIKE 'no-reply%' \
+pub(crate) const NOTIFICATION: &str = "(m.from_addr LIKE 'noreply%' OR m.from_addr LIKE 'no-reply%' \
      OR m.from_addr LIKE 'donotreply%' OR m.from_addr LIKE 'do-not-reply%' OR m.from_addr LIKE 'notification%' \
      OR m.from_addr LIKE 'notify%' OR m.from_addr LIKE 'alert%' OR m.from_addr LIKE '%@notifications.%' \
      OR m.from_addr LIKE '%@notify.%' OR m.from_addr LIKE 'mailer-daemon%')";
@@ -167,6 +167,7 @@ fn plan(conn: &Connection, q: &Query) -> Result<Sql> {
             TermKind::Is(Status::Vip) => "EXISTS (SELECT 1 FROM vip v WHERE v.address = m.from_addr)".into(),
             TermKind::Is(Status::Notification) => NOTIFICATION.into(),
             TermKind::Is(Status::NeedsReply) => crate::ai::triage::NEEDS_REPLY.into(),
+            TermKind::Is(Status::Important) => crate::notify::important(conn)?,
             TermKind::Is(Status::Invite) => {
                 let ids = crate::store::unanswered_threads(conn, chrono::Utc::now(), tz::here())?;
                 let p = sql.param(serde_json::to_string(&ids.iter().map(|t| t.0).collect::<Vec<_>>()).expect("numbers"));

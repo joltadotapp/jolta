@@ -10,6 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
 
+use rusqlite::OptionalExtension;
+
 use super::{Ai, Cancel, Provider, tasks, triage};
 use crate::model::*;
 use crate::{Jolta, Result};
@@ -90,30 +92,44 @@ impl Background {
         self.wake.notify_one();
     }
 
-    /// New mail arrived in a thread: sort its unsorted messages and, when
-    /// it is long enough, summarise it.
-    pub fn new_mail(&self, jolta: &Jolta, thread: ThreadId) {
-        let Ok((settings, messages)) = jolta.store.read(|c| {
+    /// A sync round stored these messages: sort each one that is in an
+    /// inbox and not the user's own, and summarise the conversations they
+    /// are in when those are long enough.
+    pub fn arrived(&self, jolta: &Jolta, messages: &[MessageId]) {
+        let Ok((settings, found)) = jolta.store.read(|c| {
             let settings = super::settings(c)?;
-            let mut stmt = c.prepare(
-                "SELECT m.id FROM message m WHERE m.thread_id = ?1
-                   AND NOT EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id)
-                   AND NOT EXISTS (SELECT 1 FROM own_address a WHERE a.address = m.from_addr COLLATE NOCASE)
-                 ORDER BY m.date DESC LIMIT 3",
+            let mut stmt = c.prepare_cached(
+                "SELECT m.thread_id, NOT EXISTS (SELECT 1 FROM ai_triage t WHERE t.message_id = m.id) FROM message m
+                 WHERE m.id = ?1
+                   AND EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id
+                               WHERE mm.message_id = m.id AND b.role = 'inbox')
+                   AND NOT EXISTS (SELECT 1 FROM own_address a WHERE a.address = m.from_addr COLLATE NOCASE)",
             )?;
-            let ids: Vec<MessageId> = stmt.query_map([thread], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-            Ok((settings, ids))
+            let mut found: Vec<(MessageId, ThreadId, bool)> = Vec::new();
+            for &id in messages {
+                if let Some((thread, unsorted)) = stmt.query_row([id], |r| Ok((r.get(0)?, r.get(1)?))).optional()? {
+                    found.push((id, thread, unsorted));
+                }
+            }
+            Ok((settings, found))
         }) else {
             return;
         };
         let mut jobs = Vec::new();
         if settings.sorts_new_mail() {
-            jobs.extend(messages.into_iter().map(Job::Sort));
+            jobs.extend(found.iter().filter(|(_, _, unsorted)| *unsorted).map(|(m, _, _)| Job::Sort(*m)));
         }
         if settings.auto_summary && settings.provider == Some(Provider::Local) {
-            jobs.push(Job::Summary(thread));
+            jobs.extend(found.iter().map(|(_, t, _)| Job::Summary(*t)));
         }
         self.push(jobs);
+    }
+
+    /// Sorting runs now: it is on, and the local model may use the Mac.
+    pub fn sorts_now(&self, jolta: &Jolta) -> bool {
+        jolta.store.read(super::settings).is_ok_and(|s| {
+            s.sorts_new_mail() && (s.provider != Some(Provider::Local) || self.allowed.load(Ordering::SeqCst))
+        })
     }
 
     /// Sorts the inbox mail of the last two weeks that isn't sorted yet:

@@ -9,6 +9,7 @@ mod calendar;
 mod compose;
 mod ids;
 mod mail;
+mod notify;
 mod search;
 mod store;
 mod sync;

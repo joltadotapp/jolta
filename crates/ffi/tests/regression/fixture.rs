@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jolta_core::store::{self, NewAccount, RemoteMailbox};
 use jolta_core::{Account, AccountId, AccountKind, Jolta, MailboxId, MailboxRole, MessageId, ThreadId};
+use jolta_ffi::notify::Notice;
 use jolta_ffi::{Core, CoreEvent, CoreListener, ListSort, SortKey, ThreadRow};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -23,8 +24,9 @@ pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
+/// Every event's name, and the notices in full.
 #[derive(Default)]
-pub struct Events(pub Mutex<Vec<&'static str>>);
+pub struct Events(pub Mutex<Vec<&'static str>>, pub Mutex<Vec<Notice>>);
 
 impl Events {
     pub fn seen(&self, name: &str) -> bool {
@@ -36,7 +38,10 @@ impl CoreListener for Events {
     fn on_event(&self, event: CoreEvent) {
         let name = match event {
             CoreEvent::ListsChanged => "lists",
-            CoreEvent::NewMail { .. } => "new mail",
+            CoreEvent::Notice { notice } => {
+                self.1.lock().unwrap().push(notice);
+                "notice"
+            }
             CoreEvent::Sent { .. } => "sent",
             CoreEvent::SyncFinished { .. } => "synced",
             CoreEvent::SyncFailed { .. } => "sync failed",

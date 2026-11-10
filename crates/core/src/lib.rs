@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod import;
 pub mod mime;
 pub mod model;
+pub mod notify;
 pub mod oauth;
 pub mod people;
 pub mod reader;

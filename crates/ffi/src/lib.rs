@@ -22,6 +22,7 @@ pub mod editor;
 mod find_time;
 mod focus;
 mod holds;
+pub mod notify;
 mod rooms;
 pub mod quick;
 pub mod repeat;
@@ -235,7 +236,6 @@ pub enum CoreEvent {
     SyncStarted { account_id: i64 },
     SyncFinished { account_id: i64 },
     SyncFailed { account_id: i64, message: String },
-    NewMail { account_id: i64, thread_id: i64, from: String, subject: String, vip: bool },
     Sent { account_id: i64, subject: String },
     /// A snoozed thread came back to the inbox.
     Woke { account_id: i64, thread_id: i64, subject: String },
@@ -269,6 +269,8 @@ pub enum CoreEvent {
     /// Holds changed: reload the line of these conversations (or the open
     /// one, when empty), and show `notice` as a toast.
     HoldsChanged { thread_ids: Vec<i64>, notice: Option<holds::HoldNotice> },
+    /// Show or withdraw a notification, or set the Dock badge.
+    Notice { notice: notify::Notice },
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -836,7 +838,9 @@ pub struct Core {
     jolta: Jolta,
     runtime: tokio::runtime::Runtime,
     listener: Arc<dyn CoreListener>,
-    engine: Mutex<Option<Arc<Engine>>>,
+    /// Shared with AI's background queue, whose results can change what is
+    /// important and so the badge.
+    engine: Arc<Mutex<Option<Arc<Engine>>>>,
     engine_sink: Mutex<Option<jolta_core::engine::Sink>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
@@ -936,18 +940,22 @@ impl Core {
             .map_err(|e| CoreError::Failed { message: e.to_string() })?;
         let ai = Arc::new(jolta_core::ai::Ai::new(&jolta.data_dir, ai::helper_path()));
         let order: Arc<Mutex<Option<Order>>> = Arc::new(Mutex::new(None));
+        let engine: Arc<Mutex<Option<Arc<Engine>>>> = Arc::default();
         let changed: jolta_core::ai::background::Changed = {
-            let (order, listener) = (order.clone(), listener.clone());
+            let (order, listener, engine) = (order.clone(), listener.clone(), engine.clone());
             Arc::new(move || {
                 *order.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 listener.on_event(CoreEvent::ListsChanged);
+                if let Some(engine) = engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    engine.notices().changed();
+                }
             })
         };
         let background = jolta_core::ai::background::Background::start(jolta.clone(), ai.clone(), changed, runtime.handle());
         Ok(Arc::new(Core {
             runtime,
             listener,
-            engine: Mutex::new(None),
+            engine,
             engine_sink: Mutex::new(None),
             order,
             refresh: Arc::default(),
@@ -1125,7 +1133,6 @@ impl Core {
             return Ok(());
         }
         let (order, listener) = (self.order.clone(), self.listener.clone());
-        let (background, jolta) = (self.background.clone(), self.jolta.clone());
         let sink: jolta_core::engine::Sink = Arc::new(move |event| {
             let event = match event {
                 Event::ListsChanged => {
@@ -1135,10 +1142,7 @@ impl Core {
                 Event::SyncStarted(a) => CoreEvent::SyncStarted { account_id: a.0 },
                 Event::SyncFinished(a) => CoreEvent::SyncFinished { account_id: a.0 },
                 Event::SyncFailed(a, message) => CoreEvent::SyncFailed { account_id: a.0, message },
-                Event::NewMail { account, thread, from, subject, vip } => {
-                    background.new_mail(&jolta, thread);
-                    CoreEvent::NewMail { account_id: account.0, thread_id: thread.0, from, subject, vip }
-                }
+                Event::Notice(notice) => CoreEvent::Notice { notice: notice.into() },
                 Event::ActionFailed(message) => CoreEvent::ActionFailed { message },
                 Event::Sent { account, subject } => CoreEvent::Sent { account_id: account.0, subject },
                 Event::NoReply { account, thread, subject } => {
@@ -1165,7 +1169,9 @@ impl Core {
             listener.on_event(event);
         });
         *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
-        *engine = Some(Engine::start(self.jolta.clone(), sink, self.runtime.handle().clone())?);
+        let started = Engine::start(self.jolta.clone(), sink, self.runtime.handle().clone())?;
+        started.set_background(self.background.clone());
+        *engine = Some(started);
         self.background.catch_up(&self.jolta);
         Ok(())
     }
@@ -1884,6 +1890,9 @@ impl Core {
     fn changed(&self) {
         *self.order.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.listener.on_event(CoreEvent::ListsChanged);
+        if let Some(engine) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            engine.notices().changed();
+        }
     }
 
     fn running_engine(&self) -> Result<Arc<Engine>> {

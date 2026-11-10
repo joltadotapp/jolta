@@ -9,7 +9,7 @@ import XCTest
 /// folder with `-JoltaTestData UITest-<test name>`, so no test sees real mail.
 @MainActor
 final class Journeys: XCTestCase {
-    private func launch(_ test: String = #function) throws -> XCUIApplication {
+    private func launch(_ test: String = #function, arguments: [String] = []) throws -> XCUIApplication {
         let name = "UITest-" + test.replacingOccurrences(of: "()", with: "")
         let home = getpwuid(getuid()).map { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
         let folder = home + "/Library/Application Support/Jolta/" + name
@@ -17,7 +17,7 @@ final class Journeys: XCTestCase {
             throw XCTSkip("No test data in \(folder); run the UI tests with scripts/ui-tests.sh")
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-JoltaTestData", name]
+        app.launchArguments = ["-JoltaTestData", name] + arguments
         app.launch()
         addTeardownBlock { @MainActor in app.terminate() }
         // With another Jolta running (the one installed on this Mac) the test
@@ -1360,6 +1360,34 @@ final class Journeys: XCTestCase {
     /// Settings › an account adds an address it sends as, compose's From menu
     /// offers it under the account, and c in another account's inbox writes
     /// from that account.
+    /// Settings › General › Notifications: the banner choice an older Jolta
+    /// kept moves into the core at launch, and the choices stay after
+    /// Settings closes.
+    func testNotificationSettings() throws {
+        let app = try launch(arguments: ["-NewMailBanners", "vips"])
+        app.typeKey(",", modifierFlags: .command)
+        app.buttons.matching(NSPredicate(format: "label == 'General'")).firstMatch.click()
+        let scope = app.popUpButtons["notify-scope"]
+        let badge = app.popUpButtons["dock-badge"]
+        XCTAssertTrue(scope.waitForExistence(timeout: 5), "General has Notify me about")
+        XCTAssertEqual(scope.value as? String, "Only VIPs", "the old Only from VIPs moved over")
+        XCTAssertEqual(badge.value as? String, "Important unread", "the badge counts important mail by default")
+
+        scope.click()
+        scope.menuItems["All new mail"].click()
+        badge.click()
+        badge.menuItems["None"].click()
+        app.checkBoxes["notify-sound"].click()
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(scope.waitForNonExistence(timeout: 5), "Settings closed")
+
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertTrue(scope.waitForExistence(timeout: 5))
+        XCTAssertEqual(scope.value as? String, "All new mail")
+        XCTAssertEqual(badge.value as? String, "None")
+        XCTAssertEqual(app.checkBoxes["notify-sound"].value as? Int, 0, "Play a sound stays off")
+    }
+
     func testSendFromAnAlias() throws {
         let app = try launch()
         app.typeKey(",", modifierFlags: .command)

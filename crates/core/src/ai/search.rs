@@ -9,7 +9,7 @@ const LANGUAGE: &str = "Query language (all terms must match):
 - a word matches anywhere in the mail; \"an exact phrase\" in double quotes
 - from:name-or-address  to:name-or-address  subject:word
 - has:attachment
-- is:unread  is:read  is:starred  is:vip  is:newsletter  is:notification  is:needs-reply
+- is:unread  is:read  is:starred  is:vip  is:newsletter  is:notification  is:needs-reply  is:important
 - is:invite (meeting invitations not answered yet)
 - category:personal  category:work  category:finance  category:newsletter  category:notification
 - in:inbox  in:sent  in:archive  in:drafts  in:trash  in:spam  in:snoozed; Trash and Spam are left out unless named, in:anywhere includes them

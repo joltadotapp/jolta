@@ -76,6 +76,7 @@ pub fn insert_message(conn: &Connection, m: &NewMessage) -> Result<Inserted> {
     )?;
     link_mailbox(conn, id, m.mailbox_id, m.uid)?;
     index_fts(conn, id, e, m.body.as_ref().map_or("", |b| b.text.as_str()))?;
+    crate::notify::note_correspondents(conn, &e.from_addr, &e.to, &e.cc)?;
     if let Some(body) = &m.body {
         super::set_invitations(conn, id, &body.invitations)?;
     }
