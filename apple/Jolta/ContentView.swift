@@ -770,6 +770,7 @@ struct ActionButton: View {
     let title: String
     let key: String
     var showsTitle = true
+    var showsKey = true
     var iconTint: Color?
     let action: () -> Void
     @State private var hovering = false
@@ -779,11 +780,13 @@ struct ActionButton: View {
             HStack(spacing: 7) {
                 Image(systemName: icon).font(.system(size: 12.5)).foregroundStyle(iconTint ?? Color(Theme.text2))
                 if showsTitle { Text(title) }
-                Text(key)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(Color(Theme.text3))
-                    .frame(minWidth: 16, minHeight: 16)
-                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color(Theme.line), lineWidth: 1))
+                if showsKey {
+                    Text(key)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Color(Theme.text3))
+                        .frame(minWidth: 16, minHeight: 16)
+                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color(Theme.line), lineWidth: 1))
+                }
             }
             .font(.system(size: 12.5))
             .foregroundStyle(Color(Theme.text2))
@@ -794,7 +797,7 @@ struct ActionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(title)
+        .help(showsKey ? title : "\(title) (\(key))")
     }
 }
 

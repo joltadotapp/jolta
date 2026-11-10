@@ -27,6 +27,27 @@ struct ComposeView: View {
     @State private var senders: [MailSender] = []
     @AppStorage(AppModel.key("showsFormatBar")) private var showsFormatBar = true
 
+    private func actions(showsKeys: Bool) -> some View {
+        HStack(spacing: 4) {
+            ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false, showsKey: showsKeys) { attach() }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+            ActionButton(icon: "sparkles", title: "Write with AI", key: "⌘J", showsTitle: false, showsKey: showsKeys) { writeWithAI() }
+                .keyboardShortcut("j", modifiers: .command)
+            ActionButton(icon: "text.badge.plus", title: "Insert snippet", key: "⌘;", showsTitle: false, showsKey: showsKeys) { model.palette = .snippets }
+                .keyboardShortcut(";", modifiers: .command)
+            ActionButton(icon: "bell", title: "Remind me if no reply", key: "⇧⌘H", showsTitle: false, showsKey: showsKeys) { model.palette = .remind }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+            ActionButton(icon: "clock", title: "Send later", key: "⇧⌘L", showsTitle: false, showsKey: showsKeys) { model.palette = .sendLater }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+            ActionButton(icon: "trash", title: "Discard", key: "⌘⌫", showsTitle: false, showsKey: showsKeys) { model.discardCompose() }
+                .keyboardShortcut(.delete, modifiers: .command)
+            SendButton { model.sendCompose() }
+                // ⌘Return is Find a time's Invite while its panel is up.
+                .keyboardShortcut(model.findTime == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
+        }
+        .fixedSize()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
@@ -34,25 +55,12 @@ struct ComposeView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
-                // The subject gives way first; the buttons keep their size.
-                HStack(spacing: 4) {
-                ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false) { attach() }
-                    .keyboardShortcut("a", modifiers: [.command, .shift])
-                ActionButton(icon: "sparkles", title: "Write with AI", key: "⌘J", showsTitle: false) { writeWithAI() }
-                    .keyboardShortcut("j", modifiers: .command)
-                ActionButton(icon: "text.badge.plus", title: "Insert snippet", key: "⌘;", showsTitle: false) { model.palette = .snippets }
-                    .keyboardShortcut(";", modifiers: .command)
-                ActionButton(icon: "bell", title: "Remind me if no reply", key: "⇧⌘H", showsTitle: false) { model.palette = .remind }
-                    .keyboardShortcut("h", modifiers: [.command, .shift])
-                ActionButton(icon: "clock", title: "Send later", key: "⇧⌘L", showsTitle: false) { model.palette = .sendLater }
-                    .keyboardShortcut("l", modifiers: [.command, .shift])
-                ActionButton(icon: "trash", title: "Discard", key: "⌘⌫", showsTitle: false) { model.discardCompose() }
-                    .keyboardShortcut(.delete, modifiers: .command)
-                SendButton { model.sendCompose() }
-                    // ⌘Return is Find a time's Invite while its panel is up.
-                    .keyboardShortcut(model.findTime == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
+                // The subject gives way first, then the keys beside the buttons,
+                // so Send stays in the pane at the window's narrowest.
+                ViewThatFits(in: .horizontal) {
+                    actions(showsKeys: true)
+                    actions(showsKeys: false)
                 }
-                .fixedSize()
             }
             .padding(.leading, 28)
             .padding(.trailing, 16)
