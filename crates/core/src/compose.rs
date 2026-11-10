@@ -411,6 +411,11 @@ pub fn from_draft(conn: &Connection, message: MessageId, raw: &[u8]) -> Result<C
             .unwrap_or_default();
         format_addresses(&pairs)
     };
+    let from = root.from().and_then(|l| l.first()).and_then(|m| m.address()).map(str::to_string);
+    let from = match from {
+        Some(a) => store::aliases(conn, account)?.into_iter().find(|x| x.address.eq_ignore_ascii_case(&a)).map(|x| x.address),
+        None => None,
+    };
     let in_reply_to = envelope.in_reply_to.first().cloned();
     let replying_to = match &in_reply_to {
         Some(id) => conn
@@ -420,6 +425,7 @@ pub fn from_draft(conn: &Connection, message: MessageId, raw: &[u8]) -> Result<C
     };
     Ok(Compose {
         account: Some(account),
+        from,
         to: list(root.to()),
         cc: list(root.cc()),
         bcc: list(root.bcc()),

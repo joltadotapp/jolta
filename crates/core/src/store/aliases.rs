@@ -110,17 +110,18 @@ pub fn remove_alias(conn: &Connection, id: i64) -> Result<()> {
 }
 
 /// Replaces the account's provider aliases with the provider's list. The
-/// user's own stay, and so do the ones they removed.
+/// user's own stay, and so do the ones they removed or renamed: a name is
+/// taken only for an address new to the list.
 pub fn set_provider_aliases(conn: &Connection, account: AccountId, list: &[ProviderAlias]) -> Result<()> {
     for a in list {
         conn.execute(
             "INSERT INTO account_alias (account_id, address, display_name, source) VALUES (?1, ?2, ?3, 'provider')
-             ON CONFLICT (account_id, address) DO UPDATE SET display_name = excluded.display_name WHERE source = 'provider'",
+             ON CONFLICT (account_id, address) DO NOTHING",
             params![account, a.address, a.display_name],
         )?;
     }
     let listed: Vec<String> = list.iter().map(|a| a.address.to_lowercase()).collect();
-    let mut stmt = conn.prepare("SELECT id, address FROM account_alias WHERE account_id = ?1 AND source = 'provider'")?;
+    let mut stmt = conn.prepare("SELECT id, address FROM account_alias WHERE account_id = ?1 AND source = 'provider' AND NOT hidden")?;
     let stored = stmt.query_map([account], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, address) in stored {
         if !listed.contains(&address.to_lowercase()) {

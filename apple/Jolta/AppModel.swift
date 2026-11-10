@@ -178,6 +178,8 @@ final class AppModel {
     private var summaryTask: Task<Void, Never>?
     /// A settings page something asked to show; the window opens on it.
     var settingsRequest: SettingsPage?
+    /// Goes up when an account's aliases change, so an open From menu lists them again.
+    var sendersRevision = 0
     /// The search field has the keyboard, so ⌘J searches with AI.
     var searchFocused = false
     private(set) var aiSearching = false

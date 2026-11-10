@@ -199,7 +199,7 @@ struct ComposeView: View {
             }
         }
         .onDisappear { saveTask?.cancel() }
-        .task(id: model.accounts.map(\.id)) { senders = (try? model.core.senders()) ?? [] }
+        .task(id: "\(model.accounts.map(\.id)) \(model.sendersRevision)") { senders = (try? model.core.senders()) ?? [] }
     }
 
     /// ⌘J: opens the AI bar, or writes again from the same instruction.

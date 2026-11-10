@@ -367,6 +367,7 @@ private struct SendAsSection: View {
 
     private func loadSenders() {
         senders = (try? model.core.senders()) ?? []
+        model.sendersRevision += 1
         defaultSender = (try? model.core.defaultSender()).flatMap { $0 }.map { SenderKey(accountId: $0.accountId, alias: $0.alias) }
     }
 
