@@ -189,12 +189,12 @@ impl Planner {
         }
         let mut replaced: Vec<ThreadId> = Vec::new();
         let mut fresh: BTreeMap<ThreadId, Vec<Candidate>> = BTreeMap::new();
-        let mut to_summary: Vec<(Candidate, bool)> = Vec::new();
+        let mut summary_only: Vec<(Candidate, bool)> = Vec::new();
         for c in gather {
             let Some(reach) = self.reach(&c) else { continue };
             let late = now - c.arrived > LATE;
             if late || (reach == Reach::Summary && !self.banners.contains_key(&c.thread)) {
-                to_summary.push((c, late));
+                summary_only.push((c, late));
             } else if let Some(shown) = self.banners.get_mut(&c.thread) {
                 if !replaced.contains(&c.thread) {
                     replaced.push(c.thread);
@@ -206,28 +206,44 @@ impl Planner {
         }
         let mut fresh: Vec<Vec<Candidate>> = fresh.into_values().collect();
         fresh.sort_by_key(|mail| std::cmp::Reverse(newest(mail).map(|c| (c.arrived, c.message))));
+        self.banner_times.retain(|t| now - t < BANNER_WINDOW);
+        let room = BANNERS_AT_ONCE.min(BANNERS_PER_WINDOW.saturating_sub(self.banner_times.len()));
+        let mut to_summary: Vec<(Candidate, bool)> = Vec::new();
+        if fresh.len() > room {
+            to_summary.extend(fresh.split_off(room).into_iter().flatten().map(|c| (c, false)));
+        }
+
+        // One conversation, one notification: a conversation with a banner
+        // takes the mail the summary holds for it and any that would go there now.
+        let mut shrunk = false;
+        for mail in &mut fresh {
+            let moved = self.out_of_summary(mail[0].thread);
+            shrunk |= !moved.is_empty();
+            mail.extend(moved);
+        }
+        for (c, late) in summary_only {
+            if let Some(mail) = fresh.iter_mut().find(|m| m[0].thread == c.thread) {
+                mail.push(c);
+            } else if let Some(shown) = self.banners.get_mut(&c.thread) {
+                if !replaced.contains(&c.thread) {
+                    replaced.push(c.thread);
+                }
+                shown.push(c);
+            } else {
+                to_summary.push((c, late));
+            }
+        }
 
         let mut out = Vec::new();
         for thread in replaced {
             let sound = self.sound(now);
             out.push(Notice::Show(banner(&self.banners[&thread], Level::Normal, sound)));
         }
-        self.banner_times.retain(|t| now - t < BANNER_WINDOW);
-        let room = BANNERS_AT_ONCE.min(BANNERS_PER_WINDOW.saturating_sub(self.banner_times.len()));
-        let mut shrunk = false;
-        for (i, mut mail) in fresh.into_iter().enumerate() {
-            if i >= room {
-                to_summary.extend(mail.into_iter().map(|c| (c, false)));
-                continue;
-            }
+        for mail in fresh {
             self.banner_times.push_back(now);
             let sound = self.sound(now);
-            let thread = mail[0].thread;
-            let moved = self.out_of_summary(thread);
-            shrunk |= !moved.is_empty();
-            mail.extend(moved);
             out.push(Notice::Show(banner(&mail, Level::Normal, sound)));
-            self.banners.insert(thread, mail);
+            self.banners.insert(mail[0].thread, mail);
         }
         if !to_summary.is_empty() {
             self.summary.extend(to_summary);
