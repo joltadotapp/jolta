@@ -157,6 +157,29 @@ fn banner_buttons_act_on_the_conversation() {
     assert!(app.core.notice_action("mail-summary".into(), NoticeAction::Archive).unwrap().is_empty());
 }
 
+/// Switching AI sorting changes what is important, so the badge follows at
+/// once (found by review on 2026-11-10: it waited for the next mail change).
+#[test]
+fn the_badge_follows_switching_ai_sorting() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let asks = app.deliver(&me, MailboxRole::Inbox, &Mail::new("Fay <fay@test.invalid>", "me@test.invalid", "Can you check this?", "?"));
+    app.jolta
+        .store
+        .write(|tx| Ok(tx.execute("INSERT INTO ai_triage (message_id, category, needs_reply, model, at) VALUES (?1, 'work', 1, 'test', 0)", [asks])?))
+        .unwrap();
+    let badge = || {
+        app.events.1.lock().unwrap().iter().rev().find_map(|n| match n {
+            Notice::Badge { count } => Some(*count),
+            _ => None,
+        })
+    };
+    wait(10, "the badge starts at 0 with sorting off", || badge() == Some(0));
+    sorting(&app, true);
+    app.core.set_ai_settings(app.core.ai_settings().unwrap()).unwrap();
+    wait(10, "the badge counts the mail that asks for a reply", || badge() == Some(1));
+}
+
 fn shown(app: &App) -> Vec<NoticeContent> {
     app.events.1.lock().unwrap().iter().filter_map(|n| match n {
         Notice::Show { content } => Some(content.clone()),

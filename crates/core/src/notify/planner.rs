@@ -633,6 +633,35 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_in_the_summary_moves_into_its_own_banner() {
+        let mut p = planner(Scope::Important);
+        let mut out = p.arrive((1..5).map(|i| mail(i, i, &format!("P{i}"), T0 + i)).collect(), T0 + 4);
+        out.extend(p.tick(T0 + 4 + QUIET));
+        assert_eq!(ids(&out), ["mail-4", "mail-3", "mail-2", "mail-summary"], "the summary holds P1's conversation");
+
+        let out = run(&mut p, vec![mail(5, 1, "P1", T0 + 60)]);
+        assert!(out.contains(&Notice::Withdraw(vec!["mail-summary".into()])), "the summary no longer counts it: {out:?}");
+        assert_eq!(ids(&out), ["mail-1"]);
+        assert_eq!(shows(&out)[0].title, "P1, 2 new messages", "one notification for the conversation");
+
+        let mut out = p.arrive((6..10).map(|i| mail(i, i, &format!("Q{i}"), T0 + 700)).collect(), T0 + 700);
+        out.extend(p.tick(T0 + 700 + QUIET));
+        assert_eq!(shows(&out).last().unwrap().title, "1 new message");
+        let out = p.arrive(vec![mail(10, 6, "Q6", T0 + 710).vip().urgent()], T0 + 710);
+        assert!(out.contains(&Notice::Withdraw(vec!["mail-summary".into()])), "urgent mail takes it out of the summary too: {out:?}");
+        assert_eq!(shows(&out)[0].title, "Q6, 2 new messages");
+    }
+
+    #[test]
+    fn urgent_banners_count_toward_the_rolling_limit() {
+        let mut p = planner(Scope::Important);
+        assert_eq!(ids(&p.arrive(vec![mail(1, 1, "Vera", T0).vip().urgent()], T0)), ["mail-1"]);
+        assert_eq!(ids(&run(&mut p, (2..5).map(|i| mail(i, i, "Ann", T0 + 10)).collect())).len(), 3);
+        let out = run(&mut p, (5..8).map(|i| mail(i, i, "Bob", T0 + 60)).collect());
+        assert_eq!(ids(&out), ["mail-7", "mail-6", "mail-summary"], "the urgent banner was the sixth's place");
+    }
+
+    #[test]
     fn urgent_needs_important_mail() {
         let mut p = planner(Scope::Important);
         let asks = mail(1, 1, "Ann", T0).urgent().unimportant();
