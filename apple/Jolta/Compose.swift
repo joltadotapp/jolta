@@ -36,10 +36,6 @@ struct ComposeView: View {
                 Spacer()
                 // The subject gives way first; the buttons keep their size.
                 HStack(spacing: 4) {
-                if !showsFormatBar {
-                    ActionButton(icon: "textformat", title: "Show formatting", key: "⌥⌘T", showsTitle: false) { showsFormatBar = true }
-                        .accessibilityIdentifier("format-show")
-                }
                 ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false) { attach() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 ActionButton(icon: "sparkles", title: "Write with AI", key: "⌘J", showsTitle: false) { writeWithAI() }
@@ -101,6 +97,15 @@ struct ComposeView: View {
                             body.window?.makeFirstResponder(body)
                             return .handled
                         }
+                    if !showsFormatBar {
+                        Button("Aa") { showsFormatBar = true }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color(Theme.text3))
+                            .help("Show formatting  ⌥⌘T")
+                            .accessibilityLabel("Show formatting")
+                            .accessibilityIdentifier("format-show")
+                    }
                 }
                 if let schedule = model.composeSchedule {
                     HStack(spacing: 8) {
