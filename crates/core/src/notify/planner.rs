@@ -84,10 +84,28 @@ pub struct Planner {
     seen: HashSet<MessageId>,
 }
 
+/// Where a message can go under the user's choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Banner,
+    Summary,
+}
+
 impl Planner {
     pub fn new(settings: Settings) -> Planner {
-        let _ = settings;
-        unimplemented!()
+        Planner {
+            settings,
+            foreground: false,
+            gather: Vec::new(),
+            first: 0,
+            last: 0,
+            banners: BTreeMap::new(),
+            summary: Vec::new(),
+            banner_times: VecDeque::new(),
+            urgent_times: VecDeque::new(),
+            last_sound: None,
+            seen: HashSet::new(),
+        }
     }
 
     pub fn set_settings(&mut self, settings: Settings) {
@@ -102,8 +120,29 @@ impl Planner {
     /// New mail from a sync round. Urgent mail is shown at once; the rest
     /// waits for the gather to close.
     pub fn arrive(&mut self, mail: Vec<Candidate>, now: i64) -> Vec<Notice> {
-        let _ = (mail, now);
-        unimplemented!()
+        let mut out = Vec::new();
+        if self.settings.scope == Scope::Nothing {
+            return out;
+        }
+        for c in mail {
+            if !self.seen.insert(c.message) || (self.reach(&c).is_none() && !c.sorting) {
+                continue;
+            }
+            if self.urgent_now(&c, now) {
+                self.urgent_times.push_back((c.sender_address.to_lowercase(), now));
+                let sound = self.sound(now);
+                let thread = self.banners.entry(c.thread).or_default();
+                thread.push(c);
+                out.push(Notice::Show(banner(thread, Level::Urgent, sound)));
+                continue;
+            }
+            if self.gather.is_empty() {
+                self.first = now;
+            }
+            self.last = now;
+            self.gather.push(c);
+        }
+        out
     }
 
     /// The mail waiting in the gather, for the store to look at again.
@@ -114,19 +153,74 @@ impl Planner {
     /// The waiting mail as the store sees it now. Mail missing from `fresh`
     /// was read or left the inbox and is dropped.
     pub fn refresh(&mut self, fresh: Vec<Candidate>) {
-        let _ = fresh;
-        unimplemented!()
+        let mut fresh: std::collections::HashMap<MessageId, Candidate> = fresh.into_iter().map(|c| (c.message, c)).collect();
+        self.gather = self.gather.iter().filter_map(|c| fresh.remove(&c.message)).collect();
     }
 
     /// When the gather closes, if anything waits.
     pub fn due(&self) -> Option<i64> {
-        unimplemented!()
+        if self.gather.is_empty() {
+            return None;
+        }
+        let latest = self.first + GATHER;
+        Some(if self.gather.iter().any(|c| c.sorting) { latest } else { (self.last + QUIET).min(latest) })
     }
 
-    /// Closes the gather when it is due.
+    /// Closes the gather when it is due: up to `BANNERS_AT_ONCE` new
+    /// conversations get a banner, newest first, within the rolling limit;
+    /// a conversation that has one gets it replaced; the rest, and mail
+    /// that arrived while away, goes into the summary.
     pub fn tick(&mut self, now: i64) -> Vec<Notice> {
-        let _ = now;
-        unimplemented!()
+        if self.due().is_none_or(|due| due > now) {
+            return Vec::new();
+        }
+        let gather = std::mem::take(&mut self.gather);
+        if self.foreground {
+            return Vec::new();
+        }
+        let mut replaced: Vec<ThreadId> = Vec::new();
+        let mut fresh: BTreeMap<ThreadId, Vec<Candidate>> = BTreeMap::new();
+        let mut to_summary: Vec<(Candidate, bool)> = Vec::new();
+        for c in gather {
+            let Some(reach) = self.reach(&c) else { continue };
+            let late = now - c.arrived > LATE;
+            if late || (reach == Reach::Summary && !self.banners.contains_key(&c.thread)) {
+                to_summary.push((c, late));
+            } else if let Some(shown) = self.banners.get_mut(&c.thread) {
+                if !replaced.contains(&c.thread) {
+                    replaced.push(c.thread);
+                }
+                shown.push(c);
+            } else {
+                fresh.entry(c.thread).or_default().push(c);
+            }
+        }
+        let mut fresh: Vec<Vec<Candidate>> = fresh.into_values().collect();
+        fresh.sort_by_key(|mail| std::cmp::Reverse(newest(mail).map(|c| (c.arrived, c.message))));
+
+        let mut out = Vec::new();
+        for thread in replaced {
+            let sound = self.sound(now);
+            out.push(Notice::Show(banner(&self.banners[&thread], Level::Normal, sound)));
+        }
+        self.banner_times.retain(|t| now - t < BANNER_WINDOW);
+        let room = BANNERS_AT_ONCE.min(BANNERS_PER_WINDOW.saturating_sub(self.banner_times.len()));
+        for (i, mail) in fresh.into_iter().enumerate() {
+            if i >= room {
+                to_summary.extend(mail.into_iter().map(|c| (c, false)));
+                continue;
+            }
+            self.banner_times.push_back(now);
+            let sound = self.sound(now);
+            let thread = mail[0].thread;
+            out.push(Notice::Show(banner(&mail, Level::Normal, sound)));
+            self.banners.insert(thread, mail);
+        }
+        if !to_summary.is_empty() {
+            self.summary.extend(to_summary);
+            out.push(Notice::Show(self.summary_notification(false)));
+        }
+        out
     }
 
     /// The mail behind the notifications shown, for the store to check.
@@ -138,14 +232,181 @@ impl Planner {
     /// it is read or gone from the inbox, and those messages from the summary.
     /// `still` is the shown mail that is still unread in the inbox.
     pub fn withdraw(&mut self, still: &HashSet<MessageId>) -> Vec<Notice> {
-        let _ = still;
-        unimplemented!()
+        let mut gone = Vec::new();
+        self.banners.retain(|thread, mail| {
+            let keep = mail.iter().any(|c| still.contains(&c.message));
+            if !keep {
+                gone.push(format!("mail-{thread}"));
+            }
+            keep
+        });
+        let mut out = Vec::new();
+        let before = self.summary.len();
+        self.summary.retain(|(c, _)| still.contains(&c.message));
+        if self.summary.len() != before {
+            if self.summary.is_empty() {
+                gone.push(SUMMARY.into());
+            } else {
+                out.push(Notice::Show(self.summary_notification(true)));
+            }
+        }
+        if !gone.is_empty() {
+            out.insert(0, Notice::Withdraw(gone));
+        }
+        out
     }
 
     /// Reminders the user asked for, which always get a banner.
     pub fn remind(&mut self, kind: Reminder, threads: Vec<(AccountId, ThreadId, String)>, now: i64) -> Vec<Notice> {
-        let _ = (kind, threads, now);
-        unimplemented!()
+        if self.settings.scope == Scope::Nothing || threads.is_empty() {
+            return Vec::new();
+        }
+        if threads.len() > REMINDERS_AT_ONCE {
+            let subjects: Vec<&str> = threads.iter().map(|(_, _, s)| shown_subject(s)).collect();
+            return vec![Notice::Show(Notification {
+                id: "reminders".into(),
+                group: "reminders".into(),
+                title: format!("{} conversations are back", threads.len()),
+                subtitle: String::new(),
+                body: clip(&subjects.join(", ")),
+                level: Level::Normal,
+                sound: self.sound(now),
+                open: Target::UnifiedInbox,
+                actions: Vec::new(),
+                account: None,
+                arrived: now,
+            })];
+        }
+        let (prefix, title) = match kind {
+            Reminder::Snooze => ("snooze", "Back from snooze"),
+            Reminder::NoReply => ("noreply", "No reply yet"),
+        };
+        threads
+            .into_iter()
+            .map(|(account, thread, subject)| {
+                Notice::Show(Notification {
+                    id: format!("{prefix}-{thread}"),
+                    group: "reminders".into(),
+                    title: title.into(),
+                    subtitle: shown_subject(&subject).into(),
+                    body: String::new(),
+                    level: Level::Normal,
+                    sound: self.sound(now),
+                    open: Target::Thread(thread),
+                    actions: vec![Action::Archive, Action::MarkRead, Action::Reply],
+                    account: Some(account),
+                    arrived: now,
+                })
+            })
+            .collect()
+    }
+
+    fn reach(&self, c: &Candidate) -> Option<Reach> {
+        match self.settings.scope {
+            Scope::Important => c.important.then_some(Reach::Banner),
+            Scope::All => Some(if c.important { Reach::Banner } else { Reach::Summary }),
+            Scope::Vips => c.vip.then_some(Reach::Banner),
+            Scope::Nothing => None,
+        }
+    }
+
+    /// Urgent mail that arrived just now, within both caps.
+    fn urgent_now(&mut self, c: &Candidate, now: i64) -> bool {
+        if !(c.urgent && c.important && self.reach(c) == Some(Reach::Banner) && now - c.arrived <= LATE) {
+            return false;
+        }
+        while self.urgent_times.front().is_some_and(|(_, t)| now - t >= 3600) {
+            self.urgent_times.pop_front();
+        }
+        let sender = c.sender_address.to_lowercase();
+        self.urgent_times.len() < URGENT_PER_HOUR
+            && !self.urgent_times.iter().any(|(s, t)| *s == sender && now - t < URGENT_PER_SENDER)
+    }
+
+    /// Whether this notification plays a sound, and if so, notes it.
+    fn sound(&mut self, now: i64) -> bool {
+        if !self.settings.sound || self.foreground || self.last_sound.is_some_and(|t| now - t < SOUND_GAP) {
+            return false;
+        }
+        self.last_sound = Some(now);
+        true
+    }
+
+    /// "5 new messages", from the important senders first. Quiet when it
+    /// holds no important mail, or when it only lost messages.
+    fn summary_notification(&self, shrunk: bool) -> Notification {
+        let n = self.summary.len();
+        let away = if self.summary.iter().all(|(_, late)| *late) { " while you were away" } else { "" };
+        let mut mail: Vec<&Candidate> = self.summary.iter().map(|(c, _)| c).collect();
+        mail.sort_by_key(|c| std::cmp::Reverse((c.important, c.arrived, c.message)));
+        let mut names: Vec<&str> = Vec::new();
+        for c in &mail {
+            if !names.contains(&c.sender.as_str()) {
+                names.push(&c.sender);
+            }
+        }
+        let important = self.summary.iter().any(|(c, _)| c.important);
+        Notification {
+            id: SUMMARY.into(),
+            group: "mail".into(),
+            title: format!("{n} new message{}{away}", if n == 1 { "" } else { "s" }),
+            subtitle: String::new(),
+            body: from(&names),
+            level: if important && !shrunk { Level::Normal } else { Level::Quiet },
+            sound: false,
+            open: Target::UnifiedInbox,
+            actions: Vec::new(),
+            account: None,
+            arrived: mail.iter().map(|c| c.arrived).max().unwrap_or_default(),
+        }
+    }
+}
+
+fn newest(mail: &[Candidate]) -> Option<&Candidate> {
+    mail.iter().max_by_key(|c| (c.arrived, c.message))
+}
+
+/// A conversation's banner: the newest sender, how many messages, the
+/// latest subject and its first line.
+fn banner(mail: &[Candidate], level: Level, sound: bool) -> Notification {
+    let c = newest(mail).expect("a banner has mail behind it");
+    let title = if mail.len() == 1 { c.sender.clone() } else { format!("{}, {} new messages", c.sender, mail.len()) };
+    Notification {
+        id: format!("mail-{}", c.thread),
+        group: format!("mail-{}", c.thread),
+        title,
+        subtitle: shown_subject(&c.subject).into(),
+        body: clip(&c.first_line),
+        level,
+        sound,
+        open: Target::Thread(c.thread),
+        actions: vec![Action::Archive, Action::MarkRead, Action::Reply],
+        account: Some(c.account),
+        arrived: c.arrived,
+    }
+}
+
+fn shown_subject(subject: &str) -> &str {
+    if subject.trim().is_empty() { "(no subject)" } else { subject }
+}
+
+fn clip(text: &str) -> String {
+    let text = text.trim();
+    if text.chars().count() <= BODY {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(BODY - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// "From Ann", "From Ann and Bob", "From Ann, Bob and Cas", "From Ann, Bob and 3 others".
+fn from(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!("From {one}"),
+        [a, b] => format!("From {a} and {b}"),
+        [a, b, c] => format!("From {a}, {b} and {c}"),
+        [a, b, rest @ ..] => format!("From {a}, {b} and {} others", rest.len()),
     }
 }
 
