@@ -57,9 +57,8 @@ struct MessageList: NSViewRepresentable {
             c.reload(full: false, resorted: c.lastSort != model.sort)
         }
         c.lastRevision = model.listRevision
-        if let table = c.table, c.focusRequest != model.focusListRequest || c.wantsFocus {
+        if let table = c.table, c.focusRequest != model.focusListRequest {
             c.focusRequest = model.focusListRequest
-            c.wantsFocus = table.window == nil
             table.window?.makeFirstResponder(table)
         }
     }
@@ -71,9 +70,11 @@ struct MessageList: NSViewRepresentable {
         var lastQuery = ""
         var lastSort = ListSort(key: .date, reversed: false)
         var lastRevision = -1
-        var wantsFocus = true
         var focusRequest = 0
         private var reportedLaunch = false
+        /// Whether a list has been shown since launch. The list view is made
+        /// again when the palette or calendar mode gives way, so this outlives it.
+        private static var shownOnce = false
         private var count = 0
         private var pages: [Int: [ThreadRow]] = [:]
         private let pageSize = 100
@@ -101,10 +102,16 @@ struct MessageList: NSViewRepresentable {
             if full {
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
-                // notification while calendar mode showed, keeps its row.
-                let row = model.selectedThreadID.flatMap { model.rows(of: [$0]).first } ?? 0
+                // notification while calendar mode showed, keeps its row. At
+                // launch nothing else opens, as opening marks it read; a list
+                // the user switched to opens at the top.
+                let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
+                let row = opened ?? 0
                 table.scrollRowToVisible(row)
-                if count > 0 { table.selectRowIndexes([row], byExtendingSelection: false) }
+                if count > 0, opened != nil || Self.shownOnce {
+                    table.selectRowIndexes([row], byExtendingSelection: false)
+                }
+                Self.shownOnce = true
                 if !reportedLaunch, count > 0 {
                     reportedLaunch = true
                     DispatchQueue.main.async {
@@ -305,6 +312,13 @@ struct MessageList: NSViewRepresentable {
 
 final class KeyTableView: NSTableView {
     override var acceptsFirstResponder: Bool { true }
+
+    /// The list has the keyboard as soon as it is in the window, not at
+    /// SwiftUI's next update, which may come after the user clicked Search.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+    }
 }
 
 /// Graphite's cursor row: a soft fill and an accent caret. Unread rows get a
