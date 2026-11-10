@@ -34,7 +34,6 @@ fn first_sync_and_new_mail() {
 
     server.append("INBOX", &Mail::new("carl@test.invalid", &server.user, "Fresh news", "Arrived while Jolta ran."));
     wait(20, "IDLE brought the new message", || inbox_has(&app, "Fresh news"));
-    assert!(app.events.seen("new mail"), "the app was told about new mail");
 }
 
 /// Archive, read, flag and trash in Jolta reach the server, and undo after

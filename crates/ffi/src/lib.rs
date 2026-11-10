@@ -22,6 +22,7 @@ pub mod editor;
 mod find_time;
 mod focus;
 mod holds;
+pub mod notify;
 mod rooms;
 pub mod quick;
 pub mod repeat;
@@ -269,6 +270,8 @@ pub enum CoreEvent {
     /// Holds changed: reload the line of these conversations (or the open
     /// one, when empty), and show `notice` as a toast.
     HoldsChanged { thread_ids: Vec<i64>, notice: Option<holds::HoldNotice> },
+    /// Show or withdraw a notification, or set the Dock badge.
+    Notice { notice: notify::Notice },
 }
 
 #[derive(uniffi::Record, Clone)]
