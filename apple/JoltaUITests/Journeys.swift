@@ -74,8 +74,31 @@ final class Journeys: XCTestCase {
         let after = unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label
         XCTAssertEqual(after, before, "nothing is marked read at launch")
         XCTAssertFalse(app.webViews.firstMatch.exists, "the reader shows no conversation")
+        let list = app.tables.firstMatch
+        XCTAssertEqual(list.value(forKey: "hasKeyboardFocus") as? Bool, true, "the list has the keyboard")
+
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
+        app.typeKey(.escape, modifierFlags: [])
+        app.typeKey("2", modifierFlags: .command)
+        app.typeKey("1", modifierFlags: .command)
+        RunLoop.current.run(until: Date() + 3)
+        XCTAssertFalse(app.webViews.firstMatch.exists, "closing the palette and leaving calendar mode open nothing")
+        XCTAssertEqual(unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label, before, "and mark nothing read")
+
         app.typeKey("j", modifierFlags: [])
-        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "j opens the top conversation")
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "j opens a conversation")
+        XCTAssertTrue(list.tableRows.firstMatch.isSelected, "the top one")
+    }
+
+    /// Return right after launch opens the top conversation, as j does.
+    func testReturnAtLaunchOpensTheTop() throws {
+        let app = try launch()
+        let list = app.tables.firstMatch
+        XCTAssertTrue(list.tableRows.firstMatch.waitForExistence(timeout: 10), "the list shows")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "Return opens a conversation")
+        XCTAssertTrue(list.tableRows.firstMatch.isSelected, "the top one")
     }
 
     /// Mail that arrives at inbox zero stays unread and unopened until it is
