@@ -281,6 +281,8 @@ pub struct ComposeFile {
 #[derive(uniffi::Record, Clone)]
 pub struct ComposeData {
     pub account_id: Option<i64>,
+    /// The alias of the account it is from; None for the account's own address.
+    pub from: Option<String>,
     pub to: String,
     pub cc: String,
     pub bcc: String,
@@ -341,6 +343,7 @@ impl From<Compose> for ComposeData {
     fn from(c: Compose) -> Self {
         ComposeData {
             account_id: c.account.map(|a| a.0),
+            from: c.from,
             to: c.to,
             cc: c.cc,
             bcc: c.bcc,
@@ -364,6 +367,7 @@ impl From<ComposeData> for Compose {
     fn from(c: ComposeData) -> Self {
         Compose {
             account: c.account_id.map(AccountId),
+            from: c.from,
             to: c.to,
             cc: c.cc,
             bcc: c.bcc,
@@ -1116,7 +1120,8 @@ impl Core {
             None => self.jolta.store.read(store::accounts)?.into_iter().next(),
         };
         let Some(account) = account else { return Ok(Vec::new()) };
-        Ok(compose::size_options(&account, &c)?
+        let from = self.jolta.store.read(|conn| compose::sender_from_store(conn, &account, c.from.as_deref()))?;
+        Ok(compose::size_options(&account, &from, &c)?
             .into_iter()
             .map(|o| MessageSize { size: o.size.into(), longest_side: o.size.longest_side(), bytes: o.bytes, fits: o.fits })
             .collect())

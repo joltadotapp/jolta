@@ -30,18 +30,18 @@ pub fn save_draft(conn: &Connection, c: &Compose) -> Result<i64> {
             conn.execute(
                 "UPDATE draft SET account_id = ?2, to_addrs = ?3, cc_addrs = ?4, bcc_addrs = ?5, subject = ?6,
                    body = ?7, in_reply_to = ?8, refs = ?9, replying_to = ?10, attachments = ?11,
-                   state = 'editing', dirty = 1, updated = ?12, image_size = ?13
+                   state = 'editing', dirty = 1, updated = ?12, image_size = ?13, from_addr = ?14
                  WHERE id = ?1",
-                params![id, c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name()],
+                params![id, c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name(), c.from],
             )?;
             Ok(id)
         }
         None => {
             conn.execute(
                 "INSERT INTO draft (account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs,
-                                    replying_to, attachments, dirty, updated, image_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12)",
-                params![c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name()],
+                                    replying_to, attachments, dirty, updated, image_size, from_addr)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13)",
+                params![c.account, c.to, c.cc, c.bcc, c.subject, c.body, c.in_reply_to, refs, c.replying_to, attachments, now(), c.image_size.name(), c.from],
             )?;
             Ok(conn.last_insert_rowid())
         }
@@ -62,11 +62,12 @@ fn draft_row(r: &Row) -> rusqlite::Result<Compose> {
         replying_to: r.get(9)?,
         attachments: decode_attachments(&r.get::<_, String>(10)?),
         image_size: ImageSize::from_name(&r.get::<_, String>(11)?),
+        from: r.get(12)?,
     })
 }
 
 const DRAFT_COLS: &str =
-    "id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs, replying_to, attachments, image_size";
+    "id, account_id, to_addrs, cc_addrs, bcc_addrs, subject, body, in_reply_to, refs, replying_to, attachments, image_size, from_addr";
 
 pub fn draft(conn: &Connection, id: i64) -> Result<Option<Compose>> {
     Ok(conn.query_row(&format!("SELECT {DRAFT_COLS} FROM draft WHERE id = ?1"), [id], draft_row).optional()?)

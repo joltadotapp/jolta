@@ -19,6 +19,7 @@ mod rename;
 pub mod rich;
 pub mod render;
 pub mod search;
+pub mod send_as;
 pub mod secrets;
 pub mod smime;
 pub mod smtp;

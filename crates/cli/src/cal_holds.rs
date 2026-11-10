@@ -57,7 +57,7 @@ pub fn hold(jolta: &Jolta, account: &str, to: &str, subject: &str, slots: &[Stri
     let a = jolta.store.read(|c| store::find_account(c, account))?;
     let mut c = Compose { account: Some(a.id), to: to.into(), subject: subject.into(), ..Compose::default() };
     offer(jolta, &mut c, &Offered { times: slots.to_vec(), minutes })?;
-    let built = compose::build(&a, &c, true)?;
+    let built = compose::build(&a, &compose::sender(&a, &[], None), &c, true)?;
     let now = Utc::now();
     let item = store::OutboxItem {
         id: 0,

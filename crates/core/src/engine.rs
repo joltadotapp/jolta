@@ -288,8 +288,12 @@ impl Engine {
     /// inbox then unless someone replies. Returns a token for `cancel_send`.
     pub fn send(&self, compose: &Compose, send_at: Option<i64>, remind_at: Option<i64>) -> Result<i64> {
         let account_id = compose.account.ok_or_else(|| crate::Error::Other("Choose an account to send from.".into()))?;
-        let account = self.jolta.store.read(|c| store::account(c, account_id))?;
-        let built = compose::build(&account, compose, true)?;
+        let (account, from) = self.jolta.store.read(|c| {
+            let account = store::account(c, account_id)?;
+            let from = compose::sender_from_store(c, &account, compose.from.as_deref())?;
+            Ok((account, from))
+        })?;
+        let built = compose::build(&account, &from, compose, true)?;
         let blob = self.jolta.blobs.put(&built.raw)?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         let delay = send_at.map_or(UNDO_SEND_SECONDS, |at| (at - now).max(UNDO_SEND_SECONDS));
@@ -743,12 +747,14 @@ impl Engine {
         if dirty.is_empty() {
             return Ok(None);
         }
+        let aliases = self.jolta.store.read_async(move |c| store::aliases(c, account_id)).await?;
+        let from = |c: &Compose| compose::sender(account, &aliases, c.from.as_deref());
         let drafts_box = self.role_mailbox(account.id, MailboxRole::Drafts).await?;
         let session = match link {
             Link::Imap(session, _) => session,
             Link::Graph(g) => {
                 for d in dirty {
-                    let built = (!d.deleted).then(|| compose::build(account, &d.compose, false)).transpose()?;
+                    let built = (!d.deleted).then(|| compose::build(account, &from(&d.compose), &d.compose, false)).transpose()?;
                     g.save_draft(built.as_ref().map(|b| b.raw.as_slice()), d.server_message_id.as_deref()).await?;
                     let (id, deleted, server_id) = (d.id, d.deleted, built.map(|b| b.message_id));
                     self.jolta.store.write_async(move |tx| store::draft_synced(tx, id, server_id.as_deref(), deleted)).await?;
@@ -777,7 +783,7 @@ impl Engine {
             }
             let mut server_id = None;
             if !d.deleted {
-                let built = compose::build(account, &d.compose, false)?;
+                let built = compose::build(account, &from(&d.compose), &d.compose, false)?;
                 session.append(&drafts_box.remote_id, Some("(\\Draft \\Seen)"), None, &built.raw).await?;
                 server_id = Some(built.message_id);
             }
