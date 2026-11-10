@@ -108,13 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
-/// Jolta keeps syncing with its window closed; the menu bar item shows unread
-/// mail and brings the window back.
+/// Jolta keeps syncing with its window closed; the menu bar item shows the
+/// Dock badge's number and brings the window back.
 struct MenuBarLabel: View {
     let model: AppModel?
 
     var body: some View {
-        let unread = model.map { _ = $0.listRevision; return $0.unreadCount("in:inbox") } ?? 0
+        let unread = Int(model?.badgeCount ?? 0)
         Image(systemName: unread > 0 ? "envelope.badge" : "envelope")
         if let model, let next = model.calendar.nextMeeting, let text = Self.soon(next, now: model.calendar.now) {
             Text(text)

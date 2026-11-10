@@ -24,6 +24,10 @@
 # in apple/Jolta-Info.plist. The OAuth clients the app carries come from
 # ~/jolta-devid/oauth-clients.env, in the same form as the data folder's file.
 # Notarization uses the notarytool keychain profile jolta-notary.
+#
+# The app gets the Time Sensitive notifications entitlement at signing, with the Developer ID
+# provisioning profile ~/jolta-devid/Jolta_Developer_ID.provisionprofile embedded; macOS won't
+# launch it otherwise. scripts/check-profile.sh checks the profile first and says how to make one.
 set -euo pipefail
 
 VERSION=${1:?usage: scripts/release.sh <version> [--public | --no-notarize]}
@@ -48,6 +52,7 @@ SPARKLE_BIN=${SPARKLE_BIN:-$HOME/jolta-tools-sparkle/bin}
 ED_KEY=${ED_KEY:-$DEVID/sparkle-ed25519-private.key}
 FEED_FILE=${JOLTA_FEED_FILE:-$DEVID/feed-url}
 CLIENTS=${JOLTA_CLIENTS_FILE:-$DEVID/oauth-clients.env}
+PROFILE=${JOLTA_PROFILE:-$DEVID/Jolta_Developer_ID.provisionprofile}
 [ -s "$FEED_FILE" ] || { echo "No feed address in $FEED_FILE."; exit 1; }
 TEST_URL=$(tr -d '[:space:]' < "$FEED_FILE")
 
@@ -80,6 +85,7 @@ ROOT=$(pwd)
 IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/ {print $2; exit}')
 [ -n "$IDENTITY" ] || { echo "No Developer ID Application certificate in the Keychain."; exit 1; }
 [ -f "$ED_KEY" ] || { echo "No Sparkle signing key at $ED_KEY."; exit 1; }
+scripts/check-profile.sh "$PROFILE"
 # A published version is never rebuilt: its appcast entry is signed for the old zip.
 [ ! -e "$UPDATES/Jolta-$VERSION.zip" ] || { echo "Jolta $VERSION is already published; pick a new version."; exit 1; }
 [ ! -e "$PUBLIC_UPDATES/Jolta-$VERSION.zip" ] || { echo "Jolta $VERSION is already public; pick a new version."; exit 1; }
@@ -118,8 +124,19 @@ sign "$SPARKLE/Updater.app"
 sign "$APP/Contents/Frameworks/Sparkle.framework"
 sign --entitlements apple/jolta-mcp.entitlements "$APP/Contents/MacOS/jolta-mcp"
 sign --entitlements apple/jolta-ai.entitlements "$APP/Contents/MacOS/jolta-ai"
-sign --preserve-metadata=entitlements "$APP"
+# Xcode signs with apple/Jolta.entitlements, which Debug builds share; Time Sensitive and the
+# identifiers the profile matches on are added here, with the profile that allows them.
+ENTITLEMENTS=$(mktemp)
+codesign -d --entitlements :- "$APP" > "$ENTITLEMENTS" 2>/dev/null
+/usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string RWQLHW7V7V.app.jolta.mac" \
+    -c "Add :com.apple.developer.team-identifier string RWQLHW7V7V" \
+    -c "Add :com.apple.developer.usernotifications.time-sensitive bool true" "$ENTITLEMENTS"
+cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+sign --entitlements "$ENTITLEMENTS" "$APP"
+rm -f "$ENTITLEMENTS"
 codesign --verify --deep --strict "$APP"
+codesign -d --entitlements - "$APP" 2>/dev/null | grep -q usernotifications.time-sensitive \
+    || { echo "The app isn't signed with the Time Sensitive entitlement."; exit 1; }
 
 if [ $NOTARIZE = 1 ]; then
     WORK=$(mktemp -d)

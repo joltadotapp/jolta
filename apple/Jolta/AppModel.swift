@@ -185,6 +185,11 @@ final class AppModel {
     private(set) var aiSearching = false
     private var markReadTask: Task<Void, Never>?
     let notifier = Notifier()
+    /// The Dock badge's number, which the menu bar item shows too.
+    private(set) var badgeCount: UInt32 = 0
+    /// A banner's Archive or Mark as Read clicked while Jolta was in the
+    /// background: its toast, with Undo, shows when Jolta comes forward.
+    private var noticeToast: Toast?
     private let power = PowerWatch()
 
     var sort: ListSort {
@@ -254,16 +259,35 @@ final class AppModel {
         Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification) {
                 self?.core.checkAway()
+                self?.core.setForeground(active: true)
+                if let toast = self?.noticeToast {
+                    self?.noticeToast = nil
+                    self?.show(toast)
+                }
             }
         }
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: NSApplication.didResignActiveNotification) {
+                self?.core.setForeground(active: false)
+            }
+        }
+        core.setForeground(active: NSApp?.isActive ?? false)
+        startNotifications()
         if !Self.isTestData { startMCP() }
         power.start(core: core)
         AddressBook.load(into: core)
         notifier.onOpen = { [weak self] threadID in
             self?.mode = .mail
             self?.source = .unifiedInbox
-            self?.open(threadID: threadID)
+            if let threadID { self?.open(threadID: threadID) }
         }
+        notifier.onReply = { [weak self] threadID in
+            self?.mode = .mail
+            self?.source = .unifiedInbox
+            self?.open(threadID: threadID)
+            self?.reply(.reply, threadID: threadID)
+        }
+        notifier.onAction = { [weak self] id, action in self?.noticeAction(id: id, action: action) }
         if accounts.contains(where: { $0.account.provider != "Synthetic" }) {
             notifier.requestPermission()
         }
@@ -587,10 +611,9 @@ final class AppModel {
         case .syncFailed(let id, let message):
             syncing.remove(id)
             syncErrors[id] = message
-        case .newMail(_, let threadID, let from, let subject, let vip):
-            if NewMailBanners.current.shows(vip: vip) {
-                notifier.post(threadID: threadID, from: from, subject: subject)
-            }
+        case .notice(let notice):
+            if case .badge(let count) = notice { badgeCount = count }
+            notifier.deliver(notice)
         case .actionFailed(let message):
             show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
         case .agentRequest(let id, let name):
@@ -602,11 +625,8 @@ final class AppModel {
             agentRevision += 1
         case .woke(_, _, let subject):
             show(Toast(text: "Back from snooze: \(subject)", undo: nil))
-        case .noReply(_, let threadID, let subject):
+        case .noReply(_, _, let subject):
             show(Toast(text: "No reply yet: \(subject)", undo: nil))
-            if NewMailBanners.current != .none {
-                notifier.post(threadID: threadID, from: "No reply yet", subject: subject)
-            }
         case .sent(_, let subject):
             show(Toast(text: "Sent: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil))
         case .sendFailed(let message, let gaveUp):
@@ -670,6 +690,40 @@ final class AppModel {
     }
 
     /// Acts on a thread, or on the selection when none is named, and offers undo.
+    /// Settings › General › Notifications.
+    var notifySettings: NotifySettings {
+        get { _ = notifyRevision; return (try? core.notifySettings()) ?? NotifySettings(scope: .important, sound: true, badge: .importantUnread) }
+        set {
+            do { try core.setNotifySettings(settings: newValue) } catch { notify("\(error)") }
+            notifyRevision += 1
+        }
+    }
+    private var notifyRevision = 0
+
+    /// The setting the app kept before the core had one moves over once;
+    /// earlier notifications go, and the badge starts from the core's count.
+    private func startNotifications() {
+        let defaults = UserDefaults.standard
+        if let old = defaults.string(forKey: "NewMailBanners") {
+            _ = try? core.migrateNewMailBanners(old: old)
+            defaults.removeObject(forKey: "NewMailBanners")
+        }
+        badgeCount = (try? core.badgeCount()) ?? 0
+        notifier.deliver(.badge(count: badgeCount))
+        Task { await notifier.clearEarlierNotices() }
+    }
+
+    private func noticeAction(id: String, action: NoticeAction) {
+        do {
+            let tokens = try core.noticeAction(id: id, action: action)
+            guard !tokens.isEmpty else { return }
+            let toast = Toast(text: action == .archive ? "Archived" : "Marked read", undo: .action(tokens))
+            if NSApp.isActive { show(toast) } else { noticeToast = toast }
+        } catch {
+            noticeToast = Toast(text: "\(error)", undo: nil)
+        }
+    }
+
     func act(_ action: ThreadAction, label: String, threadID: Int64? = nil) {
         let threads = threadID.map { [$0] } ?? (isMultiSelection ? selectedThreads : selectedThreadID.map { [$0] } ?? [])
         guard !threads.isEmpty else { return }
