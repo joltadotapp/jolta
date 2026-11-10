@@ -52,7 +52,7 @@ struct MessageList: NSViewRepresentable {
         let c = context.coordinator
         _ = model.listRevision
         if c.lastQuery != model.query {
-            c.reload(full: true, opensTop: true)
+            c.reload(full: true)
         } else if c.lastRevision != model.listRevision {
             c.reload(full: false, resorted: c.lastSort != model.sort)
         }
@@ -83,10 +83,7 @@ struct MessageList: NSViewRepresentable {
         /// took them out (archived, moved), the cursor stays at the same
         /// height, on the next thread. Mail that comes or goes by itself never
         /// gets the cursor, which would open it and mark it read.
-        /// `opensTop`: the user switched lists, so the new one opens at its
-        /// top. A list view made at launch, or again when the palette or
-        /// calendar mode gives way, opens only what was already open.
-        func reload(full: Bool, resorted: Bool = false, opensTop: Bool = false) {
+        func reload(full: Bool, resorted: Bool = false) {
             guard let table else { return }
             let userChanged = model.userChangedList
             model.userChangedList = false
@@ -102,12 +99,16 @@ struct MessageList: NSViewRepresentable {
             if full {
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
-                // notification while calendar mode showed, keeps its row.
-                // Nothing else opens by itself, as opening marks it read.
+                // notification while calendar mode showed, keeps its row. A
+                // list the user switched to opens at its top; at launch, or
+                // the same list shown again, nothing else opens, as opening
+                // marks it read.
+                let switched = model.shownListQuery.map { $0 != model.query } ?? false
+                model.shownListQuery = model.query
                 let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
                 let row = opened ?? 0
                 table.scrollRowToVisible(row)
-                if count > 0, opened != nil || opensTop {
+                if count > 0, opened != nil || switched {
                     table.selectRowIndexes([row], byExtendingSelection: false)
                 }
                 if !reportedLaunch, count > 0 {
