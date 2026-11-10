@@ -798,6 +798,8 @@ struct ActionButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(showsKey ? title : "\(title) (\(key))")
+        // Its key names it for UI tests, also when the hint is hidden.
+        .accessibilityIdentifier(key)
     }
 }
 
