@@ -432,15 +432,16 @@ struct SenderKey: Hashable {
     }
 }
 
-/// The menu items of a From menu: each account, its aliases under it.
+/// The menu items of a From menu: each account, then its aliases, a line
+/// between accounts. The menu shows the chosen item as it is, so aliases
+/// aren't indented.
 struct SenderMenuItems: View {
     let senders: [MailSender]
 
     var body: some View {
         ForEach(Array(senders.enumerated()), id: \.offset) { index, sender in
             if sender.alias == nil && index > 0 { Divider() }
-            Text(sender.alias == nil ? sender.address : "    \(sender.address)")
-                .tag(Optional(SenderKey(sender)))
+            Text(sender.address).tag(Optional(SenderKey(sender)))
         }
     }
 }

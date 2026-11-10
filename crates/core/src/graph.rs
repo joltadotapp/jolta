@@ -46,7 +46,7 @@ fn http_error(e: impl std::fmt::Display) -> Error {
 fn send_failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
     let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     match json["error"]["code"].as_str() {
-        Some("ErrorSendAsDenied") => Error::Refused("Microsoft 365 doesn't let this mailbox send as that address".into()),
+        Some("ErrorSendAsDenied") => Error::Refused("the mailbox has no right to send as that address".into()),
         _ => failure(status, bytes),
     }
 }
