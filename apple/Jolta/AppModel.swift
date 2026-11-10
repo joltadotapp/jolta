@@ -187,6 +187,10 @@ final class AppModel {
     /// The user archived, moved or undid something, so the list's next
     /// change may move the cursor on to the next conversation.
     @ObservationIgnored var userChangedList = false
+    /// The query of the list last shown, nil before the first. The list view
+    /// is made again when the palette or calendar mode gives way, so a list
+    /// switched to meanwhile is told apart from the same list shown again.
+    @ObservationIgnored var shownListQuery: String?
     let notifier = Notifier()
     /// The Dock badge's number, which the menu bar item shows too.
     private(set) var badgeCount: UInt32 = 0

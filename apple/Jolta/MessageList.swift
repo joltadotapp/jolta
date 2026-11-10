@@ -57,9 +57,8 @@ struct MessageList: NSViewRepresentable {
             c.reload(full: false, resorted: c.lastSort != model.sort)
         }
         c.lastRevision = model.listRevision
-        if let table = c.table, c.focusRequest != model.focusListRequest || c.wantsFocus {
+        if let table = c.table, c.focusRequest != model.focusListRequest {
             c.focusRequest = model.focusListRequest
-            c.wantsFocus = table.window == nil
             table.window?.makeFirstResponder(table)
         }
     }
@@ -71,7 +70,6 @@ struct MessageList: NSViewRepresentable {
         var lastQuery = ""
         var lastSort = ListSort(key: .date, reversed: false)
         var lastRevision = -1
-        var wantsFocus = true
         var focusRequest = 0
         private var reportedLaunch = false
         private var count = 0
@@ -101,10 +99,18 @@ struct MessageList: NSViewRepresentable {
             if full {
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
-                // notification while calendar mode showed, keeps its row.
-                let row = model.selectedThreadID.flatMap { model.rows(of: [$0]).first } ?? 0
+                // notification while calendar mode showed, keeps its row. A
+                // list the user switched to opens at its top; at launch, or
+                // the same list shown again, nothing else opens, as opening
+                // marks it read.
+                let switched = model.shownListQuery.map { $0 != model.query } ?? false
+                model.shownListQuery = model.query
+                let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
+                let row = opened ?? 0
                 table.scrollRowToVisible(row)
-                if count > 0 { table.selectRowIndexes([row], byExtendingSelection: false) }
+                if count > 0, opened != nil || switched {
+                    table.selectRowIndexes([row], byExtendingSelection: false)
+                }
                 if !reportedLaunch, count > 0 {
                     reportedLaunch = true
                     DispatchQueue.main.async {
@@ -273,7 +279,10 @@ struct MessageList: NSViewRepresentable {
                 return true
             }
             switch event.keyCode {
-            case 36, 76: openSelected(); return true
+            case 36, 76:
+                // With nothing open yet, Return opens the top, as j does.
+                if (table?.selectedRow ?? 0) < 0 { move(1) } else { openSelected() }
+                return true
             case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true
             default: break
             }
@@ -305,6 +314,13 @@ struct MessageList: NSViewRepresentable {
 
 final class KeyTableView: NSTableView {
     override var acceptsFirstResponder: Bool { true }
+
+    /// The list has the keyboard as soon as it is in the window, not at
+    /// SwiftUI's next update, which may come after the user clicked Search.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+    }
 }
 
 /// Graphite's cursor row: a soft fill and an accent caret. Unread rows get a

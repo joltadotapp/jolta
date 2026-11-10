@@ -63,6 +63,60 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
     }
 
+    /// Launch opens no conversation, as opening one marks it read: the
+    /// unread count holds until the user opens something, and j opens the top.
+    func testLaunchOpensNothing() throws {
+        let app = try launch()
+        let unread = app.staticTexts.matching(NSPredicate(format: "value ENDSWITH ' unread' OR label ENDSWITH ' unread'")).firstMatch
+        XCTAssertTrue(unread.waitForExistence(timeout: 10), "the inbox shows its unread count")
+        let before = unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label
+        RunLoop.current.run(until: Date() + 3)
+        let after = unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label
+        XCTAssertEqual(after, before, "nothing is marked read at launch")
+        XCTAssertFalse(app.webViews.firstMatch.exists, "the reader shows no conversation")
+        let list = app.tables.firstMatch
+        XCTAssertEqual(list.value(forKey: "hasKeyboardFocus") as? Bool, true, "the list has the keyboard")
+
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
+        app.typeKey(.escape, modifierFlags: [])
+        app.typeKey("2", modifierFlags: .command)
+        app.typeKey("1", modifierFlags: .command)
+        RunLoop.current.run(until: Date() + 3)
+        XCTAssertFalse(app.webViews.firstMatch.exists, "closing the palette and leaving calendar mode open nothing")
+        XCTAssertEqual(unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label, before, "and mark nothing read")
+
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "j opens a conversation")
+        XCTAssertTrue(list.tableRows.firstMatch.isSelected, "the top one")
+    }
+
+    /// A list switched to while calendar mode shows opens at its top once
+    /// mail mode is back, as any list switch does.
+    func testListSwitchedInCalendarOpensItsTop() throws {
+        let app = try launch()
+        let list = app.tables.firstMatch
+        XCTAssertTrue(list.tableRows.firstMatch.waitForExistence(timeout: 10), "the list shows")
+        app.typeKey("2", modifierFlags: .command)
+        app.typeKey("k", modifierFlags: .command)
+        app.typeText("Go to Sent")
+        XCTAssertTrue(paletteRow(app, "Go to Sent").waitForExistence(timeout: 5), "the palette offers Sent")
+        app.typeKey(.return, modifierFlags: [])
+        if !list.waitForExistence(timeout: 3) { app.typeKey("1", modifierFlags: .command) }
+        XCTAssertTrue(list.tableRows.firstMatch.waitForExistence(timeout: 5), "Sent shows its mail")
+        XCTAssertTrue(waitUntil { list.tableRows.firstMatch.isSelected }, "Sent opens at its top")
+    }
+
+    /// Return right after launch opens the top conversation, as j does.
+    func testReturnAtLaunchOpensTheTop() throws {
+        let app = try launch()
+        let list = app.tables.firstMatch
+        XCTAssertTrue(list.tableRows.firstMatch.waitForExistence(timeout: 10), "the list shows")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "Return opens a conversation")
+        XCTAssertTrue(list.tableRows.firstMatch.isSelected, "the top one")
+    }
+
     /// Mail that arrives at inbox zero stays unread and unopened until it is
     /// opened, so it can notify. The data folder also has an account on the
     /// local Dovecot (`scripts/test-servers.sh up`), and `scripts/ui-tests.sh`
@@ -172,7 +226,8 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(visible(app, "Lunch on Friday"), "typing in the palette didn't archive")
         app.typeKey(.escape, modifierFlags: [])
         app.typeKey("e", modifierFlags: [])
-        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
+        let row = app.tables.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@ OR label BEGINSWITH %@", "Lunch on Friday", "Lunch on Friday")).firstMatch
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5), "after Esc, keys reach the list again")
     }
 
     /// The color of the empty list below the rows, as 0–255 sRGB channels,
