@@ -25,6 +25,7 @@ struct ComposeView: View {
 
     /// Each account that can send, with its aliases.
     @State private var senders: [MailSender] = []
+    @AppStorage(AppModel.key("showsFormatBar")) private var showsFormatBar = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,6 +97,15 @@ struct ComposeView: View {
                             body.window?.makeFirstResponder(body)
                             return .handled
                         }
+                    if !showsFormatBar {
+                        Button("Aa") { showsFormatBar = true }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color(Theme.text3))
+                            .help("Show formatting  ⌥⌘T")
+                            .accessibilityLabel("Show formatting")
+                            .accessibilityIdentifier("format-show")
+                    }
                 }
                 if let schedule = model.composeSchedule {
                     HStack(spacing: 8) {
@@ -142,6 +152,10 @@ struct ComposeView: View {
                         // Editing a finished draft keeps it.
                         if writer.state == .done, body != writer.lastBody { self.writer = nil }
                     }
+            }
+
+            if showsFormatBar {
+                FormatBar()
             }
 
             // The cursor starts where the user types next: To until it names

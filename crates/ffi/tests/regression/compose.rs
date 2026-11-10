@@ -1,7 +1,7 @@
 use jolta_core::MailboxRole;
 use jolta_ffi::ReplyMode;
 
-use crate::fixture::{App, Mail, block_on, now, png, span};
+use crate::fixture::{App, Mail, block_on, line, now, png, runs, span};
 
 fn addresses(field: &str) -> Vec<String> {
     let mut out: Vec<String> = field
@@ -138,7 +138,7 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     compose.account_id = Some(me.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "The chart".into();
-    compose.body = app.core.body_markdown(vec![span("Here:\n", None), span("Pasted image.png", Some(&path)), span("\nThanks", None)]);
+    compose.body = app.core.body_from_lines(vec![line(vec![span("Here:", None)]), line(vec![span("Pasted image.png", Some(&path))]), line(vec![span("Thanks", None)])]);
     compose.image_size = jolta_ffi::ImageSizeChoice::Medium;
     let id = app.core.save_draft(compose).unwrap();
 
@@ -147,9 +147,8 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
 
     let reopened = app.core.draft(id).unwrap().expect("the draft is there");
     assert_eq!(reopened.image_size, jolta_ffi::ImageSizeChoice::Medium, "the draft keeps its image size");
-    let spans = app.core.body_spans(reopened.body.clone());
-    let images: Vec<_> = spans.iter().filter_map(|s| Some((s.text.as_str(), s.image.as_deref()?))).collect();
-    assert_eq!(images, [("Pasted image.png", path.as_str())]);
+    let lines = app.core.body_lines(reopened.body.clone());
+    assert_eq!(runs(&lines)[1], [("Pasted image.png", Some(path.as_str()))]);
     assert_eq!(std::fs::read(&path).unwrap(), png);
 
     app.core.send(reopened, None, None).unwrap();
@@ -161,6 +160,54 @@ fn a_pasted_image_survives_the_draft_and_goes_out_inline() {
     let html = msg.body_html(0).unwrap();
     assert!(html.contains(&format!("src=\"cid:{}\"", image.content_id().unwrap())), "{html}");
     assert!(msg.body_text(0).unwrap().replace("\r\n", "\n").contains("Here:\n[image: Pasted image.png]\nThanks"));
+}
+
+/// A formatted draft keeps every style through saving and reopening, and the
+/// sent message carries them: inline styles, alignment, indents and nested
+/// lists in its HTML, the lists' shape and the indents in its plain text.
+#[test]
+fn a_formatted_draft_keeps_its_styles_and_sends_them() {
+    use jolta_ffi::{TextAlign, TextColor, TextFont, TextHighlight, TextLine, TextSize, TextSpan};
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let mut compose = app.core.new_compose(None).unwrap();
+    compose.account_id = Some(me.id.0);
+    compose.to = "bob@test.invalid".into();
+    compose.subject = "Formatted".into();
+    let important = TextSpan {
+        bold: true,
+        underline: true,
+        font: Some(TextFont::Georgia),
+        size: Some(TextSize::Large),
+        color: Some(TextColor::Red),
+        highlight: Some(TextHighlight::Yellow),
+        ..span("Important", None)
+    };
+    let lines = vec![
+        TextLine { align: TextAlign::Center, ..line(vec![important]) },
+        line(vec![span("1. first", None)]),
+        TextLine { indent: 1, ..line(vec![span("- inside", None)]) },
+        TextLine { indent: 2, ..line(vec![span("an aside", None)]) },
+    ];
+    compose.body = app.core.body_from_lines(lines.clone());
+    let id = app.core.save_draft(compose).unwrap();
+    let reopened = app.core.draft(id).unwrap().expect("the draft is there");
+    assert_eq!(app.core.body_lines(reopened.body.clone()), lines, "the draft reopens as it was written");
+
+    app.core.send(reopened, None, None).unwrap();
+    let blob: String = app.jolta.store.read(|c| Ok(c.query_row("SELECT blob FROM outbox", [], |r| r.get(0))?)).unwrap();
+    let raw = app.jolta.blobs.get(&blob).unwrap();
+    let msg = mail_parser::MessageParser::new().parse(&raw).unwrap();
+    let html = msg.body_html(0).unwrap();
+    for part in [
+        "<div style=\"text-align: center\"><span style=\"font-family: Georgia, serif; font-size: 18px; color: #d93b3b; background-color: #fff1a8\"><u><b>Important</b></u></span></div>",
+        "<ol><li>first<ul><li>inside</li></ul></li></ol>",
+        "<div style=\"margin-left: 80px\">an aside</div>",
+    ] {
+        assert!(html.contains(part), "{part}\nin {html}");
+    }
+    let text = msg.body_text(0).unwrap().replace("\r\n", "\n");
+    assert!(text.contains("Important\n1. first\n    - inside\n        an aside"), "{text}");
 }
 
 /// A draft survives saving twice (one row, the newest text) and goes away
