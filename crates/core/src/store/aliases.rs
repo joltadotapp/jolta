@@ -230,6 +230,25 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_list_keeps_the_users_names_and_removals() {
+        let (store, account, dir) = store_with_account("keeps");
+        let list = provider(&[("sales@example.com", "Sales"), ("help@example.com", "Help")]);
+        store.write(|tx| set_provider_aliases(tx, account, &list)).unwrap();
+        let rows = store.read(|c| aliases(c, account)).unwrap();
+        store.write(|tx| rename_alias(tx, rows.iter().find(|a| a.address == "sales@example.com").unwrap().id, "Our sales")).unwrap();
+        store.write(|tx| remove_alias(tx, rows.iter().find(|a| a.address == "help@example.com").unwrap().id)).unwrap();
+
+        store.write(|tx| set_provider_aliases(tx, account, &provider(&[("sales@example.com", "Sales")]))).unwrap();
+        store.write(|tx| set_provider_aliases(tx, account, &list)).unwrap();
+        assert_eq!(
+            listed(&store, account),
+            [("sales@example.com".to_string(), "Our sales".to_string(), AliasSource::Provider)],
+            "a rename survives the next list, and a removal survives a list that left the address out"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn removing_and_renaming_an_alias() {
         let (store, account, dir) = store_with_account("remove");
         let alias = store.write(|tx| add_alias(tx, account, "team@example.com", "")).unwrap();

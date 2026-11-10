@@ -942,6 +942,27 @@ mod tests {
     }
 
     #[test]
+    fn a_draft_written_elsewhere_keeps_its_alias() {
+        let (s, _, dir) = senders_store("draft-alias");
+        s.write(|tx| {
+            store::add_alias(tx, AccountId(2), "sales@gmail.test", "")?;
+            tx.execute_batch(
+                "INSERT INTO thread (id, account_id) VALUES (1, 2);
+                 INSERT INTO message (id, account_id, remote_id, thread_id, date) VALUES (1, 2, 'm', 1, 0), (2, 2, 'n', 1, 0);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let draft = |from: &str| {
+            let raw = format!("From: {from}\r\nTo: ann@x.test\r\nSubject: Offer\r\n\r\nHi\r\n");
+            s.read(|c| from_draft(c, MessageId(1), raw.as_bytes())).unwrap().from
+        };
+        assert_eq!(draft("Sales <SALES@gmail.test>").as_deref(), Some("sales@gmail.test"));
+        assert_eq!(draft("me@gmail.test"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_reply_is_from_the_alias_the_mail_was_sent_to() {
         let to_alias = reply_from("to-alias", "From: Ann <ann@x.test>\r\nTo: bob@x.test, Help <HELP@gmail.test>", ReplyKind::Reply);
         assert_eq!((to_alias.account, to_alias.from.as_deref()), (Some(AccountId(2)), Some("help@gmail.test")));
