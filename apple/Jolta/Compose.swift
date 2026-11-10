@@ -25,6 +25,7 @@ struct ComposeView: View {
 
     /// Each account that can send, with its aliases.
     @State private var senders: [MailSender] = []
+    @AppStorage("showsFormatBar") private var showsFormatBar = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,6 +36,10 @@ struct ComposeView: View {
                 Spacer()
                 // The subject gives way first; the buttons keep their size.
                 HStack(spacing: 4) {
+                if !showsFormatBar {
+                    ActionButton(icon: "textformat", title: "Show formatting", key: "⌥⌘T", showsTitle: false) { showsFormatBar = true }
+                        .accessibilityIdentifier("format-show")
+                }
                 ActionButton(icon: "paperclip", title: "Attach", key: "⇧⌘A", showsTitle: false) { attach() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
                 ActionButton(icon: "sparkles", title: "Write with AI", key: "⌘J", showsTitle: false) { writeWithAI() }
@@ -142,6 +147,10 @@ struct ComposeView: View {
                         // Editing a finished draft keeps it.
                         if writer.state == .done, body != writer.lastBody { self.writer = nil }
                     }
+            }
+
+            if showsFormatBar {
+                FormatBar()
             }
 
             // The cursor starts where the user types next: To until it names

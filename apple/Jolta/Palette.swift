@@ -250,7 +250,7 @@ struct PaletteView: View {
 
     private var snippetItems: [PaletteItem] {
         ((try? model.core.snippets()) ?? []).map { s in
-            let preview = model.core.bodySpans(body: s.body).map(\.text).joined().split(separator: "\n").first.map(String.init) ?? ""
+            let preview = model.core.bodyPreview(s.body)
             return PaletteItem(id: "snippet-\(s.id)", title: s.name, detail: preview, icon: "text.badge.plus") { [model] in
                 model.insertSnippet(s)
             }

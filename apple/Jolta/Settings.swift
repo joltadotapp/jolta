@@ -196,7 +196,7 @@ struct SnippetsSettings: View {
     }
 
     private func preview(_ body: String) -> String {
-        model.core.bodySpans(body: body).map(\.text).joined().split(separator: "\n").first.map(String.init) ?? ""
+        model.core.bodyPreview(body)
     }
 
     private func load() {

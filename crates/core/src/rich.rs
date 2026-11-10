@@ -467,13 +467,40 @@ fn has_tag_closer(chars: &[char], from: usize, mark: Mark) -> bool {
 
 /// The lines of a body, for the editor. List and quote markers stay text.
 pub fn lines(body: &str) -> Vec<Line> {
-    todo!("read and write lines with styles")
+    body.split('\n')
+        .map(|line| {
+            let p = parts(line);
+            let mut spans = Vec::new();
+            for s in inline(p.rest, &Span::default()) {
+                push(&mut spans, s);
+            }
+            Line { indent: p.indent, align: p.align, spans }
+        })
+        .collect()
 }
 
 /// The body for these lines. A newline in a span starts a new line with the
 /// same indent and alignment.
 pub fn body(lines: &[Line]) -> String {
-    todo!("read and write lines with styles")
+    let mut out = Vec::new();
+    for line in lines {
+        let mut current: Vec<Span> = Vec::new();
+        for s in &line.spans {
+            if s.image.is_some() {
+                current.push(s.clone());
+                continue;
+            }
+            for (i, text) in s.text.split('\n').enumerate() {
+                if i > 0 {
+                    out.push(write_line(line, &current));
+                    current.clear();
+                }
+                current.push(Span { text: text.into(), ..s.clone() });
+            }
+        }
+        out.push(write_line(line, &current));
+    }
+    out.join("\n")
 }
 
 fn write_line(line: &Line, spans: &[Span]) -> String {

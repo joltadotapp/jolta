@@ -5,7 +5,7 @@
 use futures::TryStreamExt;
 use jolta_ffi::{ListContext, ThreadAction};
 
-use crate::fixture::{App, Mail, block_on, now, png, span};
+use crate::fixture::{App, Mail, block_on, line, now, png, runs, span};
 use crate::server::{Mailbox, available, caught, wait};
 
 fn inbox_has(app: &App, subject: &str) -> bool {
@@ -304,6 +304,38 @@ fn drafts_reopen_from_drafts() {
     wait(40, "sending removed the draft", || server.subjects("Drafts") == ["Re: Numbers, attached"]);
 }
 
+/// A formatted draft goes to the server and opens again from Drafts with
+/// every style it had.
+#[test]
+fn a_formatted_draft_comes_back_from_the_server_as_it_was() {
+    use jolta_ffi::{TextAlign, TextColor, TextLine, TextSize, TextSpan};
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let app = App::unstarted();
+    let account = server.sign_in(&app);
+    wait(20, "the first sync finished", || app.events.seen("synced"));
+
+    let mut compose = app.core.new_compose(None).unwrap();
+    compose.account_id = Some(account.id.0);
+    compose.to = "bob@test.invalid".into();
+    compose.subject = "Styled".into();
+    let lines = vec![
+        TextLine { align: TextAlign::Right, ..line(vec![TextSpan { underline: true, size: Some(TextSize::Huge), ..span("Big news", None) }]) },
+        line(vec![span("- one", None)]),
+        TextLine { indent: 1, ..line(vec![span("- ", None), TextSpan { color: Some(TextColor::Teal), ..span("two", None) }]) },
+    ];
+    compose.body = app.core.body_from_lines(lines.clone());
+    app.core.save_draft(compose).unwrap();
+    app.core.sync_now();
+    let thread = || app.list("in:drafts").into_iter().find(|r| r.subject == "Styled").map(|r| r.thread_id);
+    wait(20, "the draft came back in Drafts", || thread().is_some());
+
+    let opened = block_on(app.core.open_draft(thread().unwrap())).unwrap().expect("a draft");
+    assert_eq!(app.core.body_lines(opened.body), lines);
+}
+
 /// A pasted image goes to the server with its draft, shown inline there, and
 /// opening the draft again from Drafts brings it back where it was.
 #[test]
@@ -321,7 +353,7 @@ fn a_pasted_image_comes_back_with_its_draft() {
     compose.account_id = Some(account.id.0);
     compose.to = "bob@test.invalid".into();
     compose.subject = "With a chart".into();
-    compose.body = app.core.body_markdown(vec![span("See:\n", None), span("Pasted image.png", Some(&path)), span("\nBye", None)]);
+    compose.body = app.core.body_from_lines(vec![line(vec![span("See:", None)]), line(vec![span("Pasted image.png", Some(&path))]), line(vec![span("Bye", None)])]);
     compose.image_size = jolta_ffi::ImageSizeChoice::Large;
     let id = app.core.save_draft(compose).unwrap();
     app.core.sync_now();
@@ -331,9 +363,8 @@ fn a_pasted_image_comes_back_with_its_draft() {
     let opened = block_on(app.core.open_draft(thread().unwrap())).unwrap().expect("a draft");
     assert_eq!(opened.draft_id, Some(id));
     assert_eq!(opened.image_size, jolta_ffi::ImageSizeChoice::Large, "and its image size");
-    let spans = app.core.body_spans(opened.body);
-    let texts: Vec<_> = spans.iter().map(|s| (s.text.as_str(), s.image.as_deref())).collect();
-    assert_eq!(texts, [("See:\n", None), ("Pasted image.png", Some(path.as_str())), ("\nBye", None)]);
+    let lines = app.core.body_lines(opened.body);
+    assert_eq!(runs(&lines), [vec![("See:", None)], vec![("Pasted image.png", Some(path.as_str()))], vec![("Bye", None)]]);
 
     let raw = server.with(async |s| {
         s.select("Drafts").await.unwrap();

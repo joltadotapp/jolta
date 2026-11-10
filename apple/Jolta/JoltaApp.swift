@@ -35,16 +35,11 @@ struct JoltaApp: App {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandGroup(replacing: .appSettings) { SettingsMenuButton() }
             CommandGroup(replacing: .newItem) { NewMessageButton(model: model) }
-            CommandMenu("Format") {
-                Button("Bold") { RichTextView.focused?.toggle(.bold) }.keyboardShortcut("b")
-                Button("Italic") { RichTextView.focused?.toggle(.italic) }.keyboardShortcut("i")
-                Button("Strikethrough") { RichTextView.focused?.toggle(.strike) }.keyboardShortcut("x", modifiers: [.command, .shift])
-                Divider()
-                Button("Add Link…") { RichTextView.focused?.addLink() }.keyboardShortcut("k", modifiers: [.command, .shift])
-            }
+            CommandMenu("Format") { FormatMenu() }
             CommandMenu("Conversation") {
+                // While a text editor has the keyboard, ⌘U underlines.
                 Button("Unsubscribe") { model?.run(.unsubscribe) }
-                    .keyboardShortcut("u")
+                    .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("u"))
                     .disabled(model?.compose != nil)
                 // While writing, ⌘J belongs to Write with AI in the compose view.
                 Button(model?.searchFocused == true ? "Search with AI" : "Summarize") { model?.run(.summarize) }

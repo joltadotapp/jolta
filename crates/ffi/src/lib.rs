@@ -484,13 +484,40 @@ pub struct SnippetInfo {
     pub body: String,
 }
 
+/// The same enum on both sides of the bridge, under a name of its own here.
+macro_rules! mirror {
+    ($name:ident, $core:ident, [$($v:ident),*]) => {
+        #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum $name { $($v),* }
+        impl From<rich::$core> for $name {
+            fn from(x: rich::$core) -> Self { match x { $(rich::$core::$v => $name::$v),* } }
+        }
+        impl From<$name> for rich::$core {
+            fn from(x: $name) -> Self { match x { $($name::$v => rich::$core::$v),* } }
+        }
+    };
+}
+
+mirror!(TextFont, Font, [Arial, Verdana, Tahoma, Trebuchet, Georgia, Times, Courier]);
+mirror!(TextSize, Size, [Small, Large, Huge]);
+mirror!(TextColor, Color, [Red, Orange, Green, Teal, Blue, Purple, Pink, Gray]);
+mirror!(TextHighlight, Highlight, [Yellow, Green, Blue, Pink, Orange, Purple]);
+mirror!(TextAlign, Align, [Left, Center, Right]);
+mirror!(LineKind, Kind, [Paragraph, Bullet, Number, Quote]);
+
 /// A run of message text with one set of styles.
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct TextSpan {
     pub text: String,
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
+    pub underline: bool,
+    /// None is the message's own font, size or color.
+    pub font: Option<TextFont>,
+    pub size: Option<TextSize>,
+    pub color: Option<TextColor>,
+    pub highlight: Option<TextHighlight>,
     pub link: Option<String>,
     /// An image file shown here, by path; `text` is its name.
     pub image: Option<String>,
@@ -498,14 +525,106 @@ pub struct TextSpan {
 
 impl From<rich::Span> for TextSpan {
     fn from(s: rich::Span) -> Self {
-        TextSpan { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link, image: s.image }
+        TextSpan {
+            text: s.text,
+            bold: s.bold,
+            italic: s.italic,
+            strike: s.strike,
+            underline: s.underline,
+            font: s.font.map(Into::into),
+            size: s.size.map(Into::into),
+            color: s.color.map(Into::into),
+            highlight: s.highlight.map(Into::into),
+            link: s.link,
+            image: s.image,
+        }
     }
 }
 
 impl From<TextSpan> for rich::Span {
     fn from(s: TextSpan) -> Self {
-        rich::Span { text: s.text, bold: s.bold, italic: s.italic, strike: s.strike, link: s.link, image: s.image }
+        rich::Span {
+            text: s.text,
+            bold: s.bold,
+            italic: s.italic,
+            strike: s.strike,
+            underline: s.underline,
+            font: s.font.map(Into::into),
+            size: s.size.map(Into::into),
+            color: s.color.map(Into::into),
+            highlight: s.highlight.map(Into::into),
+            link: s.link,
+            image: s.image,
+        }
     }
+}
+
+/// One paragraph of message text. List and quote markers are text in it.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct TextLine {
+    /// 0 to `FormatChoices.max_indent`.
+    pub indent: u8,
+    pub align: TextAlign,
+    pub spans: Vec<TextSpan>,
+}
+
+impl From<rich::Line> for TextLine {
+    fn from(l: rich::Line) -> Self {
+        TextLine { indent: l.indent, align: l.align.into(), spans: l.spans.into_iter().map(Into::into).collect() }
+    }
+}
+
+impl From<TextLine> for rich::Line {
+    fn from(l: TextLine) -> Self {
+        rich::Line { indent: l.indent, align: l.align.into(), spans: l.spans.into_iter().map(Into::into).collect() }
+    }
+}
+
+/// What a paragraph is, by the marker it starts with.
+#[derive(uniffi::Record)]
+pub struct LineMarker {
+    pub kind: LineKind,
+    /// The marker's length in UTF-16 units, as the editor counts.
+    pub length: u32,
+}
+
+/// The values the format allows, for the editor's menus and how it shows them.
+#[derive(uniffi::Record)]
+pub struct FormatChoices {
+    pub fonts: Vec<FontChoice>,
+    pub sizes: Vec<SizeChoice>,
+    pub colors: Vec<ColorChoice>,
+    pub highlights: Vec<HighlightChoice>,
+    /// Text on a highlight with no color of its own, as `#rrggbb`.
+    pub ink: String,
+    /// Normal text, in pixels; the sizes are relative to it.
+    pub normal_px: u32,
+    pub max_indent: u8,
+}
+
+#[derive(uniffi::Record)]
+pub struct FontChoice {
+    pub font: TextFont,
+    /// The family to show it in.
+    pub family: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct SizeChoice {
+    pub size: TextSize,
+    pub px: u32,
+}
+
+#[derive(uniffi::Record)]
+pub struct ColorChoice {
+    pub color: TextColor,
+    pub hex: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct HighlightChoice {
+    pub highlight: TextHighlight,
+    pub hex: String,
 }
 
 #[derive(uniffi::Record)]
@@ -1186,14 +1305,38 @@ impl Core {
         compose::expand_snippet(&body, &to)
     }
 
-    /// A body as styled runs, for the editor.
-    pub fn body_spans(&self, body: String) -> Vec<TextSpan> {
-        rich::spans(&body).into_iter().map(Into::into).collect()
+    /// A body as styled paragraphs, for the editor.
+    pub fn body_lines(&self, body: String) -> Vec<TextLine> {
+        rich::lines(&body).into_iter().map(Into::into).collect()
     }
 
-    /// The editor's styled runs as a body.
-    pub fn body_markdown(&self, spans: Vec<TextSpan>) -> String {
-        rich::markdown(&spans.into_iter().map(Into::into).collect::<Vec<_>>())
+    /// The editor's styled paragraphs as a body.
+    pub fn body_from_lines(&self, lines: Vec<TextLine>) -> String {
+        rich::body(&lines.into_iter().map(Into::into).collect::<Vec<_>>())
+    }
+
+    /// What the editor's paragraph `text` is: a list item, a quote or neither.
+    pub fn body_line_marker(&self, text: String) -> LineMarker {
+        let (kind, len) = rich::line_kind(&text);
+        LineMarker { kind: kind.into(), length: text[..len].encode_utf16().count() as u32 }
+    }
+
+    /// The runs with every style gone but links and images.
+    pub fn clear_formatting(&self, spans: Vec<TextSpan>) -> Vec<TextSpan> {
+        spans.into_iter().map(|s| rich::clear(&s.into()).into()).collect()
+    }
+
+    pub fn format_choices(&self) -> FormatChoices {
+        use rich::Choice;
+        FormatChoices {
+            fonts: rich::Font::ALL.iter().map(|&f| FontChoice { font: f.into(), family: f.family().into() }).collect(),
+            sizes: rich::Size::ALL.iter().map(|&s| SizeChoice { size: s.into(), px: s.px() }).collect(),
+            colors: rich::Color::ALL.iter().map(|&c| ColorChoice { color: c.into(), hex: c.css().into() }).collect(),
+            highlights: rich::Highlight::ALL.iter().map(|&h| HighlightChoice { highlight: h.into(), hex: h.css().into() }).collect(),
+            ink: rich::INK.into(),
+            normal_px: rich::Size::NORMAL_PX,
+            max_indent: rich::MAX_INDENT,
+        }
     }
 
     /// The message at each image size, smallest first, for the Image size
