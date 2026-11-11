@@ -496,9 +496,18 @@ async fn account(jolta: &Jolta, cmd: AccountCommand) -> Result<()> {
         }
         AccountCommand::Remove { account } => {
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
+            let provider = jolta_core::oauth::Provider::for_kind(a.kind).filter(|p| p.revoke_url().is_some());
+            let refresh_token = provider.and_then(|_| secrets::password(&a.secret_ref).ok());
+            jolta_core::oauth::forget(&a);
             jolta.store.write(|tx| store::delete_account(tx, a.id))?;
             secrets::delete(&a.secret_ref)?;
             println!("Removed account {} ({}).", a.id, a.address);
+            if let (Some(provider), Some(token)) = (provider, refresh_token) {
+                match jolta_core::oauth::revoke(provider, token).await {
+                    Ok(()) => println!("Revoked Jolta's access at {provider:?}."),
+                    Err(e) => eprintln!("Could not revoke at {provider:?}: {e}"),
+                }
+            }
             Ok(())
         }
     }

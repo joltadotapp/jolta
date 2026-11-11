@@ -714,11 +714,23 @@ fn revoke_request(provider: Provider, refresh_token: &str) -> Option<(&'static s
 
 /// Withdraws the grant behind `refresh_token` at the provider, best effort:
 /// an account is removed whether or not the provider could be reached.
-pub async fn revoke(provider: Provider, refresh_token: String) {
-    let Some((url, body)) = revoke_request(provider, &refresh_token) else { return };
+pub async fn revoke(provider: Provider, refresh_token: String) -> Result<()> {
+    let Some((url, body)) = revoke_request(provider, &refresh_token) else { return Ok(()) };
     init_tls();
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() else { return };
-    let _ = client.post(url).header("Content-Type", "application/x-www-form-urlencoded").body(body).send().await;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().map_err(|e| Error::Other(format!("HTTP client: {e}")))?;
+    let response = client
+        .post(url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| Error::Other(format!("revoking at {url}: {e}")))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let detail = response.text().await.unwrap_or_default();
+    Err(Error::Auth(format!("revoking at {url}: {status} {}", detail.trim())))
 }
 
 static DATA_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
