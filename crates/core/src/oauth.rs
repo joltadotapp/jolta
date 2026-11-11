@@ -919,6 +919,24 @@ mod tests {
         assert!(!page.contains("signed in"), "{page}");
     }
 
+    #[test]
+    fn debug_output_never_shows_a_token_or_the_client_secret() {
+        let client = Client { id: "client-id".into(), secret: Some("client-secret-value".into()) };
+        let signed = SignedIn {
+            email: "me@example.com".into(),
+            name: "Me".into(),
+            refresh_token: "refresh-token-value".into(),
+            access_token: "access-token-value".into(),
+            expires_in: 3600,
+            user_id: Some("user-1".into()),
+        };
+        let text = format!("{client:?} {client:#?} {signed:?} {signed:#?} {:?}", Consent::Granted(signed.clone()));
+        for secret in ["client-secret-value", "refresh-token-value", "access-token-value"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert!(text.contains("client-id") && text.contains("me@example.com"), "the rest still shows: {text}");
+    }
+
     fn params(url: &str) -> HashMap<String, String> {
         query_of(url)
     }
