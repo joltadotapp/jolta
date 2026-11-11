@@ -597,6 +597,26 @@ mod tests {
     }
 
     #[test]
+    fn a_move_names_only_mailboxes_of_the_threads_own_account() {
+        let (_dir, store) = store();
+        store
+            .write(|c| {
+                gmail(c)?;
+                for (action, context) in [
+                    (Action::MoveTo(MailboxId(12)), Context::Inbox),
+                    (Action::Trash, Context::Mailbox(MailboxId(10))),
+                    (Action::MoveTo(MailboxId(99)), Context::Inbox),
+                ] {
+                    assert!(perform(c, ThreadId(1), action, context).is_err(), "{action:?} from {context:?}");
+                }
+                let ops: i64 = c.query_row("SELECT COUNT(*) FROM op", [], |r| r.get(0))?;
+                assert_eq!(ops, 0, "nothing was queued");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn mark_read_queues_only_unread_messages() {
         let (_dir, store) = store();
         let ops = store.write(|c| mark_read(c, &[MessageId(1), MessageId(3)])).unwrap();
