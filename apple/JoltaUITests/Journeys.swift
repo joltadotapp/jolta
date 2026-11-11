@@ -167,7 +167,17 @@ final class Journeys: XCTestCase {
     /// click shows it at its own size, which scrolls sideways to either edge,
     /// and another click fits it again.
     func testWideImageFitsAndZooms() throws {
-        let app = try launch()
+        try checkWideImage(in: launch())
+    }
+
+    /// The same in a mail whose signature table is wider than the reader,
+    /// which scales the whole mail down: the click shows the screenshot at
+    /// its own size all the same.
+    func testWideImageInScaledMailFitsAndZooms() throws {
+        try checkWideImage(in: launch())
+    }
+
+    private func checkWideImage(in app: XCUIApplication) {
         text(app, "Page layout question").click()
         app.typeKey(.return, modifierFlags: [])
         let reader = app.webViews.firstMatch
