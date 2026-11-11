@@ -124,6 +124,8 @@ pub fn settings(conn: &Connection) -> Result<Settings> {
 }
 
 pub fn save_settings(conn: &Connection, s: &Settings) -> Result<()> {
+    remote::base(Provider::OpenAi, &s.openai.base_url)?;
+    remote::base(Provider::Anthropic, &s.anthropic.base_url)?;
     let remote = |r: &Remote| json!({"base_url": r.base_url.trim(), "model": r.model.trim()});
     let value = json!({
         "provider": s.provider.map(Provider::name),

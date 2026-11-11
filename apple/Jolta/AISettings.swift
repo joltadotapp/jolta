@@ -283,6 +283,7 @@ private struct RemoteAccount: View {
     @State private var problem: String?
     @State private var models: [AiModelInfo] = []
     @State private var address = ""
+    @State private var addressProblem: String?
     @State private var advanced = false
 
     private var name: String { provider == .openAi ? "OpenAI" : "Anthropic" }
@@ -318,7 +319,8 @@ private struct RemoteAccount: View {
             if advanced {
                 SettingsCard {
                     SettingsRow(title: "API address",
-                                detail: "For a compatible server, such as Ollama, LM Studio or a company proxy. A server on your own network may not need a key.") {
+                                detail: addressProblem ?? "For a compatible server, such as Ollama, LM Studio or a company proxy. A server on your own network may not need a key.",
+                                detailColor: addressProblem == nil ? Color(Theme.text3) : .red) {
                         HStack(spacing: 6) {
                             TextField(model.core.aiDefaultUrl(provider: provider), text: $address)
                                 .settingsField(width: 220, mono: true)
@@ -407,7 +409,16 @@ private struct RemoteAccount: View {
 
     private func saveAddress() {
         let typed = address.trimmingCharacters(in: .whitespaces)
-        model.saveAI { s in if provider == .openAi { s.openaiUrl = typed } else { s.anthropicUrl = typed } }
+        var settings = model.ai
+        if provider == .openAi { settings.openaiUrl = typed } else { settings.anthropicUrl = typed }
+        do {
+            try model.core.setAiSettings(settings: settings)
+        } catch {
+            addressProblem = "\(error)"
+            return
+        }
+        addressProblem = nil
+        model.reloadAI()
         Task { await loadModels(key: nil) }
     }
 
