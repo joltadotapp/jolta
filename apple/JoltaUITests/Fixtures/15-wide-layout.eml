@@ -1,0 +1,36 @@
+From: Ann Berg <ann@test.invalid>
+To: Me <me@test.invalid>
+Subject: Spring catalogue
+Date: Mon, 09 Nov 2026 09:30:00 +0100
+Message-ID: <ui-15-wide-layout@test.invalid>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="===============8172678459824976039=="
+
+--===============8172678459824976039==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Spring catalogue
+
+--===============8172678459824976039==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<!doctype html><html><head><style>body{margin:0;background:#eef0f3}</style></=
+head><body>
+<table width=3D"100%" cellpadding=3D"0" cellspacing=3D"0" bgcolor=3D"#eef0f3"=
+><tr><td align=3D"center">
+<table width=3D"1100" cellpadding=3D"0" cellspacing=3D"0" bgcolor=3D"#ffffff"=
+ style=3D"width:1100px">
+<tr><td style=3D"padding:24px 32px;font:16px/1.5 Helvetica,sans-serif;color:#=
+222">
+<table width=3D"1036" cellpadding=3D"0" cellspacing=3D"0"><tr>
+<td width=3D"518" style=3D"background:#fde2e2;padding:12px">Catalogue left co=
+lumn</td>
+<td width=3D"518" style=3D"background:#dbe6fd;padding:12px;text-align:right">=
+Catalogue right column</td></tr></table>
+</td></tr></table></td></tr></table></body></html>
+
+--===============8172678459824976039==--
