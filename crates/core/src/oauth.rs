@@ -834,6 +834,55 @@ mod tests {
         assert!(begin_rooms(&google, Client { id: "cid".into(), secret: None }, 0).await.is_err());
     }
 
+    /// Sends one GET to the sign-in listener, as a browser would, and
+    /// returns the status line and the page.
+    async fn browse(redirect: &str, target: &str) -> (String, String) {
+        let port = redirect.trim_end_matches('/').rsplit(':').next().unwrap();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+        stream.write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
+        (head.lines().next().unwrap_or_default().to_string(), body.to_string())
+    }
+
+    #[tokio::test]
+    async fn the_listener_turns_away_requests_that_are_not_the_reply_and_keeps_waiting() {
+        let pending = begin(Provider::Google, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let (state, redirect) = (pending.state.clone(), pending.redirect.clone());
+        let flow = tokio::spawn(pending.finish_consent(std::future::pending()));
+
+        assert_eq!(browse(&redirect, "/favicon.ico").await.0, "HTTP/1.1 404 Not Found");
+        for forged in ["/?code=stolen&state=other", "/?code=stolen", "/?error=access_denied&state="] {
+            let (status, page) = browse(&redirect, forged).await;
+            assert_eq!(status, "HTTP/1.1 400 Bad Request", "{forged}");
+            assert!(!page.contains("signed in"), "{forged}: {page}");
+        }
+        assert!(!flow.is_finished(), "a forged reply doesn't end the sign-in");
+
+        let (status, page) = browse(&redirect, &format!("/?error=access_denied&state={state}")).await;
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert!(!page.contains("signed in"), "a refusal isn't shown as a sign-in: {page}");
+        let Consent::Refused(reason) = flow.await.unwrap().unwrap() else { panic!("the real reply ends the sign-in") };
+        assert_eq!(reason, "access_denied");
+    }
+
+    #[tokio::test]
+    async fn the_reply_with_a_code_says_signed_in_and_hands_over_the_code() {
+        let pending = begin(Provider::Google, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let target = format!("/?code=c0de&state={}", pending.state);
+        let (code, (status, page)) = tokio::join!(pending.receive_code(), browse(&pending.redirect, &target));
+        assert!(matches!(code.unwrap(), Redirect::Code(c) if c == "c0de"));
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert!(page.contains("You're signed in"));
+
+        let pending = begin(Provider::Google, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let target = format!("/?state={}", pending.state);
+        let (code, (_, page)) = tokio::join!(pending.receive_code(), browse(&pending.redirect, &target));
+        assert!(code.is_err(), "the reply had no code");
+        assert!(!page.contains("signed in"), "{page}");
+    }
+
     fn params(url: &str) -> HashMap<String, String> {
         query_of(url)
     }
