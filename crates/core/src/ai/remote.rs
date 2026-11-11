@@ -63,7 +63,10 @@ fn company(provider: Provider) -> &'static str {
 
 fn client(timeout: Option<Duration>) -> Result<reqwest::Client> {
     crate::oauth::init_tls();
-    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(90));
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(90));
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }

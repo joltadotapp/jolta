@@ -97,7 +97,7 @@ pub(crate) fn attachment_name(part: &MessagePart) -> String {
         matches!(c, '/' | '\\' | ':' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') || c.is_control()
     };
     let name: String = part.attachment_name().unwrap_or_default().chars().map(|c| if unsafe_char(c) { '-' } else { c }).collect();
-    let name = name.trim().trim_start_matches('.').trim_start();
+    let name = name.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end();
     if name.is_empty() {
         return "attachment".into();
     }
