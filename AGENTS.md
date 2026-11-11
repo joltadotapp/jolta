@@ -8,7 +8,7 @@ If `AGENTS.local.md` exists, read it first: it describes this checkout's machine
 
 - Functionality first. Write a test where logic can break silently. No CI, fuzzing, lint configs or benchmark tracking yet.
 - Keep tooling minimal: cargo, the scripts in `scripts/`, a hand-made Xcode project. Ask before adding a tool or a build step.
-- Every dependency must be MIT, Apache-2.0, BSD, ISC, Zlib or MPL-2.0. No GPL, AGPL or LGPL code, copied or linked.
+- Every dependency must be MIT, Apache-2.0, BSD, ISC, Zlib or MPL-2.0. No GPL, AGPL or LGPL code, copied or linked. Font files are the one exception: they may also be under the SIL Open Font License 1.1, self-hosted with their license file next to them (the website's fonts are in `site/public/fonts/`).
 - Jolta works fully without any server of ours. An optional subscription service may come later for features that need one; it adds to the app and never gates the core. No telemetry containing mail data.
 - Mail and calendar logic stays in Rust. Swift renders and forwards user intents.
 - The repository is public. The hooks in `.githooks/` refuse secrets (gitleaks), anything listed in `.git/info/private-strings` in changes or commit messages, and any commit email that isn't a GitHub no-reply address. Turn them on in a new clone with `git config core.hooksPath .githooks` and `brew install gitleaks`. Refer to people and test accounts by role, never by name or address.

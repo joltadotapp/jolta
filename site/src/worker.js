@@ -15,10 +15,11 @@ const CONTENT_TYPES = {
 // with every release.
 const IMMUTABLE = /^updates\/mac\/[^/]+-\d[^/]*\.(zip|delta)$/;
 
-// The pages load only their own stylesheet and run no script.
+// The pages load only their own stylesheet, fonts and scripts from jolta.app:
+// no inline script and nothing from another site.
 const SECURITY_HEADERS = {
   "content-security-policy":
-    "default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-frame-options": "DENY",
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
   "cross-origin-opener-policy": "same-origin",

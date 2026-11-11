@@ -43,3 +43,6 @@ xcuserdata/
 !/docs/architecture.md
 /AGENTS.local.md
 /CLAUDE.local.md
+
+# Impeccable review screenshots, made per build
+/.impeccable/review/

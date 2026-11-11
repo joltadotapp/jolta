@@ -12,6 +12,15 @@ bucket `jolta-releases`, the release files that `scripts/release.sh --public` up
 `/.well-known/microsoft-identity-association.json` proves the Microsoft publisher domain. Keep all
 three in place.
 
+The homepage's sky follows the visitor's clock (dawn, day, dusk, night) and the light or dark
+theme, which follows the system unless the visitor picks one in the footer. `public/theme.js`
+applies the stored theme before the first paint on every page; `public/site.js` paints the sky
+from the colours in `apple/Jolta/Scenery.swift` and runs the live inbox demo, whose mail is
+invented. The Worker's Content-Security-Policy allows scripts only from jolta.app itself, so
+pages may not use inline scripts, inline `style` attributes or anything from another site.
+The fonts in `public/fonts/` are self-hosted under the SIL Open Font License, with their
+license files beside them. `DESIGN.md` at the repository root records the design system.
+
 ## Work on it
 
 ```sh
