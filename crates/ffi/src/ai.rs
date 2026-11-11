@@ -389,9 +389,11 @@ impl Core {
 
 /// The helper next to the app's executable (`Jolta.app/Contents/MacOS`).
 pub(crate) fn helper_path() -> std::path::PathBuf {
-    std::env::var_os("JOLTA_AI_HELPER").map(Into::into).unwrap_or_else(|| {
-        std::env::current_exe().unwrap_or_default().with_file_name("jolta-ai")
-    })
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("JOLTA_AI_HELPER") {
+        return path.into();
+    }
+    std::env::current_exe().unwrap_or_default().with_file_name("jolta-ai")
 }
 
 pub(crate) type Downloads = Arc<Mutex<std::collections::HashMap<String, (Cancel, ModelState)>>>;

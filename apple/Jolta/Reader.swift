@@ -124,7 +124,11 @@ final class ReaderPage {
         }
         let html = page
         let navigation = webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
+        #if DEBUG
         let debug = UserDefaults.standard.bool(forKey: "JoltaReaderDebug")
+        #else
+        let debug = false
+        #endif
         guard debug || done != nil else { return }
         guard let navigation else { done?(); return }
         var log = "html \(html.count) chars\n"
@@ -718,8 +722,10 @@ struct ReaderView: View {
             reader.onToggle = { model.expandedMessages[$0] = $1 }
             reader.images.core = core
             render()
+            #if DEBUG
             // `-JoltaLoadImages YES` loads remote images at once, for checking from scripts.
             if UserDefaults.standard.bool(forKey: "JoltaLoadImages"), imagesBlocked { loadImages() }
+            #endif
         }
         .onChange(of: thread.html) { render() }
         .task(id: HoldsKey(thread: thread.threadId, revision: model.holdsRevision)) {
