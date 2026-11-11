@@ -48,6 +48,18 @@
       .reduce(function (sum, c, i) { return sum + c * [0.2126, 0.7152, 0.0722][i]; }, 0);
   }
   function contrast(a, b) { var x = luminance(a), y = luminance(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+  // Moves colour c lighter or darker, whichever it already leans, until it
+  // stands at least min:1 from the colour behind it.
+  function apart(c, from, min) {
+    var toward = luminance(c) >= luminance(from) ? "#FFFFFF" : "#000000";
+    for (var k = 0; k <= 1; k += 0.02) { var m = mix(c, toward, k); if (contrast(m, from) >= min) return m; }
+    return toward;
+  }
+  // Moves colour c toward `toward` until it stands at least min:1 from c.
+  function step(c, toward, min) {
+    for (var k = 0; k <= 1; k += 0.02) { var m = mix(c, toward, k); if (contrast(m, c) >= min) return m; }
+    return toward;
+  }
   function isDark() { return window.joltaTheme ? window.joltaTheme.isDark() : matchMedia("(prefers-color-scheme: dark)").matches; }
 
   // Stars scattered at random, kept apart so they never clump or line up.
@@ -96,7 +108,11 @@
   }
 
   function mountWindow(root, opts) {
-    var rows = MAIL.slice(), cur = 0, query = "", undo = [], toastTimer = 0, onScreen = false;
+    var rows = MAIL.slice(), cur = 0, query = "", undo = [], snoozed = [], toastTimer = 0, onScreen = false;
+    // Snoozing in the demo wakes the message tomorrow at 09:00, shown the way
+    // the app's "Next to wake" list does: a short weekday and the time.
+    var wakeAt = new Date(); wakeAt.setDate(wakeAt.getDate() + 1); wakeAt.setHours(9, 0, 0, 0);
+    var wakeLabel = wakeAt.toLocaleDateString("en-GB", { weekday: "short" }) + " 09:00";
     root.classList.add("jw");
     root.tabIndex = 0;
     root.setAttribute("role", "group");
@@ -104,8 +120,10 @@
     root.setAttribute("aria-label", "Jolta inbox demo with invented mail. J and K move, E archives, H snoozes, Z undoes, slash searches.");
     root.innerHTML =
       '<aside class="jw-side" aria-hidden="true"><div class="jw-lights"><i></i><i></i><i></i></div>' +
-      '<div class="jw-nav jw-on"><b>Inbox</b><span class="jw-n"></span></div><div class="jw-nav">VIP<span>3</span></div><div class="jw-nav">Snoozed<span>5</span></div><div class="jw-nav">Drafts<span>2</span></div><div class="jw-nav">Sent</div>' +
-      '<div class="jw-group">Accounts</div><div class="jw-acct">Work<small>Google</small></div><div class="jw-acct">Studio<small>Microsoft 365</small></div><div class="jw-acct">Personal<small>iCloud</small></div><div class="jw-acct">Server<small>IMAP</small></div>' +
+      '<div class="jw-nav jw-on"><b>Inbox</b><span class="jw-n"></span></div><div class="jw-nav">Starred</div>' +
+      '<div class="jw-group">Mailboxes</div><div class="jw-nav">Snoozed<span class="jw-sn"></span></div><div class="jw-nav">Drafts</div><div class="jw-nav">Sent</div>' +
+      '<div class="jw-wake"></div>' +
+      '<div class="jw-group jw-accts-label">Accounts<span class="jw-fold"></span></div><div class="jw-accts"><div class="jw-acct">Work<small>Google</small></div><div class="jw-acct">Studio<small>Microsoft 365</small></div><div class="jw-acct">Personal<small>iCloud</small></div><div class="jw-acct">Server<small>IMAP</small></div></div>' +
       '<div class="jw-sync">All accounts synced</div></aside>' +
       '<section class="jw-main"><div class="jw-head"><h3>Inbox</h3><span class="jw-count"></span><label class="jw-search"><input type="text" placeholder="Search" aria-label="Search the demo mail" tabindex="-1"><kbd>/</kbd></label></div>' +
       '<ul class="jw-list" aria-label="Messages"><li class="jw-zero" aria-hidden="true"></li></ul></section>' +
@@ -149,6 +167,16 @@
       root.querySelector(".jw-count").textContent = query ? vis.length + " found" : unread ? unread + " unread" : "";
       root.querySelector(".jw-n").textContent = rows.length || "";
       list.classList.toggle("jw-empty", rows.length === 0);
+      var wake = root.querySelector(".jw-wake");
+      wake.innerHTML = snoozed.length ? '<div class="jw-group">Next to wake</div>' + snoozed.slice(0, 5).map(function (m) {
+        return '<div class="jw-woke"><span class="jw-at">' + wakeLabel + "</span><span>" + esc(m.subj) + "</span></div>";
+      }).join("") : "";
+      root.querySelector(".jw-sn").textContent = snoozed.length || "";
+      // Like the app's collapsible Accounts group, it folds away when the
+      // snoozed list needs the room.
+      var folded = snoozed.length > 1;
+      root.querySelector(".jw-accts").hidden = folded;
+      root.querySelector(".jw-fold").textContent = folded && unread ? unread : "";
       if (rows.length === 0) {
         var sky = opts.sky();
         zero.innerHTML = sceneSVG(sky, isDark() || opts.phase() !== "day") +
@@ -160,14 +188,17 @@
     function act(type) {
       if (type === "undo") {
         var last = undo.pop(); if (!last) return;
+        if (last.type === "snooze") snoozed.splice(snoozed.indexOf(last.m), 1);
         rows.splice(last.at, 0, last.m); query = ""; input.value = "";
         cur = rows.indexOf(last.m); render(); say("Moved back to Inbox");
         opts.onAction && opts.onAction("undo"); return;
       }
       var m = visible()[cur]; if (!m) return;
       var at = rows.indexOf(m);
-      rows.splice(at, 1); undo.push({ m: m, at: at }); render();
-      say(type === "archive" ? "Archived on " + m.acct + " &middot; <kbd>Z</kbd> undo" : "Snoozed until tomorrow 09:00 &middot; <kbd>Z</kbd> undo");
+      rows.splice(at, 1); undo.push({ m: m, at: at, type: type });
+      if (type === "snooze") snoozed.unshift(m);
+      render();
+      say(type === "archive" ? "Archived on " + m.acct + " &middot; <kbd>Z</kbd> undo" : "Snoozed until " + wakeLabel + " &middot; <kbd>Z</kbd> undo");
       opts.onAction && opts.onAction(type);
       if (rows.length === 0 && opts.onZero) opts.onZero();
     }
@@ -223,12 +254,23 @@
     var dark = isDark(), s = currentSky();
     function set(k, v) { root.style.setProperty(k, v); }
     set("--top", s.top); set("--bottom", s.bottom);
-    set("--far", s.planeFar || s.far);
-    set("--mid", s.planeMid || mix(s.far, s.near, 0.5));
+    var far = s.planeFar || s.far, mid = s.planeMid || mix(s.far, s.near, 0.5);
+    if (!dark) {
+      // At night Graphite Light's hills sit too close to the sky to read as
+      // layers. The far ridge lifts into the haze above the sky's bottom, and
+      // each nearer ridge is darker than the one behind it by at least 1.3:1.
+      var lifted = contrast(far, s.bottom) < 1.3;
+      if (lifted) far = step(s.bottom, "#FFFFFF", 1.3);
+      if (lifted || contrast(mid, far) < 1.3 || luminance(mid) > luminance(far)) mid = step(far, "#000000", 1.3);
+    }
+    set("--far", far);
+    set("--mid", mid);
     // The near ridge carries the key hints, so in Graphite Light's daytime it
     // is darkened a little to keep white text readable.
     var near = !dark && phase === "day" ? mix(s.near, "#000000", 0.22) : s.near;
+    if (!dark && (contrast(near, mid) < 1.3 || luminance(near) > luminance(mid))) near = step(mid, "#000000", 1.3);
     set("--near", near);
+    set("--ground-fade", !dark && luminance(near) < 0.05 ? "2.5rem" : "6rem");
     var page = dark ? mix(s.near, "#0C0C0E", 0.3) : mix(s.near, "#FFFFFF", 0.9);
     set("--page", page);
     set("--sky-ink", s.ink);
@@ -254,11 +296,6 @@
     // scene's own hill colours, moved lighter or darker only as far as needed
     // to stand 1.3:1 from what sits behind them.
     set("--close-glow", mix(closeSky, s.bottom, 0.8));
-    function apart(c, from, min) {
-      var toward = luminance(c) >= luminance(from) ? "#FFFFFF" : "#000000";
-      for (var k = 0; k <= 1; k += 0.02) { var m = mix(c, toward, k); if (contrast(m, from) >= min) return m; }
-      return toward;
-    }
     var closeFar = apart(s.planeFar || s.far, closeSky, 1.3);
     var closeNear = apart(s.planeNear || s.near, closeFar, 1.3);
     if (dark && contrast(closeNear, page) < 1.3) closeNear = apart(closeNear, page, 1.3);
@@ -278,7 +315,8 @@
     if (win) win.render();
   }
 
-  win = mountWindow(document.getElementById("win"), {
+  var winEl = document.getElementById("win");
+  if (winEl) win = mountWindow(winEl, {
     sky: currentSky,
     phase: function () { return phase; },
     onZero: function () { skyEl.classList.add("zero"); },

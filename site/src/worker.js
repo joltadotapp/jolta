@@ -49,7 +49,43 @@ async function route(request, env) {
   if (RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
     return release(request, env, key);
   }
+  if (key.startsWith("media/")) {
+    return media(request, env);
+  }
   return env.ASSETS.fetch(request);
+}
+
+// Safari plays a video only when the server answers byte-range requests with 206.
+// The static assets always answer 200 with the whole file, so the recordings
+// under /media/ (each about 1 MB) are sliced here.
+async function media(request, env) {
+  const range = request.headers.get("range");
+  const plain = new Request(request.url, { method: request.method === "HEAD" ? "HEAD" : "GET" });
+  const asset = await env.ASSETS.fetch(plain);
+  const match = range && /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+  if (!asset.ok || !match || request.method !== "GET") {
+    const whole = new Response(asset.body, asset);
+    whole.headers.set("accept-ranges", "bytes");
+    return whole;
+  }
+  const body = await asset.arrayBuffer();
+  const size = body.byteLength;
+  let start, end;
+  if (match[1] === "") {
+    start = Math.max(0, size - Number(match[2]));
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1);
+  }
+  if (start > end || start >= size) {
+    return new Response(null, { status: 416, headers: { "content-range": `bytes */${size}` } });
+  }
+  const headers = new Headers(asset.headers);
+  headers.set("accept-ranges", "bytes");
+  headers.set("content-range", `bytes ${start}-${end}/${size}`);
+  headers.set("content-length", String(end - start + 1));
+  return new Response(body.slice(start, end + 1), { status: 206, headers });
 }
 
 async function release(request, env, key) {
