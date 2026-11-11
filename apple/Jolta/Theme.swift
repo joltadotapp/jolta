@@ -90,25 +90,6 @@ extension Color {
     init(_ token: NSColor) { self.init(nsColor: token) }
 }
 
-/// A key hint such as `E` or `⌘K`. Accent outline when it belongs to the focused thing.
-struct KeyCap: View {
-    let key: String
-    var focused = false
-
-    var body: some View {
-        Text(key)
-            .font(.system(size: 10.5, weight: .medium))
-            .foregroundStyle(Color(focused ? Theme.accentText : Theme.kbdText))
-            .padding(.horizontal, 4)
-            .frame(minWidth: 17, minHeight: 17)
-            .background {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(focused ? Color.clear : Color(Theme.kbd))
-                    .strokeBorder(focused ? Color(Theme.accent).opacity(0.55) : .clear, lineWidth: 1)
-            }
-    }
-}
-
 /// A theme's background, text and accent as three overlapping dots.
 struct ThemeSwatch: View {
     let theme: ThemePalette

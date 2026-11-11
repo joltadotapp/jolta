@@ -1010,22 +1010,6 @@ struct RepeatRowAnchor: PreferenceKey {
     static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
 }
 
-extension View {
-    /// The mockup's `.f`: a raised box with a hairline, 26 points tall.
-    func fieldBox(focused: Bool = false, height: CGFloat? = 26, chevrons: Bool = false) -> some View {
-        padding(.horizontal, 8)
-            .padding(.trailing, chevrons ? 14 : 0)
-            .frame(height: height)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.raise)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(focused ? Theme.accent : Theme.line), lineWidth: 1))
-            .overlay(alignment: .trailing) {
-                if chevrons {
-                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color(Theme.text3)).padding(.trailing, 7).allowsHitTesting(false)
-                }
-            }
-    }
-}
-
 /// "Tue 24 Nov", which opens a month to pick another day.
 private struct DayChip: View {
     let day: Date
