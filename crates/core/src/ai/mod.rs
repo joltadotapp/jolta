@@ -297,6 +297,8 @@ mod tests {
             "http://[::ffff:192.168.1.2]",
             "http://mac-studio.local:11434/v1",
             "http://Mac-Studio.LOCAL.",
+            "http://nas.example.home.arpa:11434/v1",
+            "http://ollama.internal",
         ];
         for address in allowed {
             assert!(saves(address).is_ok(), "{address} is allowed: {:?}", saves(address));
@@ -312,6 +314,8 @@ mod tests {
             "http://local",
             "http://localhost.example.com",
             "http://example.local.example.com",
+            "http://home.arpa.example.com",
+            "http://internal.example.com",
             "ftp://192.168.1.2",
             "file:///etc/passwd",
             "localhost:11434",
