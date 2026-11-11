@@ -23,6 +23,7 @@ const SECURITY_HEADERS = {
   "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-embedder-policy": "require-corp",
+  "cross-origin-resource-policy": "same-origin",
   "referrer-policy": "strict-origin-when-cross-origin",
 };
 
