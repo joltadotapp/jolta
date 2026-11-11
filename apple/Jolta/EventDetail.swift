@@ -83,8 +83,7 @@ struct EventDetailCard: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color(Theme.text2))
                         .fixedSize(horizontal: false, vertical: true)
-                    Button(conflict.action) { cal.applyMine(conflict.op) }
-                        .controlSize(.small)
+                    KitButton(title: conflict.action, size: .small) { cal.applyMine(conflict.op) }
                         .accessibilityIdentifier("event-detail-apply-mine")
                 }
                 .padding(8)
@@ -158,36 +157,32 @@ struct EventDetailCard: View {
                     .padding(.top, 6)
                     .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
             }
-            HStack(spacing: 6) {
-                Button { cal.edit(event) } label: { HStack(spacing: 5) { Text("Edit"); KeyCap(key: "E") } }
+            HStack(spacing: 2) {
+                KitButton(title: "Edit", key: "E", kind: .quiet, size: .small) { cal.edit(event) }
                     .accessibilityIdentifier("event-detail-edit")
                 if cal.detailDeletable {
-                    Button { cal.deleteSelected() } label: { HStack(spacing: 5) { Text("Delete"); KeyCap(key: "⌫") } }
+                    KitButton(title: "Delete", key: "⌫", kind: .quiet, size: .small) { cal.deleteSelected() }
                         .accessibilityIdentifier("event-detail-delete")
                 }
                 if detail.emailGuests {
-                    Button { cal.emailGuests(event) } label: { Text("Email guests") }
+                    KitButton(title: "Email guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
                         .help("Write to the people on this event, for what isn't a calendar update")
                         .accessibilityIdentifier("event-detail-email-guests")
                 }
             }
-            .buttonStyle(.plain)
-            .font(.system(size: 11.5))
-            .foregroundStyle(Color(Theme.text2))
-            .padding(.top, 10)
+            // The first button's words line up with the card's text.
+            .padding(.leading, -7)
+            .padding(.top, 8)
             if let m = detail.meeting {
                 HStack(spacing: 6) {
-                    JoinButton(title: m.provider.short.isEmpty ? "Join" : "Join \(m.provider.short)", live: live) { CalendarModel.join(m) }
-                    Button("Copy Link") {
+                    KitButton(title: m.provider.short.isEmpty ? "Join" : "Join \(m.provider.short)", kind: live ? .primary : .secondary, size: .small) {
+                        CalendarModel.join(m)
+                    }
+                    .help("Join the online meeting")
+                    KitButton(title: "Copy Link", size: .small) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(m.joinUrl, forType: .string)
                     }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Color(Theme.text2))
-                    .padding(.horizontal, 8)
-                    .frame(height: 22)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
                 }
                 .padding(.top, 10)
             }

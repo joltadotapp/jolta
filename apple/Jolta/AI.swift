@@ -192,15 +192,15 @@ struct SummaryCard: View {
                 Text("Summaries need a model: one on this Mac, or your OpenAI or Anthropic account.")
                     .foregroundStyle(Color(Theme.text2))
                 Spacer(minLength: 8)
-                Button("Choose a Model…", action: openSettings)
+                KitButton(title: "Choose a Model…", size: .small, action: openSettings)
             }
             .font(.system(size: 12.5))
         case .failed(let message):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(message).foregroundStyle(Color(Theme.text2)).textSelection(.enabled)
                 Spacer(minLength: 8)
-                Button("Try Again") { summary.start(automatic: false, fresh: true, label: label) }
-                if message.contains("Settings") { Button("AI Settings…", action: openSettings) }
+                KitButton(title: "Try Again", size: .small) { summary.start(automatic: false, fresh: true, label: label) }
+                if message.contains("Settings") { KitButton(title: "AI Settings…", size: .small, action: openSettings) }
             }
             .font(.system(size: 12.5))
         default:
@@ -344,7 +344,7 @@ struct WriteBar: View {
                 HStack(spacing: 6) {
                     if writer.isWorking { ProgressView().controlSize(.mini) }
                     Text(status).lineLimit(2).textSelection(.enabled)
-                    if writer.state == .notSetUp { Button("Choose a Model…") { model.openSettings(.ai) }.controlSize(.small) }
+                    if writer.state == .notSetUp { KitButton(title: "Choose a Model…", size: .small) { model.openSettings(.ai) } }
                 }
                 .font(.system(size: 11.5))
                 .foregroundStyle(Color(Theme.text3))
@@ -365,13 +365,13 @@ struct WriteBar: View {
         HStack(spacing: 6) {
             switch writer.state {
             case .working:
-                hint("Stop", key: "esc") { writer.stop() }
+                KitButton(title: "Stop", key: "esc", size: .small) { writer.stop() }
             case .done:
-                hint("Keep", key: "↩", action: close)
-                hint("Try Again", key: "⌘J") { writer.write(model: model) }
-                hint("Undo", key: "esc") { writer.undo(model: model); close() }
+                KitButton(title: "Keep", key: "↩", size: .small, action: close)
+                KitButton(title: "Try Again", key: "⌘J", size: .small) { writer.write(model: model) }
+                KitButton(title: "Undo", key: "esc", size: .small) { writer.undo(model: model); close() }
             default:
-                hint("Write", key: "↩") { writer.write(model: model) }
+                KitButton(title: "Write", key: "↩", size: .small) { writer.write(model: model) }
             }
         }
     }
@@ -403,19 +403,5 @@ struct WriteBar: View {
         case .done: writer.undo(model: model); close()
         default: close()
         }
-    }
-
-    private func hint(_ title: String, key: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Text(title)
-                Text(key).font(.system(size: 10.5)).foregroundStyle(Color(Theme.text3))
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 22)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-        }
-        .buttonStyle(.plain)
-        .font(.system(size: 12))
     }
 }

@@ -301,10 +301,8 @@ private struct RemoteAccount: View {
             }
             SettingsRow(title: "Model", detail: modelDetail) { modelControl }
         } accessory: {
-            Link(destination: keysPage) {
-                HStack(spacing: 3) { Text("Get a key"); Image(systemName: "arrow.up.right").font(.system(size: 9.5, weight: .semibold)) }
-            }
-            .font(.system(size: 12))
+            KitButton(title: "Get a key ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(keysPage) }
+                .padding(.trailing, -7)
         }
         VStack(alignment: .leading, spacing: 10) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { advanced.toggle() } } label: {

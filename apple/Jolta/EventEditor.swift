@@ -413,18 +413,8 @@ struct EventEditorPanel: View {
                     .accessibilityIdentifier("editor-read-by-ai")
             }
             Spacer()
-            Button { cal.closeEditor() } label: {
-                HStack(spacing: 6) {
-                    KeyCap(key: "esc", style: .inherit)
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
-                }
-                .foregroundStyle(Color(Theme.text3))
-                .padding(.horizontal, 6)
-                .frame(height: 24)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Close (Esc)")
+            KitButton(title: "Close", key: "esc", icon: "xmark", kind: .quiet, size: .small, showsTitle: false) { cal.closeEditor() }
+                .help("Close (Esc)")
         }
         .padding(.leading, 20)
         .padding(.trailing, 10)
@@ -448,14 +438,14 @@ struct EventEditorPanel: View {
             }
             Spacer()
             if editor.isReadOnly {
-                EditorButton(title: "Done", key: "⌘↩", primary: true) { cal.closeEditor() }
+                KitButton(title: "Done", key: "⌘↩", kind: .primary) { cal.closeEditor() }
                     .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityIdentifier("editor-done")
             } else {
                 // The repeat popover takes Esc and Return while it is open.
-                EditorButton(title: "Cancel", key: "esc") { cal.closeEditor() }
+                KitButton(title: "Cancel", key: "esc") { cal.closeEditor() }
                     .keyboardShortcut(editor.repeatPicker == nil ? .cancelAction : nil)
-                EditorButton(title: editor.willSend ? "Save and send…" : "Save", key: "⌘↩", primary: true) {
+                KitButton(title: editor.willSend ? "Save and send…" : "Save", key: "⌘↩", kind: .primary) {
                     commitTimes()
                     cal.saveEditor()
                 }
@@ -653,21 +643,13 @@ struct EventEditorPanel: View {
                         Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
                         Spacer(minLength: 0)
                         if canFindTime {
-                            Button { findTime() } label: {
-                                HStack(spacing: 5) { Text("Find a time"); KeyCap(key: "⇧⌘F", style: .inherit) }
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color(Theme.accentText))
-                            .keyboardShortcut("f", modifiers: [.command, .shift])
-                            .help("See when everyone is free and pick a time (⇧⌘F)")
-                            .accessibilityIdentifier("editor-find-time")
+                            KitButton(title: "Find a time", key: "⇧⌘F", kind: .quiet, size: .small) { findTime() }
+                                .keyboardShortcut("f", modifiers: [.command, .shift])
+                                .help("See when everyone is free and pick a time (⇧⌘F)")
+                                .accessibilityIdentifier("editor-find-time")
                         }
                         if let event = emailable {
-                            Button("Email guests") { cal.emailGuests(event) }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color(Theme.accentText))
+                            KitButton(title: "Email guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
                                 .help("Write to the people on this event, for what isn't a calendar update")
                                 .accessibilityIdentifier("editor-email-guests")
                         }
@@ -1129,36 +1111,6 @@ private struct CalendarDot: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 3).fill(Color(CalendarColor.color(color, .bar))).frame(width: 10, height: 10)
-    }
-}
-
-struct EditorButton: View {
-    let title: String
-    let key: String
-    var primary = false
-    let action: () -> Void
-    @Environment(\.isEnabled) private var enabled
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Text(title)
-                KeyCap(key: key, style: .inherit)
-            }
-            .font(.system(size: 12.5, weight: primary ? .semibold : .medium))
-            .foregroundStyle(primary ? Color(Theme.onAccent) : Color(Theme.text))
-            .padding(.leading, 12)
-            .padding(.trailing, 10)
-            .frame(height: 28)
-            .background {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(primary ? Color(Theme.accent) : Color(Theme.kbd))
-                    .strokeBorder(primary ? .clear : Color(Theme.line), lineWidth: 1)
-            }
-            .opacity(enabled ? 1 : 0.5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 

@@ -21,11 +21,11 @@ struct AwayStrip: View {
             .help("Automatic replies are on for \(info.address)" + (info.untilText.map { " until \($0)" } ?? ""))
             Spacer(minLength: 6)
             if info.editable {
-                StripButton(title: "Edit") { model.openAwaySheet(account: info.accountId) }
-                StripButton(title: "Turn off") { model.turnOffAway(info) }
+                KitButton(title: "Edit", size: .small) { model.openAwaySheet(account: info.accountId) }
+                KitButton(title: "Turn off", size: .small) { model.turnOffAway(info) }
                     .disabled(model.turningOffAway.contains(info.accountId))
             } else {
-                StripButton(title: info.settingsTitle) { model.openAwaySettings(info) }
+                KitButton(title: info.settingsTitle, size: .small) { model.openAwaySettings(info) }
             }
         }
         .font(.system(size: 12.5))
@@ -44,25 +44,6 @@ struct AwayStrip: View {
         Text("Automatic replies are on").fontWeight(.semibold)
             + Text(" for \(info.address)")
             + Text(until ? info.untilText.map { " until \($0)" } ?? "" : "")
-    }
-}
-
-private struct StripButton: View {
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 10)
-                .frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
     }
 }
 

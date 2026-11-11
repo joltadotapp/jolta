@@ -98,7 +98,10 @@ struct UpNext: View {
             HStack {
                 Text(detail).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
                 Spacer()
-                if let join { JoinButton(live: live, action: join) }
+                if let join {
+                    KitButton(title: "Join", kind: live ? .primary : .secondary, size: .small, action: join)
+                        .help("Join the online meeting")
+                }
             }
         }
         .padding(.horizontal, 12)

@@ -124,9 +124,9 @@ struct RepeatPopover: View {
             summary
             HStack(spacing: 8) {
                 Spacer()
-                EditorButton(title: "Cancel", key: "esc", action: cancel)
+                KitButton(title: "Cancel", key: "esc", action: cancel)
                     .keyboardShortcut(.cancelAction)
-                EditorButton(title: "Done", key: "↩", primary: true, action: done)
+                KitButton(title: "Done", key: "↩", kind: .primary, action: done)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!picker.canFinish)
                     .accessibilityIdentifier("repeat-done")

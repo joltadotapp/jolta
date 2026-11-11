@@ -154,9 +154,8 @@ struct RoomPicker: View {
                 Text(text).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).fixedSize(horizontal: false, vertical: true)
             }
             if let action {
-                Button(action.0, action: action.1)
-                    .buttonStyle(.link)
-                    .font(.system(size: 12))
+                KitButton(title: action.0, size: .small, action: action.1)
+                    .padding(.top, 3)
                     .accessibilityIdentifier("room-picker-ask")
             }
         }

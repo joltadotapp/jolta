@@ -120,18 +120,11 @@ struct FocusSheet: View {
                     Text(problem).font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 }
                 Spacer()
-                Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                Button(action: add) {
-                    HStack(spacing: 6) {
-                        Text("Add")
-                        Text("⌘↩").foregroundStyle(.secondary)
-                    }
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .tint(Color(Theme.accent))
-                .buttonStyle(.borderedProminent)
-                .disabled(!canAdd)
-                .accessibilityIdentifier("focus-add")
+                KitButton(title: "Cancel", key: "esc", action: close).keyboardShortcut(.cancelAction)
+                KitButton(title: "Add", key: "⌘↩", kind: .primary, action: add)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canAdd)
+                    .accessibilityIdentifier("focus-add")
             }
         }
         .padding(22)

@@ -305,20 +305,10 @@ struct RsvpNotePanel: View {
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
                 ForEach(InvitationAnswer.all, id: \.self) { a in
-                    Button { model.answerInvitation(a, message: invitation.messageId) } label: {
-                        HStack(spacing: 5) {
-                            Text(a.title)
-                            if a == standard { Text("↩").foregroundStyle(Color(Theme.text3)) }
-                        }
-                        .font(.system(size: 12, weight: a == standard ? .semibold : .medium))
-                        .padding(.horizontal, 10)
-                        .frame(height: 24)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(a == standard ? Color(Theme.fill) : .clear))
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                        .contentShape(Rectangle())
+                    // Return sends the note with the standard answer.
+                    KitButton(title: a.title, key: a == standard ? "↩" : nil, kind: a == standard ? .primary : .secondary, size: .small) {
+                        model.answerInvitation(a, message: invitation.messageId)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color(Theme.text))
                 }
             }
         }
@@ -394,12 +384,11 @@ struct RsvpProposePanel: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Color(valid ? Theme.text3 : Theme.accentText))
                 Spacer(minLength: 0)
-                Button("Find a time…") {
+                KitButton(title: "Find a time…", kind: .quiet, size: .small) {
                     model.findTime(for: .propose(message: invitation.messageId, organizer: invitation.organizer),
                                    minutes: Int64(end.timeIntervalSince(start) / 60))
                 }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
+                .padding(.trailing, -7)
                 .help("See when \(organizer) and the guests are busy")
                 .accessibilityIdentifier("propose-find-time")
             }
@@ -447,23 +436,9 @@ struct RsvpProposePanel: View {
     }
 
     private func answer(_ a: InvitationAnswer, hint: String) -> some View {
-        let main = a == .maybe
-        return Button { send(a) } label: {
-            HStack(spacing: 5) {
-                Text(a.title)
-                Text(hint).foregroundStyle(Color(Theme.text3))
-            }
-            .font(.system(size: 12, weight: main ? .semibold : .medium))
-            .padding(.horizontal, 10)
-            .frame(height: 24)
-            .background(RoundedRectangle(cornerRadius: 6).fill(main ? Color(Theme.fill) : .clear))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Color(Theme.text))
-        .disabled(!valid)
-        .accessibilityIdentifier("propose-\(a.name)")
+        KitButton(title: a.title, key: hint, kind: a == .maybe ? .primary : .secondary, size: .small) { send(a) }
+            .disabled(!valid)
+            .accessibilityIdentifier("propose-\(a.name)")
     }
 
     private func send(_ a: InvitationAnswer) {

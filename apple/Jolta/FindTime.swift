@@ -334,23 +334,9 @@ struct FindTimePanel: View {
                 zoneMenu(zone)
             }
             if canAddRoom {
-                Button { pickingRoom = true } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
-                        Text("Room")
-                        KeyCap(key: "R")
-                    }
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color(Theme.text2))
-                    .padding(.leading, 8)
-                    .padding(.trailing, 4)
-                    .frame(height: 22)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Add a room as a row (R)")
-                .accessibilityIdentifier("find-time-add-room")
+                KitButton(title: "Room", key: "R", icon: "plus", size: .small) { pickingRoom = true }
+                    .help("Add a room as a row (R)")
+                    .accessibilityIdentifier("find-time-add-room")
             }
             if showsHoursToggle {
                 HStack(spacing: 6) {
@@ -402,7 +388,7 @@ struct FindTimePanel: View {
                     .foregroundStyle(Color(Theme.text2))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(turningOn ? (needsConsent ? "Continue in your browser…" : "Turning on…") : "Turn On Calendar") {
+                KitButton(title: turningOn ? (needsConsent ? "Continue in your browser…" : "Turning on…") : "Turn On Calendar", kind: .primary) {
                     turnOn(accountId)
                 }
                 .disabled(turningOn)
@@ -507,39 +493,16 @@ struct FindTimePanel: View {
             hint("↑↓", listsStretches ? nil : "Move")
             hint("Space", holding ? "Pick" : nil)
             hint("− +", "Length")
-            Button { pick() } label: {
-                HStack(spacing: 5) {
-                    Text(pickVerb)
-                    Text("↩").foregroundStyle(Color(Theme.text3))
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 10)
-                .frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone || (holding && picked.isEmpty))
-            .accessibilityIdentifier("find-time-pick")
+            // Invite is the panel's main action where it is offered.
+            KitButton(title: pickVerb, key: "↩", kind: invites ? .secondary : .primary, size: .small) { pick() }
+                .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone || (holding && picked.isEmpty))
+                .accessibilityIdentifier("find-time-pick")
             if invites {
-                Button { invite() } label: {
-                    HStack(spacing: 5) {
-                        Text("Invite")
-                        Text("⌘↩").opacity(0.75)
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(Theme.onAccent))
-                    .padding(.horizontal, 10)
-                    .frame(height: 24)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.accent)))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(slots.isEmpty || pendingRooms > 0)
-                .help("Open the event editor with this time, everyone here and the room (⌘↩)")
-                .accessibilityIdentifier("find-time-invite")
+                KitButton(title: "Invite", key: "⌘↩", kind: .primary, size: .small) { invite() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(slots.isEmpty || pendingRooms > 0)
+                    .help("Open the event editor with this time, everyone here and the room (⌘↩)")
+                    .accessibilityIdentifier("find-time-invite")
             }
         }
         .font(.system(size: 12))

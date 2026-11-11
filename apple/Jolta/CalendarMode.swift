@@ -227,37 +227,12 @@ struct NextMeetingLine: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Color(Theme.text2))
                 .lineLimit(1)
-            JoinButton(title: next.meeting.provider.short.isEmpty ? "Join" : "Join \(next.meeting.provider.short)",
-                       live: CalendarModel.isLive(start: next.start, end: next.end, now: now)) {
+            KitButton(title: next.meeting.provider.short.isEmpty ? "Join" : "Join \(next.meeting.provider.short)",
+                      kind: CalendarModel.isLive(start: next.start, end: next.end, now: now) ? .primary : .secondary, size: .small) {
                 CalendarModel.join(next.meeting)
             }
+            .help("Join the online meeting")
         }
-    }
-}
-
-/// Join: the accent from 5 minutes before the start until the end, an outline otherwise.
-struct JoinButton: View {
-    var title = "Join"
-    let live: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: live ? .semibold : .medium))
-                .foregroundStyle(Color(live ? Theme.onAccent : Theme.text2))
-                .padding(.horizontal, 10)
-                .frame(height: 22)
-                .background {
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(live ? Color(Theme.accent) : .clear)
-                        .strokeBorder(live ? .clear : Color(Theme.line), lineWidth: 1)
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
-        .help("Join the online meeting")
     }
 }
 
@@ -722,9 +697,9 @@ struct AgendaRow: View {
             }
             Spacer(minLength: 8)
             if let start = e.start, let end = e.end, e.record.joinUrl != nil, !e.isPast(cal.now) {
-                JoinButton(live: CalendarModel.isLive(start: Int64(start.timeIntervalSince1970), end: Int64(end.timeIntervalSince1970), now: cal.now)) {
-                    cal.join(e)
-                }
+                let live = CalendarModel.isLive(start: Int64(start.timeIntervalSince1970), end: Int64(end.timeIntervalSince1970), now: cal.now)
+                KitButton(title: "Join", kind: live ? .primary : .secondary, size: .small) { cal.join(e) }
+                    .help("Join the online meeting")
             }
         }
         .padding(.horizontal, 12)

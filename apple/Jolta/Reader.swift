@@ -721,10 +721,7 @@ struct ReaderView: View {
                             .foregroundStyle(Color(Theme.text2))
                             .fixedSize()
                             .help("Jolta blocks remote images so senders can't see when you read their mail.")
-                        Button("Load Images", action: loadImages)
-                            .buttonStyle(.plain)
-                            .fontWeight(.medium)
-                            .foregroundStyle(Color(Theme.accentText))
+                        KitButton(title: "Load Images", size: .small, action: loadImages)
                         if !thread.imageSender.isEmpty {
                             Button("Always from \(thread.imageSender)") { trustSender(true) }
                                 .buttonStyle(.plain)
@@ -973,25 +970,11 @@ struct HoldsLineView: View {
                 Text(line.title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 8)
                 if let slot = cursor {
-                    Button { model.bookHold(slot) } label: {
-                        HStack(spacing: 5) {
-                            Text("Book \(Self.short(slot))")
-                            KeyCap(key: "B")
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                    .help("Open the event editor at this time with the people you wrote to")
-                    .accessibilityIdentifier("holds-book")
+                    KitButton(title: "Book \(Self.short(slot))", key: "B", size: .small) { model.bookHold(slot) }
+                        .help("Open the event editor at this time with the people you wrote to")
+                        .accessibilityIdentifier("holds-book")
                 }
-                Button("Release all") { model.releaseHolds(line.setId) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color(Theme.text2))
+                KitButton(title: "Release all", kind: .quiet, size: .small) { model.releaseHolds(line.setId) }
                     .help("Delete every hold of this message from your calendar")
                     .accessibilityIdentifier("holds-release")
             }

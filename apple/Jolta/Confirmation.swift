@@ -38,14 +38,13 @@ private struct ConfirmationView: View {
             HStack(spacing: 8) {
                 Spacer()
                 // Return and Esc both cancel, as in the system's own destructive alerts.
-                Button("Cancel", action: dismiss)
-                    .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
+                KitButton(title: "Cancel", key: "↩", action: dismiss)
                     .keyboardShortcut(.defaultAction)
-                Button(confirmation.action) {
+                KitButton(title: confirmation.action, key: "⌘⌫", kind: .danger) {
                     dismiss()
                     confirmation.perform()
                 }
-                .buttonStyle(DialogButton(fill: Color(Theme.danger), text: .white))
+                .keyboardShortcut(.delete, modifiers: .command)
             }
             .padding(.top, 14)
         }
@@ -53,22 +52,5 @@ private struct ConfirmationView: View {
         .frame(width: 400)
         .presentationBackground(Color(Theme.raise))
         .onExitCommand(perform: dismiss)
-    }
-}
-
-struct DialogButton: ButtonStyle {
-    let fill: Color
-    let text: Color
-    var border: Color = .clear
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(text)
-            .padding(.horizontal, 14)
-            .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 8).fill(fill).strokeBorder(border, lineWidth: 1))
-            .opacity(configuration.isPressed ? 0.8 : 1)
-            .contentShape(Rectangle())
     }
 }

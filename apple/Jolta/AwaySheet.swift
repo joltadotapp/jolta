@@ -50,18 +50,11 @@ struct AwaySheet: View {
                     Text(problem).font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 }
                 Spacer()
-                Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                Button(action: turnOn) {
-                    HStack(spacing: 6) {
-                        Text("Turn on")
-                        Text("⌘↩").foregroundStyle(.secondary)
-                    }
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .tint(Color(Theme.accent))
-                .buttonStyle(.borderedProminent)
-                .disabled(!canTurnOn)
-                .accessibilityIdentifier("away-turn-on")
+                KitButton(title: "Cancel", key: "esc", action: close).keyboardShortcut(.cancelAction)
+                KitButton(title: "Turn on", key: "⌘↩", kind: .primary, action: turnOn)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canTurnOn)
+                    .accessibilityIdentifier("away-turn-on")
             }
         }
         .padding(22)
@@ -192,26 +185,23 @@ struct AwaySheet: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Color(row.enabled ? Theme.text2 : Theme.text3))
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 12) {
+                HStack(spacing: 4) {
                     if let title = row.linkTitle, let link = row.linkUrl, let url = URL(string: link) {
-                        Button("\(title) ↗") { NSWorkspace.shared.open(url) }
-                            .buttonStyle(.link)
-                            .font(.system(size: 12))
+                        KitButton(title: "\(title) ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(url) }
                     }
                     if row.calendarOff {
-                        Button("Turn on calendar") {
+                        KitButton(title: "Turn on calendar", kind: .quiet, size: .small) {
                             close()
                             model.openSettings(.calendar)
                         }
-                        .buttonStyle(.link)
-                        .font(.system(size: 12))
                     }
                 }
+                // The first button's words line up with the row's text.
+                .padding(.leading, -7)
                 if let current = row.current {
                     HStack(spacing: 8) {
                         Text(current).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.accentText))
-                        Button("Turn off") { turnOff(row) }
-                            .controlSize(.small)
+                        KitButton(title: "Turn off", size: .small) { turnOff(row) }
                             .disabled(working)
                             .accessibilityIdentifier("away-turn-off-\(row.accountId)")
                     }

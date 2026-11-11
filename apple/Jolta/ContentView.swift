@@ -778,6 +778,7 @@ struct KeyFooter: View {
 
 // MARK: - Reader column
 
+/// A toolbar's action: an icon, its name and its key.
 struct ActionButton: View {
     let icon: String
     let title: String
@@ -786,27 +787,12 @@ struct ActionButton: View {
     var showsKey = true
     var iconTint: Color?
     let action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: icon).font(.system(size: 12.5)).foregroundStyle(iconTint ?? Color(Theme.text2))
-                if showsTitle { Text(title) }
-                if showsKey { KeyCap(key: key, style: .inherit) }
-            }
-            .font(.system(size: 12.5))
-            .foregroundStyle(Color(Theme.text2))
-            .padding(.horizontal, 7)
-            .frame(height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(hovering ? Theme.hover : .clear)))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(showsKey ? title : "\(title) (\(key))")
-        // Its key names it for UI tests, also when the hint is hidden.
-        .accessibilityIdentifier(key)
+        KitButton(title: title, key: key, icon: icon, kind: .quiet, showsTitle: showsTitle, showsKey: showsKey, iconTint: iconTint, action: action)
+            .help(showsKey ? title : "\(title) (\(key))")
+            // Its key names it for UI tests, also when the hint is hidden.
+            .accessibilityIdentifier(key)
     }
 }
 

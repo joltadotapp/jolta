@@ -41,9 +41,10 @@ struct ComposeView: View {
                 .keyboardShortcut("l", modifiers: [.command, .shift])
             ActionButton(icon: "trash", title: "Discard", key: "⌘⌫", showsTitle: false, showsKey: showsKeys) { model.discardCompose() }
                 .keyboardShortcut(.delete, modifiers: .command)
-            SendButton { model.sendCompose() }
+            KitButton(title: "Send", key: "⌘↩", kind: .primary) { model.sendCompose() }
                 // ⌘Return is Find a time's Invite while its panel is up.
                 .keyboardShortcut(model.findTime == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
+                .padding(.leading, 6)
         }
         .fixedSize()
     }
@@ -313,26 +314,6 @@ private struct FieldRow<Content: View>: View {
     }
 }
 
-private struct SendButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Text("Send").fontWeight(.medium)
-                Text("⌘↩").font(.system(size: 11)).opacity(0.75)
-            }
-            .font(.system(size: 12.5))
-            .foregroundStyle(Color(Theme.bg))
-            .padding(.horizontal, 12)
-            .frame(height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(Theme.text)))
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 6)
-    }
-}
-
 extension ComposeData {
     static let blank = ComposeData(accountId: nil, from: nil, to: "", cc: "", bcc: "", subject: "", body: "", inReplyTo: nil,
                                    references: [], replyingTo: nil, attachments: [], draftId: nil, imageSize: .actual)
@@ -416,8 +397,7 @@ private struct ImageSizeBar: View {
                         Text(fitting == nil ? "Over Microsoft 365's usual 35 MB limit, even at Small" : "Over Microsoft 365's usual 35 MB limit")
                             .foregroundStyle(Color(Theme.accentText))
                         if let fitting {
-                            Button("Use \(Self.name(fitting.size))") { choose(fitting.size) }
-                                .buttonStyle(.link)
+                            KitButton(title: "Use \(Self.name(fitting.size))", size: .small) { choose(fitting.size) }
                         }
                     }
                     Spacer()

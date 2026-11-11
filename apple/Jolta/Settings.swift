@@ -76,8 +76,8 @@ struct SaveBar: View {
                 Text("Unsaved changes").foregroundStyle(Color(Theme.text3))
             }
             Spacer()
-            Button("Revert", action: revert).disabled(working)
-            Button("Save", action: save).keyboardShortcut(.defaultAction).tint(Color(Theme.accent)).disabled(working)
+            KitButton(title: "Revert", action: revert).disabled(working)
+            KitButton(title: "Save", kind: .primary, action: save).keyboardShortcut(.defaultAction).disabled(working)
         }
         .font(.system(size: 12.5))
         .padding(.horizontal, 32)
@@ -291,12 +291,14 @@ struct AddIMAPAccount: View {
             HStack {
                 if working { ProgressView().controlSize(.small); Text("Signing in…").foregroundStyle(.secondary) }
                 Spacer()
-                Button("Cancel") { done(nil) }.keyboardShortcut(.cancelAction)
-                Button("Add Account") { add() }.keyboardShortcut(.defaultAction).disabled(!ready)
+                KitButton(title: "Cancel", key: "esc") { done(nil) }.keyboardShortcut(.cancelAction)
+                KitButton(title: "Add Account", key: "↩", kind: .primary) { add() }.keyboardShortcut(.defaultAction).disabled(!ready)
             }
         }
         .padding(20)
         .frame(width: 420)
+        .background(Color(Theme.bg))
+        .foregroundStyle(Color(Theme.text))
     }
 
     private func add() {

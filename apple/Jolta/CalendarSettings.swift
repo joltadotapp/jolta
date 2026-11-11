@@ -509,7 +509,7 @@ struct CalendarIntroSheet: View {
             }
             HStack {
                 Spacer()
-                Button("Done") { model.finishCalendarIntro() }.keyboardShortcut(.defaultAction).tint(Color(Theme.accent))
+                KitButton(title: "Done", key: "↩", kind: .primary) { model.finishCalendarIntro() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)

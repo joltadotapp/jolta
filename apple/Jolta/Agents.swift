@@ -29,19 +29,14 @@ struct AgentApproval: View {
             .toggleStyle(.checkbox)
             .font(.system(size: 13))
             HStack(spacing: 8) {
-                Button("Don't Allow") { decide(false, []) }
-                    .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
+                KitButton(title: "Don't Allow") { decide(false, []) }
                 Spacer()
-                Button("Not Now", action: later)
-                    .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
+                KitButton(title: "Not Now", key: "esc", action: later)
                     .keyboardShortcut(.cancelAction)
                 // No plain Return: a key meant for the mail must not let an agent in.
-                Button {
+                KitButton(title: "Allow", key: "⌘↩") {
                     decide(true, [read ? "read" : nil, organize ? "organize" : nil, draft ? "draft" : nil].compactMap { $0 })
-                } label: {
-                    HStack(spacing: 6) { Text("Allow"); KeyCap(key: "⌘↩") }
                 }
-                .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
