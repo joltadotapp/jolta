@@ -59,6 +59,9 @@ async function route(request, env) {
 // The static assets always answer 200 with the whole file, so the recordings
 // under /media/ (each about 1 MB) are sliced here.
 async function media(request, env) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(null, { status: 405, headers: { allow: "GET, HEAD" } });
+  }
   const range = request.headers.get("range");
   const plain = new Request(request.url, { method: request.method === "HEAD" ? "HEAD" : "GET" });
   const asset = await env.ASSETS.fetch(plain);

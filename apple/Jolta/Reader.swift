@@ -60,10 +60,56 @@ final class ReaderPage {
         // and the link under the pointer as a context menu opens. WebKit
         // dispatches `contextmenu` before it asks the app to show the menu,
         // so the link arrives first.
+        //
+        // `fit` sizes mail wider than the reader. An image that `max-width`
+        // shrinks gets `jolta-fit`, whose `height: auto` beats the height
+        // Outlook writes into the image's style, and a click outside a link
+        // toggles it to its own size. A fixed-width layout zooms down to the
+        // reader's width, except while one of its images shows at its own
+        // size; below half size it scrolls sideways instead.
         let script = """
+        const zoom = (body) => {
+          body.style.zoom = "";
+          if (!body.classList.contains("jolta-wide") || body.querySelector("img.jolta-full")) return;
+          const scale = body.clientWidth / body.scrollWidth;
+          if (scale < 1 && scale >= 0.5) body.style.zoom = scale;
+        };
+        const fit = (body) => {
+          if (!body || !body.clientWidth) return;
+          body.style.zoom = "";
+          const full = [...body.querySelectorAll("img.jolta-full")];
+          for (const img of full) img.classList.remove("jolta-full");
+          for (const img of body.querySelectorAll("img")) {
+            const fitted = img.getBoundingClientRect().width;
+            img.classList.add("jolta-natural");
+            const natural = img.getBoundingClientRect().width;
+            img.classList.remove("jolta-natural");
+            img.classList.toggle("jolta-fit", natural > fitted + 1);
+            if (natural > fitted + 1 && full.includes(img)) img.classList.add("jolta-full");
+          }
+          zoom(body);
+        };
+        const fitAll = () => document.querySelectorAll(".jolta-body").forEach(fit);
+        document.addEventListener("DOMContentLoaded", fitAll);
+        document.addEventListener("load", (e) => { if (e.target.tagName === "IMG") fit(e.target.closest(".jolta-body")); }, true);
+        let resizing = 0;
+        addEventListener("resize", () => { cancelAnimationFrame(resizing); resizing = requestAnimationFrame(fitAll); });
+        document.addEventListener("click", (e) => {
+          const img = e.target;
+          if (!img.matches?.("img.jolta-fit") || img.closest("a[href]")) return;
+          const body = img.closest(".jolta-body");
+          const was = img.getBoundingClientRect();
+          const x = (e.clientX - was.left) / was.width, y = (e.clientY - was.top) / was.height;
+          img.classList.toggle("jolta-full");
+          zoom(body);
+          const now = img.getBoundingClientRect();
+          body.scrollLeft += now.left + x * now.width - e.clientX;
+          scrollBy(0, now.top + y * now.height - e.clientY);
+        });
         document.addEventListener("toggle", (e) => {
           const body = e.target.matches?.("details.jolta-message") && e.target.querySelector(":scope > .jolta-body");
           if (body) webkit.messageHandlers.toggle.postMessage({ id: body.id.slice(1), open: e.target.open });
+          if (body && e.target.open) fit(body);
         }, true);
         document.addEventListener("contextmenu", (e) => {
           const a = e.target.closest?.("a[href]");
@@ -789,6 +835,11 @@ enum ReaderStyle {
     .jolta-body img { max-width: 100%; height: auto; }
     body:not(.jolta-images):not(#jolta-a):not(#jolta-b) .jolta-body img[src^="x-remote:"] { display: none !important; }
     .jolta-body.jolta-wide { max-width: 100%; width: fit-content; margin: 0 auto; overflow-x: auto; }
+    .jolta-body img.jolta-fit { height: auto !important; }
+    .jolta-body img.jolta-fit:not(.jolta-full):not(a[href] img) { cursor: zoom-in; }
+    .jolta-body img.jolta-natural, .jolta-body img.jolta-full { max-width: none !important; }
+    .jolta-body img.jolta-full { cursor: zoom-out; }
+    .jolta-body:has(img.jolta-full) { max-width: 100%; overflow-x: auto; }
     .jolta-body a { color: inherit; text-decoration-color: var(--tx3); }
     .jolta-quote { color: var(--tx3); }
     .jolta-files { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 18px; }

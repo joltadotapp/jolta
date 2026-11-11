@@ -163,6 +163,8 @@ h2 { margin: 0; font: 400 clamp(2.4rem, 5vw, 4.2rem)/1 var(--serif); letter-spac
 .aside { margin: 0; color: var(--text-soft); font-size: .95rem; }
 .aside kbd { display: inline-grid; place-items: center; min-width: 1.5rem; height: 1.5rem; margin: 0 .1rem; border-radius: 5px; background: linear-gradient(var(--kbd), var(--kbd-low)); border: 1px solid var(--kbd-edge); box-shadow: 0 1.5px 0 var(--kbd-edge); color: var(--text); font-size: .78rem; font-weight: 600; }
 @media (hover: none) { .aside { display: none; } }
+.watch { margin: 2.5rem 0 0; font-size: 1.05rem; }
+.watch a { font-weight: 600; text-decoration-thickness: 2px; }
 
 /* Keycaps: a top face on a 2px wall. A pressed key sinks onto its base. */
 .key kbd, .tabs kbd, .keylist kbd { display: inline-grid; place-items: center; background: linear-gradient(var(--kbd), var(--kbd-low)); border: 1px solid var(--kbd-edge); box-shadow: 0 2px 0 var(--kbd-edge); color: var(--text); font-weight: 600; transition: translate .09s ease-out, box-shadow .09s ease-out, color .2s, border-color .2s; }
@@ -403,7 +405,10 @@ h2 { margin: 0; font: 400 clamp(2.4rem, 5vw, 4.2rem)/1 var(--serif); letter-spac
 @media (max-width: 900px) {
   .title, .keys, .direct .head, .stage, .also-list { grid-template-columns: 1fr; }
   .keys { grid-auto-flow: row; grid-template-rows: none; }
-  .bar nav, .cloud { display: none; }
+  .cloud { display: none; }
+  /* Narrow screens keep the links, on their own row under the wordmark and hour switch. */
+  .bar { flex-wrap: wrap; row-gap: .6rem; }
+  .bar nav { order: 3; width: 100%; margin-left: 0; gap: 1.4rem; }
   .hours { margin-left: auto; }
   .facts { grid-template-columns: 1fr; }
   .facts li { padding: 1rem 0; }
@@ -424,6 +429,7 @@ h2 { margin: 0; font: 400 clamp(2.4rem, 5vw, 4.2rem)/1 var(--serif); letter-spac
 }
 @media (max-width: 640px) {
   .sky.short { padding-bottom: 5rem; }
+  .sky.short .p-far { height: 37%; }
   .frame video { justify-self: center; aspect-ratio: auto; max-height: 75svh; width: auto; max-width: 100%; border-radius: 14px; }
   .jw { grid-template-columns: minmax(0, 1fr); font-size: 12.5px; }
   .jw-side { display: none; }
