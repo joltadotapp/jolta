@@ -584,28 +584,29 @@ final class ChipView: NSView {
     }
 }
 
-/// AppKit twin of `KeyCap`, outlined in the accent because it only shows on the cursor row.
+/// AppKit twin of `KeyCap`'s focused style: it only shows on the cursor row.
 final class KeyCapView: NSView {
     private let key: String
+    private static let font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
 
     init(key: String) {
         self.key = key
-        super.init(frame: NSRect(x: 0, y: 0, width: 17, height: 17))
+        // As `KeyCap`: 4 points beside the letter, 17 at least.
+        let width = max(17, ceil(NSAttributedString(string: key, attributes: [.font: Self.font]).size().width) + 8)
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 17))
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 17).isActive = true
+        widthAnchor.constraint(equalToConstant: width).isActive = true
         heightAnchor.constraint(equalToConstant: 17).isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ dirtyRect: NSRect) {
-        Theme.accent.withAlphaComponent(0.55).setStroke()
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        Theme.accent.setStroke()
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.radiusKey, yRadius: Theme.radiusKey)
         path.lineWidth = 1
         path.stroke()
-        let text = NSAttributedString(string: key, attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .medium), .foregroundColor: Theme.accentText,
-        ])
+        let text = NSAttributedString(string: key, attributes: [.font: Self.font, .foregroundColor: Theme.accentText])
         let size = text.size()
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
     }

@@ -53,7 +53,7 @@ private struct ScopePromptView: View {
             .padding(.top, 12)
             HStack {
                 Spacer()
-                EditorButton(title: "Cancel", key: "Esc", action: cancel)
+                EditorButton(title: "Cancel", key: "esc", action: cancel)
                     .keyboardShortcut(.cancelAction)
             }
             .background {

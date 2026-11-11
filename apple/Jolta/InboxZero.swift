@@ -29,7 +29,7 @@ struct InboxZero: View {
                     Text("Inbox zero").font(.system(size: 26, weight: .semibold)).tracking(-0.4)
                     Text(sky.line).font(.system(size: 14)).opacity(0.8)
                     Button(action: compose) {
-                        HStack(spacing: 6) { Text("Write something"); Text("C").font(.system(size: 11, weight: .medium)).opacity(0.7) }
+                        HStack(spacing: 6) { Text("Write something"); KeyCap(key: "C", style: .inherit) }
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 12.5))

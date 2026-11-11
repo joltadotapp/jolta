@@ -425,7 +425,7 @@ struct PaletteView: View {
                 Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(Theme.text2))
             }
             if let keys = item.keys {
-                HStack(spacing: 3) { ForEach(keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: $0.uppercased(), focused: on) } }
+                HStack(spacing: 3) { ForEach(keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: KeyCap.shown($0), focused: on) } }
             }
         }
         .font(.system(size: 13))
@@ -468,7 +468,7 @@ struct HelpView: View {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                 ForEach(Command.allCases) { c in
                     HStack(spacing: 10) {
-                        HStack(spacing: 3) { ForEach(c.keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: $0.uppercased()) } }
+                        HStack(spacing: 3) { ForEach(c.keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: KeyCap.shown($0)) } }
                             .frame(width: 52, alignment: .leading)
                         Text(c.title).foregroundStyle(Color(Theme.text2))
                     }
@@ -487,7 +487,7 @@ struct HelpView: View {
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                 ForEach(CalendarCommand.allCases) { c in
                     HStack(spacing: 10) {
-                        KeyCap(key: c.keys.uppercased()).frame(width: 52, alignment: .leading)
+                        KeyCap(key: KeyCap.shown(c.keys)).frame(width: 52, alignment: .leading)
                         Text(c.title).foregroundStyle(Color(Theme.text2))
                     }
                 }

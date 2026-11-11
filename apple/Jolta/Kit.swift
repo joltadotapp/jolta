@@ -127,6 +127,11 @@ struct KeyCap: View {
         case .inherit: AnyShapeStyle(ForegroundStyle.foreground.opacity(0.8))
         }
     }
+
+    /// A keymap key as its cap shows it: a letter in capitals, `esc` and `⌘K` as written.
+    static func shown(_ key: String) -> String {
+        key.count == 1 ? key.uppercased() : key
+    }
 }
 
 // MARK: - Button

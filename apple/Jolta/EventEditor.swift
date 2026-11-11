@@ -415,7 +415,7 @@ struct EventEditorPanel: View {
             Spacer()
             Button { cal.closeEditor() } label: {
                 HStack(spacing: 6) {
-                    KeyHint(key: "Esc")
+                    KeyCap(key: "esc", style: .inherit)
                     Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
                 }
                 .foregroundStyle(Color(Theme.text3))
@@ -436,7 +436,7 @@ struct EventEditorPanel: View {
             if !editor.isNew && !editor.isReadOnly {
                 Button { cal.deleteFromEditor() } label: {
                     // A guest removes someone else's meeting, after declining it.
-                    HStack(spacing: 7) { Text(editor.locked(.title) ? "Remove from calendar…" : "Delete"); KeyHint(key: "⌘⌫") }
+                    HStack(spacing: 7) { Text(editor.locked(.title) ? "Remove from calendar…" : "Delete"); KeyCap(key: "⌘⌫", style: .inherit) }
                         .foregroundStyle(Color(Theme.dangerText))
                         .padding(.horizontal, 6)
                         .frame(height: 28)
@@ -453,7 +453,7 @@ struct EventEditorPanel: View {
                     .accessibilityIdentifier("editor-done")
             } else {
                 // The repeat popover takes Esc and Return while it is open.
-                EditorButton(title: "Cancel", key: "Esc") { cal.closeEditor() }
+                EditorButton(title: "Cancel", key: "esc") { cal.closeEditor() }
                     .keyboardShortcut(editor.repeatPicker == nil ? .cancelAction : nil)
                 EditorButton(title: editor.willSend ? "Save and send…" : "Save", key: "⌘↩", primary: true) {
                     commitTimes()
@@ -654,7 +654,7 @@ struct EventEditorPanel: View {
                         Spacer(minLength: 0)
                         if canFindTime {
                             Button { findTime() } label: {
-                                HStack(spacing: 5) { Text("Find a time"); KeyHint(key: "⇧⌘F") }
+                                HStack(spacing: 5) { Text("Find a time"); KeyCap(key: "⇧⌘F", style: .inherit) }
                             }
                             .buttonStyle(.plain)
                             .font(.system(size: 12))
@@ -1132,20 +1132,6 @@ private struct CalendarDot: View {
     }
 }
 
-/// A key shown inside a button, outlined in the button's text color.
-struct KeyHint: View {
-    let key: String
-
-    var body: some View {
-        Text(key)
-            .font(.system(size: 10, weight: .medium))
-            .padding(.horizontal, 4)
-            .frame(minWidth: 16, minHeight: 16)
-            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.foreground.opacity(0.5), lineWidth: 1))
-            .opacity(0.8)
-    }
-}
-
 struct EditorButton: View {
     let title: String
     let key: String
@@ -1157,7 +1143,7 @@ struct EditorButton: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Text(title)
-                KeyHint(key: key)
+                KeyCap(key: key, style: .inherit)
             }
             .font(.system(size: 12.5, weight: primary ? .semibold : .medium))
             .foregroundStyle(primary ? Color(Theme.onAccent) : Color(Theme.text))

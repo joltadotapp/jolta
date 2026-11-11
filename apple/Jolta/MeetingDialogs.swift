@@ -81,7 +81,7 @@ private struct EmailGuestsBox: View {
 
     var body: some View {
         Toggle(isOn: $on) {
-            HStack(spacing: 6) { Text(label); KeyHint(key: "⌘E") }
+            HStack(spacing: 6) { Text(label); KeyCap(key: "⌘E", style: .inherit) }
         }
         .toggleStyle(.checkbox)
         .font(.system(size: 12.5))
@@ -99,7 +99,7 @@ private struct DangerButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 7) { Text(title); KeyHint(key: "⌘⌫") }
+            HStack(spacing: 7) { Text(title); KeyCap(key: "⌘⌫", style: .inherit) }
                 .font(.system(size: 12.5, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.leading, 12)
@@ -143,7 +143,7 @@ private struct SendPromptView: View {
                 }
                 Spacer()
                 if let back = choice(.back) {
-                    EditorButton(title: back.label, key: "Esc", action: goBack)
+                    EditorButton(title: back.label, key: "esc", action: goBack)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("send-back")
                 }
@@ -208,7 +208,7 @@ private struct SenderPromptView: View {
             .accessibilityIdentifier("sender-list")
             HStack(spacing: 8) {
                 Spacer()
-                EditorButton(title: "Keep editing", key: "Esc", action: goBack)
+                EditorButton(title: "Keep editing", key: "esc", action: goBack)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("sender-back")
                 EditorButton(title: "Continue", key: "↩", primary: true) {

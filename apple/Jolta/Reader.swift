@@ -704,7 +704,7 @@ struct ReaderView: View {
                             Button(action: onUnsubscribe) {
                                 HStack(spacing: 6) {
                                     Text("Unsubscribe")
-                                    Text("⌘U").font(.system(size: 11)).foregroundStyle(Color(Theme.text3))
+                                    KeyCap(key: "⌘U")
                                 }
                             }
                             .buttonStyle(.plain)

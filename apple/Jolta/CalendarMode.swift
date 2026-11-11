@@ -309,7 +309,7 @@ struct CalendarFooter: View {
             hint(["J", "K"], span == .day ? "day" : span == .month ? "month" : "week")
             hint(["T"], "today")
             hint(["C"], "new event")
-            hint(["↵"], "open")
+            hint(["↩"], "open")
             hint(["1–9"], "calendars")
             hint(["D", "X", "W", "M", "A"], "views")
             Spacer()
@@ -400,13 +400,7 @@ struct CalendarRow: View {
                         .help(c.syncError ?? "")
                 }
                 Spacer(minLength: 4)
-                if let n = entry.number {
-                    Text("\(n)")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Color(Theme.text3))
-                        .frame(minWidth: 16, minHeight: 16)
-                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color(Theme.line), lineWidth: 1))
-                }
+                if let n = entry.number { KeyCap(key: "\(n)") }
             }
             .padding(.horizontal, 8)
             .frame(height: 26)

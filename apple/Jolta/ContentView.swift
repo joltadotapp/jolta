@@ -793,13 +793,7 @@ struct ActionButton: View {
             HStack(spacing: 7) {
                 Image(systemName: icon).font(.system(size: 12.5)).foregroundStyle(iconTint ?? Color(Theme.text2))
                 if showsTitle { Text(title) }
-                if showsKey {
-                    Text(key)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(Color(Theme.text3))
-                        .frame(minWidth: 16, minHeight: 16)
-                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color(Theme.line), lineWidth: 1))
-                }
+                if showsKey { KeyCap(key: key, style: .inherit) }
             }
             .font(.system(size: 12.5))
             .foregroundStyle(Color(Theme.text2))
