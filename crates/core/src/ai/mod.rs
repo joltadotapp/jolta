@@ -258,3 +258,65 @@ impl Ai {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saves(address: &str) -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute("CREATE TABLE setting (key TEXT PRIMARY KEY, value TEXT)", [])?;
+        let remote = Remote { base_url: address.into(), model: "m".into() };
+        save_settings(&conn, &Settings { openai: remote.clone(), ..Settings::default() })?;
+        save_settings(&conn, &Settings { anthropic: remote, ..Settings::default() })
+    }
+
+    #[test]
+    fn a_custom_address_needs_https_unless_the_server_is_on_this_mac_or_its_network() {
+        let allowed = [
+            "",
+            "https://api.example.com/v1",
+            "HTTPS://Proxy.Example.com/",
+            "https://8.8.8.8",
+            "http://localhost:11434/v1",
+            "http://LOCALHOST:1234",
+            "http://127.0.0.1:11434",
+            "http://127.5.5.5",
+            "http://10.0.0.5:11434/v1",
+            "http://172.16.0.1",
+            "http://172.31.255.255",
+            "http://192.168.1.20:1234/v1",
+            "http://169.254.1.1",
+            "http://100.64.0.1",
+            "http://100.127.255.255:11434",
+            "http://[::1]:11434",
+            "http://[fd12:3456::1]",
+            "http://[fe80::1]",
+            "http://[::ffff:192.168.1.2]",
+            "http://mac-studio.local:11434/v1",
+            "http://Mac-Studio.LOCAL.",
+        ];
+        for address in allowed {
+            assert!(saves(address).is_ok(), "{address} is allowed: {:?}", saves(address));
+        }
+        let refused = [
+            "http://api.example.com/v1",
+            "http://8.8.8.8",
+            "http://172.32.0.1",
+            "http://192.169.0.1",
+            "http://100.128.0.1",
+            "http://0.0.0.0:11434",
+            "http://[2001:db8::1]",
+            "http://local",
+            "http://localhost.example.com",
+            "http://example.local.example.com",
+            "ftp://192.168.1.2",
+            "file:///etc/passwd",
+            "localhost:11434",
+            "not an address",
+        ];
+        for address in refused {
+            assert!(saves(address).is_err(), "{address} is refused");
+        }
+    }
+}
