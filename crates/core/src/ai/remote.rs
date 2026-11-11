@@ -303,6 +303,26 @@ mod tests {
         assert!(error.to_string().starts_with("Use an https:// address."), "{error}");
     }
 
+    #[tokio::test]
+    async fn a_redirect_from_the_ai_server_is_not_followed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Ok(Ok((mut stream, _))) = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await {
+                requests += 1;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let reply = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+            requests
+        });
+        assert!(models(Provider::Anthropic, &format!("http://127.0.0.1:{port}/v1"), Some("sk-test".into())).await.is_err());
+        assert_eq!(server.await.unwrap(), 1, "the redirect was followed");
+    }
+
     #[test]
     fn events_split_across_chunks() {
         let mut sse = Sse::default();

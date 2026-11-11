@@ -833,7 +833,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
         let names: Vec<String> = ["../x", "/etc/passwd", "a\\b", "", ".", "..", "..\\..\\x", "a\u{1}b\nc", "notes\u{202E}fdp.exe", "C:x"]
             .iter()
             .map(|s| s.to_string())
-            .chain([format!("{}.pdf", "a".repeat(1000)), "é".repeat(400)])
+            .chain([format!("{}.pdf", "a".repeat(1000)), "é".repeat(400), ". ..".into()])
             .collect();
         let raw = with_raw_names(&names);
         let dir = std::env::temp_dir().join(format!("jolta-names-{}", std::process::id()));
