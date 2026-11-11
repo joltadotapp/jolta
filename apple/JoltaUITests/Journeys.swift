@@ -162,6 +162,51 @@ final class Journeys: XCTestCase {
         }
     }
 
+    /// A screenshot wider than the reader fits it at its own proportions,
+    /// although Outlook writes its full width and height into its style. A
+    /// click shows it at its own size, which scrolls sideways to either edge,
+    /// and another click fits it again.
+    func testWideImageFitsAndZooms() throws {
+        let app = try launch()
+        text(app, "Page layout question").click()
+        app.typeKey(.return, modifierFlags: [])
+        let reader = app.webViews.firstMatch
+        let image = reader.images["Screenshot of the page"]
+        XCTAssertTrue(image.waitForExistence(timeout: 10), "the reader shows the screenshot")
+        let fits = { image.frame.minX >= reader.frame.minX - 1 && image.frame.maxX <= reader.frame.maxX + 1 }
+        XCTAssertTrue(waitUntil { fits() && abs(image.frame.width / image.frame.height - 1890.0 / 1060) < 0.02 },
+                      "the screenshot fits the reader at its own proportions: \(image.frame) in \(reader.frame)")
+        click(visiblePartOf: image, in: reader)
+        XCTAssertTrue(waitUntil { abs(image.frame.width - 1890) < 2 }, "a click shows it at its own size: \(image.frame)")
+        reader.scroll(byDeltaX: 4000, deltaY: 0)
+        XCTAssertTrue(waitUntil { abs(image.frame.minX - reader.frame.minX) < 80 }, "scrolling reaches its left edge: \(image.frame) in \(reader.frame)")
+        reader.scroll(byDeltaX: -4000, deltaY: 0)
+        XCTAssertTrue(waitUntil { abs(image.frame.maxX - reader.frame.maxX) < 80 }, "scrolling reaches its right edge: \(image.frame) in \(reader.frame)")
+        click(visiblePartOf: image, in: reader)
+        XCTAssertTrue(waitUntil(fits), "a second click fits it again: \(image.frame) in \(reader.frame)")
+    }
+
+    /// A layout of fixed width, wider than the reader, scales down to show
+    /// both its edges.
+    func testWideLayoutFitsTheReader() throws {
+        let app = try launch()
+        text(app, "Spring catalogue").click()
+        app.typeKey(.return, modifierFlags: [])
+        let reader = app.webViews.firstMatch
+        let cell = { (name: String) in reader.staticTexts.matching(NSPredicate(format: "value == %@", name)).firstMatch }
+        let left = cell("Catalogue left column"), right = cell("Catalogue right column")
+        XCTAssertTrue(right.waitForExistence(timeout: 10), "the reader shows the catalogue")
+        XCTAssertTrue(waitUntil { left.frame.minX >= reader.frame.minX && right.frame.maxX <= reader.frame.maxX },
+                      "both columns are in view: \(left.frame) and \(right.frame) in \(reader.frame)")
+    }
+
+    /// Clicks the middle of the part of `element` that `container` shows.
+    private func click(visiblePartOf element: XCUIElement, in container: XCUIElement) {
+        let shown = element.frame.intersection(container.frame)
+        element.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: shown.midX - element.frame.minX, dy: shown.midY - element.frame.minY)).click()
+    }
+
     /// Y, M and N answer the invitation in the open conversation. The test
     /// account has no calendar and no server, so each answer is a reply
     /// mail that waits in the outbox, and the card shows the answer given.
