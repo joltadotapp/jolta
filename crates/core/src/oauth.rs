@@ -48,6 +48,16 @@ impl Provider {
         }
     }
 
+    /// Where removing an account withdraws its grant. Google's revoke ends
+    /// the whole grant, so the account is signed out on every Mac. Microsoft
+    /// lets a public client revoke no single token.
+    pub fn revoke_url(self) -> Option<&'static str> {
+        match self {
+            Provider::Google => Some("https://oauth2.googleapis.com/revoke"),
+            Provider::Microsoft => None,
+        }
+    }
+
     fn token_url(self) -> &'static str {
         match self {
             Provider::Google => "https://oauth2.googleapis.com/token",
@@ -687,6 +697,30 @@ pub fn remember(account_ref: &str, access_token: &str, expires_in: u64) {
     );
 }
 
+/// Drops every access token kept for an account, its room lists' too.
+pub fn forget(account: &Account) {
+    if let Some(cache) = TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        for grant in [Grant::Account, Grant::Rooms] {
+            cache.remove(&cache_key(account, grant));
+        }
+    }
+}
+
+/// The request that withdraws the grant behind a refresh token: where to
+/// POST and the form to send.
+fn revoke_request(provider: Provider, refresh_token: &str) -> Option<(&'static str, String)> {
+    provider.revoke_url().map(|url| (url, form(&[("token", refresh_token)])))
+}
+
+/// Withdraws the grant behind `refresh_token` at the provider, best effort:
+/// an account is removed whether or not the provider could be reached.
+pub async fn revoke(provider: Provider, refresh_token: String) {
+    let Some((url, body)) = revoke_request(provider, &refresh_token) else { return };
+    init_tls();
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() else { return };
+    let _ = client.post(url).header("Content-Type", "application/x-www-form-urlencoded").body(body).send().await;
+}
+
 static DATA_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Where `oauth-clients.env` lives; set when the data folder opens.
@@ -938,6 +972,15 @@ mod tests {
         let (code, (_, page)) = tokio::join!(pending.receive_code(), browse(&pending.redirect, &target));
         assert!(code.is_err(), "the reply had no code");
         assert!(!page.contains("signed in"), "{page}");
+    }
+
+    #[test]
+    fn removal_revokes_a_google_grant_and_has_nothing_to_send_microsoft() {
+        assert_eq!(
+            revoke_request(Provider::Google, "1//0g-x/y+z"),
+            Some(("https://oauth2.googleapis.com/revoke", "token=1%2F%2F0g-x%2Fy%2Bz".to_string()))
+        );
+        assert_eq!(revoke_request(Provider::Microsoft, "token"), None);
     }
 
     #[test]
