@@ -332,7 +332,10 @@
   setInterval(function () { if (!chosen) { var p = phaseFor(new Date().getHours()); if (p !== phase) { phase = p; paint(); } } }, 60000);
   paint();
 
-  // Painted planes: each moves at its own speed as the page scrolls.
+  // Painted planes: the near ridge moves with the page, and the farther a
+  // ridge is, the more it lags behind and sinks as the page scrolls. Sinking
+  // planes are clipped by the sky, so they never open a gap below the ridge
+  // or slide over the window.
   var planes = Array.prototype.slice.call(document.querySelectorAll("[data-speed]"));
   var still = matchMedia("(prefers-reduced-motion: reduce)"), ticking = false;
   addEventListener("scroll", function () {
@@ -340,7 +343,7 @@
     ticking = true;
     requestAnimationFrame(function () {
       var y = Math.min(scrollY, innerHeight * 1.5);
-      planes.forEach(function (p) { p.style.transform = "translate3d(0," + (-y * p.dataset.speed).toFixed(1) + "px,0)"; });
+      planes.forEach(function (p) { p.style.transform = "translate3d(0," + (y * p.dataset.speed).toFixed(1) + "px,0)"; });
       ticking = false;
     });
   }, { passive: true });
