@@ -171,7 +171,7 @@ private struct UnresolvedChip: View {
     let pick: (PersonRecord) -> Void
     let remove: () -> Void
 
-    private static let warning = Color(NSColor(hex: 0xC9302C))
+    private static var warning: Color { Color(Theme.dangerText) }
 
     var body: some View {
         Menu {
@@ -226,14 +226,14 @@ private struct PersonChip: View {
                 .background(Circle().fill(Color(Theme.fill)))
             Text(name).lineLimit(1)
             if person.role == .optional {
-                Text("Optional").font(.system(size: 10.5)).foregroundStyle(Color(Theme.text3))
+                Text("Optional").font(.system(size: 10.5)).foregroundStyle(Color(selected ? Theme.onAccent : Theme.text3)).opacity(selected ? 0.8 : 1)
             }
             if saved, let glyph = answerGlyph {
-                Image(systemName: glyph.0).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(glyph.1)
+                Image(systemName: glyph.0).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(selected ? Color(Theme.onAccent) : glyph.1)
             }
         }
         .font(.system(size: 12))
-        .foregroundStyle(Color(selected ? Theme.raise : Theme.text))
+        .foregroundStyle(Color(selected ? Theme.onAccent : Theme.text))
         .padding(.leading, 3)
         .padding(.trailing, 7)
         .frame(height: 21)
@@ -252,7 +252,7 @@ private struct PersonChip: View {
         switch person.response {
         case .accepted: ("checkmark", Color(Theme.text2))
         case .tentative: ("questionmark", Color(Theme.text2))
-        case .declined: ("xmark", Color(NSColor(hex: 0xC9302C)))
+        case .declined: ("xmark", Color(Theme.dangerText))
         case .needsAction, .delegated: nil
         }
     }

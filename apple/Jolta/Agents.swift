@@ -125,7 +125,7 @@ struct ActivitySettings: View {
                                     .foregroundStyle(Color(Theme.text3))
                             }
                             Text(e.summary).font(.system(size: 11, design: .monospaced)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
-                            if e.outcome != "ok" { Text(e.outcome).font(.system(size: 11)).foregroundStyle(.orange).lineLimit(2) }
+                            if e.outcome != "ok" { Text(e.outcome).font(.system(size: 11)).foregroundStyle(Color(Theme.warningText)).lineLimit(2) }
                         }
                         .font(.system(size: 12.5))
                     }

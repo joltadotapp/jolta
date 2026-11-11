@@ -335,7 +335,7 @@ struct SettingsCard<Content: View>: View {
             Group(subviews: content) { rows in
                 ForEach(rows) { row in
                     if row.id != rows.first?.id {
-                        Rectangle().fill(Color(Theme.line2)).frame(height: 1)
+                        Rectangle().fill(Color(Theme.line)).frame(height: 1)
                     }
                     row
                 }
@@ -484,7 +484,7 @@ struct GeneralSettings: View {
                             detail: contactsRefused
                                 ? "Jolta can't read Contacts. Allow it in System Settings › Privacy & Security › Contacts."
                                 : "Adds your Mac's contacts to the suggestions. They stay on this Mac.",
-                            detailColor: contactsRefused ? .red : Color(Theme.text3)) {
+                            detailColor: contactsRefused ? Color(Theme.dangerText) : Color(Theme.text3)) {
                     Toggle("Suggest people from Contacts", isOn: $contacts)
                         .settingsSwitch()
                         .onChange(of: contacts) { _, on in toggleContacts(on) }

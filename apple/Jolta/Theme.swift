@@ -14,13 +14,20 @@ enum Theme {
     static var text: NSColor { ThemeStore.shared.color(\.text) }
     static var text2: NSColor { ThemeStore.shared.color(\.text2) }
     static var text3: NSColor { ThemeStore.shared.color(\.text3) }
-    static var fill: NSColor { ThemeStore.shared.color(\.fill) }
-    static var hover: NSColor { ThemeStore.shared.color(\.hover) }
+    /// A selected row's fill and a hovered row's: the text color at the
+    /// theme's strength, so they show the same on every surface.
+    static var fill: NSColor { ThemeStore.shared.color(\.text, alpha: \ThemeTokens.fillAlpha) }
+    static var hover: NSColor { ThemeStore.shared.color(\.text, alpha: \ThemeTokens.hoverAlpha) }
     static var accent: NSColor { ThemeStore.shared.color(\.accent) }
     static var star: NSColor { ThemeStore.shared.color(\.star) }
     static var accentText: NSColor { ThemeStore.shared.color(\.accentText) }
     static var kbd: NSColor { ThemeStore.shared.color(\.kbd) }
     static var kbdText: NSColor { ThemeStore.shared.color(\.kbdText) }
+    static var onAccent: NSColor { ThemeStore.shared.color(\.onAccent) }
+    /// A destructive button's fill; its text is white.
+    static var danger: NSColor { ThemeStore.shared.color(\.danger) }
+    static var dangerText: NSColor { ThemeStore.shared.color(\.dangerText) }
+    static var warningText: NSColor { ThemeStore.shared.color(\.warningText) }
 
     static let rowHeight: CGFloat = 40
     static let senderWidth: CGFloat = 136

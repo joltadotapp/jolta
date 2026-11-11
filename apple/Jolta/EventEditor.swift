@@ -437,7 +437,7 @@ struct EventEditorPanel: View {
                 Button { cal.deleteFromEditor() } label: {
                     // A guest removes someone else's meeting, after declining it.
                     HStack(spacing: 7) { Text(editor.locked(.title) ? "Remove from calendar…" : "Delete"); KeyHint(key: "⌘⌫") }
-                        .foregroundStyle(Color(NSColor(hex: 0xC9302C)))
+                        .foregroundStyle(Color(Theme.dangerText))
                         .padding(.horizontal, 6)
                         .frame(height: 28)
                         .contentShape(Rectangle())
@@ -658,7 +658,7 @@ struct EventEditorPanel: View {
                             }
                             .buttonStyle(.plain)
                             .font(.system(size: 12))
-                            .foregroundStyle(Color(Theme.accent))
+                            .foregroundStyle(Color(Theme.accentText))
                             .keyboardShortcut("f", modifiers: [.command, .shift])
                             .help("See when everyone is free and pick a time (⇧⌘F)")
                             .accessibilityIdentifier("editor-find-time")
@@ -667,7 +667,7 @@ struct EventEditorPanel: View {
                             Button("Email guests") { cal.emailGuests(event) }
                                 .buttonStyle(.plain)
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color(Theme.accent))
+                                .foregroundStyle(Color(Theme.accentText))
                                 .help("Write to the people on this event, for what isn't a calendar update")
                                 .accessibilityIdentifier("editor-email-guests")
                         }
@@ -1128,7 +1128,7 @@ struct ProblemLine: View {
     var body: some View {
         Label(problem.text, systemImage: problem.blocking ? "exclamationmark.circle" : "info.circle")
             .font(.system(size: 11.5))
-            .foregroundStyle(problem.blocking ? Color(NSColor(hex: 0xC9302C)) : Color(Theme.text3))
+            .foregroundStyle(problem.blocking ? Color(Theme.dangerText) : Color(Theme.text3))
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("editor-problem")
     }
@@ -1176,7 +1176,7 @@ struct EditorButton: View {
                 KeyHint(key: key)
             }
             .font(.system(size: 12.5, weight: primary ? .semibold : .medium))
-            .foregroundStyle(primary ? Color(Theme.raise) : Color(Theme.text))
+            .foregroundStyle(primary ? Color(Theme.onAccent) : Color(Theme.text))
             .padding(.leading, 12)
             .padding(.trailing, 10)
             .frame(height: 28)

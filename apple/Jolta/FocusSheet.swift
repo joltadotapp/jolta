@@ -113,7 +113,7 @@ struct FocusSheet: View {
                     .accessibilityIdentifier("focus-line")
             }
             if let failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
                 if let problem = plan?.problem {

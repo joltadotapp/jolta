@@ -30,7 +30,7 @@ final class ThemeStore {
     /// AppKit asks dynamic colors for their value whenever it draws, on any
     /// thread, so the colors read the pair here instead of capturing one.
     private nonisolated static let live = Mutex(ThemePair(dark: ThemePalette.graphiteDark.tokens, light: ThemePalette.graphiteLight.tokens))
-    @ObservationIgnored private var colors: [KeyPath<ThemeTokens, UInt32>: NSColor] = [:]
+    @ObservationIgnored private var colors: [[AnyKeyPath]: NSColor] = [:]
     @ObservationIgnored private let keyPrefix: String
 
     private init() {
@@ -128,18 +128,22 @@ final class ThemeStore {
     /// draw again when the theme changes. AppKit keeps some of these colors
     /// (in attributed strings, as tints), so each one resolves from the live
     /// pair each time it draws rather than from the pair when it was made.
-    func color(_ token: KeyPath<ThemeTokens, UInt32> & Sendable) -> NSColor {
+    func color(_ token: KeyPath<ThemeTokens, UInt32> & Sendable, alpha: (KeyPath<ThemeTokens, Double> & Sendable)? = nil) -> NSColor {
         _ = active
-        if let color = colors[token] { return color }
-        let color = Self.dynamicColor(token)
-        colors[token] = color
+        let key: [AnyKeyPath] = [token] + (alpha.map { [$0] } ?? [])
+        if let color = colors[key] { return color }
+        let color = Self.dynamicColor(token, alpha: alpha)
+        colors[key] = color
         return color
     }
 
-    private nonisolated static func dynamicColor(_ token: KeyPath<ThemeTokens, UInt32> & Sendable) -> NSColor {
+    private nonisolated static func dynamicColor(_ token: KeyPath<ThemeTokens, UInt32> & Sendable, alpha: (KeyPath<ThemeTokens, Double> & Sendable)?) -> NSColor {
         NSColor(name: nil) { appearance in
             let mode: ThemeMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
-            return NSColor(hex: live.withLock { $0[mode][keyPath: token] })
+            return live.withLock {
+                let tokens = $0[mode]
+                return NSColor(hex: tokens[keyPath: token], alpha: alpha.map { tokens[keyPath: $0] } ?? 1)
+            }
         }
     }
 }

@@ -26,9 +26,6 @@ private struct ConfirmationView: View {
     let confirmation: Confirmation
     let dismiss: () -> Void
 
-    /// White text on it reads at about 7.7:1.
-    private static let danger = Color(NSColor(hex: 0xC9302C))
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(confirmation.title)
@@ -48,7 +45,7 @@ private struct ConfirmationView: View {
                     dismiss()
                     confirmation.perform()
                 }
-                .buttonStyle(DialogButton(fill: Self.danger, text: .white))
+                .buttonStyle(DialogButton(fill: Color(Theme.danger), text: .white))
             }
             .padding(.top, 14)
         }

@@ -392,7 +392,7 @@ struct RsvpProposePanel: View {
             HStack {
                 Text(summary)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(valid ? Theme.text3 : Theme.accent))
+                    .foregroundStyle(Color(valid ? Theme.text3 : Theme.accentText))
                 Spacer(minLength: 0)
                 Button("Find a time…") {
                     model.findTime(for: .propose(message: invitation.messageId, organizer: invitation.organizer),

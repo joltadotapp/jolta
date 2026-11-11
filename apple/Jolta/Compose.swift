@@ -414,7 +414,7 @@ private struct ImageSizeBar: View {
                     if !chosen.fits {
                         let fitting = sizes.last(where: \.fits)
                         Text(fitting == nil ? "Over Microsoft 365's usual 35 MB limit, even at Small" : "Over Microsoft 365's usual 35 MB limit")
-                            .foregroundStyle(Color(Theme.accent))
+                            .foregroundStyle(Color(Theme.accentText))
                         if let fitting {
                             Button("Use \(Self.name(fitting.size))") { choose(fitting.size) }
                                 .buttonStyle(.link)

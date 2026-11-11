@@ -724,7 +724,7 @@ struct ReaderView: View {
                         Button("Load Images", action: loadImages)
                             .buttonStyle(.plain)
                             .fontWeight(.medium)
-                            .foregroundStyle(Color(Theme.accent))
+                            .foregroundStyle(Color(Theme.accentText))
                         if !thread.imageSender.isEmpty {
                             Button("Always from \(thread.imageSender)") { trustSender(true) }
                                 .buttonStyle(.plain)
@@ -793,9 +793,12 @@ enum ReaderStyle {
     }
 
     private static func variables(_ t: ThemeTokens) -> String {
-        [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("fill", t.fill), ("acc", t.accent)]
+        let colors = [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("acc", t.accent),
+                      ("acctx", t.accentText), ("onacc", t.onAccent)]
             .map { "--\($0.0):#\(String(format: "%06x", $0.1));" }
-            .joined(separator: " ")
+        // A hovered control's fill: the text color at the theme's strength, as `Theme.fill`.
+        let fill = "--fill:color-mix(in srgb, var(--tx) \(t.fillAlpha * 100)%, transparent);"
+        return (colors + [fill]).joined(separator: " ")
     }
 
     /// Styles for the page around each message. Message HTML keeps its own
@@ -817,7 +820,7 @@ enum ReaderStyle {
       border-radius: 4px; box-shadow: inset 0 0 0 1px var(--tx3); color: var(--tx2); font-size: 9.5px; font-weight: 600;
       letter-spacing: .05em; line-height: 15px; }
     .jolta-sig.jolta-muted { color: var(--tx3); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx3) 55%, transparent); }
-    .jolta-sig.jolta-warn { color: var(--acc); box-shadow: inset 0 0 0 1px var(--acc); }
+    .jolta-sig.jolta-warn { color: var(--acctx); box-shadow: inset 0 0 0 1px var(--acc); }
     .jolta-snippet { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--tx3); }
     .jolta-date { color: var(--tx3); font: 11.5px ui-monospace, SFMono-Regular, monospace; }
     .jolta-to { display: none; }
@@ -829,7 +832,7 @@ enum ReaderStyle {
     .jolta-sigline { display: none; }
     .jolta-message[open] .jolta-sigline { display: block; flex-basis: 100%; color: var(--tx3); font-size: 12.5px;
       line-height: 18px; white-space: normal; }
-    .jolta-message[open] .jolta-sigline.jolta-warn { color: var(--acc); }
+    .jolta-message[open] .jolta-sigline.jolta-warn { color: var(--acctx); }
     .jolta-notice { margin: 0 0 18px; color: var(--tx2); }
     .jolta-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
     .jolta-body img { max-width: 100%; height: auto; }
@@ -875,7 +878,7 @@ enum ReaderStyle {
     .jolta-invite-people b { color: var(--tx); font-weight: 500; }
     .jolta-invite-note, .jolta-invite-free { margin-top: 10px; }
     .jolta-invite-note + .jolta-invite-note, .jolta-invite-note + .jolta-invite-free { margin-top: 2px; }
-    .jolta-invite .jolta-warn { color: var(--acc); }
+    .jolta-invite .jolta-warn { color: var(--acctx); }
     .jolta-invite del { color: var(--tx3); text-decoration: line-through; text-decoration-color: var(--tx3); }
     .jolta-invite ins { padding: 0 3px; margin: 0 -1px; border-radius: 4px; text-decoration: none; color: var(--tx);
       background: color-mix(in oklab, var(--acc) 15%, transparent); -webkit-box-decoration-break: clone; }
@@ -941,7 +944,7 @@ enum ReaderStyle {
     .jolta-rsvp-quiet .jolta-tick { opacity: 0; }
     .jolta-rsvp-quiet.jolta-on .jolta-tick { opacity: 1; }
     .jolta-join:hover { background: var(--fill); }
-    .jolta-join.jolta-live { background: var(--acc); color: #fff; box-shadow: none; }
+    .jolta-join.jolta-live { background: var(--acc); color: var(--onacc); box-shadow: none; }
     .jolta-invite-reply { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 10px 14px; }
     .jolta-invite-reply b { color: var(--tx); font-weight: 600; }
     .jolta-invite-about { margin-left: auto; color: var(--tx3); }

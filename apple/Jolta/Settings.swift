@@ -71,7 +71,7 @@ struct SaveBar: View {
                 ProgressView().controlSize(.small)
                 Text(workingText).foregroundStyle(Color(Theme.text3))
             } else if let message {
-                Text(message).foregroundStyle(failed ? Color.red : Color(Theme.text3)).lineLimit(2)
+                Text(message).foregroundStyle(failed ? Color(Theme.dangerText) : Color(Theme.text3)).lineLimit(2)
             } else {
                 Text("Unsaved changes").foregroundStyle(Color(Theme.text3))
             }
@@ -114,7 +114,7 @@ struct VIPSettings: View {
                     }
                 }
                 if let error {
-                    SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
+                    SettingsBlock { Text(error).foregroundStyle(Color(Theme.dangerText)).font(.system(size: 12)) }
                 }
             }
         }
@@ -286,7 +286,7 @@ struct AddIMAPAccount: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 if working { ProgressView().controlSize(.small); Text("Signing in…").foregroundStyle(.secondary) }

@@ -529,7 +529,7 @@ struct FindTimePanel: View {
                         Text("⌘↩").opacity(0.75)
                     }
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(Theme.raise))
+                    .foregroundStyle(Color(Theme.onAccent))
                     .padding(.horizontal, 10)
                     .frame(height: 24)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.accent)))

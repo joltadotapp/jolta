@@ -54,8 +54,7 @@ extension View {
     }
 }
 
-/// White text on it reads at about 7.7:1, as in `Confirmation`.
-private let danger = Color(NSColor(hex: 0xC9302C))
+@MainActor private var danger: Color { Color(Theme.danger) }
 
 private struct DialogText: View {
     let title: String
@@ -161,7 +160,7 @@ private struct SendPromptView: View {
                     Button(link.label) { pick(link) }
                         .buttonStyle(.plain)
                         .font(.system(size: 12))
-                        .foregroundStyle(Color(Theme.accent))
+                        .foregroundStyle(Color(Theme.accentText))
                         .accessibilityIdentifier("send-link")
                 }
                 .padding(.top, 10)

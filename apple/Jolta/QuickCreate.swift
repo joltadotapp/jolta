@@ -126,7 +126,7 @@ struct QuickCreateView: View {
                     Text(found.name.isEmpty ? found.address : found.name).foregroundStyle(Color(Theme.text2))
                 } else {
                     Text("\(p.typed)?")
-                        .foregroundStyle(Color(NSColor(hex: 0xC9302C)))
+                        .foregroundStyle(Color(Theme.dangerText))
                         .help("You'll choose who \(p.typed) is in the editor; nobody is invited by a guess.")
                 }
             }

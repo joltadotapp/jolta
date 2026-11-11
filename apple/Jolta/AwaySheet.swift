@@ -43,7 +43,7 @@ struct AwaySheet: View {
             fields
             accounts
             if let failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
                 if let problem {
@@ -160,7 +160,7 @@ struct AwaySheet: View {
             ForEach(rows, id: \.accountId) { row in
                 accountRow(row)
                 if row.accountId != rows.last?.accountId {
-                    Rectangle().fill(Color(Theme.line2)).frame(height: 1)
+                    Rectangle().fill(Color(Theme.line)).frame(height: 1)
                 }
             }
             if loaded && rows.isEmpty {
@@ -209,7 +209,7 @@ struct AwaySheet: View {
                 }
                 if let current = row.current {
                     HStack(spacing: 8) {
-                        Text(current).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.accent))
+                        Text(current).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.accentText))
                         Button("Turn off") { turnOff(row) }
                             .controlSize(.small)
                             .disabled(working)

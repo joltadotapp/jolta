@@ -122,7 +122,7 @@ struct AccountPage: View {
                                 detail: draft?.verifyCerts == false
                                     ? "Jolta accepts any certificate from these servers, so someone between you and them could read your mail and password. Only turn this off for a server you run yourself with a self-signed certificate."
                                     : "Jolta only connects to servers with a valid certificate.",
-                                detailColor: draft?.verifyCerts == false ? .orange : Color(Theme.text3)) {
+                                detailColor: draft?.verifyCerts == false ? Color(Theme.warningText) : Color(Theme.text3)) {
                         Toggle("Verify server certificates", isOn: binding(\.verifyCerts)).settingsSwitch()
                     }
                 }
@@ -132,7 +132,7 @@ struct AccountPage: View {
                     SettingsRow(title: "Signed in with \(section.account.provider)",
                                 detail: failure.map { "This account can't sync: \($0). Sign in again to fix it." }
                                     ?? "Sign in again when Jolta reports that the account's access ran out or was revoked. \(section.account.provider) manages the servers and their security.",
-                                detailColor: failure == nil ? Color(Theme.text3) : .orange) {
+                                detailColor: failure == nil ? Color(Theme.text3) : Color(Theme.warningText)) {
                         Button("Sign In Again…", action: signInAgain).disabled(signingIn)
                     }
                 }
@@ -320,7 +320,7 @@ private struct SendAsSection: View {
                 }
             }
             if let error {
-                SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
+                SettingsBlock { Text(error).foregroundStyle(Color(Theme.dangerText)).font(.system(size: 12)) }
             }
             if let fetchError {
                 SettingsBlock {

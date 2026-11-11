@@ -245,7 +245,7 @@ struct JoinButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12, weight: live ? .semibold : .medium))
-                .foregroundStyle(Color(live ? Theme.raise : Theme.text2))
+                .foregroundStyle(Color(live ? Theme.onAccent : Theme.text2))
                 .padding(.horizontal, 10)
                 .frame(height: 22)
                 .background {

@@ -203,7 +203,7 @@ private struct LocalModels: View {
     }
 
     private func stateColor(_ m: LocalModelInfo) -> Color {
-        if case .failed = m.state { return .red }
+        if case .failed = m.state { return Color(Theme.dangerText) }
         return Color(Theme.text3)
     }
 
@@ -296,7 +296,7 @@ private struct RemoteAccount: View {
 
     var body: some View {
         SettingsSection("\(name) account") {
-            SettingsRow(title: "API key", detail: keyDetail, detailColor: problem == nil ? Color(Theme.text3) : .red) {
+            SettingsRow(title: "API key", detail: keyDetail, detailColor: problem == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
                 keyControl
             }
             SettingsRow(title: "Model", detail: modelDetail) { modelControl }
@@ -320,7 +320,7 @@ private struct RemoteAccount: View {
                 SettingsCard {
                     SettingsRow(title: "API address",
                                 detail: addressProblem ?? "For a compatible server, such as Ollama, LM Studio or a company proxy. A server on your own network may not need a key.",
-                                detailColor: addressProblem == nil ? Color(Theme.text3) : .red) {
+                                detailColor: addressProblem == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
                         HStack(spacing: 6) {
                             TextField(model.core.aiDefaultUrl(provider: provider), text: $address)
                                 .settingsField(width: 220, mono: true)

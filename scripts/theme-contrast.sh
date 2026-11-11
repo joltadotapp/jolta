@@ -10,4 +10,4 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 cp scripts/theme-contrast.swift "$OUT/main.swift"
 swiftc -O -o "$OUT/check" apple/Jolta/ThemePalette.swift apple/Jolta/OmarchyThemes.swift apple/Jolta/Scenery.swift "$OUT/main.swift"
-"$OUT/check"
+"$OUT/check" "$@"
