@@ -310,7 +310,9 @@ enum Provider {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+    // async-imap traces every line it sends, the sign-in's token or password included.
+    let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive("async_imap=debug".parse()?);
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(jolta_core::default_data_dir);
     let jolta = Jolta::open(&data_dir).with_context(|| format!("opening {}", data_dir.display()))?;
