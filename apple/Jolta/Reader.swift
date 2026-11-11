@@ -836,7 +836,7 @@ enum ReaderStyle {
     body:not(.jolta-images):not(#jolta-a):not(#jolta-b) .jolta-body img[src^="x-remote:"] { display: none !important; }
     .jolta-body.jolta-wide { max-width: 100%; width: fit-content; margin: 0 auto; overflow-x: auto; }
     .jolta-body img.jolta-fit { height: auto !important; }
-    .jolta-body img.jolta-fit:not(a[href] img) { cursor: zoom-in; }
+    .jolta-body img.jolta-fit:not(.jolta-full):not(a[href] img) { cursor: zoom-in; }
     .jolta-body img.jolta-natural, .jolta-body img.jolta-full { max-width: none !important; }
     .jolta-body img.jolta-full { cursor: zoom-out; }
     .jolta-body:has(img.jolta-full) { max-width: 100%; overflow-x: auto; }
