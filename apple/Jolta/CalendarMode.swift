@@ -70,14 +70,7 @@ struct CalendarModeView: View {
                 Text(message).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).padding().allowsHitTesting(false)
             }
         }
-        .overlay(alignment: .bottom) {
-            if let toast = model.toast {
-                ToastView(toast: toast, undo: { model.undo() }, release: { model.releaseHolds($0) })
-                    .padding(.bottom, 48)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(.snappy(duration: 0.22), value: model.toast)
+        .overlay(alignment: .bottom) { ToastLayer(model: model).padding(.bottom, 34) }
     }
 }
 

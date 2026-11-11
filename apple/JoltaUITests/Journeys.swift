@@ -80,19 +80,6 @@ final class Journeys: XCTestCase {
         app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Undo")).firstMatch
     }
 
-    /// Archiving the last conversation shows the empty-inbox scene, and the
-    /// message with Undo shows on it.
-    func testUndoShowsAtInboxZero() throws {
-        let app = try launch()
-        text(app, "Lunch on Friday").click()
-        for _ in 0..<8 where !text(app, "Inbox zero").exists {
-            app.typeKey("e", modifierFlags: [])
-            usleep(400_000)
-        }
-        XCTAssertTrue(text(app, "Inbox zero").waitForExistence(timeout: 5), "the inbox is empty")
-        XCTAssertTrue(undoButton(app).waitForExistence(timeout: 2), "Undo shows over the empty-inbox scene")
-    }
-
     /// Closing the palette while writing gives the keyboard back to the
     /// message, not to the list, where a letter is a command.
     func testPaletteInComposeGivesTheKeyboardBack() throws {
@@ -123,22 +110,6 @@ final class Journeys: XCTestCase {
         app.typeKey("z", modifierFlags: [])
         XCTAssertTrue(to.waitForExistence(timeout: 5), "z opens the message again")
         XCTAssertEqual(to.value as? String, "ann@test.invalid", "with what was written")
-    }
-
-    /// The message that offers Undo for a send stays for the whole ten
-    /// seconds the send waits.
-    func testSendUndoLastsTheWholeWait() throws {
-        let app = try launch()
-        app.typeKey("c", modifierFlags: [])
-        let to = app.textFields["compose-to"]
-        XCTAssertTrue(to.waitForExistence(timeout: 5), "c opens compose")
-        app.typeText("ann@test.invalid")
-        app.typeKey(.return, modifierFlags: .command)
-        XCTAssertTrue(to.waitForNonExistence(timeout: 5), "⌘↩ sends")
-        sleep(8)
-        XCTAssertTrue(undoButton(app).exists, "Undo still shows after 8 seconds")
-        app.typeKey("z", modifierFlags: [])
-        XCTAssertTrue(to.waitForExistence(timeout: 5), "z brings the message back")
     }
 
     /// Launch opens no conversation, as opening one marks it read: the

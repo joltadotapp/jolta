@@ -59,7 +59,7 @@ private struct ConfirmationView: View {
     }
 }
 
-private struct DialogButton: ButtonStyle {
+struct DialogButton: ButtonStyle {
     let fill: Color
     let text: Color
     var border: Color = .clear

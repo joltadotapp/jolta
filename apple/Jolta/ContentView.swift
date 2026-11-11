@@ -20,6 +20,12 @@ struct ContentView: View {
         .sheet(item: Binding(get: { model.awaySheet }, set: { model.awaySheet = $0 })) { request in
             AwaySheet(model: model, request: request) { model.awaySheet = nil }
         }
+        // A sheet, so no key reaches the mail behind it while it asks.
+        .sheet(isPresented: Binding(get: { model.pendingAgent != nil }, set: { if !$0 { model.postponeAgent() } })) {
+            if let agent = model.pendingAgent {
+                AgentApproval(name: agent.name, later: model.postponeAgent) { approve, grants in model.decideAgent(approve: approve, grants: grants) }
+            }
+        }
         .sheet(item: Binding(get: { model.focusSheet }, set: { model.focusSheet = $0 })) { _ in
             FocusSheet(model: model) { model.focusSheet = nil }
         }
@@ -29,6 +35,8 @@ struct ContentView: View {
                 GeometryReader { geo in
                     let panel: CGFloat = model.showsDayPanel ? 300 : 0
                     InboxZero(compose: model.startCompose)
+                        // The scene covers the list, and with it the list's toast.
+                        .overlay(alignment: .bottom) { ToastLayer(model: model) }
                         .frame(width: geo.size.width - Theme.sidebarWidth - panel)
                         .frame(maxWidth: .infinity, alignment: .trailing)
                         .padding(.trailing, panel)
@@ -58,14 +66,6 @@ struct ContentView: View {
         .overlay {
             if let request = model.findTime {
                 FindTimePanel(model: model, request: request).id(request)
-            }
-        }
-        .overlay {
-            if let agent = model.pendingAgent {
-                ZStack {
-                    Color.black.opacity(0.35).ignoresSafeArea()
-                    AgentApproval(name: agent.name) { approve, grants in model.decideAgent(approve: approve, grants: grants) }
-                }
             }
         }
         .overlay(alignment: .top) {
@@ -520,14 +520,7 @@ struct ListColumn: View {
                 .overlay {
                     if model.listCount == 0 { EmptyList(model: model) }
                 }
-                .overlay(alignment: .bottom) {
-                    if let toast = model.toast {
-                        ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) }, release: { model.releaseHolds($0) })
-                            .padding(.bottom, 14)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
-                .animation(.snappy(duration: 0.22), value: model.toast)
+                .overlay(alignment: .bottom) { ToastLayer(model: model) }
             KeyFooter()
         }
     }
@@ -700,6 +693,22 @@ struct SearchField: View {
     }
 }
 
+/// The toast at the foot of whatever it is laid over, with its actions.
+struct ToastLayer: View {
+    let model: AppModel
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if let toast = model.toast {
+                ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) }, release: { model.releaseHolds($0) })
+                    .padding(.bottom, 14)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy(duration: 0.22), value: model.toast)
+    }
+}
+
 struct ToastView: View {
     let toast: Toast
     let undo: () -> Void
@@ -708,7 +717,11 @@ struct ToastView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(toast.text).lineLimit(1)
+            TimelineView(.periodic(from: .now, by: toast.until == nil ? 3600 : 0.5)) { context in
+                Text(toast.text(at: context.date)).lineLimit(1).truncationMode(.middle).monospacedDigit()
+            }
+            .frame(maxWidth: 420)
+            .help(toast.text(at: .now))
             if toast.undo != nil {
                 Button(action: undo) {
                     HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z", focused: true) }

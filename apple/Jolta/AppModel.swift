@@ -477,6 +477,14 @@ final class AppModel {
         show(Toast(text: approve ? "\(agent.name) can use Jolta" : "\(agent.name) was turned away", undo: nil))
     }
 
+    /// Closes the question without an answer. The agent stays waiting in
+    /// Settings › Agents, where it can be allowed or revoked.
+    func postponeAgent() {
+        guard let agent = pendingAgent else { return }
+        pendingAgent = nil
+        show(Toast(text: "\(agent.name) is waiting in Settings › Agents", undo: nil))
+    }
+
     func reviewDraft(_ id: Int64) {
         if let draft = try? core.draft(draftId: id) {
             openCompose(draft)
@@ -795,8 +803,17 @@ final class AppModel {
         }
     }
 
+    /// What Z takes back: the last action that offered Undo. Kept apart from
+    /// the toast, so the action can be undone after its message has left or
+    /// another message has replaced it.
+    private var lastUndo: Toast.Undo?
+    /// The message Discard closed, for Undo to open again.
+    private var discarded: ComposeData?
+
     func undo() {
-        switch toast?.undo {
+        let undo = lastUndo
+        lastUndo = nil
+        switch undo {
         case .action(let tokens):
             userChangedList = true
             try? core.undo(tokens: tokens)
@@ -820,8 +837,14 @@ final class AppModel {
             } else {
                 show(Toast(text: "Already sent", undo: nil))
             }
+        case .discard:
+            guard var draft = discarded else { return }
+            discarded = nil
+            // The stored draft is gone; the next save stores it again.
+            draft.draftId = nil
+            openCompose(draft)
         case nil:
-            break
+            show(Toast(text: "Nothing to undo", undo: nil))
         }
     }
 
@@ -875,13 +898,13 @@ final class AppModel {
         guard let draft = compose else { return }
         do {
             let token = try core.send(compose: draft, sendAt: at, remindAt: composeReminder?.at)
-            var text = label.map { "Scheduled for \($0)" } ?? "Sending in 10 seconds"
+            var text = label.map { "Scheduled for \($0)" } ?? "Sending in \(Toast.countdownMark)"
             if let reminder = composeReminder { text += ", reminder \(reminder.label)" }
             compose = nil
             composeReminder = nil
             composeSchedule = nil
             requestListFocus()
-            show(Toast(text: text, undo: .send(token)))
+            show(Toast(text: text, undo: .send(token), until: label == nil ? Date.now + Toast.undoWindow : nil))
         } catch {
             show(Toast(text: "\(error)", undo: nil))
         }
@@ -994,6 +1017,10 @@ final class AppModel {
     func discardCompose() {
         composeSchedule = nil
         if let id = compose?.draftId { try? core.discardDraft(draftId: id) }
+        if let draft = compose, !draft.isEmpty {
+            discarded = draft
+            show(Toast(text: "Message discarded", undo: .discard))
+        }
         compose = nil
         requestListFocus()
     }
@@ -1072,9 +1099,10 @@ final class AppModel {
 
     private func show(_ toast: Toast) {
         self.toast = toast
+        if let undo = toast.undo { lastUndo = undo }
         let id = toast.id
         Task {
-            try? await Task.sleep(for: .seconds(toast.review != nil ? 12 : toast.undo == nil && toast.release == nil ? 3 : 6))
+            try? await Task.sleep(for: .seconds(toast.seconds))
             if self.toast?.id == id { self.toast = nil }
         }
     }
@@ -1172,7 +1200,15 @@ struct Toast: Equatable {
         case vips([String], Bool)
         /// Bring back the holds of a set that these calendar ops release.
         case holds(String, [Int64])
+        /// Open the message Discard closed.
+        case discard
     }
+
+    /// How long a send or a calendar change waits before it goes out, as
+    /// the core's `UNDO_SEND_SECONDS`.
+    static let undoWindow: TimeInterval = 10
+    /// Where `text` shows the seconds left until `until`.
+    static let countdownMark = "{seconds}"
 
     let id = UUID()
     let text: String
@@ -1181,6 +1217,27 @@ struct Toast: Equatable {
     var review: Int64?
     /// A hold set the toast's Release releases.
     var release: String?
+    /// When the action goes out for good; the toast stays and counts down until then.
+    var until: Date?
+
+    /// How long the toast shows. One that offers Undo for something the core
+    /// holds back stays for as long as the core does.
+    var seconds: TimeInterval {
+        if review != nil { return 12 }
+        if let until { return max(1, until.timeIntervalSinceNow) }
+        switch undo {
+        case .calendar: return Self.undoWindow
+        case .some: return 6
+        case nil: return release == nil ? 3 : 6
+        }
+    }
+
+    /// `text` with the seconds left filled in.
+    func text(at now: Date) -> String {
+        guard let until else { return text }
+        let left = max(1, Int(until.timeIntervalSince(now).rounded(.up)))
+        return text.replacingOccurrences(of: Self.countdownMark, with: left == 1 ? "1 second" : "\(left) seconds")
+    }
 }
 
 /// Receives core events on the core's threads and hands them to the main actor.

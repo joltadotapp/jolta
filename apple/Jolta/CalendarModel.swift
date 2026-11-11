@@ -815,7 +815,7 @@ final class CalendarModel {
         if editor.isReadOnly { return false }
         if editor.isNew {
             let d = editor.draft
-            return !d.title.isEmpty || !d.description.isEmpty || !d.location.isEmpty || !d.room.isEmpty || d.rule != nil
+            return !d.title.isEmpty || !d.description.isEmpty || !d.location.isEmpty || !d.room.isEmpty || d.rule != nil || !d.people.isEmpty
         }
         return (try? core.planSave(draft: editor.draft))?.unchanged == false
     }

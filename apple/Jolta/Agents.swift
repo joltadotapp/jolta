@@ -4,6 +4,8 @@ import SwiftUI
 /// Shown when an agent connects for the first time.
 struct AgentApproval: View {
     let name: String
+    /// Esc: close without an answer.
+    let later: () -> Void
     let decide: (Bool, [String]) -> Void
     @State private var read = true
     @State private var organize = false
@@ -26,20 +28,26 @@ struct AgentApproval: View {
             }
             .toggleStyle(.checkbox)
             .font(.system(size: 13))
-            HStack {
-                Button("Don't allow") { decide(false, []) }
-                    .keyboardShortcut(.cancelAction)
+            HStack(spacing: 8) {
+                Button("Don't Allow") { decide(false, []) }
+                    .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
                 Spacer()
-                Button("Allow") {
+                Button("Not Now", action: later)
+                    .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
+                    .keyboardShortcut(.cancelAction)
+                // No plain Return: a key meant for the mail must not let an agent in.
+                Button {
                     decide(true, [read ? "read" : nil, organize ? "organize" : nil, draft ? "draft" : nil].compactMap { $0 })
+                } label: {
+                    HStack(spacing: 6) { Text("Allow"); KeyCap(key: "⌘↩") }
                 }
-                .keyboardShortcut(.defaultAction)
+                .buttonStyle(DialogButton(fill: Color(Theme.kbd), text: Color(Theme.text), border: Color(Theme.line)))
+                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(24)
         .frame(width: 460)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .presentationBackground(Color(Theme.raise))
     }
 }
 
