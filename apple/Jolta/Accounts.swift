@@ -163,7 +163,8 @@ struct AccountPage: View {
                     Button("Remove…", role: .destructive) {
                         removal = Confirmation(
                             title: "Remove \(section.account.address)?",
-                            message: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.",
+                            message: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries."
+                                + (section.account.kind == "gmail" ? " This also signs the account out of Jolta on your other Macs." : ""),
                             action: "Remove Account") {
                                 try? model.core.removeAccount(accountId: section.id)
                                 model.reloadAccounts()

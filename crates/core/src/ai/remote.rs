@@ -13,13 +13,48 @@ pub const OPENAI_URL: &str = "https://api.openai.com/v1";
 pub const ANTHROPIC_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-fn base(provider: Provider, base_url: &str) -> String {
+/// The address requests go to. A custom one uses https, except for a
+/// server on this Mac or the user's own network, such as Ollama.
+pub(super) fn base(provider: Provider, base_url: &str) -> Result<String> {
     let url = base_url.trim().trim_end_matches('/');
-    match (url.is_empty(), provider) {
-        (true, Provider::Anthropic) => ANTHROPIC_URL.into(),
-        (true, _) => OPENAI_URL.into(),
-        (false, _) => url.into(),
+    if url.is_empty() {
+        return Ok(if provider == Provider::Anthropic { ANTHROPIC_URL } else { OPENAI_URL }.into());
     }
+    let parsed = reqwest::Url::parse(url).map_err(|_| Error::Other(format!("“{url}” isn't a web address. Type the whole address, starting with https://.")))?;
+    match parsed.scheme() {
+        "https" => Ok(url.into()),
+        "http" if parsed.host_str().is_some_and(nearby) => Ok(url.into()),
+        "http" => Err(Error::Other(
+            "Use an https:// address. Plain http:// works only for a server on this Mac or your own network, such as Ollama.".into(),
+        )),
+        _ => Err(Error::Other(format!("“{url}” isn't a web address. Type the whole address, starting with https://."))),
+    }
+}
+
+/// Whether `host` is this Mac or on the user's own network: loopback,
+/// private and link-local addresses, Tailscale's 100.64.0.0/10, and
+/// Bonjour's `.local` names.
+fn nearby(host: &str) -> bool {
+    use std::net::IpAddr;
+    fn ip(addr: IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(v4) => {
+                let [a, b, ..] = v4.octets();
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || (a == 100 && b & 0xc0 == 64)
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+                    || v6.to_ipv4_mapped().is_some_and(|v4| ip(IpAddr::V4(v4)))
+            }
+        }
+    }
+    if let Ok(addr) = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        return ip(addr);
+    }
+    let name = host.trim_end_matches('.').to_ascii_lowercase();
+    name == "localhost" || name.ends_with(".local")
 }
 
 fn company(provider: Provider) -> &'static str {
@@ -28,7 +63,10 @@ fn company(provider: Provider) -> &'static str {
 
 fn client(timeout: Option<Duration>) -> Result<reqwest::Client> {
     crate::oauth::init_tls();
-    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(90));
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(90));
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }
@@ -79,7 +117,7 @@ pub struct ModelChoice {
 /// The provider's models, newest first. Also checks that the address and
 /// key work. On api.openai.com only the text models are listed.
 pub async fn models(provider: Provider, base_url: &str, key: Option<String>) -> Result<Vec<ModelChoice>> {
-    let base = base(provider, base_url);
+    let base = base(provider, base_url)?;
     let url = match provider {
         Provider::Anthropic => format!("{base}/v1/models?limit=100"),
         _ => format!("{base}/models"),
@@ -138,7 +176,7 @@ pub async fn generate(
     if key.is_none() && remote.base_url.trim().is_empty() {
         return Err(Error::Other(format!("Add your {} API key in Settings › AI.", company(provider))));
     }
-    let base = base(provider, &remote.base_url);
+    let base = base(provider, &remote.base_url)?;
     let (url, body) = match provider {
         Provider::Anthropic => (
             format!("{base}/v1/messages"),
@@ -261,6 +299,32 @@ impl Sse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_address_saved_before_the_https_rule_is_refused_before_any_request() {
+        let error = models(Provider::OpenAi, "http://203.0.113.9/v1", None).await.unwrap_err();
+        assert!(error.to_string().starts_with("Use an https:// address."), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_from_the_ai_server_is_not_followed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Ok(Ok((mut stream, _))) = tokio::time::timeout(Duration::from_millis(500), listener.accept()).await {
+                requests += 1;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let reply = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+            requests
+        });
+        assert!(models(Provider::Anthropic, &format!("http://127.0.0.1:{port}/v1"), Some("sk-test".into())).await.is_err());
+        assert_eq!(server.await.unwrap(), 1, "the redirect was followed");
+    }
 
     #[test]
     fn events_split_across_chunks() {

@@ -397,7 +397,14 @@ impl Engine {
 
     pub fn remove_account(&self, account: AccountId) -> Result<()> {
         let a = self.jolta.store.read(|c| store::account(c, account))?;
+        let revoke = crate::oauth::Provider::for_kind(a.kind)
+            .filter(|p| p.revoke_url().is_some())
+            .and_then(|p| Some((p, crate::secrets::password(&a.secret_ref).ok()?)));
         self.jolta.store.write(|tx| store::delete_account(tx, account))?;
+        crate::oauth::forget(&a);
+        if let Some((provider, refresh_token)) = revoke {
+            self.runtime.spawn(crate::oauth::revoke(provider, refresh_token));
+        }
         self.wake(account);
         (self.sink)(Event::ListsChanged);
         let jolta = self.jolta.clone();

@@ -453,7 +453,7 @@ pub fn forward_attachments(raw: &[u8], dir: &Path) -> Result<Vec<AttachmentFile>
         if inline {
             continue;
         }
-        let name = file_name(part.attachment_name().unwrap_or("attachment"));
+        let name = crate::render::attachment_name(&part);
         let mut saved = name.clone();
         let mut n = 2;
         while !used.insert(saved.to_lowercase()) {
@@ -473,13 +473,6 @@ pub fn forward_attachments(raw: &[u8], dir: &Path) -> Result<Vec<AttachmentFile>
         files.push(AttachmentFile { name, mime_type, path: path.to_string_lossy().into_owned() });
     }
     Ok(files)
-}
-
-/// An attachment name made safe to use as a file name.
-fn file_name(name: &str) -> String {
-    let clean: String = name.chars().map(|c| if c == '/' || c == '\\' || c == ':' || c.is_control() { '_' } else { c }).collect();
-    let clean = clean.trim().trim_start_matches('.').to_string();
-    if clean.is_empty() { "attachment".into() } else { clean }
 }
 
 /// A snippet's body with `{first name}`, `{name}` and `{email}` filled in
@@ -745,15 +738,15 @@ mod tests {
             --x\r\nContent-Type: image/png\r\nContent-ID: <logo@a>\r\nContent-Transfer-Encoding: base64\r\n\r\naGk=\r\n\
             --x\r\nContent-Type: application/pdf; name=\"../inv.pdf\"\r\nContent-Disposition: attachment; filename=\"../inv.pdf\"\r\n\
             Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n\
-            --x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"_inv.pdf\"\r\n\r\nsecond\r\n\
+            --x\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"-inv.pdf\"\r\n\r\nsecond\r\n\
             --x--\r\n";
         let dir = std::env::temp_dir().join(format!("jolta-fwd-{}", std::process::id()));
         let files = forward_attachments(raw.as_bytes(), &dir).unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["_inv.pdf", "_inv.pdf"], "the inline logo stays behind and the path is defused");
+        assert_eq!(names, ["-inv.pdf", "-inv.pdf"], "the inline logo stays behind and the path is defused");
         assert_eq!(files[0].mime_type, "application/pdf");
         assert_eq!(std::fs::read(&files[0].path).unwrap(), b"%PDF-");
-        assert!(files[1].path.ends_with("_inv 2.pdf"), "same names get their own files: {}", files[1].path);
+        assert!(files[1].path.ends_with("-inv 2.pdf"), "same names get their own files: {}", files[1].path);
         assert!(files.iter().all(|f| Path::new(&f.path).starts_with(&dir)));
         std::fs::remove_dir_all(dir).unwrap();
     }

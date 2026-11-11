@@ -26,17 +26,35 @@ pub enum Provider {
 /// Client ids come from the environment, then `oauth-clients.env` in the data
 /// folder (written by the setup wizards), then the ones a release build
 /// carries. None of them is in the repository.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     pub id: String,
     pub secret: Option<String>,
 }
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("id", &self.id).field("secret", &self.secret.as_ref().map(|_| REDACTED)).finish()
+    }
+}
+
+const REDACTED: &str = "<redacted>";
 
 impl Provider {
     fn auth_url(self) -> &'static str {
         match self {
             Provider::Google => "https://accounts.google.com/o/oauth2/v2/auth",
             Provider::Microsoft => "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        }
+    }
+
+    /// Where removing an account withdraws its grant. Google's revoke ends
+    /// the whole grant, so the account is signed out on every Mac. Microsoft
+    /// lets a public client revoke no single token.
+    pub fn revoke_url(self) -> Option<&'static str> {
+        match self {
+            Provider::Google => Some("https://oauth2.googleapis.com/revoke"),
+            Provider::Microsoft => None,
         }
     }
 
@@ -258,7 +276,7 @@ pub struct Pending {
 }
 
 /// What a finished sign-in yields.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SignedIn {
     pub email: String,
     pub name: String,
@@ -268,6 +286,19 @@ pub struct SignedIn {
     /// The provider's permanent id for the user, which an address change
     /// keeps: Google's `sub`, Microsoft's `oid`.
     pub user_id: Option<String>,
+}
+
+impl std::fmt::Debug for SignedIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedIn")
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("refresh_token", &REDACTED)
+            .field("access_token", &REDACTED)
+            .field("expires_in", &self.expires_in)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 impl SignedIn {
@@ -370,9 +401,29 @@ fn authorize_url(
     format!("{}?{}", provider.auth_url(), form(&params))
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Jolta</title>\
-<body style=\"font:15px -apple-system,system-ui;margin:20vh auto;max-width:420px;text-align:center\">\
-<h2>You're signed in</h2><p>You can close this tab and go back to Jolta.</p>";
+/// A plain page for the browser tab the sign-in comes back to.
+fn page(status: &str, title: &str, text: &str) -> String {
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><title>Jolta</title>\
+         <body style=\"font:15px -apple-system,system-ui;margin:20vh auto;max-width:420px;text-align:center\">\
+         <h2>{title}</h2><p>{text}</p>"
+    );
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// What reached the sign-in listener.
+enum Callback {
+    /// A favicon or another request without a query.
+    Stray,
+    /// A reply whose `state` is missing or isn't this sign-in's: an old
+    /// tab, or a page trying to slip in its own code.
+    Foreign,
+    /// This sign-in's reply.
+    Reply(Result<Redirect>),
+}
 
 impl Pending {
     /// Waits for the browser to come back (up to ten minutes), then trades
@@ -450,30 +501,46 @@ impl Pending {
             }
             let request = String::from_utf8_lossy(&buf);
             let path = request.split_whitespace().nth(1).unwrap_or("/");
-            let query = query_of(path);
-            if query.is_empty() {
-                // A favicon or other stray request.
-                stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await.ok();
-                continue;
-            }
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{DONE_PAGE}",
-                DONE_PAGE.len()
-            );
+            let callback = self.callback(&query_of(path));
+            let reply = match &callback {
+                Callback::Stray => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                Callback::Foreign => page(
+                    "400 Bad Request",
+                    "This isn't the sign-in Jolta is waiting for",
+                    "Close this tab. To sign in, start again from Jolta.",
+                ),
+                Callback::Reply(Ok(Redirect::Code(_))) => {
+                    page("200 OK", "You're signed in", "You can close this tab and go back to Jolta.")
+                }
+                Callback::Reply(_) => page("200 OK", "Sign-in didn't finish", "Go back to Jolta to see why, or to try again."),
+            };
             stream.write_all(reply.as_bytes()).await.ok();
-            return self.code_from_query(&query);
+            if let Callback::Reply(reply) = callback {
+                return reply;
+            }
         }
     }
 
+    /// A redirect address pasted by hand, which has no browser tab to answer.
     fn code_from_query(&self, query: &HashMap<String, String>) -> Result<Redirect> {
+        match self.callback(query) {
+            Callback::Reply(reply) => reply,
+            Callback::Stray | Callback::Foreign => Err(Error::Auth("the sign-in reply did not match this request".into())),
+        }
+    }
+
+    fn callback(&self, query: &HashMap<String, String>) -> Callback {
+        if query.is_empty() {
+            return Callback::Stray;
+        }
         if query.get("state") != Some(&self.state) {
-            return Err(Error::Auth("the sign-in reply did not match this request".into()));
+            return Callback::Foreign;
         }
         if let Some(err) = query.get("error") {
             let detail = query.get("error_description").cloned().unwrap_or_default();
-            return Ok(Redirect::Refused(format!("{err} {detail}").trim().to_string()));
+            return Callback::Reply(Ok(Redirect::Refused(format!("{err} {detail}").trim().to_string())));
         }
-        query.get("code").cloned().map(Redirect::Code).ok_or_else(|| Error::Auth("the sign-in reply had no code".into()))
+        Callback::Reply(query.get("code").cloned().map(Redirect::Code).ok_or_else(|| Error::Auth("the sign-in reply had no code".into())))
     }
 }
 
@@ -628,6 +695,30 @@ pub fn remember(account_ref: &str, access_token: &str, expires_in: u64) {
         account_ref.to_string(),
         Cached { token: access_token.to_string(), until: Instant::now() + Duration::from_secs(expires_in.saturating_sub(60)) },
     );
+}
+
+/// Drops every access token kept for an account, its room lists' too.
+pub fn forget(account: &Account) {
+    if let Some(cache) = TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        for grant in [Grant::Account, Grant::Rooms] {
+            cache.remove(&cache_key(account, grant));
+        }
+    }
+}
+
+/// The request that withdraws the grant behind a refresh token: where to
+/// POST and the form to send.
+fn revoke_request(provider: Provider, refresh_token: &str) -> Option<(&'static str, String)> {
+    provider.revoke_url().map(|url| (url, form(&[("token", refresh_token)])))
+}
+
+/// Withdraws the grant behind `refresh_token` at the provider, best effort:
+/// an account is removed whether or not the provider could be reached.
+pub async fn revoke(provider: Provider, refresh_token: String) {
+    let Some((url, body)) = revoke_request(provider, &refresh_token) else { return };
+    init_tls();
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() else { return };
+    let _ = client.post(url).header("Content-Type", "application/x-www-form-urlencoded").body(body).send().await;
 }
 
 static DATA_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -832,6 +923,82 @@ mod tests {
         assert!(pending.finish_consent(async { Some(wrong) }).await.is_err(), "a reply to another request is no answer");
         let google = Account { kind: AccountKind::Gmail, ..account };
         assert!(begin_rooms(&google, Client { id: "cid".into(), secret: None }, 0).await.is_err());
+    }
+
+    /// Sends one GET to the sign-in listener, as a browser would, and
+    /// returns the status line and the page.
+    async fn browse(redirect: &str, target: &str) -> (String, String) {
+        let port = redirect.trim_end_matches('/').rsplit(':').next().unwrap();
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+        stream.write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((&reply, ""));
+        (head.lines().next().unwrap_or_default().to_string(), body.to_string())
+    }
+
+    #[tokio::test]
+    async fn the_listener_turns_away_requests_that_are_not_the_reply_and_keeps_waiting() {
+        let pending = begin(Provider::Google, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let (state, redirect) = (pending.state.clone(), pending.redirect.clone());
+        let flow = tokio::spawn(pending.finish_consent(std::future::pending()));
+
+        assert_eq!(browse(&redirect, "/favicon.ico").await.0, "HTTP/1.1 404 Not Found");
+        for forged in ["/?code=stolen&state=other", "/?code=stolen", "/?error=access_denied&state="] {
+            let (status, page) = browse(&redirect, forged).await;
+            assert_eq!(status, "HTTP/1.1 400 Bad Request", "{forged}");
+            assert!(!page.contains("signed in"), "{forged}: {page}");
+        }
+        assert!(!flow.is_finished(), "a forged reply doesn't end the sign-in");
+
+        let (status, page) = browse(&redirect, &format!("/?error=access_denied&state={state}")).await;
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert!(!page.contains("signed in"), "a refusal isn't shown as a sign-in: {page}");
+        let Consent::Refused(reason) = flow.await.unwrap().unwrap() else { panic!("the real reply ends the sign-in") };
+        assert_eq!(reason, "access_denied");
+    }
+
+    #[tokio::test]
+    async fn the_reply_with_a_code_says_signed_in_and_hands_over_the_code() {
+        let pending = begin(Provider::Google, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let target = format!("/?code=c0de&state={}", pending.state);
+        let (code, (status, page)) = tokio::join!(pending.receive_code(), browse(&pending.redirect, &target));
+        assert!(matches!(code.unwrap(), Redirect::Code(c) if c == "c0de"));
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert!(page.contains("You're signed in"));
+
+        let pending = begin(Provider::Google, Client { id: "cid".into(), secret: None }, 0).await.unwrap();
+        let target = format!("/?state={}", pending.state);
+        let (code, (_, page)) = tokio::join!(pending.receive_code(), browse(&pending.redirect, &target));
+        assert!(code.is_err(), "the reply had no code");
+        assert!(!page.contains("signed in"), "{page}");
+    }
+
+    #[test]
+    fn removal_revokes_a_google_grant_and_has_nothing_to_send_microsoft() {
+        assert_eq!(
+            revoke_request(Provider::Google, "1//0g-x/y+z"),
+            Some(("https://oauth2.googleapis.com/revoke", "token=1%2F%2F0g-x%2Fy%2Bz".to_string()))
+        );
+        assert_eq!(revoke_request(Provider::Microsoft, "token"), None);
+    }
+
+    #[test]
+    fn debug_output_never_shows_a_token_or_the_client_secret() {
+        let client = Client { id: "client-id".into(), secret: Some("client-secret-value".into()) };
+        let signed = SignedIn {
+            email: "me@example.com".into(),
+            name: "Me".into(),
+            refresh_token: "refresh-token-value".into(),
+            access_token: "access-token-value".into(),
+            expires_in: 3600,
+            user_id: Some("user-1".into()),
+        };
+        let text = format!("{client:?} {client:#?} {signed:?} {signed:#?} {:?}", Consent::Granted(signed.clone()));
+        for secret in ["client-secret-value", "refresh-token-value", "access-token-value"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        assert!(text.contains("client-id") && text.contains("me@example.com"), "the rest still shows: {text}");
     }
 
     fn params(url: &str) -> HashMap<String, String> {

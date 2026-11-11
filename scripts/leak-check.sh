@@ -2,15 +2,16 @@
 # Opens tests/fixtures/hostile.eml in the real Jolta.app reader and fails if
 # any of its 25 remote resources reaches a local logging server.
 #
-#   scripts/leak-check.sh [Debug|Release]
+#   scripts/leak-check.sh
 #
-# Needs a built app and an account to hold the fixture (the first account,
-# or JOLTA_LEAK_ACCOUNT). The app runs in the background and is stopped after.
+# Debug builds only: readerdebug.txt, which says when the fixture finished
+# loading, is written only by a Debug build. Needs a built app and an
+# account to hold the fixture (the first account, or JOLTA_LEAK_ACCOUNT).
+# The app runs in the background and is stopped after.
 set -eu
 
 cd "$(dirname "$0")/.."
-CONFIG=${1:-Debug}
-APP="build/DerivedData/Build/Products/$CONFIG/Jolta.app/Contents/MacOS/Jolta"
+APP="build/DerivedData/Build/Products/Debug/Jolta.app/Contents/MacOS/Jolta"
 DATA="$HOME/Library/Application Support/Jolta"
 PORT=18080
 LOG=$(mktemp)

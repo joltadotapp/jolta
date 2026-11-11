@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use mail_parser::{MessageParser, PartKind};
+use mail_parser::{MessageParser, MessagePart, PartKind};
 
 use crate::calendar::card::Card;
 use crate::smime::{Protection, Verdict};
@@ -85,7 +85,35 @@ pub fn attachment_bytes(raw: &[u8], index: usize) -> Option<(String, String, Vec
         .content_type()
         .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")))
         .unwrap_or_else(|| "application/octet-stream".into());
-    Some((part.attachment_name().unwrap_or("attachment").to_string(), mime, part.decoded().into_owned()))
+    Some((attachment_name(&part), mime, part.decoded().into_owned()))
+}
+
+/// An attachment's name made into a plain file name, the only form the core
+/// hands out: no path separators, colons, control or text-direction
+/// characters, no leading dot, and at most 200 bytes with the extension
+/// kept, so a " 2" for a name already taken still fits macOS's 255.
+pub(crate) fn attachment_name(part: &MessagePart) -> String {
+    let unsafe_char = |c: char| {
+        matches!(c, '/' | '\\' | ':' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') || c.is_control()
+    };
+    let name: String = part.attachment_name().unwrap_or_default().chars().map(|c| if unsafe_char(c) { '-' } else { c }).collect();
+    let name = name.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end();
+    if name.is_empty() {
+        return "attachment".into();
+    }
+    const MAX: usize = 200;
+    if name.len() <= MAX {
+        return name.to_string();
+    }
+    let ext = match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() && ext.len() <= 16 => &name[name.len() - ext.len() - 1..],
+        _ => "",
+    };
+    let mut end = MAX - ext.len();
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ext}", name[..end].trim_end())
 }
 
 /// MIME type and bytes of the part a `cid:` URL names, for inline images.
@@ -105,7 +133,7 @@ pub fn attachments(raw: &[u8]) -> Vec<Attachment> {
             let ct = a.content_type();
             Attachment {
                 index: i as u32,
-                name: a.attachment_name().unwrap_or("attachment").to_string(),
+                name: attachment_name(&a),
                 mime_type: ct
                     .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")))
                     .unwrap_or_else(|| "application/octet-stream".into()),
@@ -653,8 +681,6 @@ pub fn save_listed(raw: &[u8], id: i64, dir: &std::path::Path) -> crate::Result<
     let mut saved = Vec::new();
     for f in listed(raw, &clean, id) {
         let Some((name, _, bytes)) = attachment_bytes(raw, f.index as usize) else { continue };
-        let name = name.replace(['/', ':'], "-");
-        let name = if name.trim().is_empty() || name.starts_with('.') { format!("attachment {}", f.index + 1) } else { name };
         let (stem, ext) = match name.rsplit_once('.') {
             Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
             _ => (name.clone(), String::new()),
@@ -785,6 +811,53 @@ input[value^="a"] { background: url(http://evil.test/5) }
         let html = render_thread(&[MessageView { protection: &Protection::Encrypted, ..message(1, encrypted, true) }], "").html;
         assert!(html.contains(">Encrypted</span>") && html.contains("jolta-notice") && html.contains("smime.p7m"));
         assert!(!html.contains("jolta-sigline"), "the body says it instead");
+    }
+
+    /// A message whose attachments are named `names`, sent RFC 2231
+    /// encoded, so a name can hold any byte.
+    fn with_raw_names(names: &[String]) -> Vec<u8> {
+        let mut raw = String::from("From: a@example.com\r\nSubject: s\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n");
+        for (i, n) in names.iter().enumerate() {
+            let encoded: String = n.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+            raw.push_str(&format!(
+                "--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename*=utf-8''{encoded}\r\n\r\nfile {i}\r\n"
+            ));
+        }
+        raw.push_str("--b--\r\n");
+        raw.into_bytes()
+    }
+
+    #[test]
+    fn every_attachment_name_handed_out_is_a_plain_file_name() {
+        let names: Vec<String> = ["../x", "/etc/passwd", "a\\b", "", ".", "..", "..\\..\\x", "a\u{1}b\nc", "notes\u{202E}fdp.exe", "C:x"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain([format!("{}.pdf", "a".repeat(1000)), "é".repeat(400), ". ..".into()])
+            .collect();
+        let raw = with_raw_names(&names);
+        let dir = std::env::temp_dir().join(format!("jolta-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let listed: Vec<String> = attachments(&raw).into_iter().map(|a| a.name).collect();
+        let opened: Vec<String> = (0..names.len()).map(|i| attachment_bytes(&raw, i).unwrap().0).collect();
+        let forwarded: Vec<String> = crate::compose::forward_attachments(&raw, &dir.join("fwd")).unwrap().into_iter().map(|f| f.name).collect();
+        assert_eq!(listed.len(), names.len());
+        assert_eq!(opened, listed, "opening uses the name the reader lists");
+        assert_eq!(forwarded, listed, "forwarding uses it too");
+        for name in &listed {
+            assert!(!name.is_empty() && !name.starts_with('.'), "{name:?}");
+            assert!(!name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)), "{name:?}");
+            assert!(name.len() <= 255, "{} bytes", name.len());
+            assert_eq!(dir.join(name).parent(), Some(dir.as_path()), "{name:?}");
+        }
+        assert!(listed[10].ends_with(".pdf"), "a long name keeps its extension: {}", listed[10]);
+
+        let saved = save_listed(&raw, 1, &dir).unwrap();
+        assert_eq!(saved.len(), names.len());
+        assert!(saved.iter().all(|p| p.parent() == Some(dir.as_path())));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
