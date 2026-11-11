@@ -15,20 +15,40 @@ const CONTENT_TYPES = {
 // with every release.
 const IMMUTABLE = /^updates\/mac\/[^/]+-\d[^/]*\.(zip|delta)$/;
 
+// The pages load only their own stylesheet and run no script.
+const SECURITY_HEADERS = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "x-frame-options": "DENY",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-embedder-policy": "require-corp",
+  "referrer-policy": "strict-origin-when-cross-origin",
+};
+
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.hostname === "www.jolta.app") {
-      url.hostname = "jolta.app";
-      return Response.redirect(url.toString(), 301);
+    const response = await route(request, env);
+    const secured = new Response(response.body, response);
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+      secured.headers.set(name, value);
     }
-    const key = url.pathname.slice(1);
-    if (RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
-      return release(request, env, key);
-    }
-    return env.ASSETS.fetch(request);
+    return secured;
   },
 };
+
+async function route(request, env) {
+  const url = new URL(request.url);
+  if (url.hostname === "www.jolta.app") {
+    url.hostname = "jolta.app";
+    return Response.redirect(url.toString(), 301);
+  }
+  const key = url.pathname.slice(1);
+  if (RELEASE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+    return release(request, env, key);
+  }
+  return env.ASSETS.fetch(request);
+}
 
 async function release(request, env, key) {
   if (request.method !== "GET" && request.method !== "HEAD") {
