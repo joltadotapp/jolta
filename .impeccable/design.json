@@ -1,0 +1,798 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-11T18:18:48.008Z",
+  "title": "Design System: Jolta website",
+  "extensions": {
+    "colorMeta": {
+      "sky-top": {
+        "role": "primary",
+        "displayName": "Daytime Sky Blue",
+        "canonical": "#5FA8E8",
+        "tonalRamp": [
+          "#000239",
+          "#00245a",
+          "#00447d",
+          "#1565a1",
+          "#3e88c6",
+          "#62abec",
+          "#86d0ff",
+          "#abf6ff"
+        ]
+      },
+      "sky-bottom": {
+        "role": "primary",
+        "displayName": "Haze Blue",
+        "canonical": "#CFE8F7",
+        "tonalRamp": [
+          "#000d17",
+          "#142833",
+          "#304551",
+          "#4f6572",
+          "#6f8694",
+          "#91a9b7",
+          "#b5cddc",
+          "#daf3ff"
+        ]
+      },
+      "hill-far": {
+        "role": "primary",
+        "displayName": "Meadow",
+        "canonical": "#8DBF8A",
+        "tonalRamp": [
+          "#001300",
+          "#002f00",
+          "#1f4e1f",
+          "#406e3e",
+          "#60915e",
+          "#83b480",
+          "#a6d9a3",
+          "#cbffc7"
+        ]
+      },
+      "hill-mid": {
+        "role": "primary",
+        "displayName": "Pasture",
+        "canonical": "#76AD77",
+        "tonalRamp": [
+          "#001300",
+          "#003000",
+          "#194f1e",
+          "#3b6f3d",
+          "#5c925d",
+          "#7eb57f",
+          "#a2daa2",
+          "#c6ffc6"
+        ]
+      },
+      "hill-near": {
+        "role": "primary",
+        "displayName": "Shaded Ridge",
+        "canonical": "#4a784d",
+        "tonalRamp": [
+          "#001300",
+          "#002f07",
+          "#204d25",
+          "#406e43",
+          "#619064",
+          "#83b385",
+          "#a7d8a9",
+          "#cbfecd"
+        ]
+      },
+      "sky-ink": {
+        "role": "neutral",
+        "displayName": "Sky Ink",
+        "canonical": "#17304A",
+        "tonalRamp": [
+          "#000b22",
+          "#0d263f",
+          "#2a445f",
+          "#496481",
+          "#6985a4",
+          "#8ba8c8",
+          "#aeccee",
+          "#d3f2ff"
+        ]
+      },
+      "sky-ink-soft": {
+        "role": "neutral",
+        "displayName": "Soft Sky Ink",
+        "canonical": "rgba(23,48,74,0.82)",
+        "tonalRamp": [
+          "#000b22",
+          "#0d263f",
+          "#2a445f",
+          "#496481",
+          "#6985a4",
+          "#8ba8c8",
+          "#aeccee",
+          "#d3f2ff"
+        ]
+      },
+      "hero-button": {
+        "role": "neutral",
+        "displayName": "Hero Button",
+        "canonical": "#17181A",
+        "tonalRamp": [
+          "#0a0b0d",
+          "#242527",
+          "#414244",
+          "#606164",
+          "#818285",
+          "#a4a5a8",
+          "#c8c9cc",
+          "#edeef1"
+        ]
+      },
+      "hero-button-ink": {
+        "role": "neutral",
+        "displayName": "Hero Button Ink",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "page": {
+        "role": "neutral",
+        "displayName": "Hill Ground",
+        "canonical": "#eef4ee",
+        "tonalRamp": [
+          "#090c09",
+          "#222622",
+          "#3f433f",
+          "#5e635e",
+          "#7f847f",
+          "#a1a7a1",
+          "#c5cbc5",
+          "#eaf0ea"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#17181a",
+        "tonalRamp": [
+          "#0a0b0d",
+          "#242527",
+          "#414244",
+          "#606164",
+          "#818285",
+          "#a4a5a8",
+          "#c8c9cc",
+          "#edeef1"
+        ]
+      },
+      "text-soft": {
+        "role": "neutral",
+        "displayName": "Soft Ink",
+        "canonical": "#4a4c52",
+        "tonalRamp": [
+          "#090b10",
+          "#23252a",
+          "#404248",
+          "#5f6167",
+          "#808289",
+          "#a2a5ac",
+          "#c6c9d0",
+          "#eceef6"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "rgba(20,22,26,0.14)",
+        "tonalRamp": [
+          "#090b0f",
+          "#232529",
+          "#404247",
+          "#5f6166",
+          "#808288",
+          "#a2a5ab",
+          "#c6c9cf",
+          "#ebeef4"
+        ]
+      },
+      "keycap": {
+        "role": "neutral",
+        "displayName": "Keycap",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "keycap-edge": {
+        "role": "neutral",
+        "displayName": "Keycap Edge",
+        "canonical": "rgba(20,22,26,0.22)",
+        "tonalRamp": [
+          "#090b0f",
+          "#232529",
+          "#404247",
+          "#5f6166",
+          "#808288",
+          "#a2a5ab",
+          "#c6c9cf",
+          "#ebeef4"
+        ]
+      },
+      "focus": {
+        "role": "secondary",
+        "displayName": "Focus Orange",
+        "canonical": "#e5521a",
+        "tonalRamp": [
+          "#3d0000",
+          "#650000",
+          "#8c0000",
+          "#b41d00",
+          "#dc4a0b",
+          "#ff703e",
+          "#ff9664",
+          "#ffbc8a"
+        ]
+      },
+      "bolt-amber": {
+        "role": "secondary",
+        "displayName": "Bolt Amber",
+        "canonical": "#FFC020",
+        "tonalRamp": [
+          "#280000",
+          "#490f00",
+          "#6a3100",
+          "#8d5300",
+          "#b17500",
+          "#d69900",
+          "#fdbe1a",
+          "#ffe455"
+        ]
+      },
+      "bolt-light": {
+        "role": "secondary",
+        "displayName": "Bolt Light",
+        "canonical": "#FFE066",
+        "tonalRamp": [
+          "#1e0200",
+          "#3b1e00",
+          "#5a3d00",
+          "#7b5e00",
+          "#9d8000",
+          "#c1a315",
+          "#e6c84b",
+          "#ffed74"
+        ]
+      },
+      "bolt-deep": {
+        "role": "secondary",
+        "displayName": "Bolt Deep",
+        "canonical": "#FF8A00",
+        "tonalRamp": [
+          "#360000",
+          "#5b0000",
+          "#810a00",
+          "#a73800",
+          "#ce5d00",
+          "#f68200",
+          "#ffa73b",
+          "#ffcd67"
+        ]
+      },
+      "bolt-edge": {
+        "role": "secondary",
+        "displayName": "Bolt Edge",
+        "canonical": "#C86A00",
+        "tonalRamp": [
+          "#300000",
+          "#540000",
+          "#781f00",
+          "#9d4300",
+          "#c36600",
+          "#ea8937",
+          "#ffae5f",
+          "#ffd385"
+        ]
+      },
+      "ridge-ink": {
+        "role": "neutral",
+        "displayName": "Ridge White",
+        "canonical": "#f4f6f2",
+        "tonalRamp": [
+          "#0a0c09",
+          "#242623",
+          "#41433f",
+          "#60625e",
+          "#81837f",
+          "#a4a6a2",
+          "#c8cac6",
+          "#edefeb"
+        ]
+      },
+      "sky-top-dark": {
+        "role": "primary",
+        "displayName": "Daytime Sky Blue (dark theme)",
+        "canonical": "#1c2938",
+        "tonalRamp": [
+          "#030c19",
+          "#192635",
+          "#354353",
+          "#546374",
+          "#748496",
+          "#97a7ba",
+          "#bacbdf",
+          "#dff0ff"
+        ]
+      },
+      "sky-bottom-dark": {
+        "role": "primary",
+        "displayName": "Haze Blue (dark theme)",
+        "canonical": "#283b42",
+        "tonalRamp": [
+          "#000e13",
+          "#16282f",
+          "#32454d",
+          "#51656d",
+          "#71868e",
+          "#93a9b2",
+          "#b7ced6",
+          "#dcf3fc"
+        ]
+      },
+      "hill-far-dark": {
+        "role": "primary",
+        "displayName": "Meadow (dark theme)",
+        "canonical": "#2b382c",
+        "tonalRamp": [
+          "#040e05",
+          "#1c291d",
+          "#39463a",
+          "#576658",
+          "#788779",
+          "#9aaa9b",
+          "#becebf",
+          "#e3f4e4"
+        ]
+      },
+      "hill-mid-dark": {
+        "role": "primary",
+        "displayName": "Pasture (dark theme)",
+        "canonical": "#1f291f",
+        "tonalRamp": [
+          "#060e06",
+          "#1e281e",
+          "#3b453b",
+          "#596559",
+          "#7a867a",
+          "#9da99c",
+          "#c0cdc0",
+          "#e5f3e5"
+        ]
+      },
+      "hill-near-dark": {
+        "role": "primary",
+        "displayName": "Shaded Ridge (dark theme)",
+        "canonical": "#131913",
+        "tonalRamp": [
+          "#070d07",
+          "#212721",
+          "#3d443d",
+          "#5c645c",
+          "#7d857d",
+          "#a0a89f",
+          "#c3ccc3",
+          "#e9f1e8"
+        ]
+      },
+      "sky-ink-dark": {
+        "role": "neutral",
+        "displayName": "Sky Ink (dark theme)",
+        "canonical": "#ECECEE",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#252526",
+          "#424243",
+          "#616163",
+          "#828284",
+          "#a5a5a7",
+          "#c9c9cb",
+          "#eeeef0"
+        ]
+      },
+      "hero-button-dark": {
+        "role": "neutral",
+        "displayName": "Hero Button (dark theme)",
+        "canonical": "#F2F2F0",
+        "tonalRamp": [
+          "#0b0b0a",
+          "#252524",
+          "#424240",
+          "#616160",
+          "#828281",
+          "#a5a5a3",
+          "#c9c9c7",
+          "#eeeeec"
+        ]
+      },
+      "hero-button-ink-dark": {
+        "role": "neutral",
+        "displayName": "Hero Button Ink (dark theme)",
+        "canonical": "#121214",
+        "tonalRamp": [
+          "#0b0b0d",
+          "#252527",
+          "#424244",
+          "#616163",
+          "#828285",
+          "#a5a5a7",
+          "#c9c9cc",
+          "#eeeef1"
+        ]
+      },
+      "page-dark": {
+        "role": "neutral",
+        "displayName": "Hill Ground (dark theme)",
+        "canonical": "#121512",
+        "tonalRamp": [
+          "#090c09",
+          "#232623",
+          "#404340",
+          "#5f625f",
+          "#808480",
+          "#a2a6a2",
+          "#c6cac6",
+          "#ebf0eb"
+        ]
+      },
+      "text-dark": {
+        "role": "neutral",
+        "displayName": "Ink (dark theme)",
+        "canonical": "#ECECEE",
+        "tonalRamp": [
+          "#0b0b0c",
+          "#252526",
+          "#424243",
+          "#616163",
+          "#828284",
+          "#a5a5a7",
+          "#c9c9cb",
+          "#eeeef0"
+        ]
+      },
+      "text-soft-dark": {
+        "role": "neutral",
+        "displayName": "Soft Ink (dark theme)",
+        "canonical": "#a8a8b0",
+        "tonalRamp": [
+          "#0b0a10",
+          "#24242a",
+          "#414148",
+          "#606068",
+          "#818189",
+          "#a4a4ac",
+          "#c8c8d0",
+          "#ededf6"
+        ]
+      },
+      "rule-dark": {
+        "role": "neutral",
+        "displayName": "Hairline (dark theme)",
+        "canonical": "rgba(255,255,255,0.13)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "keycap-dark": {
+        "role": "neutral",
+        "displayName": "Keycap (dark theme)",
+        "canonical": "rgba(255,255,255,0.07)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "keycap-edge-dark": {
+        "role": "neutral",
+        "displayName": "Keycap Edge (dark theme)",
+        "canonical": "rgba(255,255,255,0.24)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#252525",
+          "#424242",
+          "#616161",
+          "#828282",
+          "#a5a5a5",
+          "#c9c9c9",
+          "#eeeeee"
+        ]
+      },
+      "focus-dark": {
+        "role": "secondary",
+        "displayName": "Focus Orange (dark theme)",
+        "canonical": "#ff6b2c",
+        "tonalRamp": [
+          "#3d0000",
+          "#650000",
+          "#8c0000",
+          "#b41e00",
+          "#dc4a00",
+          "#ff7133",
+          "#ff975c",
+          "#ffbd82"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The hero headline only."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "One per section, including the closing band and the legal page title."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Names of key items; legal section headings at 1.3rem."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All running text; legal text at 1.05rem with line height 1.75."
+      },
+      "lede": {
+        "displayName": "Lede",
+        "purpose": "The hero paragraph beside the headline, 30rem measure."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Segmented switch options."
+      },
+      "wordmark": {
+        "displayName": "Wordmark",
+        "purpose": "Lowercase jolta beside the bolt in the top bar."
+      }
+    },
+    "shadows": [
+      {
+        "name": "button-lift",
+        "value": "0 8px 22px -10px rgba(0,0,0,.55)",
+        "purpose": "The Download button."
+      },
+      {
+        "name": "window-float",
+        "value": "0 0 0 .5px var(--jw-edge), 0 24px 60px -12px rgba(10,10,20,.4), 0 6px 16px -6px rgba(10,10,20,.22)",
+        "purpose": "The app miniature only."
+      },
+      {
+        "name": "pressed-option",
+        "value": "0 1px 2px rgba(0,0,0,.18)",
+        "purpose": "Selected option of the hour switch on the sky."
+      },
+      {
+        "name": "bolt-glow",
+        "value": "drop-shadow(0 0 40px rgba(255,200,60,.6))",
+        "purpose": "Filter on the large inbox-zero bolt."
+      },
+      {
+        "name": "evening-glow",
+        "value": "radial-gradient(closest-side, rgba(255,196,80,.28), transparent 75%)",
+        "purpose": "Behind the app window at dusk and night."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-house",
+        "value": "cubic-bezier(.16,1,.3,1)",
+        "purpose": "Every transition on the site."
+      },
+      {
+        "name": "sky-repaint",
+        "value": ".9s",
+        "purpose": "Sky, hills, ground and stars when the hour or theme changes."
+      },
+      {
+        "name": "button-lift",
+        "value": ".25s",
+        "purpose": "Download button rising 1px on hover."
+      },
+      {
+        "name": "parallax-far",
+        "value": "0.08",
+        "purpose": "Far hill plane, fraction of scroll distance, capped at 1.5 viewport heights."
+      },
+      {
+        "name": "parallax-mid",
+        "value": "0.16",
+        "purpose": "Mid hill plane."
+      },
+      {
+        "name": "parallax-near",
+        "value": "0.3",
+        "purpose": "Near hill plane."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "none",
+        "purpose": "prefers-reduced-motion removes parallax and all transitions."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone-narrow",
+        "value": "520px"
+      },
+      {
+        "name": "phone",
+        "value": "640px"
+      },
+      {
+        "name": "tablet",
+        "value": "900px"
+      },
+      {
+        "name": "desktop-narrow",
+        "value": "1200px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Download Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one button style: a pill that takes the sky's button colours. Used for Download for Mac in the hero and the closing band.",
+      "html": "<a class=\"ds-btn\" href=\"#\"><svg viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-hidden=\"true\"><path d=\"M8 2v8m0 0-3.5-3.5M8 10l3.5-3.5M3 13.5h10\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>Download for Mac</a>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; gap: .55rem; padding: .85rem 1.4rem; border-radius: 999px; background: var(--hero-btn, #17181A); color: var(--hero-btn-ink, #fff); font: 600 1.0625rem/1.6 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); text-decoration: none; box-shadow: 0 8px 22px -10px rgba(0,0,0,.55); transition: transform .25s cubic-bezier(.16,1,.3,1), filter .15s; } .ds-btn:hover { transform: translateY(-1px); filter: brightness(1.08); } .ds-btn:focus-visible { outline: 2px solid var(--focus, #e5521a); outline-offset: 4px; border-radius: 999px; } .ds-btn svg { flex: none; }"
+    },
+    {
+      "name": "Hour Switch",
+      "kind": "chip",
+      "refersTo": "segmented-option-active",
+      "description": "Segmented pill on the sky that picks dawn, day, dusk or night; the selected option inverts Sky Ink and the sky's top colour.",
+      "html": "<div class=\"ds-seg\" role=\"group\" aria-label=\"Time of day\"><button type=\"button\">Dawn</button><button type=\"button\" aria-pressed=\"true\">Day</button><button type=\"button\">Dusk</button><button type=\"button\">Night</button></div>",
+      "css": ".ds-seg { display: inline-flex; padding: 3px; border-radius: 999px; color: var(--sky-ink, #17304A); background: color-mix(in srgb, currentColor 13%, var(--top, #5FA8E8)); } .ds-seg button { all: unset; cursor: pointer; padding: .3rem .72rem; border-radius: 999px; font: 500 .82rem/1.2 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); color: inherit; } .ds-seg button:hover { background: color-mix(in srgb, currentColor 12%, transparent); } .ds-seg button[aria-pressed=\"true\"] { background: var(--sky-ink, #17304A); color: var(--top, #5FA8E8); box-shadow: 0 1px 2px rgba(0,0,0,.18); } .ds-seg button:focus-visible { outline: 2px solid var(--focus, #e5521a); outline-offset: 4px; }"
+    },
+    {
+      "name": "Theme Switch",
+      "kind": "chip",
+      "refersTo": "footer-switch-option-active",
+      "description": "Footer switch on every page: System, Light or Dark, kept in localStorage.",
+      "html": "<div class=\"ds-theme\" role=\"group\" aria-label=\"Appearance\"><button type=\"button\" aria-pressed=\"true\">System</button><button type=\"button\">Light</button><button type=\"button\">Dark</button></div>",
+      "css": ".ds-theme { display: inline-flex; padding: 3px; border-radius: 999px; color: var(--text, #17181a); background: color-mix(in srgb, currentColor 13%, transparent); } .ds-theme button { all: unset; cursor: pointer; padding: .3rem .72rem; border-radius: 999px; font: 500 .82rem/1.2 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); color: inherit; } .ds-theme button:hover { background: color-mix(in srgb, currentColor 12%, transparent); } .ds-theme button[aria-pressed=\"true\"] { background: var(--text, #17181a); color: var(--page, #eef4ee); } .ds-theme button:focus-visible { outline: 2px solid var(--focus, #e5521a); outline-offset: 4px; }"
+    },
+    {
+      "name": "Key Item",
+      "kind": "custom",
+      "refersTo": "keycap",
+      "description": "One shortcut on the ground: keycaps on the left, a title and one plain line on the right, under a hairline.",
+      "html": "<div class=\"ds-key\"><span class=\"ds-caps\"><kbd>⌘</kbd><kbd>K</kbd></span><div><h3>Everything else</h3><p>One palette for every command, from \"go to sent\" to snooze, send later and snippets.</p></div></div>",
+      "css": ".ds-key { display: grid; grid-template-columns: 7.5rem minmax(0,1fr); gap: 1.5rem; padding: 1.3rem 0; border-top: 1px solid var(--rule, rgba(20,22,26,.14)); align-items: baseline; color: var(--text, #17181a); font: 400 1.0625rem/1.6 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); } .ds-caps { display: flex; gap: .3rem; } .ds-key kbd { display: inline-grid; place-items: center; min-width: 2.2rem; height: 2.2rem; padding: 0 .5rem; border-radius: 8px; background: var(--kbd, #fff); border: 1px solid var(--kbd-edge, rgba(20,22,26,.22)); border-bottom-width: 3px; font: 600 1rem var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); color: var(--text, #17181a); } .ds-key h3 { margin: 0 0 .25rem; font: 600 1.1rem/1.3 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); } .ds-key p { margin: 0; color: var(--text-soft, #4a4c52); font-size: .98rem; }"
+    },
+    {
+      "name": "Measured Facts",
+      "kind": "card",
+      "refersTo": "",
+      "description": "Hairline list of measured numbers; the number is bold Ink with tabular figures, and a note says how it was measured.",
+      "html": "<ul class=\"ds-facts\"><li><b>0.3 seconds</b> from launch to the first rows of your inbox.</li><li><b>1 millisecond</b> to search a real mailbox of 84,000 messages.</li><li class=\"ds-note\">Measured on a Mac mini with a release build.</li></ul>",
+      "css": ".ds-facts { margin: 0; padding: 0; list-style: none; font: 400 1.05rem/1.6 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); color: var(--text-soft, #4a4c52); } .ds-facts li { padding: .9rem 0; border-top: 1px solid var(--rule, rgba(20,22,26,.14)); } .ds-facts b { color: var(--text, #17181a); font-weight: 600; font-variant-numeric: tabular-nums; } .ds-facts .ds-note { padding-top: .6rem; font-size: .85rem; }"
+    },
+    {
+      "name": "Top Bar",
+      "kind": "nav",
+      "refersTo": "",
+      "description": "Bolt and lowercase wordmark, three text links and the hour switch, in Sky Ink on the sky.",
+      "html": "<nav class=\"ds-bar\"><a class=\"ds-mark\" href=\"#\"><svg viewBox=\"0 0 40 64\" width=\"14\" height=\"22\" aria-hidden=\"true\"><path d=\"M25 1 5 37h14l-6 26 23-38H22l8-24z\" fill=\"#FFC020\" stroke=\"#C86A00\" stroke-width=\"2\" stroke-linejoin=\"round\"/></svg>jolta</a><span class=\"ds-links\"><a href=\"#\">Keyboard</a><a href=\"#\">Privacy</a><a href=\"#\">Source code</a></span></nav>",
+      "css": ".ds-bar { display: flex; align-items: center; gap: 2rem; padding: 1.25rem 1rem; background: var(--top, #5FA8E8); color: var(--sky-ink, #17304A); font: 400 .95rem/1.6 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); } .ds-bar a { color: inherit; text-decoration: none; } .ds-mark { display: inline-flex; align-items: center; gap: .5rem; font: 700 1.5rem/1 var(--sans, \"Hanken Grotesk\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif); letter-spacing: -.035em; } .ds-links { display: flex; gap: 1.6rem; margin-left: auto; } .ds-links a { opacity: .88; text-underline-offset: .22em; } .ds-links a:hover { opacity: 1; text-decoration: underline; } .ds-bar a:focus-visible { outline: 2px solid var(--focus, #e5521a); outline-offset: 4px; border-radius: 6px; }"
+    },
+    {
+      "name": "Sky Band",
+      "kind": "custom",
+      "refersTo": "",
+      "description": "Signature: a vertical sky gradient with scattered stars and three SVG hill planes; the near ridge fades into the ground.",
+      "html": "<div class=\"ds-sky\"><h2>Get to inbox zero today.</h2><svg class=\"ds-far\" viewBox=\"0 0 1440 400\" preserveAspectRatio=\"none\"><path d=\"M0 170C150 110 300 70 470 95S760 190 930 150 1250 50 1440 100V400H0z\"/></svg><svg class=\"ds-mid\" viewBox=\"0 0 1440 300\" preserveAspectRatio=\"none\"><path d=\"M0 150C220 80 420 60 640 100S1030 170 1220 120 1380 90 1440 95V300H0z\"/></svg><svg class=\"ds-near\" viewBox=\"0 0 1440 160\" preserveAspectRatio=\"none\"><path d=\"M0 70C300 40 520 92 760 96S1180 60 1440 44V160H0z\"/></svg></div><div class=\"ds-ground\"></div>",
+      "css": ".ds-sky { position: relative; height: 260px; overflow: hidden; background: linear-gradient(var(--top, #5FA8E8), var(--bottom, #CFE8F7) 78%); color: var(--sky-ink, #17304A); } .ds-sky h2 { position: relative; z-index: 3; margin: 0; padding: 2rem 1rem; font: 400 2.4rem/1 var(--serif, \"Gloock\", \"New York\", Georgia, serif); letter-spacing: -.015em; } .ds-sky svg { position: absolute; left: -2%; width: 104%; bottom: 0; } .ds-far { height: 52%; } .ds-far path { fill: var(--far, #8DBF8A); } .ds-mid { height: 36%; } .ds-mid path { fill: var(--mid, #76AD77); } .ds-near { height: 22%; bottom: -1px; } .ds-near path { fill: var(--near, #4a784d); } .ds-ground { height: 6rem; background: linear-gradient(var(--near, #4a784d), var(--page, #eef4ee)); }"
+    },
+    {
+      "name": "App Window Miniature",
+      "kind": "custom",
+      "refersTo": "app-window-miniature",
+      "description": "Mirrors the Graphite app, not the site palette: system font, Graphite Light tokens, and the focused row's orange cursor triangle with its own keys.",
+      "html": "<div class=\"ds-jw\"><div class=\"ds-jw-head\"><b>Inbox</b><span>4 unread</span></div><div class=\"ds-jw-row ds-jw-cur\"><span class=\"ds-jw-dot\"></span><b>Ines Marchetti</b><span class=\"ds-jw-line\"><b>Harbour lighting: revised quote</b> Attached the v3 numbers.</span><span class=\"ds-jw-keys\"><kbd>E</kbd><kbd>H</kbd><kbd>R</kbd></span></div><div class=\"ds-jw-row\"><span class=\"ds-jw-dot\"></span><b>Relay CI</b><span class=\"ds-jw-line\"><b>main failed: build #4821</b> test timed out</span><span class=\"ds-jw-time\">08:57</span></div></div>",
+      "css": ".ds-jw { --w: #fbfbfa; --f: #eeeeeb; --i: #17171a; --i2: #55555d; --i3: #66666e; --a: #e5521a; --at: #b23a0a; padding: 0 8px 8px; border-radius: 12px; background: var(--w); color: var(--i); font: 13px/1.3 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", sans-serif; box-shadow: 0 0 0 .5px rgba(0,0,0,.22), 0 24px 60px -12px rgba(10,10,20,.4), 0 6px 16px -6px rgba(10,10,20,.22); } .ds-jw-head { display: flex; gap: 10px; align-items: center; height: 44px; padding: 0 10px; font-size: 15px; } .ds-jw-head span { font-size: 12.5px; color: var(--i3); } .ds-jw-row { position: relative; display: grid; grid-template-columns: 8px 8.5rem minmax(0,1fr) auto; gap: 8px; align-items: center; height: 38px; padding: 0 10px 0 8px; border-radius: 7px; white-space: nowrap; } .ds-jw-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--i2); } .ds-jw-line { overflow: hidden; text-overflow: ellipsis; color: var(--i3); } .ds-jw-line b { color: var(--i); } .ds-jw-time { font-size: 12px; color: var(--i3); } .ds-jw-cur { background: var(--f); } .ds-jw-cur::before { content: \"\"; position: absolute; left: -7px; top: 50%; translate: 0 -50%; border: 5px solid transparent; border-left: 6px solid var(--a); } .ds-jw-keys { display: flex; gap: 3px; color: var(--at); } .ds-jw-keys kbd { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 3px; border: 1px solid currentColor; border-radius: 4px; font: 600 10px/1 inherit; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Sky by the Hour",
+    "overview": "The page is the sky that the Mac app shows at inbox zero. The same hues come from `apple/Jolta/Scenery.swift`, and the visitor's clock picks the phase: dawn (05:00 to 07:59), day (08:00 to 16:59), dusk (17:00 to 19:59) or night. The theme picks Graphite Light or Graphite Dark mixes of those hues. Three painted hill planes sit at the foot of the sky and move at different speeds as the page scrolls, like layers of a cel animation. The live miniature of the app window stands on the hills, and the near ridge passes in front of its lower edge.\n\nBelow the ridge, the hill dissolves into a flat ground, and the reading sections (keys, privacy, facts) sit on that ground with hairline rules and no cards. The page ends back in the sky: the closing band is one tone of the current sky with its own two ridges, then the footer sits on the ground again. Type is a quiet sans for reading and one heavy serif for the few headlines. Colour is carried by the sky and hills; the interface itself stays close to black and white, with one amber bolt and one orange focus ring.\n\nThe world rejects the category default for mail apps: a dark gradient hero with a glowing product screenshot.",
+    "keyCharacteristics": [
+      "The sky and hill colours are computed at runtime from the hour and theme, never fixed per section.",
+      "Depth comes from stacked hill planes, not from shadows or cards.",
+      "Gloock appears only at headline size; everything else is Hanken Grotesk.",
+      "One amber bolt for the mark and the inbox-zero moment; orange marks keyboard focus.",
+      "Light and dark themes follow the system, with a System, Light and Dark switch in the footer.",
+      "Everything is served from jolta.app itself: no inline scripts, no inline style attributes, no third-party requests."
+    ],
+    "rules": [
+      {
+        "name": "The Clock Sets the Sky Rule",
+        "body": "Sky, hill, ink and button colours come from `site.js`, which reads the Scenery hues, the visitor's hour and the theme. Never hand-pick a sky colour for a section; derive it from the current phase. The stylesheet values are only the first-paint defaults for a daytime sky.",
+        "section": "colors"
+      },
+      {
+        "name": "The Plane Step Rule",
+        "body": "In light theme the planes are the phase's far hill, the mix of far and near at 50%, and the near hill; by day the near hill is darkened 22% toward black so white key hints stay readable. In dark theme the far plane is the sky bottom mixed 32% toward the hill hue, the near plane is `#0C0C0E` mixed toward the hill hue at 45% of the phase's hill amount, and the mid plane is halfway between them, so each step is visible in the dark.",
+        "section": "colors"
+      },
+      {
+        "name": "The Ground Rule",
+        "body": "The ground below the ridge is the phase's near hill mixed 90% toward white in light theme, or 30% toward `#0C0C0E` in dark theme. The ridge fades into it over 6rem, so the sky and the reading sections are one landscape.",
+        "section": "colors"
+      },
+      {
+        "name": "The Earned Contrast Rule",
+        "body": "The closing band's colour is the lightest mix of the sky's top toward its bottom (starting at 65% and stepping back 5% at a time) on which white or `#17181A` reaches at least 4.8:1. Its text and button take whichever of the two wins. Its two ridges each stand at least 1.3:1 from what is behind them, and a glow halfway to the sky bottom sits below the text.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Bolt Rule",
+        "body": "Amber belongs to the bolt: the wordmark, the inbox-zero strike and text selection. It is never a button, link or text colour.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two Voices Rule",
+        "body": "Gloock is for the hero headline and section headlines, at 2.4rem or larger, weight 400. Every label, button, title, number and paragraph is Hanken Grotesk.",
+        "section": "typography"
+      },
+      {
+        "name": "The App Speaks in SF Rule",
+        "body": "The app miniature uses the system font stack (-apple-system, SF Pro Text) at the app's own pixel sizes (11 to 15px, 13px rows), never the site's fonts, because it shows the real app.",
+        "section": "typography"
+      },
+      {
+        "name": "The Painted Planes Rule",
+        "body": "Depth is made by stacking landscape planes that move at different speeds, not by lifting panels with shadows. A new section that needs separation gets a hairline or a change of ground, not a card.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do take every sky, hill, ink and button colour from the phase and theme through `site.js`, using the Scenery.swift hues.",
+      "Do end each sky in a ridge that fades into the ground (6rem in the hero, 3rem in the closing band).",
+      "Do check contrast when a colour sits on the sky: 4.8:1 for text in the closing band, 1.3:1 between neighbouring ridges.",
+      "Do mark keyboard focus with the 2px Focus Orange ring (focus, focus-dark), offset 4px.",
+      "Do keep the app miniature in Graphite tokens and the system font, so it matches screenshots of the real app.",
+      "Do self-host every font and script on jolta.app; set any runtime style through the style object (`element.style`), because the Content-Security-Policy blocks inline style attributes and inline scripts.",
+      "Do let `prefers-reduced-motion` stop the parallax and transitions."
+    ],
+    "donts": [
+      "Don't build a dark gradient hero with a glowing product screenshot.",
+      "Don't set stars in rows or a grid; scatter them with the seeded random placement and a minimum gap.",
+      "Don't use amber for buttons, links or text; it belongs to the bolt.",
+      "Don't put Gloock below headline size or Hanken Grotesk in the app miniature.",
+      "Don't wrap reading sections in cards or shadows; use hairlines and the ground.",
+      "Don't load fonts, scripts, images or analytics from another domain."
+    ]
+  }
+}
