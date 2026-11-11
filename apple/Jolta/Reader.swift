@@ -135,6 +135,7 @@ final class ReaderPage {
         navigator.track(navigation, event: { log += "event \($0)\n" }) { [weak self] error in
             if let error { log += "load error \(error)\n" }
             done?()
+            #if DEBUG
             guard debug, let self else { return }
             let events = log
             Task {
@@ -144,6 +145,7 @@ final class ReaderPage {
                 try? log.write(toFile: AppModel.dataDirectory + "/readerdebug.txt", atomically: true, encoding: .utf8)
                 try? html.write(toFile: AppModel.dataDirectory + "/readerdebug.html", atomically: true, encoding: .utf8)
             }
+            #endif
         }
     }
 
