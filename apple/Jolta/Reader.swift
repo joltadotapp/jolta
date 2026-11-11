@@ -65,26 +65,29 @@ final class ReaderPage {
         // shrinks gets `jolta-fit`, whose `height: auto` beats the height
         // Outlook writes into the image's style, and a click outside a link
         // toggles it to its own size. A fixed-width layout zooms down to the
-        // reader's width; below half size it scrolls sideways instead.
+        // reader's width, except while one of its images shows at its own
+        // size; below half size it scrolls sideways instead.
         let script = """
+        const zoom = (body) => {
+          body.style.zoom = "";
+          if (!body.classList.contains("jolta-wide") || body.querySelector("img.jolta-full")) return;
+          const scale = body.clientWidth / body.scrollWidth;
+          if (scale < 1 && scale >= 0.5) body.style.zoom = scale;
+        };
         const fit = (body) => {
           if (!body || !body.clientWidth) return;
           body.style.zoom = "";
           const full = [...body.querySelectorAll("img.jolta-full")];
           for (const img of full) img.classList.remove("jolta-full");
-          if (body.classList.contains("jolta-wide") && body.scrollWidth > body.clientWidth + 1) {
-            const scale = body.clientWidth / body.scrollWidth;
-            if (scale >= 0.5) body.style.zoom = scale;
-          }
           for (const img of body.querySelectorAll("img")) {
-            img.classList.remove("jolta-fit");
-            if (body.style.zoom) continue;
             const fitted = img.getBoundingClientRect().width;
             img.classList.add("jolta-natural");
             const natural = img.getBoundingClientRect().width;
             img.classList.remove("jolta-natural");
-            if (natural > fitted + 1) img.classList.add("jolta-fit", ...(full.includes(img) ? ["jolta-full"] : []));
+            img.classList.toggle("jolta-fit", natural > fitted + 1);
+            if (natural > fitted + 1 && full.includes(img)) img.classList.add("jolta-full");
           }
+          zoom(body);
         };
         const fitAll = () => document.querySelectorAll(".jolta-body").forEach(fit);
         document.addEventListener("DOMContentLoaded", fitAll);
@@ -98,6 +101,7 @@ final class ReaderPage {
           const was = img.getBoundingClientRect();
           const x = (e.clientX - was.left) / was.width, y = (e.clientY - was.top) / was.height;
           img.classList.toggle("jolta-full");
+          zoom(body);
           const now = img.getBoundingClientRect();
           body.scrollLeft += now.left + x * now.width - e.clientX;
           scrollBy(0, now.top + y * now.height - e.clientY);
