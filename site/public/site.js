@@ -61,6 +61,9 @@
     return toward;
   }
   function isDark() { return window.joltaTheme ? window.joltaTheme.isDark() : matchMedia("(prefers-color-scheme: dark)").matches; }
+  var still = matchMedia("(prefers-reduced-motion: reduce)");
+  var EASE = "cubic-bezier(.16,1,.3,1)";
+  function typing() { var a = document.activeElement; return !!a && a !== document.body && a.matches("input, textarea, select, [contenteditable]"); }
 
   // Stars scattered at random, kept apart so they never clump or line up.
   // A fixed seed keeps the same sky on every visit.
@@ -108,7 +111,7 @@
   }
 
   function mountWindow(root, opts) {
-    var rows = MAIL.slice(), cur = 0, query = "", undo = [], snoozed = [], toastTimer = 0, onScreen = false;
+    var rows = MAIL.slice(), cur = 0, query = "", undo = [], snoozed = [], toastTimer = 0, onScreen = false, glide = false;
     // Snoozing in the demo wakes the message tomorrow at 09:00, shown the way
     // the app's "Next to wake" list does: a short weekday and the time.
     var wakeAt = new Date(); wakeAt.setDate(wakeAt.getDate() + 1); wakeAt.setHours(9, 0, 0, 0);
@@ -127,7 +130,10 @@
       '<div class="jw-sync">All accounts synced</div></aside>' +
       '<section class="jw-main"><div class="jw-head"><h3>Inbox</h3><span class="jw-count"></span><label class="jw-search"><input type="text" placeholder="Search" aria-label="Search the demo mail" tabindex="-1"><kbd>/</kbd></label></div>' +
       '<ul class="jw-list" aria-label="Messages"><li class="jw-zero" aria-hidden="true"></li></ul></section>' +
-      '<div class="jw-foot" aria-hidden="true"><span><kbd>J</kbd><kbd>K</kbd> move</span><span><kbd>E</kbd> archive</span><span class="jw-opt"><kbd>H</kbd> snooze</span><span class="jw-opt"><kbd>Z</kbd> undo</span><span class="jw-cmd"><kbd>⌘K</kbd> commands</span></div>' +
+      // The key hints are buttons too, so the demo also works by touch.
+      '<div class="jw-foot"><span><button type="button" tabindex="-1" data-do="down" aria-label="Next message"><kbd>J</kbd></button><button type="button" tabindex="-1" data-do="up" aria-label="Previous message"><kbd>K</kbd></button> move</span>' +
+      '<button type="button" tabindex="-1" data-do="archive"><kbd>E</kbd> archive</button><button type="button" tabindex="-1" class="jw-opt" data-do="snooze"><kbd>H</kbd> snooze</button><button type="button" tabindex="-1" class="jw-opt" data-do="undo"><kbd>Z</kbd> undo</button>' +
+      '<span class="jw-cmd" aria-hidden="true"><kbd>⌘K</kbd> commands</span></div>' +
       '<div class="jw-toast" role="status" aria-live="polite"></div>';
     var list = root.querySelector(".jw-list"), zero = root.querySelector(".jw-zero");
     var input = root.querySelector("input"), toast = root.querySelector(".jw-toast");
@@ -146,22 +152,42 @@
     function render() {
       var vis = visible();
       if (cur >= vis.length) cur = Math.max(0, vis.length - 1);
-      Array.prototype.slice.call(list.querySelectorAll(".jw-row, .jw-day")).forEach(function (n) { n.remove(); });
+      // After an action the list glides to its new order: the message that
+      // left sweeps out, and the rows below it close the gap.
+      var moving = glide && !still.matches, was = new Map(), top = list.getBoundingClientRect().top;
+      glide = false;
+      Array.prototype.slice.call(list.querySelectorAll(".jw-row, .jw-day")).forEach(function (n) {
+        if (moving && n.mail && !n.classList.contains("jw-gone")) {
+          was.set(n.mail, n.getBoundingClientRect().top);
+          if (rows.indexOf(n.mail) < 0 && n.mail !== "day") {
+            n.className = "jw-row jw-gone"; n.style.top = was.get(n.mail) - top + "px";
+            n.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateX(28px)" }], { duration: 170, easing: "ease-out" }).onfinish = function () { n.remove(); };
+            return;
+          }
+        }
+        n.remove();
+      });
       var dayShown = false;
       vis.forEach(function (m, i) {
         if (m.day && !dayShown) {
           dayShown = true;
-          var d = document.createElement("li"); d.className = "jw-day"; d.textContent = m.day; d.setAttribute("aria-hidden", "true");
+          var d = document.createElement("li"); d.className = "jw-day"; d.textContent = m.day; d.setAttribute("aria-hidden", "true"); d.mail = "day";
           list.insertBefore(d, zero);
         }
         var li = document.createElement("li");
+        li.mail = m;
         li.className = "jw-row" + (m.unread ? " jw-unread" : "") + (i === cur ? " jw-cur" : "");
         if (i === cur) li.setAttribute("aria-current", "true");
         li.innerHTML = '<span class="jw-dot"></span><span class="jw-from">' + esc(m.from) + (m.n ? ' <span class="jw-num">' + m.n + "</span>" : "") +
           '</span><span class="jw-line"><span class="jw-subj">' + esc(m.subj) + "</span>&ensp;" + esc(m.line) + '</span><span class="jw-meta">' +
-          (m.tag ? '<span class="jw-tag">' + esc(m.tag) + "</span>" : "") + '<span class="jw-time">' + m.time + '</span><span class="jw-keys"><kbd>E</kbd><kbd>H</kbd><kbd>R</kbd></span></span>';
+          (m.tag ? '<span class="jw-tag">' + esc(m.tag) + "</span>" : "") + '<span class="jw-time">' + m.time + '</span><span class="jw-keys"><kbd data-do="archive">E</kbd><kbd data-do="snooze">H</kbd><kbd>R</kbd></span></span>';
         li.addEventListener("click", function () { cur = i; render(); root.focus({ preventScroll: true }); });
         list.insertBefore(li, zero);
+      });
+      if (moving) Array.prototype.forEach.call(list.querySelectorAll(".jw-row:not(.jw-gone), .jw-day"), function (n) {
+        var from = was.get(n.mail), to = n.getBoundingClientRect().top;
+        if (from === undefined) n.animate([{ opacity: 0, transform: "translateX(-12px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: EASE });
+        else if (Math.abs(from - to) > 0.5) n.animate([{ transform: "translateY(" + (from - to) + "px)" }, { transform: "none" }], { duration: 240, easing: EASE });
       });
       var unread = rows.filter(function (m) { return m.unread; }).length;
       root.querySelector(".jw-count").textContent = query ? vis.length + " found" : unread ? unread + " unread" : "";
@@ -190,17 +216,26 @@
         var last = undo.pop(); if (!last) return;
         if (last.type === "snooze") snoozed.splice(snoozed.indexOf(last.m), 1);
         rows.splice(last.at, 0, last.m); query = ""; input.value = "";
-        cur = rows.indexOf(last.m); render(); say("Moved back to Inbox");
+        cur = rows.indexOf(last.m); glide = true; render(); say("Moved back to Inbox");
         opts.onAction && opts.onAction("undo"); return;
       }
       var m = visible()[cur]; if (!m) return;
       var at = rows.indexOf(m);
       rows.splice(at, 1); undo.push({ m: m, at: at, type: type });
       if (type === "snooze") snoozed.unshift(m);
-      render();
+      glide = true; render();
       say(type === "archive" ? "Archived on " + m.acct + " &middot; <kbd>Z</kbd> undo" : "Snoozed until " + wakeLabel + " &middot; <kbd>Z</kbd> undo");
       opts.onAction && opts.onAction(type);
       if (rows.length === 0 && opts.onZero) opts.onZero();
+    }
+    // One step of the demo, from a key or from a tap on a key hint. The hint
+    // for that key lights up for a moment.
+    function run(name) {
+      var hint = root.querySelector('.jw-foot [data-do="' + name + '"] kbd');
+      if (hint) { hint.classList.add("jw-hit"); setTimeout(function () { hint.classList.remove("jw-hit"); }, 110); }
+      if (name === "down") { cur = Math.min(visible().length - 1, cur + 1); render(); }
+      else if (name === "up") { cur = Math.max(0, cur - 1); render(); }
+      else act(name);
     }
     function onKey(e) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -208,12 +243,12 @@
         if (e.key === "Escape" || e.key === "Enter") { input.blur(); root.focus({ preventScroll: true }); e.preventDefault(); }
         return;
       }
-      var k = e.key.toLowerCase(), n = visible().length;
-      if (k === "j" || e.key === "ArrowDown") { cur = Math.min(n - 1, cur + 1); render(); }
-      else if (k === "k" || e.key === "ArrowUp") { cur = Math.max(0, cur - 1); render(); }
-      else if (k === "e") act("archive");
-      else if (k === "h") act("snooze");
-      else if (k === "z") act("undo");
+      var k = e.key.toLowerCase();
+      if (k === "j" || e.key === "ArrowDown") run("down");
+      else if (k === "k" || e.key === "ArrowUp") run("up");
+      else if (k === "e") run("archive");
+      else if (k === "h") run("snooze");
+      else if (k === "z") run("undo");
       else if (k === "/") { input.tabIndex = 0; input.focus(); }
       else if (e.key === "Escape" && query) { query = ""; input.value = ""; render(); }
       else return;
@@ -221,16 +256,85 @@
     }
     input.addEventListener("input", function () { query = input.value; cur = 0; render(); });
     root.addEventListener("keydown", onKey);
+    root.addEventListener("click", function (e) {
+      var b = e.target.closest && e.target.closest("[data-do]");
+      if (b) { run(b.dataset.do); root.focus({ preventScroll: true }); }
+    });
     // The keys also work while the window is on screen and nothing else has
     // focus, so a visitor can press J, K and E without clicking first.
     new IntersectionObserver(function (es) { onScreen = es[0].intersectionRatio > 0.5; }, { threshold: [0, 0.5, 1] }).observe(root);
     document.addEventListener("keydown", function (e) {
-      var a = document.activeElement;
-      if (!onScreen || root.contains(a) || (a && a !== document.body && a.matches("input, textarea, select, [contenteditable]"))) return;
+      if (!onScreen || root.contains(document.activeElement) || typing()) return;
       if ("jkehz/".indexOf(e.key.toLowerCase()) >= 0 || e.key === "ArrowDown" || e.key === "ArrowUp") onKey(e);
     });
     render();
-    return { render: render, act: act };
+    return { render: render, act: act, onScreen: function () { return onScreen; } };
+  }
+
+  // ---- Scenery: trees on the ridges, the sun and the moon ---------------------
+
+  // Silhouettes, drawn around the point where they stand, one unit to a pixel.
+  var SHAPES = {
+    pine: '<path d="M0-30 5-19H2.5L7-9H3.5L8.5 0V6h-17V0l5-9H-7l4.5-10H-5z"/>',
+    round: '<path d="M-1.6 6V-9h3.2V6z"/><circle cy="-17" r="9"/>',
+    cypress: '<path d="M0-31c3.2 0 4.8 7.5 4.8 16S3.2 4 0 4s-4.8-10.5-4.8-19S-3.2-31 0-31z"/>',
+    house: '<path d="M-10 6V-7L0-16 10-7V6zM4-20h3.5v9H4z"/><rect class="lit" x="-6" y="-5" width="4" height="4.5"/><rect class="lit" x="2" y="-5" width="4" height="4.5"/>',
+    letterbox: '<path d="M-1.6 8V-20h3.2V8z"/><path d="M-13-19v-8a7 7 0 0 1 7-7H6a7 7 0 0 1 7 7v8z"/><g transform="translate(7 -27)"><path class="flag" d="M0 0v-15h7.5v6H1.8v9z"/></g>',
+  };
+  // Groves per hill plane: where the grove stands along the hill's own
+  // drawing (0 to 1440), then each member as [pixels from there, shape, size].
+  var GROVES = {
+    mid: [
+      [150, [[-58, "pine", 1.05], [-42, "pine", 1.45], [-24, "pine", 1.15], [-6, "round", 1.2], [26, "house", 1.25], [58, "cypress", 1.3], [70, "cypress", 1.02]]],
+      [1290, [[-44, "round", 1.25], [-22, "pine", 1.5], [-5, "pine", 1.1], [22, "cypress", 1.35], [34, "cypress", 1.08], [62, "round", 0.95]]],
+    ],
+    far: [
+      [84, [[-22, "pine", 0.7], [-12, "pine", 0.9], [-1, "pine", 0.75], [10, "pine", 0.95], [21, "pine", 0.7]]],
+      [620, [[0, "round", 0.8], [13, "round", 0.62]]],
+      [1150, [[-15, "pine", 0.75], [-5, "pine", 0.95], [6, "pine", 0.7], [16, "pine", 0.85]]],
+      [1385, [[0, "cypress", 0.8], [9, "cypress", 0.95], [18, "cypress", 0.7]]],
+    ],
+    near: [[1322, [[0, "letterbox", 1.05]]]],
+    "close-far": [
+      [190, [[-14, "pine", 0.85], [-3, "pine", 1.1], [9, "pine", 0.8], [24, "round", 0.85]]],
+      [1260, [[-10, "cypress", 0.95], [1, "cypress", 1.15], [14, "round", 0.9], [30, "pine", 0.9]]],
+    ],
+  };
+  // The height of a hill's crest at x, read from its drawing.
+  function ridgeOf(path, width) {
+    var total = path.getTotalLength(), pts = [];
+    for (var i = 0; i <= 600; i++) { var p = path.getPointAtLength(total * i / 600); pts.push(p); if (p.x >= width - 0.5) break; }
+    return function (x) {
+      for (var i = 1; i < pts.length; i++) if (pts[i].x >= x) { var a = pts[i - 1], b = pts[i]; return a.y + (b.y - a.y) * ((x - a.x) / ((b.x - a.x) || 1)); }
+      return pts[pts.length - 1].y;
+    };
+  }
+  var hills = Array.prototype.map.call(document.querySelectorAll("[data-plane]"), function (el) {
+    var svg = el.querySelector("svg"), box = svg.viewBox.baseVal;
+    var hill = { el: el, name: el.dataset.plane, w: box.width, h: box.height, ridge: ridgeOf(svg.querySelector(".hill"), box.width), trees: [] };
+    (GROVES[hill.name] || []).forEach(function (grove) {
+      grove[1].forEach(function (t) {
+        var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        g.setAttribute("class", t[1] === "letterbox" ? "letterbox" : "tree");
+        g.innerHTML = SHAPES[t[1]];
+        svg.appendChild(g);
+        hill.trees.push({ g: g, at: grove[0], dx: t[0], size: t[2] });
+      });
+    });
+    return hill;
+  });
+  // The hills stretch with the page, so each tree is scaled back to its own
+  // proportions and set on the crest again whenever the page changes size.
+  function plant() {
+    var small = innerWidth < 640 ? 0.75 : skyEl.classList.contains("short") ? 0.85 : 1;
+    hills.forEach(function (hill) {
+      var sx = hill.el.offsetWidth / hill.w, sy = hill.el.offsetHeight / hill.h;
+      if (!sx || !sy) return;
+      hill.trees.forEach(function (t) {
+        var x = t.at + t.dx * small / sx, k = t.size * small;
+        t.g.setAttribute("transform", "translate(" + x.toFixed(1) + " " + hill.ridge(x).toFixed(1) + ") scale(" + (k / sx).toFixed(4) + " " + (k / sy).toFixed(4) + ")");
+      });
+    });
   }
 
   // ---- The page --------------------------------------------------------------
@@ -240,14 +344,96 @@
   var phase = phaseFor(new Date().getHours()), chosen = false;
   function currentSky() { return (isDark() ? DARK : LIGHT)[phase]; }
 
-  Array.prototype.forEach.call(document.querySelectorAll(".stars"), function (starLayer) { STARS.forEach(function (p) {
+  Array.prototype.forEach.call(document.querySelectorAll(".stars"), function (starLayer) { STARS.forEach(function (p, n) {
     var i = document.createElement("i");
     i.style.left = (p.x * 100).toFixed(2) + "%";
     i.style.top = (p.y * 100).toFixed(2) + "%";
     i.style.width = i.style.height = p.r * 2 + "px";
     i.style.opacity = p.o.toFixed(2);
+    // Every fifth star twinkles, each at its own pace.
+    if (n % 5 === 0) { i.className = "tw"; i.style.setProperty("--tw", 3.5 + (n % 7) * 0.6 + "s"); i.style.animationDelay = -(n % 9) * 0.7 + "s"; }
     starLayer.appendChild(i);
   }); });
+
+  // The sun and the moon. Each hour has places it prefers: low on the skyline
+  // at dawn and dusk, high by day and at night. The first place that is clear
+  // of the text wins, and with no clear place the sky stays empty.
+  var SPOTS = {
+    dawn: { body: "sun", low: 0.15, xs: [0.09, 0.05, 0.14, 0.2, 0.28, 0.4, 0.6, 0.8, 0.92] },
+    day: { body: "sun", xs: [0.9, 0.86, 0.94, 0.8, 0.1, 0.14, 0.06, 0.2, 0.7, 0.5] },
+    dusk: { body: "sun", low: 0.3, xs: [0.91, 0.95, 0.86, 0.8, 0.72, 0.6, 0.4, 0.2, 0.08] },
+    night: { body: "moon", xs: [0.1, 0.14, 0.06, 0.2, 0.9, 0.86, 0.94, 0.8, 0.5] },
+  };
+  var HEIGHTS = [0.6, 0.48, 0.72, 0.36, 0.26, 0.18];
+  var heaven = skyEl.querySelector(".heaven"), cottage = skyEl.querySelector(".cottage"), barEl = skyEl.querySelector(".bar");
+  var orbs = heaven ? ["sun", "moon"].map(function (name) { return { name: name, el: heaven.querySelector("." + name), x: 0, y: 0, on: false, frame: 0 }; }) : [];
+  var backdrop = hills.filter(function (h) { return skyEl.contains(h.el) && h.name !== "near"; });
+  // Where the sky ends at x: the highest crest there, or the top of the app
+  // window when it stands in the way.
+  function skyline(x) {
+    var y = skyEl.offsetHeight;
+    backdrop.forEach(function (h) {
+      if (!h.el.offsetHeight) return;
+      var at = (x - h.el.offsetLeft) / h.el.offsetWidth * h.w;
+      y = Math.min(y, h.el.offsetTop + h.ridge(at) / h.h * h.el.offsetHeight);
+    });
+    if (cottage && cottage.offsetWidth && x > cottage.offsetLeft - 8 && x < cottage.offsetLeft + cottage.offsetWidth + 8) y = Math.min(y, cottage.offsetTop);
+    return y;
+  }
+  function textBoxes() {
+    var sky = skyEl.getBoundingClientRect(), boxes = [], range = document.createRange();
+    function add(r) { if (r.width) boxes.push({ l: r.left - sky.left, r: r.right - sky.left, t: r.top - sky.top, b: r.bottom - sky.top }); }
+    Array.prototype.forEach.call(skyEl.querySelectorAll(".bar > *, .title h1, .title .side > p, .title small, .actions > *, .title .side > .btn"), function (el) {
+      // Per line of text, so the empty end of a short line counts as sky.
+      if (/^(H1|P|SMALL)$/.test(el.tagName)) { range.selectNodeContents(el); Array.prototype.forEach.call(range.getClientRects(), add); }
+      else add(el.getBoundingClientRect());
+    });
+    return boxes;
+  }
+  function spot(want, r) {
+    var width = skyEl.offsetWidth, top = barEl ? barEl.offsetTop + barEl.offsetHeight : 0, boxes = textBoxes(), gap = 12;
+    function clear(l, t, rt, b) { return !boxes.some(function (q) { return rt + gap > q.l && l - gap < q.r && b + gap > q.t && t - gap < q.b; }); }
+    for (var i = 0; i < want.xs.length; i++) {
+      var x = Math.max(r + 6, Math.min(width - r - 6, want.xs[i] * width)), line = skyline(x), y;
+      if (want.low !== undefined) {
+        y = line - r * want.low;
+        if (y - r > top && clear(x - r, y - r, x + r, line)) return { x: x, y: y };
+      } else for (var j = 0; j < HEIGHTS.length; j++) {
+        y = line - (line - top) * HEIGHTS[j];
+        if (y + r <= line - 8 && y - r >= top && clear(x - r, y - r, x + r, y + r)) return { x: x, y: y };
+      }
+    }
+    return null;
+  }
+  function put(o, x, y) {
+    o.x = x; o.y = y;
+    var r = o.el.offsetWidth / 2;
+    o.el.style.transform = "translate3d(" + (x - r).toFixed(1) + "px," + (y - r).toFixed(1) + "px,0)";
+  }
+  // The sun and the moon cross the sky in an arc, and set behind the skyline.
+  function travel(o, to, show, animate) {
+    cancelAnimationFrame(o.frame);
+    o.on = show;
+    o.el.classList.toggle("on", show);
+    if (!animate || still.matches) { if (show) put(o, to.x, to.y); return; }
+    var x0 = o.x, y0 = o.y, t0 = performance.now(), lift = Math.abs(to.x - x0) * 0.2, ms = 1500;
+    (function tick(now) {
+      var t = Math.min(1, (now - t0) / ms), e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      put(o, x0 + (to.x - x0) * e, y0 + (to.y - y0) * e - lift * Math.sin(Math.PI * e));
+      if (t < 1) o.frame = requestAnimationFrame(tick);
+    })(t0);
+  }
+  function placeOrbs(animate) {
+    var want = SPOTS[phase];
+    orbs.forEach(function (o) {
+      var r = o.el.offsetWidth / 2, to = o.name === want.body ? spot(want, r) : null;
+      if (o.name === want.body) skyEl.classList.toggle("bolt-left", !!to && to.x > skyEl.offsetWidth / 2);
+      if (to) {
+        if (!o.on) put(o, to.x, skyline(to.x) + r * 2.2);
+        travel(o, to, true, animate);
+      } else if (o.on) travel(o, { x: o.x, y: skyline(o.x) + r * 2.2 }, false, animate);
+    });
+  }
 
   var win = null;
   function paint() {
@@ -265,6 +451,19 @@
     }
     set("--far", far);
     set("--mid", mid);
+    // The farthest range is the far ridge seen through more air: halfway to
+    // the sky behind it. Each plane also fades toward that sky at its foot.
+    var back = mix(far, s.bottom, 0.5);
+    set("--back", back);
+    set("--back-mist", mix(back, s.bottom, 0.45));
+    set("--far-mist", mix(far, s.bottom, 0.3));
+    set("--mid-mist", mix(mid, s.bottom, 0.2));
+    // The sun and the moon are the sky's own horizon colour, lit up. Clouds
+    // are white on a daytime sky and take the colour of the sky otherwise.
+    set("--sun", mix(s.bottom, "#FFFFFF", dark ? (phase === "night" ? 0.72 : 0.42) : 0.82));
+    var bright = !dark && phase === "day";
+    set("--cloud", bright ? mix(s.bottom, "#FFFFFF", 0.8) : dark ? mix(s.bottom, "#FFFFFF", 0.09) : mix(s.bottom, s.top, 0.32));
+    set("--cloud-o", bright ? "0.9" : dark ? "0.7" : phase === "night" ? "0.4" : "0.6");
     // The near ridge carries the key hints, so in Graphite Light's daytime it
     // is darkened a little to keep white text readable.
     var near = !dark && phase === "day" ? mix(s.near, "#000000", 0.22) : s.near;
@@ -315,29 +514,109 @@
     if (win) win.render();
   }
 
+  // Reaching inbox zero strikes once: the sky flashes, the bolt lands, and the
+  // flag on the letterbox drops. Undo takes it all back.
+  var flash = document.createElement("div");
+  flash.className = "flash";
+  skyEl.appendChild(flash);
   var winEl = document.getElementById("win");
   if (winEl) win = mountWindow(winEl, {
     sky: currentSky,
     phase: function () { return phase; },
-    onZero: function () { skyEl.classList.add("zero"); },
+    onZero: function () { skyEl.classList.add("zero"); flash.classList.remove("go"); void flash.offsetWidth; flash.classList.add("go"); },
     onAction: function (type) { if (type === "undo") skyEl.classList.remove("zero"); },
   });
   document.addEventListener("click", function (e) {
     var b = e.target.closest && e.target.closest("[data-phase-choice]");
-    if (!b) return;
-    phase = b.dataset.phaseChoice; chosen = true; paint();
+    if (!b || b.dataset.phaseChoice === phase) return;
+    phase = b.dataset.phaseChoice; chosen = true; paint(); placeOrbs(true);
   });
   document.addEventListener("jolta-theme", paint);
+
+  // A postmark with the visitor's own date and time.
+  var pmDate = document.getElementById("pm-date");
+  function stamp() {
+    if (!pmDate) return;
+    var now = new Date();
+    pmDate.textContent = now.toLocaleDateString("en-GB", { day: "numeric", month: "short" }).toUpperCase();
+    document.getElementById("pm-year").textContent = now.getFullYear();
+    document.getElementById("pm-time").textContent = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  }
   // Follow the clock while the page stays open, until the visitor picks an hour.
-  setInterval(function () { if (!chosen) { var p = phaseFor(new Date().getHours()); if (p !== phase) { phase = p; paint(); } } }, 60000);
+  setInterval(function () {
+    stamp();
+    if (chosen) return;
+    var p = phaseFor(new Date().getHours());
+    if (p !== phase) { phase = p; paint(); placeOrbs(true); }
+  }, 60000);
   paint();
+  stamp();
+  plant();
+  // The sun or the moon comes up once the fonts have set the text it avoids.
+  function settle() { plant(); placeOrbs(false); }
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(function () {
+    plant(); placeOrbs(true);
+    var resizing = 0;
+    addEventListener("resize", function () { cancelAnimationFrame(resizing); resizing = requestAnimationFrame(settle); });
+  });
+
+  // At night a shooting star crosses the sky now and then.
+  var shoot = document.createElement("span");
+  shoot.className = "shoot";
+  skyEl.querySelector(".stars").appendChild(shoot);
+  (function wait() {
+    setTimeout(function () {
+      if (phase === "night" && !document.hidden && !still.matches) {
+        shoot.style.left = 6 + Math.random() * 62 + "%";
+        shoot.style.top = 4 + Math.random() * 42 + "%";
+        shoot.classList.remove("go"); void shoot.offsetWidth; shoot.classList.add("go");
+      }
+      wait();
+    }, 6000 + Math.random() * 9000);
+  })();
+
+  // The list of keys moves with J and K, like every list in Jolta, and a key
+  // pressed on the visitor's keyboard goes down on the page. The demo window
+  // gets the keys first while it is on screen.
+  var keyList = document.querySelector(".keys");
+  if (keyList) (function () {
+    var items = Array.prototype.slice.call(keyList.querySelectorAll(".key"));
+    var caps = Array.prototype.slice.call(keyList.querySelectorAll("kbd[data-k]"));
+    var JUMP = { e: 1, h: 2, "/": 3, tab: 5 }, at = 0, seen = false;
+    function mark(i) {
+      at = Math.max(0, Math.min(items.length - 1, i));
+      items.forEach(function (el, n) { el.classList.toggle("cur", n === at); });
+    }
+    function press(key, down) { caps.forEach(function (c) { if (c.dataset.k === key) c.classList.toggle("down", down); }); }
+    function release() { caps.forEach(function (c) { c.classList.remove("down"); }); }
+    items.forEach(function (el, i) { el.addEventListener("pointerenter", function () { mark(i); }); });
+    new IntersectionObserver(function (es) { seen = es[0].isIntersecting; }, { threshold: 0.4 }).observe(keyList);
+    document.addEventListener("keydown", function (e) {
+      var k = e.key.toLowerCase();
+      press(k, true);
+      if (!seen || (win && win.onScreen()) || e.ctrlKey || e.altKey || typing()) return;
+      if (e.metaKey) { if (k === "k") mark(4); }
+      else if (k === "j") mark(at + 1);
+      else if (k === "k") mark(at - 1);
+      else if (JUMP[k] !== undefined) mark(JUMP[k]);
+    });
+    // macOS sends no keyup for a letter while Command is held, so letting go
+    // of Command lets go of every key.
+    document.addEventListener("keyup", function (e) { var k = e.key.toLowerCase(); if (k === "meta") release(); else press(k, false); });
+    addEventListener("blur", release);
+    mark(0);
+  })();
+
+  // The envelopes on the route travel only while the diagram is on screen.
+  var route = document.querySelector(".route");
+  if (route) new IntersectionObserver(function (es) { route.classList.toggle("live", es[0].isIntersecting); }).observe(route);
 
   // Painted planes: the near ridge moves with the page, and the farther a
   // ridge is, the more it lags behind and sinks as the page scrolls. Sinking
   // planes are clipped by the sky, so they never open a gap below the ridge
   // or slide over the window.
   var planes = Array.prototype.slice.call(document.querySelectorAll("[data-speed]"));
-  var still = matchMedia("(prefers-reduced-motion: reduce)"), ticking = false;
+  var ticking = false;
   addEventListener("scroll", function () {
     if (still.matches || ticking) return;
     ticking = true;
