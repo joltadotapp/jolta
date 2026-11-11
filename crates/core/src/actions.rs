@@ -94,6 +94,16 @@ pub fn perform(conn: &Connection, thread: ThreadId, action: Action, context: Con
                 Action::Snooze(_) => snoozed_mailbox(conn, account)?,
                 _ => unreachable!("only moves reach here"),
             };
+            for mailbox in [from, to] {
+                let own: bool = conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM mailbox WHERE id = ?1 AND account_id = ?2)",
+                    params![mailbox, account],
+                    |r| r.get(0),
+                )?;
+                if !own {
+                    return Err(Error::Other(format!("Mailbox {} isn't a mailbox of this account.", mailbox.0)));
+                }
+            }
             if from == to {
                 return Ok(None);
             }
