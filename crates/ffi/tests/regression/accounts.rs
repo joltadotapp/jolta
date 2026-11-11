@@ -6,7 +6,7 @@ use jolta_core::store::{self, RemoteCalendar};
 use jolta_core::{MailboxRole, secrets};
 use jolta_ffi::{ListContext, ThreadAction};
 
-use crate::fixture::{App, Mail, now};
+use crate::fixture::{App, Mail, block_on, now};
 
 /// Removing an account leaves no row, no secret, no message file and no
 /// calendar behind, and doesn't touch the other accounts. Before 2026-11-02
@@ -128,4 +128,34 @@ fn account_columns(app: &App) -> Vec<(String, String)> {
             Ok(out)
         })
         .unwrap()
+}
+
+/// Removing a signed-in account drops the access tokens Jolta keeps for it
+/// in memory, the room lists' one too, and leaves other accounts' alone.
+#[test]
+fn removing_an_account_forgets_its_access_tokens() {
+    use jolta_core::oauth::{self, Grant, SignedIn};
+    let app = App::new();
+    let gone = app.gmail_account("gone@test.invalid");
+    let kept = app.gmail_account("kept@test.invalid");
+    for account in [&gone, &kept] {
+        oauth::remember(&account.secret_ref, "mail token", 3600);
+        let rooms = SignedIn {
+            email: account.address.clone(),
+            name: String::new(),
+            refresh_token: String::new(),
+            access_token: "rooms token".into(),
+            expires_in: 3600,
+            user_id: None,
+        };
+        oauth::remember_rooms(account, &rooms);
+    }
+    assert_eq!(block_on(oauth::token(&gone, Grant::Account)).unwrap(), "mail token");
+
+    app.core.remove_account(gone.id.0).unwrap();
+
+    assert!(block_on(oauth::token(&gone, Grant::Account)).is_err(), "the mail token is gone");
+    assert!(block_on(oauth::token(&gone, Grant::Rooms)).is_err(), "the room lists' token is gone");
+    assert_eq!(block_on(oauth::token(&kept, Grant::Account)).unwrap(), "mail token");
+    assert_eq!(block_on(oauth::token(&kept, Grant::Rooms)).unwrap(), "rooms token");
 }
