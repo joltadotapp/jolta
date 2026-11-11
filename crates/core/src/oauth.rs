@@ -370,9 +370,29 @@ fn authorize_url(
     format!("{}?{}", provider.auth_url(), form(&params))
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Jolta</title>\
-<body style=\"font:15px -apple-system,system-ui;margin:20vh auto;max-width:420px;text-align:center\">\
-<h2>You're signed in</h2><p>You can close this tab and go back to Jolta.</p>";
+/// A plain page for the browser tab the sign-in comes back to.
+fn page(status: &str, title: &str, text: &str) -> String {
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><title>Jolta</title>\
+         <body style=\"font:15px -apple-system,system-ui;margin:20vh auto;max-width:420px;text-align:center\">\
+         <h2>{title}</h2><p>{text}</p>"
+    );
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// What reached the sign-in listener.
+enum Callback {
+    /// A favicon or another request without a query.
+    Stray,
+    /// A reply whose `state` is missing or isn't this sign-in's: an old
+    /// tab, or a page trying to slip in its own code.
+    Foreign,
+    /// This sign-in's reply.
+    Reply(Result<Redirect>),
+}
 
 impl Pending {
     /// Waits for the browser to come back (up to ten minutes), then trades
@@ -450,30 +470,46 @@ impl Pending {
             }
             let request = String::from_utf8_lossy(&buf);
             let path = request.split_whitespace().nth(1).unwrap_or("/");
-            let query = query_of(path);
-            if query.is_empty() {
-                // A favicon or other stray request.
-                stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await.ok();
-                continue;
-            }
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{DONE_PAGE}",
-                DONE_PAGE.len()
-            );
+            let callback = self.callback(&query_of(path));
+            let reply = match &callback {
+                Callback::Stray => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                Callback::Foreign => page(
+                    "400 Bad Request",
+                    "This isn't the sign-in Jolta is waiting for",
+                    "Close this tab. To sign in, start again from Jolta.",
+                ),
+                Callback::Reply(Ok(Redirect::Code(_))) => {
+                    page("200 OK", "You're signed in", "You can close this tab and go back to Jolta.")
+                }
+                Callback::Reply(_) => page("200 OK", "Sign-in didn't finish", "Go back to Jolta to see why, or to try again."),
+            };
             stream.write_all(reply.as_bytes()).await.ok();
-            return self.code_from_query(&query);
+            if let Callback::Reply(reply) = callback {
+                return reply;
+            }
         }
     }
 
+    /// A redirect address pasted by hand, which has no browser tab to answer.
     fn code_from_query(&self, query: &HashMap<String, String>) -> Result<Redirect> {
+        match self.callback(query) {
+            Callback::Reply(reply) => reply,
+            Callback::Stray | Callback::Foreign => Err(Error::Auth("the sign-in reply did not match this request".into())),
+        }
+    }
+
+    fn callback(&self, query: &HashMap<String, String>) -> Callback {
+        if query.is_empty() {
+            return Callback::Stray;
+        }
         if query.get("state") != Some(&self.state) {
-            return Err(Error::Auth("the sign-in reply did not match this request".into()));
+            return Callback::Foreign;
         }
         if let Some(err) = query.get("error") {
             let detail = query.get("error_description").cloned().unwrap_or_default();
-            return Ok(Redirect::Refused(format!("{err} {detail}").trim().to_string()));
+            return Callback::Reply(Ok(Redirect::Refused(format!("{err} {detail}").trim().to_string())));
         }
-        query.get("code").cloned().map(Redirect::Code).ok_or_else(|| Error::Auth("the sign-in reply had no code".into()))
+        Callback::Reply(query.get("code").cloned().map(Redirect::Code).ok_or_else(|| Error::Auth("the sign-in reply had no code".into())))
     }
 }
 
