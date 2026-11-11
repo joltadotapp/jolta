@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use mail_parser::{MessageParser, PartKind};
+use mail_parser::{MessageParser, MessagePart, PartKind};
 
 use crate::calendar::card::Card;
 use crate::smime::{Protection, Verdict};
@@ -85,7 +85,35 @@ pub fn attachment_bytes(raw: &[u8], index: usize) -> Option<(String, String, Vec
         .content_type()
         .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")))
         .unwrap_or_else(|| "application/octet-stream".into());
-    Some((part.attachment_name().unwrap_or("attachment").to_string(), mime, part.decoded().into_owned()))
+    Some((attachment_name(&part), mime, part.decoded().into_owned()))
+}
+
+/// An attachment's name made into a plain file name, the only form the core
+/// hands out: no path separators, colons, control or text-direction
+/// characters, no leading dot, and at most 200 bytes with the extension
+/// kept, so a " 2" for a name already taken still fits macOS's 255.
+pub(crate) fn attachment_name(part: &MessagePart) -> String {
+    let unsafe_char = |c: char| {
+        matches!(c, '/' | '\\' | ':' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') || c.is_control()
+    };
+    let name: String = part.attachment_name().unwrap_or_default().chars().map(|c| if unsafe_char(c) { '-' } else { c }).collect();
+    let name = name.trim().trim_start_matches('.').trim_start();
+    if name.is_empty() {
+        return "attachment".into();
+    }
+    const MAX: usize = 200;
+    if name.len() <= MAX {
+        return name.to_string();
+    }
+    let ext = match name.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() && ext.len() <= 16 => &name[name.len() - ext.len() - 1..],
+        _ => "",
+    };
+    let mut end = MAX - ext.len();
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ext}", name[..end].trim_end())
 }
 
 /// MIME type and bytes of the part a `cid:` URL names, for inline images.
@@ -105,7 +133,7 @@ pub fn attachments(raw: &[u8]) -> Vec<Attachment> {
             let ct = a.content_type();
             Attachment {
                 index: i as u32,
-                name: a.attachment_name().unwrap_or("attachment").to_string(),
+                name: attachment_name(&a),
                 mime_type: ct
                     .map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or("octet-stream")))
                     .unwrap_or_else(|| "application/octet-stream".into()),
@@ -653,8 +681,6 @@ pub fn save_listed(raw: &[u8], id: i64, dir: &std::path::Path) -> crate::Result<
     let mut saved = Vec::new();
     for f in listed(raw, &clean, id) {
         let Some((name, _, bytes)) = attachment_bytes(raw, f.index as usize) else { continue };
-        let name = name.replace(['/', ':'], "-");
-        let name = if name.trim().is_empty() || name.starts_with('.') { format!("attachment {}", f.index + 1) } else { name };
         let (stem, ext) = match name.rsplit_once('.') {
             Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
             _ => (name.clone(), String::new()),

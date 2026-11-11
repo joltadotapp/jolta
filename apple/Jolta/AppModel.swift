@@ -1005,7 +1005,7 @@ final class AppModel {
                 let file = try await core.attachment(messageId: message, index: index)
                 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("attachments/\(message)-\(index)")
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let url = dir.appendingPathComponent(file.name.replacingOccurrences(of: "/", with: "-"))
+                let url = dir.appendingPathComponent(file.name)
                 try Data(file.bytes).write(to: url)
                 NSWorkspace.shared.open(url)
             } catch {
