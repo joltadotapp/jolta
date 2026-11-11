@@ -32,8 +32,9 @@ pub(super) fn base(provider: Provider, base_url: &str) -> Result<String> {
 }
 
 /// Whether `host` is this Mac or on the user's own network: loopback,
-/// private and link-local addresses, Tailscale's 100.64.0.0/10, and
-/// Bonjour's `.local` names.
+/// private and link-local addresses, Tailscale's 100.64.0.0/10, and the
+/// names reserved for local networks: `.local` (Bonjour), `.home.arpa`
+/// (RFC 8375) and `.internal` (ICANN), none of which resolve on the internet.
 fn nearby(host: &str) -> bool {
     use std::net::IpAddr;
     fn ip(addr: IpAddr) -> bool {
@@ -54,7 +55,7 @@ fn nearby(host: &str) -> bool {
         return ip(addr);
     }
     let name = host.trim_end_matches('.').to_ascii_lowercase();
-    name == "localhost" || name.ends_with(".local")
+    name == "localhost" || [".local", ".home.arpa", ".internal"].iter().any(|suffix| name.ends_with(suffix))
 }
 
 fn company(provider: Provider) -> &'static str {
