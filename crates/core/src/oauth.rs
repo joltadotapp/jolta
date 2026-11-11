@@ -26,11 +26,19 @@ pub enum Provider {
 /// Client ids come from the environment, then `oauth-clients.env` in the data
 /// folder (written by the setup wizards), then the ones a release build
 /// carries. None of them is in the repository.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     pub id: String,
     pub secret: Option<String>,
 }
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("id", &self.id).field("secret", &self.secret.as_ref().map(|_| REDACTED)).finish()
+    }
+}
+
+const REDACTED: &str = "<redacted>";
 
 impl Provider {
     fn auth_url(self) -> &'static str {
@@ -258,7 +266,7 @@ pub struct Pending {
 }
 
 /// What a finished sign-in yields.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SignedIn {
     pub email: String,
     pub name: String,
@@ -268,6 +276,19 @@ pub struct SignedIn {
     /// The provider's permanent id for the user, which an address change
     /// keeps: Google's `sub`, Microsoft's `oid`.
     pub user_id: Option<String>,
+}
+
+impl std::fmt::Debug for SignedIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedIn")
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("refresh_token", &REDACTED)
+            .field("access_token", &REDACTED)
+            .field("expires_in", &self.expires_in)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 impl SignedIn {
