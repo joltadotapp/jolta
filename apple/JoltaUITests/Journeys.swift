@@ -121,6 +121,8 @@ final class Journeys: XCTestCase {
         app.typeKey("c", modifierFlags: [])
         let to = app.textFields["compose-to"]
         XCTAssertTrue(to.waitForExistence(timeout: 5), "c opens compose")
+        // In the body: Esc in To would first close its suggestions.
+        app.textViews["compose-body"].click()
         app.typeKey("/", modifierFlags: .command)
         let sheet = text(app, "Keyboard shortcuts")
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), "⌘/ shows the shortcuts")
@@ -559,7 +561,7 @@ final class Journeys: XCTestCase {
         let general = app.popUpButtons["notify-scope"]
         XCTAssertTrue(general.waitForExistence(timeout: 5), "Settings opens on General")
         app.typeKey(.downArrow, modifierFlags: [])
-        XCTAssertTrue(text(app, "Match macOS").waitForExistence(timeout: 5), "↓ shows Appearance")
+        XCTAssertTrue(text(app, "While macOS is in light mode.").waitForExistence(timeout: 5), "↓ shows Appearance")
         app.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(text(app, "Signature").waitForExistence(timeout: 5), "↓ again shows the account, not a row of Appearance")
         app.typeKey(.upArrow, modifierFlags: [])
