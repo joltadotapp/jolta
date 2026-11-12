@@ -934,20 +934,21 @@ final class CalendarModel {
     /// its calendar has no account to mail from yet, the scope prompt for one
     /// occurrence of a series, and Send an update? when the guests hear about
     /// it. `perform` saves with the answers. Nothing is saved when the user
-    /// cancels the scope prompt (`cancel`) or picks Keep editing (`back`).
-    func confirmSave(_ draft: EventDraft, cancel: @escaping () -> Void = {}, back: @escaping () -> Void = {}, failed: @escaping (String) -> Void,
-                     perform: @escaping (EditScope?, NotifyChoice?, String?) -> Void) throws {
+    /// cancels the scope prompt (`cancel`) or picks Keep editing (`back`),
+    /// which reads `backTitle` where no editor is open to go back to.
+    func confirmSave(_ draft: EventDraft, cancel: @escaping () -> Void = {}, back: @escaping () -> Void = {}, backTitle: String? = nil,
+                     failed: @escaping (String) -> Void, perform: @escaping (EditScope?, NotifyChoice?, String?) -> Void) throws {
         let plan = try core.planSave(draft: draft)
         if !plan.senders.isEmpty {
-            return askSender(plan.senders, calendar: draft.calendarId, cancel: back) { [weak self] in
-                do { try self?.confirmSave(draft, cancel: cancel, back: back, failed: failed, perform: perform) } catch { failed("\(error)") }
+            return askSender(plan.senders, calendar: draft.calendarId, cancel: back, backTitle: backTitle) { [weak self] in
+                do { try self?.confirmSave(draft, cancel: cancel, back: back, backTitle: backTitle, failed: failed, perform: perform) } catch { failed("\(error)") }
             }
         }
         let send = { [weak self] (scope: EditScope?, prompted: Bool) in
             guard let self else { return }
             guard let dialog = plan.dialog else { return perform(scope, nil, nil) }
             self.after(prompted) {
-                self.sendPrompt = SendPrompt(dialog: dialog, back: back) { notify, message, email in
+                self.sendPrompt = SendPrompt(dialog: dialog, back: back, backTitle: backTitle) { notify, message, email in
                     perform(scope, notify, message)
                     // The save selects the event as it is now, at its new time.
                     if email, let event = self.selected { self.emailGuests(event) }
@@ -969,9 +970,9 @@ final class CalendarModel {
     }
 
     /// Send invitations from, then `next` once the calendar has its account.
-    private func askSender(_ senders: [SenderInfo], calendar id: Int64, cancel: @escaping () -> Void = {}, next: @escaping () -> Void) {
+    private func askSender(_ senders: [SenderInfo], calendar id: Int64, cancel: @escaping () -> Void = {}, backTitle: String? = nil, next: @escaping () -> Void) {
         let name = calendarInfo(id)?.name ?? "this calendar"
-        senderPrompt = SenderPrompt(calendar: name, senders: senders, cancel: cancel) { [weak self] sender in
+        senderPrompt = SenderPrompt(calendar: name, senders: senders, cancel: cancel, backTitle: backTitle ?? "Keep editing") { [weak self] sender in
             guard let self else { return }
             do {
                 try self.core.setSendFrom(calendarId: id, accountId: sender.accountId)

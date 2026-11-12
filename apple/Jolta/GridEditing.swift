@@ -22,7 +22,7 @@ struct GridChange {
 /// Moving, resizing and copying events with the mouse and keys. Every
 /// change saves the way the editor's Save does: the scope prompt for an
 /// occurrence of a series, Send an update? for a meeting with guests, then
-/// the op, which Undo takes back.
+/// the op, which Undo takes back. Esc on either puts the event back.
 extension CalendarModel {
     /// Whether a drag may change the item's time: not for a meeting someone
     /// else organizes or an event in a read-only calendar.
@@ -154,8 +154,9 @@ extension CalendarModel {
         commitChange()
     }
 
-    /// Saves the change through the editor's questions. Cancel puts the
-    /// event back; Keep editing opens the editor at the new time.
+    /// Saves the change through the editor's questions. There is no editor
+    /// to keep editing in, so each question's Esc is Cancel and puts the
+    /// event back where it was.
     func commitChange() {
         gathering?.cancel()
         gathering = nil
@@ -167,7 +168,7 @@ extension CalendarModel {
         do {
             if try core.planSave(draft: change.draft).unchanged { return dropChange() }
             try confirmSave(change.draft, cancel: { [weak self] in self?.dropChange() },
-                            back: { [weak self] in self?.keepEditing(change) }, failed: failed) { [weak self] scope, notify, message in
+                            back: { [weak self] in self?.dropChange() }, backTitle: "Cancel", failed: failed) { [weak self] scope, notify, message in
                 self?.save(change.draft, scope: scope, notify: notify, message: message, failed: failed) { self?.gridChange = nil }
             }
         } catch {
@@ -180,11 +181,5 @@ extension CalendarModel {
         gathering = nil
         gridChange = nil
         updateGrids()
-    }
-
-    private func keepEditing(_ change: GridChange) {
-        dropChange()
-        guard confirmLeaving({ [weak self] in self?.keepEditing(change) }) else { return }
-        open(EventEditorModel(core: core, draft: change.draft, event: change.copy ? nil : change.event))
     }
 }

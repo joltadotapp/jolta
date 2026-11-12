@@ -936,7 +936,8 @@ final class Journeys: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Esc closes it")
         XCTAssertFalse(app.textFields["editor-title"].waitForExistence(timeout: 2), "without opening the editor at the new time")
-        XCTAssertTrue(waitUntil { sync.label.hasPrefix("Team sync, 13:00 to 13:30") }, "and the meeting is back at 13:00: \(sync.label)")
+        let atOne = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Team sync, 13:00 to 13:30"))
+        XCTAssertTrue(waitUntil { atOne.count == 7 }, "and the meeting is back at 13:00 like the week's other six")
 
         held.click(forDuration: 0.1, thenDragTo: held.withOffset(CGVector(dx: 0, dy: 48)))
         XCTAssertTrue(prompt.waitForExistence(timeout: 5))
