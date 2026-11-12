@@ -9,6 +9,8 @@ struct PlacedEvent: Identifiable {
     let bottom: Double
     let column: Int
     let columns: Int
+    /// The columns it is wide: its own and the free ones to its right.
+    let span: Int
 
     var id: String { event.id + "#\(day)" }
 }
@@ -31,9 +33,24 @@ enum CalendarLayout {
     /// Lanes of all-day events above several days; the rest are behind a day's "+N". A day view shows every lane.
     static let maxLanes = 3
 
+    /// How many columns each event of a group of overlaps is wide: its own,
+    /// and the columns to its right that hold nothing during its time. An
+    /// equal share for every event left one beside a short neighbour narrow
+    /// for its whole length, with empty grid next to it.
+    static func spans(_ items: [(top: Double, bottom: Double, column: Int)], columns: Int) -> [Int] {
+        items.map { item in
+            var span = 1
+            while item.column + span < columns,
+                  !items.contains(where: { $0.column == item.column + span && $0.top < item.bottom && $0.bottom > item.top }) {
+                span += 1
+            }
+            return span
+        }
+    }
+
     /// Timed events of less than a day per day column, packed: overlapping
     /// events share the column's width, each taking the first free column
-    /// of its group of overlaps.
+    /// of its group of overlaps and widening into free columns on its right.
     static func timed(_ events: [CalEvent], days: [CalendarDay]) -> [PlacedEvent] {
         var out: [PlacedEvent] = []
         for (d, day) in days.enumerated() {
@@ -49,7 +66,8 @@ enum CalendarLayout {
             var columnEnds: [Double] = []
             var groupEnd = -1.0
             func close() {
-                out += group.map { PlacedEvent(event: $0.0, day: d, top: $0.1, bottom: $0.2, column: $0.3, columns: columnEnds.count) }
+                let spans = spans(group.map { ($0.1, $0.2, $0.3) }, columns: columnEnds.count)
+                out += zip(group, spans).map { PlacedEvent(event: $0.0, day: d, top: $0.1, bottom: $0.2, column: $0.3, columns: columnEnds.count, span: $1) }
                 group = []
                 columnEnds = []
             }

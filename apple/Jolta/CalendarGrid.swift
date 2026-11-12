@@ -107,7 +107,7 @@ enum EventStyle {
         let colW = width / CGFloat(max(days, 1))
         let share = colW / CGFloat(p.columns)
         let x = CGFloat(p.day) * colW + share * CGFloat(p.column) + (p.column == 0 ? 3 : 1)
-        let w = share - (p.column == 0 ? 3 : 1) - (p.column == p.columns - 1 ? 4 : 1)
+        let w = share * CGFloat(p.span) - (p.column == 0 ? 3 : 1) - (p.column + p.span == p.columns ? 4 : 1)
         let y = p.top / 60 * CalendarLayout.hourHeight + 1
         let h = max(16, (p.bottom - p.top) / 60 * CalendarLayout.hourHeight - 2)
         return CGRect(x: x, y: y, width: max(w, 4), height: h)
