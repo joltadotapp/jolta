@@ -1102,10 +1102,11 @@ struct ReaderColumn: View {
                            onSaveAll: { model.saveAttachments(message: $0) }, onUnsubscribe: model.unsubscribe)
             } else {
                 // Rows but none open: at launch, or after the open one left by
-                // itself. Nothing while one loads or the list is empty, which
-                // says so itself.
+                // itself. An empty list says so itself.
                 VStack(spacing: 10) {
-                    if model.listCount > 0, model.selectedThreadID == nil {
+                    if model.selectedThreadID != nil {
+                        Text("Loading conversation…").foregroundStyle(Color(Theme.text3))
+                    } else if model.listCount > 0 {
                         Text("No conversation open").foregroundStyle(Color(Theme.text3))
                         HStack(spacing: 5) {
                             KeyCap(key: "J")
