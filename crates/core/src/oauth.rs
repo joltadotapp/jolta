@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -681,9 +681,10 @@ async fn post_token(provider: Provider, params: &[(&str, &str)]) -> Result<Value
     Ok(json)
 }
 
+/// `until` is on the wall clock: `Instant` stops while a Mac sleeps.
 struct Cached {
     token: String,
-    until: Instant,
+    until: SystemTime,
 }
 
 static TOKENS: Mutex<Option<HashMap<String, Cached>>> = Mutex::new(None);
@@ -693,14 +694,14 @@ pub fn remember(account_ref: &str, access_token: &str, expires_in: u64) {
     let mut cache = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
     cache.get_or_insert_with(HashMap::new).insert(
         account_ref.to_string(),
-        Cached { token: access_token.to_string(), until: Instant::now() + Duration::from_secs(expires_in.saturating_sub(60)) },
+        Cached { token: access_token.to_string(), until: SystemTime::now() + Duration::from_secs(expires_in.saturating_sub(60)) },
     );
 }
 
 /// The access token kept under `key`, unless it has expired by `now`.
-fn cached(key: &str, _now: SystemTime) -> Option<String> {
+fn cached(key: &str, now: SystemTime) -> Option<String> {
     let cache = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
-    cache.as_ref()?.get(key).filter(|c| c.until > Instant::now()).map(|c| c.token.clone())
+    cache.as_ref()?.get(key).filter(|c| c.until > now).map(|c| c.token.clone())
 }
 
 /// Drops every access token kept for an account, its room lists' too.

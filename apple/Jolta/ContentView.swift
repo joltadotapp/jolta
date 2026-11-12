@@ -590,8 +590,9 @@ struct SyncFooter: View {
                     HStack(spacing: 8) {
                         Text(problem.reason).lineLimit(1).padding(.leading, 14)
                         Spacer(minLength: 0)
+                        // Another account's long sync doesn't hold up a retry of a failing one.
                         KitButton(title: "Sync Now", size: .small) { model.core.syncNow() }
-                            .disabled(!model.syncing.isEmpty)
+                            .disabled(model.syncErrors.keys.allSatisfy(model.syncing.contains))
                     }
                 }
                 .help(problem.full)
