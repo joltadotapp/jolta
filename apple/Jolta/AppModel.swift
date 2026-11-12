@@ -1194,6 +1194,8 @@ final class AppModel {
 
     private func show(_ toast: Toast) {
         self.toast = toast
+        // VoiceOver doesn't look at the foot of the list by itself.
+        AccessibilityNotification.Announcement(toast.text(at: .now)).post()
         if let undo = toast.undo { lastUndo = undo }
         let id = toast.id
         Task {
@@ -1338,9 +1340,13 @@ struct Toast: Equatable {
         switch undo {
         case .calendar: return Self.undoWindow
         case .some: return 6
-        case nil: return release == nil ? 3 : 6
+        case nil: return release == nil && !isLong ? 3 : 6
         }
     }
+
+    /// A message without an action that runs past one line, as an error's
+    /// reason does: it shows on two lines and stays long enough to read.
+    var isLong: Bool { undo == nil && review == nil && release == nil && until == nil && text.count > 56 }
 
     /// `text` with the seconds left filled in.
     func text(at now: Date) -> String {

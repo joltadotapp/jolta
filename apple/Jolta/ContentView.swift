@@ -893,7 +893,11 @@ struct ToastView: View {
     var body: some View {
         HStack(spacing: 12) {
             TimelineView(.periodic(from: .now, by: toast.until == nil ? 3600 : 0.5)) { context in
-                Text(toast.text(at: context.date)).lineLimit(1).truncationMode(.middle).monospacedDigit()
+                Text(toast.text(at: context.date))
+                    .lineLimit(toast.isLong ? 2 : 1)
+                    .truncationMode(toast.isLong ? .tail : .middle)
+                    .multilineTextAlignment(.leading)
+                    .monospacedDigit()
             }
             .frame(maxWidth: 420)
             .help(toast.text(at: .now))
@@ -918,7 +922,8 @@ struct ToastView: View {
         .foregroundStyle(Color(Theme.text))
         .fixedSize()
         .padding(.horizontal, 14)
-        .frame(height: 36)
+        .padding(.vertical, toast.isLong ? 8 : 0)
+        .frame(minHeight: 36)
         .menuPanel()
     }
 }
