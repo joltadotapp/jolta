@@ -477,22 +477,47 @@ struct SyncFooter: View {
     let model: AppModel
 
     private var status: String {
-        if let (id, error) = model.syncErrors.min(by: { $0.key < $1.key }) {
-            let name = model.accounts.first { $0.account.id == id }?.account.address ?? "An account"
-            let more = model.syncErrors.count > 1 ? " (and \(model.syncErrors.count - 1) more)" : ""
-            return "\(name): \(error)\(more)"
-        }
-        if let error = model.lastError { return error }
         if !model.syncing.isEmpty { return "Syncing…" }
         if let date = model.lastSynced { return "All accounts synced, \(date.formatted(date: .omitted, time: .shortened))" }
         return model.accounts.isEmpty ? "No accounts yet" : "Up to date"
     }
 
+    /// What went wrong: a line that names it, the reason, and everything in
+    /// full for the tooltip.
+    private var problem: (title: String, reason: String, full: String, color: NSColor)? {
+        let name = { (id: Int64) in model.accounts.first { $0.account.id == id }?.account.address ?? "An account" }
+        let failures = model.syncErrors.sorted { $0.key < $1.key }
+        if let first = failures.first {
+            let more = failures.count > 1 ? " (and \(failures.count - 1) more)" : ""
+            return ("\(name(first.key)) can't sync", first.value + more,
+                    failures.map { "\(name($0.key)): \($0.value)" }.joined(separator: "\n"), Theme.warningText)
+        }
+        if let error = model.lastError { return ("Jolta couldn't read its data", error, error, Theme.dangerText) }
+        return nil
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(Color(!model.syncErrors.isEmpty ? Theme.warningText : model.lastError != nil ? Theme.dangerText : Theme.text2))
-                .frame(width: 6, height: 6)
-            Text(status).lineLimit(2)
+        Group {
+            if let problem {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Circle().fill(Color(problem.color)).frame(width: 6, height: 6)
+                        Text(problem.title).foregroundStyle(Color(Theme.text2)).lineLimit(1).truncationMode(.middle)
+                    }
+                    HStack(spacing: 8) {
+                        Text(problem.reason).lineLimit(1).padding(.leading, 14)
+                        Spacer(minLength: 0)
+                        KitButton(title: "Sync Now", size: .small) { model.core.syncNow() }
+                            .disabled(!model.syncing.isEmpty)
+                    }
+                }
+                .help(problem.full)
+            } else {
+                HStack(spacing: 8) {
+                    Circle().fill(Color(Theme.text2)).frame(width: 6, height: 6)
+                    Text(status).lineLimit(2)
+                }
+            }
         }
         .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
@@ -902,6 +927,20 @@ struct ReaderColumn: View {
                     Text("Archive, Trash, Unread, Star and VIP (!) act on all of them.")
                         .font(.system(size: 12))
                         .foregroundStyle(Color(Theme.text3))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let failure = model.openFailure {
+                VStack(spacing: 8) {
+                    Text("Jolta couldn't open this conversation").font(.system(size: Theme.title, weight: .medium)).foregroundStyle(Color(Theme.text2))
+                    Text(failure.message)
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(Color(Theme.dangerText))
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: 420)
+                    KitButton(title: "Retry") { model.open(threadID: failure.threadID) }
+                        .padding(.top, 6)
+                        .accessibilityIdentifier("reader-retry")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let thread = model.openThread {

@@ -126,6 +126,14 @@ final class AppModel {
     /// Each account's last sync failure, until that account syncs again.
     private(set) var syncErrors: [Int64: String] = [:]
     var openThread: ThreadView?
+    /// The conversation that couldn't be opened and why, shown in the
+    /// reader with Retry until another one opens.
+    private(set) var openFailure: OpenFailure?
+
+    struct OpenFailure: Equatable {
+        let threadID: Int64
+        let message: String
+    }
     /// The open conversation's holds line (C4 U10), and a count that
     /// changes whenever holds change, so the reader reads it again.
     var holdLine: HoldLine?
@@ -741,6 +749,7 @@ final class AppModel {
         markReadTask?.cancel()
         selectedThreadID = nil
         openThread = nil
+        openFailure = nil
     }
 
     /// Acts on a thread, or on the selection when none is named, and offers undo.
@@ -1189,6 +1198,7 @@ final class AppModel {
         selectedThreadID = nil
         selectedThreads = []
         openThread = nil
+        openFailure = nil
         showSummary(for: nil)
         cursorRow = nil
         cursor = (0, 0)
@@ -1203,6 +1213,7 @@ final class AppModel {
         }
         selectedThreadID = threadID
         selectedThreads = [threadID]
+        openFailure = nil
         showSummary(for: threadID)
         let opening = ContinuousClock.now
         markReadTask?.cancel()
@@ -1222,8 +1233,14 @@ final class AppModel {
                                        Double(ms.seconds) * 1000 + Double(ms.attoseconds) / 1e15, view.messageCount))
                 }
             } catch {
-                lastError = "\(error)"
                 Self.timing("open thread \(threadID) failed: \(error)")
+                // The conversation open before is not the one selected now, and
+                // one that didn't open wasn't read.
+                guard selectedThreadID == threadID else { return }
+                markReadTask?.cancel()
+                openThread = nil
+                showSummary(for: nil)
+                openFailure = OpenFailure(threadID: threadID, message: "\(error)")
             }
         }
     }
