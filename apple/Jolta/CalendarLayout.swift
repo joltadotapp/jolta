@@ -128,12 +128,27 @@ enum CalendarColor {
 
     private static var cache: [Key: NSColor] = [:]
     private static var shades: [CalendarSurface: NSColor] = [:]
+    private static var madeFor: ThemePair?
+
+    /// Drops the colors made for another theme. Each resolves from the
+    /// live theme when AppKit draws it, but SwiftUI compares a Color by its
+    /// NSColor object and would leave month pills, swatches and shaded
+    /// cells in the old theme; new objects make it draw again. Reading
+    /// `active` also makes the view body that asks run again on a change.
+    private static func followTheme() {
+        let theme = ThemeStore.shared.active
+        guard theme != madeFor else { return }
+        madeFor = theme
+        cache = [:]
+        shades = [:]
+    }
 
     /// Hours outside working hours and days off: the surface moved toward
     /// the text in 1% steps until the two differ by 1.06:1, which shows
     /// without competing with the events. Halfway to the sidebar's color,
     /// as it was, came to 1.02 to 1.04 and could not be seen.
     static func offHours(on surface: CalendarSurface = .bg) -> NSColor {
+        followTheme()
         if let c = shades[surface] { return c }
         let color = NSColor(name: nil) { appearance in
             let t = ThemeStore.tokens(appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light)
@@ -145,6 +160,7 @@ enum CalendarColor {
     }
 
     static func color(_ hex: String?, _ use: Use, on surface: CalendarSurface = .bg) -> NSColor {
+        followTheme()
         let key = Key(hex: hex, use: use, surface: surface)
         if let c = cache[key] { return c }
         let base = hex.flatMap { UInt32($0.trimmingCharacters(in: ["#"]), radix: 16) }
