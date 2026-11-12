@@ -6,7 +6,7 @@ import AppKit
 @MainActor
 enum Command: String, CaseIterable, Identifiable {
     case next, previous, open, search
-    case archive, trash, toggleRead, star, snooze, move, label, undo
+    case select, archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
     case toggleVIP, unsubscribe, summarize, saveAttachments, nextSection, help
     case accept, maybe, decline, propose, book
@@ -21,6 +21,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "k"
         case .open: "↩"
         case .search: "/"
+        case .select: "x"
         case .archive: "e"
         case .trash: "#"
         case .toggleRead: "u"
@@ -59,6 +60,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "Previous Conversation"
         case .open: "Open Conversation"
         case .search: "Search"
+        case .select: "Select or Deselect Conversation"
         case .archive: "Archive"
         case .trash: "Move to Trash"
         case .toggleRead: "Mark Read or Unread"
@@ -97,6 +99,7 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "arrow.up"
         case .open: "envelope.open"
         case .search: "magnifyingglass"
+        case .select: "checkmark.square"
         case .archive: "archivebox"
         case .trash: "trash"
         case .toggleRead: "envelope.badge"
@@ -132,7 +135,7 @@ enum Command: String, CaseIterable, Identifiable {
     /// Whether the command acts on the conversation under the cursor.
     var needsThread: Bool {
         switch self {
-        case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
+        case .select, .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
         case .accept, .maybe, .decline, .propose, .book: true
         default: false
         }
@@ -161,6 +164,7 @@ extension AppModel {
         case .next, .previous, .open, .nextSection:
             break
         case .search: requestSearchFocus()
+        case .select: togglePicked()
         case .archive: act(.archive, label: "Archived")
         case .trash: act(.trash, label: "Moved to Trash")
         case .toggleRead:

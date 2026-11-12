@@ -33,6 +33,7 @@ struct MessageList: NSViewRepresentable {
         table.action = #selector(Coordinator.clicked)
         table.doubleAction = #selector(Coordinator.openSelected)
         KeyRouter.shared.handler = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
+        model.togglePicked = { [weak coordinator = context.coordinator] in coordinator?.togglePick() }
         context.coordinator.table = table
 
         let scroll = NSScrollView()
@@ -72,6 +73,11 @@ struct MessageList: NSViewRepresentable {
         var lastRevision = -1
         var focusRequest = 0
         private var reportedLaunch = false
+        /// The conversation under the caret while X picks (`KeyTableView.pickCursor`),
+        /// to find its row again when the list changes.
+        private var pickThread: Int64?
+        /// X is changing the selection, so picking goes on.
+        private var changingPick = false
         private var count = 0
         private var pages: [Int: [ThreadRow]] = [:]
         private let pageSize = 100
@@ -97,6 +103,7 @@ struct MessageList: NSViewRepresentable {
             let rows = count
             DispatchQueue.main.async { [model] in if model.listCount != rows { model.listCount = rows } }
             if full {
+                setPick(nil)
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
                 // notification while calendar mode showed, keeps its row. A
@@ -133,8 +140,10 @@ struct MessageList: NSViewRepresentable {
                     (view as? ThreadRowView)?.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
                 }
             }
-            guard count > 0 else { return }
+            guard count > 0 else { return setPick(nil) }
             var kept = model.rows(of: model.selectedThreads)
+            // The caret follows its conversation while the picked ones are still there.
+            var caret = pickThread.flatMap { model.rows(of: [$0]).first }
             if kept.isEmpty {
                 guard userChanged else {
                     table.deselectAll(nil)
@@ -142,10 +151,14 @@ struct MessageList: NSViewRepresentable {
                     return
                 }
                 kept = [min(anchor, count - 1)]
+                caret = nil
             }
             if kept != table.selectedRowIndexes {
+                changingPick = true
                 table.selectRowIndexes(kept, byExtendingSelection: false)
+                changingPick = false
             }
+            setPick(caret)
             if resorted || previous != count, let first = kept.first { table.scrollRowToVisible(first) }
             // The same row can come back changed, say starred, without a selection change.
             if table.selectedRow >= 0, let r = row(at: table.selectedRow), r != model.cursorRow { model.cursorRow = r }
@@ -179,6 +192,8 @@ struct MessageList: NSViewRepresentable {
         /// The reader follows the cursor, so j and k read through the list.
         /// Shift-click and Command-click select several threads instead.
         func tableViewSelectionDidChange(_ notification: Notification) {
+            // A click, an arrow key or anything else that selects ends picking.
+            if !changingPick { setPick(nil) }
             guard let table, table.selectedRow >= 0, let r = row(at: table.selectedRow) else { return }
             table.enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
             model.cursor = (table.selectedRow, count)
@@ -237,9 +252,62 @@ struct MessageList: NSViewRepresentable {
 
         func move(_ delta: Int) {
             guard let table, count > 0 else { return }
+            if let caret = table.pickCursor {
+                let next = max(0, min(count - 1, caret + delta))
+                setPick(next)
+                return table.scrollRowToVisible(next)
+            }
             let next = max(0, min(count - 1, table.selectedRow + delta))
             table.selectRowIndexes([next], byExtendingSelection: false)
             table.scrollRowToVisible(next)
+        }
+
+        private func setPick(_ row: Int?) {
+            pickThread = row.flatMap { self.row(at: $0)?.threadId }
+            table?.pickCursor = row
+        }
+
+        /// X: adds the conversation under the caret to the selection, or
+        /// takes it off. From then on J and K move the caret and leave the
+        /// selection alone, until Esc or a key or click that selects.
+        func togglePick() {
+            guard let table else { return }
+            guard let caret = table.pickCursor else {
+                guard table.selectedRow >= 0 else { return }
+                setPick(table.selectedRow)
+                // The one selected row counts as picked. Among several, X takes the last one off.
+                if table.numberOfSelectedRows > 1 { togglePick() }
+                return
+            }
+            var rows = table.selectedRowIndexes
+            if rows.contains(caret) { rows.remove(caret) } else { rows.insert(caret) }
+            // With nothing picked any more, the caret's row is the cursor again.
+            guard !rows.isEmpty else { return setPick(nil) }
+            changingPick = true
+            table.selectRowIndexes(rows, byExtendingSelection: false)
+            changingPick = false
+        }
+
+        /// ⇧J and ⇧K: the table extends the selection itself, as it does for ⇧↓ and ⇧↑.
+        private func extend(_ delta: Int, like event: NSEvent) {
+            guard let table, count > 0 else { return }
+            takeKeyboard()
+            let arrow = String(UnicodeScalar(delta > 0 ? NSDownArrowFunctionKey : NSUpArrowFunctionKey).map(Character.init) ?? " ")
+            guard let key = NSEvent.keyEvent(with: .keyDown, location: event.locationInWindow, modifierFlags: [.shift, .numericPad, .function],
+                                             timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
+                                             characters: arrow, charactersIgnoringModifiers: arrow, isARepeat: event.isARepeat,
+                                             keyCode: delta > 0 ? 125 : 126) else { return }
+            table.keyDown(with: key)
+        }
+
+        /// Esc: a selection of several, or X's picking, goes back to the one
+        /// row under the caret. False when there was nothing to clear.
+        private func clearSelection() -> Bool {
+            guard let table, table.pickCursor != nil || table.numberOfSelectedRows > 1 else { return false }
+            let row = table.pickCursor ?? table.selectedRow
+            setPick(nil)
+            table.selectRowIndexes([row], byExtendingSelection: false)
+            return true
         }
 
         /// Keys typed in the main window, looked up in the keymap. `g` starts
@@ -284,12 +352,22 @@ struct MessageList: NSViewRepresentable {
                 // With nothing open yet, Return opens the top, as j does.
                 if (table?.selectedRow ?? 0) < 0 { move(1) } else { openSelected() }
                 return true
-            case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true
+            case 48:
+                // Without sections Tab moves the keyboard on, as anywhere in macOS.
+                guard model.showsSections else { return false }
+                model.nextSection(backwards: event.modifierFlags.contains(.shift))
+                return true
+            case 53: return clearSelection()
             default: break
             }
             // `characters` keeps what Shift and Option produce, so `#` and `?`
             // work on layouts that type them with Option (Belgian AZERTY).
             guard let typed = event.characters?.lowercased(), !typed.isEmpty else { return false }
+            if event.modifierFlags.contains(.shift), typed == "j" || typed == "k" {
+                prefix = nil
+                extend(typed == "j" ? 1 : -1, like: event)
+                return true
+            }
             if let started = prefixTime, started.timeIntervalSinceNow < -1.5 { prefix = nil }
             if prefix == nil, typed == "g" {
                 prefix = "g"
@@ -304,6 +382,7 @@ struct MessageList: NSViewRepresentable {
             case .next: move(1)
             case .previous: move(-1)
             case .open: openSelected()
+            case .select: togglePick()
             default: model.run(command)
             }
             return true
@@ -331,17 +410,26 @@ final class KeyTableView: NSTableView {
     /// The list is where typed keys go: it is the first responder of the
     /// key window. Only then does the cursor row show its caret and keys.
     private(set) var hasKeyboard = false {
-        didSet {
-            guard hasKeyboard != oldValue else { return }
-            enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
-        }
+        didSet { if hasKeyboard != oldValue { updateMarks() } }
+    }
+
+    /// The caret's row while X picks conversations one by one: J and K then
+    /// move the caret and leave the selection alone. Nil otherwise, when
+    /// the one selected row is the cursor.
+    var pickCursor: Int? {
+        didSet { if pickCursor != oldValue { updateMarks() } }
+    }
+
+    private func updateMarks() {
+        enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
     }
 
     /// One selected row is the keyboard cursor while the list has the
-    /// keyboard; several, or one without the keyboard, are a selection.
+    /// keyboard; several, one without the keyboard, or rows picked with X
+    /// are a selection.
     func mark(row: Int) -> ThreadCell.Mark {
         guard isRowSelected(row) else { return .none }
-        return numberOfSelectedRows == 1 && hasKeyboard ? .cursor : .selected
+        return pickCursor == nil && numberOfSelectedRows == 1 && hasKeyboard ? .cursor : .selected
     }
 
     /// The list has the keyboard as soon as it is in the window, not at
@@ -399,13 +487,18 @@ final class ThreadRowView: NSTableRowView {
         didSet { updateMark() }
     }
 
-    private var showsCursor: Bool {
-        guard let table = superview as? KeyTableView else { return false }
-        return isSelected && table.numberOfSelectedRows == 1 && table.hasKeyboard
+    private var table: KeyTableView? { superview as? KeyTableView }
+
+    /// The caret is on this row: the one selected row, or the row X acts on.
+    private var showsCaret: Bool {
+        guard let table, table.hasKeyboard else { return false }
+        if let caret = table.pickCursor { return table.row(for: self) == caret }
+        return isSelected && table.numberOfSelectedRows == 1
     }
 
     func updateMark() {
-        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = !isSelected ? .none : showsCursor ? .cursor : .selected
+        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = !isSelected ? .none
+            : showsCaret && table?.pickCursor == nil ? .cursor : .selected
         needsDisplay = true
     }
 
@@ -415,7 +508,10 @@ final class ThreadRowView: NSTableRowView {
     }
 
     override func drawBackground(in dirtyRect: NSRect) {
-        guard unread, !isSelected else { return }
+        guard !isSelected else { return }
+        // While X picks, the caret also stands on rows that aren't picked.
+        if showsCaret { return drawCaret() }
+        guard unread else { return }
         Theme.text.setFill()
         NSBezierPath(ovalIn: NSRect(x: 15, y: bounds.midY - 3, width: 6, height: 6)).fill()
     }
@@ -423,7 +519,10 @@ final class ThreadRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.fill.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
-        guard showsCursor else { return }
+        if showsCaret { drawCaret() }
+    }
+
+    private func drawCaret() {
         Theme.accent.setFill()
         let caret = NSBezierPath()
         let y = bounds.midY

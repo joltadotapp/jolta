@@ -156,6 +156,8 @@ final class AppModel {
     var listCount = -1
     /// Asks the message list to take keyboard focus (after search, for example).
     private(set) var focusListRequest = 0
+    /// X from the palette: the message list picks or drops the row under its caret.
+    @ObservationIgnored var togglePicked: () -> Void = {}
     /// The last action, shown briefly with its undo key.
     private(set) var toast: Toast?
     /// Each message opened in compose gets its own number, so the editor
