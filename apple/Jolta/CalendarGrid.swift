@@ -120,6 +120,14 @@ enum EventStyle {
         return e.isPast(now) ? 0.55 : 1
     }
 
+    /// The accent ring around the box the keyboard acts on, `gap` points out from it.
+    static func ring(_ r: CGRect, radius: CGFloat, gap: CGFloat = 1.5) {
+        Theme.accent.setStroke()
+        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -gap, dy: -gap), xRadius: radius + gap, yRadius: radius + gap)
+        ring.lineWidth = 2
+        ring.stroke()
+    }
+
     /// The colors of an event's title and of the lines under it.
     static func ink(_ e: CalEvent, now: Date) -> (title: NSColor, sub: NSColor) {
         if e.isDeclined || e.isCancelled { return (Theme.text3, Theme.text3) }
@@ -323,7 +331,9 @@ final class CalendarWeekView: NSView {
         }
         guard !days.isEmpty else { return }
         let today = days.firstIndex(where: \.isToday)
-        strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days), selectedID: selected, now: cal.now, revision: revision)
+        // One ring: the strip leaves it to a draft or an unsaved move in the hours.
+        strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days),
+                                        selectedID: draft == nil && pending == nil ? selected : nil, now: cal.now, revision: revision)
         hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), work: days.map(cal.workSpan), today: today,
                                                todayStart: today.map { days[$0].start }, selectedID: selected, now: cal.now,
                                                gutter: hours.canvas.gutter, revision: revision, draft: draft, pending: pending,
@@ -478,14 +488,15 @@ final class DayStrip: CanvasView {
             CTLineDraw(label, cg)
         }
         let moved = press?.moved(content.days.count)
+        var ringed: CGRect?
         for item in content.lanes where item.lane < Self.maxLanes {
             if moved != nil, press?.copy == false, item.id == moved?.id { continue }
             let e = item.event, r = box(item)
+            if e.id == content.selectedID { ringed = r }
             let alpha = EventStyle.alpha(e, now: content.now)
             let ink = EventStyle.ink(e, now: content.now)
             if let place = e.place {
                 drawPlace(place, item: item, alpha: alpha, ink: ink.sub, cg: cg)
-                ring(e, r)
                 continue
             }
             cg.saveGState()
@@ -515,19 +526,12 @@ final class DayStrip: CanvasView {
                 ink.title.setFill()
                 CGRect(x: r.minX + 7, y: r.midY, width: min(CTLineGetTypographicBounds(title, nil, nil, nil), width), height: 1).fill()
             }
-            ring(e, r)
         }
+        // After every event, so none drawn later covers it.
+        if let ringed { EventStyle.ring(ringed, radius: 5) }
         if let moved { drawMoved(moved, cg: cg) }
         Theme.line2.setFill()
         CGRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
-    }
-
-    private func ring(_ e: CalEvent, _ r: CGRect) {
-        guard e.id == content.selectedID else { return }
-        Theme.accent.setStroke()
-        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 6.5, yRadius: 6.5)
-        ring.lineWidth = 2
-        ring.stroke()
     }
 
     private static let placeFont = NSFont.systemFont(ofSize: 11, weight: .medium)
@@ -788,21 +792,36 @@ final class HourCanvas: CanvasView {
     private static let labelFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
     private static let nowFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
 
+    private enum Ring { case preview, draft, pending, selection }
+
     override func paint(_ cg: CGContext) {
         CalendarBench.shared?.mark("draw start")
         let paint = {
             cg.translateBy(x: 0, y: -self.frame.minY)
             let visible = self.frame
             self.drawGrid(visible, cg: cg)
-            let hidden = self.press?.hides
-            for p in self.content.placed where p.event.id != hidden {
+            let content = self.content, press = self.press
+            let hidden = press?.hides
+            var selected: [CGRect] = []
+            for p in content.placed where p.event.id != hidden {
                 let r = self.box(p)
                 guard r.intersects(visible) else { continue }
                 self.draw(p.event, in: r, cg: cg)
+                if p.event.id == content.selectedID { selected.append(r) }
             }
-            if let draft = self.content.draft, self.press?.hidesDraft != true { self.drawDraft(draft, cg: cg) }
-            if let pending = self.content.pending { self.drawDraft(pending, cg: cg) }
-            if let press = self.press, !press.refused, let preview = press.preview { self.drawDraft(preview, cg: cg) }
+            // One accent ring, on what the keyboard acts on: the block being
+            // dragged when it is the editor's draft or the selected event,
+            // else the editor's draft, else an event moved and not saved yet,
+            // else the selection. It is drawn after every event, so a
+            // neighbour drawn later can't cover it.
+            let ring: Ring = if press?.hidesDraft == true || (hidden != nil && hidden == content.selectedID) { .preview }
+                else if content.draft != nil { .draft }
+                else if content.pending != nil { .pending }
+                else { .selection }
+            if ring == .selection { for r in selected { EventStyle.ring(r, radius: 6) } }
+            if let draft = content.draft, press?.hidesDraft != true { self.drawDraft(draft, ringed: ring == .draft, cg: cg) }
+            if let pending = content.pending { self.drawDraft(pending, ringed: ring == .pending, cg: cg) }
+            if let press, !press.refused, let preview = press.preview { self.drawDraft(preview, ringed: ring == .preview, cg: cg) }
             self.drawNow(cg: cg)
         }
         if let bench = CalendarBench.shared { bench.time("draw (hour grid)", paint) } else { paint() }
@@ -910,23 +929,17 @@ final class HourCanvas: CanvasView {
         }
         cg.restoreGState()
         EventStyle.drawText(e, in: r, now: content.now, cg: cg)
-        if e.id == content.selectedID {
-            Theme.accent.setStroke()
-            let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 7.5, yRadius: 7.5)
-            ring.lineWidth = 2
-            ring.stroke()
-        }
     }
 
-    /// The editor's draft: dashed in its calendar's color, ringed with the
-    /// accent, with its title and times.
     private func rect(_ d: DraftBlock) -> CGRect {
         let hh = CalendarLayout.hourHeight
         return CGRect(x: content.gutter + CGFloat(d.day) * columnWidth + 3, y: d.top / 60 * hh + 1,
                       width: max(columnWidth - 7, 4), height: max(16, (d.bottom - d.top) / 60 * hh - 2))
     }
 
-    private func drawDraft(_ d: DraftBlock, cg: CGContext) {
+    /// A block that isn't saved yet: dashed in its calendar's color, with
+    /// its title and times, and the accent ring when `ringed`.
+    private func drawDraft(_ d: DraftBlock, ringed: Bool, cg: CGContext) {
         let r = rect(d)
         let bar = CalendarColor.color(d.color, .bar, on: content.surface)
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
@@ -939,10 +952,7 @@ final class HourCanvas: CanvasView {
         edge.setLineDash([4, 3], count: 2, phase: 0)
         bar.withAlphaComponent(0.85).setStroke()
         edge.stroke()
-        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -3, dy: -3), xRadius: 8.5, yRadius: 8.5)
-        ring.lineWidth = 2
-        Theme.accent.setStroke()
-        ring.stroke()
+        if ringed { EventStyle.ring(r, radius: 5.5, gap: 3) }
         cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         let width = r.width - 12
         guard width > 14 else { return }
