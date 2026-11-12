@@ -774,7 +774,7 @@ struct EventEditorPanel: View {
                     HStack {
                         Text("\(editor.videoLabel(video)) · link made on save").foregroundStyle(Color(Theme.text2))
                         Spacer()
-                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color(Theme.text3))
                             .help("Remove the video call")
@@ -789,7 +789,7 @@ struct EventEditorPanel: View {
                         Text(Self.shortLink(link)).foregroundStyle(Color(Theme.text2)).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         if !editor.locked(.video) {
-                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color(Theme.text3))
                                 .help("Remove the Zoom link")
@@ -859,7 +859,7 @@ struct EventEditorPanel: View {
                     .help(editor.draft.room.isEmpty ? "↓ lists the rooms" : editor.draft.room)
                     .accessibilityIdentifier("editor-room")
                 if !editor.draft.room.isEmpty {
-                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill") }
+                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
                         .help("Remove the room")

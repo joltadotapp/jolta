@@ -121,11 +121,13 @@ struct CalEvent: Identifiable, Equatable {
         }
     }
 
-    /// What VoiceOver reads: "Standup, 9:30 to 9:45, Teams meeting, accepted".
+    /// What VoiceOver reads: "Standup, 9:30 to 9:45, Monday, Teams meeting, accepted".
     var accessibilityLabel: String {
         var parts = [title]
         if let start, let end {
             parts.append("\(CalendarModel.spoken(start)) to \(CalendarModel.spoken(end))")
+            // After the times, which journeys match as the label's start.
+            parts.append(CalendarModel.spokenWeekday(start))
         } else {
             let (first, last) = dayKeys
             parts.append(first == last ? "all day" : "all day, \(CalendarModel.spokenDay(first)) to \(CalendarModel.spokenDay(last))")
@@ -1209,6 +1211,16 @@ final class CalendarModel {
 
     static func spoken(_ date: Date) -> String {
         spokenTime.string(from: date)
+    }
+
+    private static let spokenWeekdayFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE"
+        return f
+    }()
+
+    static func spokenWeekday(_ date: Date) -> String {
+        spokenWeekdayFormat.string(from: date)
     }
 
     static func spokenDay(_ key: String) -> String {

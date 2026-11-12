@@ -57,9 +57,7 @@ struct EventDetailCard: View {
                     .textSelection(.enabled)
                     .accessibilityIdentifier("event-detail-title")
                 Spacer(minLength: 8)
-                Button { cal.closeDetail() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color(Theme.text3))
+                KitButton(title: "Close", icon: "xmark", kind: .quiet, size: .small, showsTitle: false) { cal.closeDetail() }
                     .help("Close (Esc)")
             }
             Text(when).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).padding(.top, 2)

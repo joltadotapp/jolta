@@ -465,16 +465,13 @@ struct MiniMonth: View {
             HStack {
                 Text(Self.title.string(from: cal.miniMonth)).fontWeight(.semibold)
                 Spacer()
-                HStack(spacing: 2) {
-                    Button { cal.moveMiniMonth(-1) } label: { Image(systemName: "chevron.left") }
-                    Button { cal.moveMiniMonth(1) } label: { Image(systemName: "chevron.right") }
+                HStack(spacing: 0) {
+                    KitButton(title: "Previous Month", icon: "chevron.left", kind: .quiet, size: .small, showsTitle: false) { cal.moveMiniMonth(-1) }
+                    KitButton(title: "Next Month", icon: "chevron.right", kind: .quiet, size: .small, showsTitle: false) { cal.moveMiniMonth(1) }
                 }
-                .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color(Theme.text3))
             }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            .padding(.leading, 8)
+            .padding(.bottom, 4)
             HStack(spacing: 0) {
                 ForEach(0..<7, id: \.self) { i in
                     Text(symbols[(first + i) % 7]).font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).frame(width: Self.cell.width)
@@ -519,6 +516,7 @@ struct MiniDay: View, Equatable {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(CalendarModel.spokenDay(day.key) + (today ? ", today" : "") + (busy ? ", has events" : ""))
     }
 }
 

@@ -355,11 +355,15 @@ struct FindTimePanel: View {
                 .padding(.trailing, 4)
             }
             HStack(spacing: 2) {
-                Button { length(-1) } label: { Image(systemName: "minus").frame(width: 22, height: Theme.controlSmall) }
+                Button { length(-1) } label: { Image(systemName: "minus").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .help("Shorter (−)")
+                    .accessibilityLabel("Shorter")
                 Text(lengthText(minutes))
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                     .frame(minWidth: 64)
-                Button { length(1) } label: { Image(systemName: "plus").frame(width: 22, height: Theme.controlSmall) }
+                Button { length(1) } label: { Image(systemName: "plus").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .help("Longer (+)")
+                    .accessibilityLabel("Longer")
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color(Theme.text2))
@@ -444,9 +448,12 @@ struct FindTimePanel: View {
                                 Spacer(minLength: 0)
                                 Button { rooms.removeAll { $0.address == person.address } } label: {
                                     Image(systemName: "xmark").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Color(Theme.text3))
+                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall)
+                                        .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .help("Remove this room")
+                                .accessibilityLabel("Remove \(person.name)")
                                 .accessibilityIdentifier("find-time-remove-room")
                             }
                         }
