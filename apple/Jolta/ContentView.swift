@@ -473,7 +473,8 @@ struct SyncFooter: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(Color(model.lastError == nil && model.syncErrors.isEmpty ? Theme.text2 : Theme.accent)).frame(width: 6, height: 6)
+            Circle().fill(Color(!model.syncErrors.isEmpty ? Theme.warningText : model.lastError != nil ? Theme.dangerText : Theme.text2))
+                .frame(width: 6, height: 6)
             Text(status).lineLimit(2)
         }
         .font(.system(size: Theme.small))
@@ -746,7 +747,7 @@ struct ToastView: View {
             .help(toast.text(at: .now))
             if toast.undo != nil {
                 Button(action: undo) {
-                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z", focused: true) }
+                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z") }
                 }
                 .buttonStyle(.plain)
             }
@@ -778,7 +779,7 @@ struct KeyFooter: View {
             hint(["R"], "reply")
             hint(["Z"], "undo")
             Spacer()
-            HStack(spacing: 5) { KeyCap(key: "⌘K", focused: true); Text("commands") }.fixedSize()
+            HStack(spacing: 5) { KeyCap(key: "⌘K"); Text("commands") }.fixedSize()
         }
         .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))

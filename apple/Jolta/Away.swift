@@ -10,7 +10,7 @@ struct AwayStrip: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 2).fill(Color(Theme.accent)).frame(width: 8, height: 8)
+            RoundedRectangle(cornerRadius: 2).fill(Color(Theme.text2)).frame(width: 8, height: 8)
             // A narrow list drops the end before the account, then shortens.
             ViewThatFits(in: .horizontal) {
                 sentence(until: true).fixedSize()
