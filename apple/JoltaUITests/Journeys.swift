@@ -1208,6 +1208,12 @@ final class Journeys: XCTestCase {
         app.typeKey(.downArrow, modifierFlags: [])
         if calendar.title == first { app.typeKey(.upArrow, modifierFlags: []) }
         XCTAssertTrue(waitUntil { calendar.title != first }, "⇧⌘C and an arrow key pick another calendar: \(calendar.title)")
+        let showAs = app.descendants(matching: .any).matching(identifier: "editor-show-as").firstMatch
+        let shown = showAs.title
+        app.typeKey(.tab, modifierFlags: [])
+        app.typeKey(.downArrow, modifierFlags: [])
+        if showAs.title == shown { app.typeKey(.upArrow, modifierFlags: []) }
+        XCTAssertTrue(waitUntil { showAs.title != shown }, "⇥ goes on to Show as, where an arrow key picks another: \(showAs.title)")
         app.typeKey(.escape, modifierFlags: [])
         let discard = app.buttons["Discard"]
         XCTAssertTrue(discard.waitForExistence(timeout: 5), "Esc asks before dropping a new event whose calendar was changed")
