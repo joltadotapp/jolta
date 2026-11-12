@@ -228,40 +228,20 @@ struct Sidebar: View {
                     if !model.scheduled.isEmpty {
                         GroupLabel("Scheduled")
                         ForEach(model.scheduled, id: \.token) { s in
-                            Button { model.editScheduled(s) } label: {
-                                HStack(spacing: 10) {
-                                    Text(Self.wake(s.sendAt))
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(Color(Theme.text3))
-                                        .frame(width: 74, alignment: .leading)
-                                    Text(s.subject.isEmpty ? "(no subject)" : s.subject).lineLimit(1).foregroundStyle(Color(Theme.text2))
-                                }
-                                .font(.system(size: 12))
-                                .padding(.horizontal, 10)
-                                .frame(height: 24)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .help("Jolta sends it then if it's running, otherwise as soon as it opens. Click to edit it.")
+                            NavRow(icon: nil, title: s.subject.isEmpty ? "(no subject)" : s.subject, count: 0, selected: false,
+                                   time: Self.wake(s.sendAt)) { model.editScheduled(s) }
+                                .help("Jolta sends it then if it's running, otherwise as soon as it opens. Click to edit it.")
                         }
                     }
                     if !model.snoozed.isEmpty {
                         GroupLabel("Next to wake")
                         ForEach(model.snoozed.prefix(5), id: \.threadId) { s in
-                            Button { model.source = .role("snoozed"); model.open(threadID: s.threadId) } label: {
-                                HStack(spacing: 10) {
-                                    Text(Self.wake(s.wakeAt))
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(Color(Theme.text3))
-                                        .frame(width: 74, alignment: .leading)
-                                    Text(s.subject).lineLimit(1).foregroundStyle(Color(Theme.text2))
-                                }
-                                .font(.system(size: 12))
-                                .padding(.horizontal, 10)
-                                .frame(height: 24)
-                                .contentShape(Rectangle())
+                            NavRow(icon: nil, title: s.subject, count: 0,
+                                   selected: model.source == .role("snoozed") && model.selectedThreadID == s.threadId,
+                                   time: Self.wake(s.wakeAt)) {
+                                model.source = .role("snoozed")
+                                model.open(threadID: s.threadId)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     if !model.accounts.isEmpty {
@@ -406,12 +386,20 @@ struct NavRow: View {
     /// The keyboard is on the selected row, which then shows the caret.
     var marked = false
     var indent: CGFloat = 0
+    /// When a scheduled or snoozed row is due, in place of an icon.
+    var time: String?
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
+                if let time {
+                    Text(time)
+                        .font(.system(size: Theme.caption, design: .monospaced))
+                        .foregroundStyle(Color(Theme.text3))
+                        .frame(width: 74, alignment: .leading)
+                }
                 if let icon {
                     Image(systemName: icon)
                         .font(.system(size: 13))
@@ -616,30 +604,49 @@ struct SectionBar: View {
     }
 
     private func tabs(_ tabs: [SectionInfo?]) -> some View {
-            ForEach(tabs, id: \.?.id) { c in
-                let selected = model.section?.id == c?.id
-                Button { model.section = c } label: {
-                    HStack(spacing: 5) {
-                        Text(c?.name ?? "Everything")
-                            .lineLimit(1)
-                            .fontWeight(selected ? .medium : .regular)
-                            .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
-                        let n = model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " "))
-                        if n > 0 {
-                            Text("\(n)").font(.system(size: Theme.small).monospacedDigit()).foregroundStyle(Color(Theme.text3))
-                        }
-                    }
-                    .padding(.top, 6)
-                    .padding(.bottom, 8)
-                    .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color(selected ? Theme.text2 : .clear)).frame(height: 1.5)
-                    }
-                    // The whole tab is the target, not just the letters.
-                    .padding(.horizontal, 9)
-                    .contentShape(Rectangle())
+        ForEach(tabs, id: \.?.id) { c in
+            SectionTab(name: c?.name ?? "Everything", unread: model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " ")),
+                       selected: model.section?.id == c?.id) { model.section = c }
+        }
+    }
+}
+
+private struct SectionTab: View {
+    let name: String
+    let unread: Int
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(name)
+                    .lineLimit(1)
+                    .fontWeight(selected ? .medium : .regular)
+                    .foregroundStyle(Color(selected ? Theme.text : hovering ? Theme.text2 : Theme.text3))
+                if unread > 0 {
+                    Text("\(unread)").font(.system(size: Theme.small).monospacedDigit()).foregroundStyle(Color(Theme.text3))
                 }
-                .buttonStyle(.plain)
             }
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Color(selected ? Theme.text2 : .clear)).frame(height: 1.5)
+            }
+            // The whole tab is the target, not just the letters.
+            .padding(.horizontal, 9)
+            .background {
+                // Clear of the line that marks the selected tab.
+                RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Color(hovering && !selected ? Theme.hover : .clear))
+                    .padding(.horizontal, 2)
+                    .padding(.top, 2)
+                    .padding(.bottom, 5)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -679,6 +686,7 @@ struct EmptyList: View {
 /// Date, sender or subject; choosing the current key again flips its direction.
 struct SortMenu: View {
     @Bindable var model: AppModel
+    @State private var hovering = false
 
     var body: some View {
         let sort = model.sort
@@ -707,6 +715,12 @@ struct SortMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
+        // The tint reaches 6 points past the words without moving them.
+        .padding(.horizontal, 6)
+        .frame(height: Theme.controlSmall)
+        .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Color(hovering ? Theme.hover : .clear)))
+        .onHover { hovering = $0 }
+        .padding(.horizontal, -6)
         .help("Sort conversations")
     }
 

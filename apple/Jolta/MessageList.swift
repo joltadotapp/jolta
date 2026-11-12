@@ -187,6 +187,7 @@ struct MessageList: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let view = (tableView.makeView(withIdentifier: ThreadRowView.id, owner: nil) as? ThreadRowView) ?? ThreadRowView()
             view.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
+            view.hovering = row == (tableView as? KeyTableView)?.hoverRow
             return view
         }
 
@@ -425,6 +426,45 @@ final class KeyTableView: NSTableView {
         enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
     }
 
+    /// The row under the pointer, -1 for none. Kept here, not by each row:
+    /// a row that scrolls from under a still pointer gets no mouse-exited.
+    private(set) var hoverRow = -1 {
+        didSet {
+            guard hoverRow != oldValue else { return }
+            for row in [oldValue, hoverRow] where row >= 0 {
+                (rowView(atRow: row, makeIfNecessary: false) as? ThreadRowView)?.hovering = row == hoverRow
+            }
+        }
+    }
+    private var hoverArea: NSTrackingArea?
+    private var scrollObserver: NSObjectProtocol?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hover(at: event.locationInWindow) }
+    override func mouseMoved(with event: NSEvent) { hover(at: event.locationInWindow) }
+    override func mouseExited(with event: NSEvent) { hoverRow = -1 }
+
+    /// A tracking area also reports the pointer over what lies on top of
+    /// the list (the palette, a toast), so the row must be what it hits.
+    private func hover(at point: NSPoint) {
+        let here = convert(point, from: nil)
+        let onList = visibleRect.contains(here) && window?.contentView?.hitTest(point)?.isDescendant(of: self) == true
+        hoverRow = onList ? row(at: here) : -1
+    }
+
+    /// Rows moved under the pointer: scrolling sends no mouse-moved.
+    private func hoverAfterScroll() {
+        guard let window, window.isKeyWindow else { return }
+        hover(at: window.mouseLocationOutsideOfEventStream)
+    }
+
     /// One selected row is the keyboard cursor while the list has the
     /// keyboard; several, one without the keyboard, or rows picked with X
     /// are a selection.
@@ -439,7 +479,15 @@ final class KeyTableView: NSTableView {
         super.viewDidMoveToWindow()
         keyObservers.forEach(NotificationCenter.default.removeObserver)
         keyObservers = []
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        scrollObserver = nil
         guard let window else { return hasKeyboard = false }
+        if let clip = enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.hoverAfterScroll() }
+            }
+        }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.keyboardChanged() }
@@ -468,6 +516,7 @@ final class KeyTableView: NSTableView {
 
     private func keyboardChanged() {
         hasKeyboard = isFirstResponder && window?.isKeyWindow == true
+        if window?.isKeyWindow != true { hoverRow = -1 }
     }
 }
 
@@ -476,6 +525,7 @@ final class KeyTableView: NSTableView {
 final class ThreadRowView: NSTableRowView {
     static let id = NSUserInterfaceItemIdentifier("ThreadRowView")
     var unread = false { didSet { needsDisplay = true } }
+    var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
 
     init() {
         super.init(frame: .zero)
@@ -510,6 +560,10 @@ final class ThreadRowView: NSTableRowView {
 
     override func drawBackground(in dirtyRect: NSRect) {
         guard !isSelected else { return }
+        if hovering {
+            Theme.hover.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: Theme.radiusRow, yRadius: Theme.radiusRow).fill()
+        }
         // While X picks, the caret also stands on rows that aren't picked.
         if showsCaret { return drawCaret() }
         guard unread else { return }
@@ -519,7 +573,7 @@ final class ThreadRowView: NSTableRowView {
 
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.fill.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: Theme.radiusRow, yRadius: Theme.radiusRow).fill()
         if showsCaret { drawCaret() }
     }
 
