@@ -15,6 +15,8 @@ enum PaletteMode: Equatable {
     case label
     /// A theme to show, previewed as the selection moves.
     case themes
+    /// The kind of account to add.
+    case accounts
     /// Q and New event: a line read into an event (`QuickCreateView`).
     case quickEvent
     /// G: a typed day to show in the calendar (`QuickCreateView`).
@@ -60,6 +62,7 @@ struct PaletteView: View {
         case .move: "Move to folder"
         case .label: "Add or remove a label"
         case .themes: "Choose a theme"
+        case .accounts: "Add an account"
         case .quickEvent, .goToDate: ""
         }
     }
@@ -72,6 +75,7 @@ struct PaletteView: View {
         case .snippets: "text.badge.plus"
         case .themes: "paintpalette"
         case .label: "tag"
+        case .accounts: "person.crop.circle.badge.plus"
         case .commands, .move, .quickEvent, .goToDate: "magnifyingglass"
         }
     }
@@ -85,6 +89,7 @@ struct PaletteView: View {
         case .label: all = labelItems
         case .snippets: all = snippetItems
         case .themes: all = themeItems
+        case .accounts: all = accountItems
         case .quickEvent, .goToDate: return []
         }
         // "frappe" finds Catppuccin Frappé, "geneve" a folder called Genève.
@@ -173,6 +178,10 @@ struct PaletteView: View {
                                icon: "airplane") { [model] in model.openAwaySheet() })
         out.append(PaletteItem(id: "focus-time", title: "Focus Time…", detail: "Block time to work, from the next free 2 hours",
                                icon: "moon") { [model] in model.openFocusSheet() })
+        out.append(PaletteItem(id: "add-account", title: "Add Account…", icon: "person.crop.circle.badge.plus", keepsOpen: true) { [model] in
+            model.palette = .accounts
+        })
+        out.append(PaletteItem(id: "settings", title: "Settings…", icon: "gearshape", keys: "⌘,") { [model] in model.openSettings(.general) })
         out.append(PaletteItem(id: "calendar-settings", title: "Calendar Settings…", icon: "gearshape") { [model] in model.openSettings(.calendar) })
         out.append(PaletteItem(id: "sync", title: "Sync Now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
@@ -196,6 +205,20 @@ struct PaletteView: View {
             store.update { $0.matchMacOS() }
             model.notify("Matching macOS again, with \(store.choice.light.name) in light mode and \(store.choice.dark.name) in dark mode.")
         }
+    }
+
+    /// Google, Microsoft 365, or iCloud and IMAP: the welcome screen's choices.
+    private var accountItems: [PaletteItem] {
+        var out: [PaletteItem] = []
+        if text.isEmpty {
+            out.append(PaletteItem(id: "back", title: "Back to Commands", icon: "chevron.left", keepsOpen: true) { [model] in
+                model.palette = .commands
+            })
+        }
+        for kind in NewAccount.allCases {
+            out.append(PaletteItem(id: "account-\(kind)", title: "\(kind.name) Account…", icon: kind.icon) { [model] in model.addAccount(kind) })
+        }
+        return out
     }
 
     /// Graphite, then Omarchy's themes by name. Choosing one shows it at
@@ -324,7 +347,7 @@ struct PaletteView: View {
                     .onKeyPress(.upArrow) { selected = max(selected - 1, 0); return .handled }
                     // The Mac's ⌫ sends U+007F, which `.delete` (U+0008) doesn't match.
                     .onKeyPress(keys: [.delete, KeyEquivalent("\u{7F}")]) { _ in
-                        guard mode == .themes, text.isEmpty else { return .ignored }
+                        guard mode == .themes || mode == .accounts, text.isEmpty else { return .ignored }
                         model.palette = .commands
                         return .handled
                     }

@@ -23,7 +23,6 @@ struct SettingsView: View {
     /// The search match Return opens.
     @State private var marked = 0
     @State private var addingIMAP = false
-    @State private var signingIn = false
     @State private var status: String?
 
     private struct Item {
@@ -237,6 +236,8 @@ struct SettingsView: View {
                     .foregroundStyle(Color(Theme.text3))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(14)
+            } else if let model, model.signIn != nil {
+                SignInStatusRow(model: model).padding(14)
             }
         }
     }
@@ -252,10 +253,11 @@ struct SettingsView: View {
     }
 
     private var addAccount: some View {
-        Menu {
-            Button("Google Account…") { signIn(.google) }
-            Button("Microsoft 365 Account…") { signIn(.microsoft) }
-            Button("iCloud or IMAP Account…") { addingIMAP = true }
+        let signingIn = model?.signIn == .waiting
+        return Menu {
+            ForEach(NewAccount.allCases) { kind in
+                Button("\(kind.name) Account…") { add(kind) }
+            }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: signingIn ? "hourglass" : "plus").font(.system(size: 13)).frame(width: 16)
@@ -271,22 +273,14 @@ struct SettingsView: View {
         .frame(height: 28)
     }
 
-    private func signIn(_ provider: OAuthProvider) {
-        guard let core = model?.core else { return }
-        signingIn = true
-        status = "Continue in your browser…"
-        Task {
-            do {
-                let session = try await core.beginSignIn(provider: provider)
-                if let url = URL(string: session.url()) { NSWorkspace.shared.open(url) }
-                let account = try await session.finish()
-                status = "Signed in as \(account.address)."
-                model?.reloadAccounts()
-                show(.account(account.id))
-            } catch {
-                status = "Sign-in failed: \(error)"
-            }
-            signingIn = false
+    /// The same sign-in as the welcome screen's; here the new account's
+    /// page opens, and the IMAP sheet lies over this window.
+    private func add(_ kind: NewAccount) {
+        status = nil
+        switch kind {
+        case .google: model?.signIn(.google) { show(.account($0.id)) }
+        case .microsoft: model?.signIn(.microsoft) { show(.account($0.id)) }
+        case .imap: addingIMAP = true
         }
     }
 }

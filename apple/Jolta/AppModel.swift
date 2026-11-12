@@ -67,6 +67,20 @@ final class AppModel {
     var showsCalendarIntro = false
     @ObservationIgnored var reminderTask: Task<Void, Never>?
     private(set) var accounts: [AccountSection] = []
+    /// The accounts were read once, so none means none, not "not yet".
+    private(set) var accountsLoaded = false
+    /// No account yet: the main window shows the welcome screen.
+    var needsAccount: Bool { accountsLoaded && accounts.isEmpty }
+    /// The browser sign-in for a new account: waiting for the browser, or
+    /// why the last one failed, until the next attempt.
+    var signIn: SignInProgress?
+    /// The iCloud or IMAP sheet over the main window.
+    var addingIMAP = false
+
+    enum SignInProgress: Equatable {
+        case waiting
+        case failed(String)
+    }
     /// Accounts whose automatic replies are on now, for the strip over the list.
     private(set) var away: [AwayInfo] = []
     private(set) var turningOffAway: Set<Int64> = []
@@ -450,6 +464,7 @@ final class AppModel {
 
     private func apply(accounts: [AccountSection], sections: [SectionInfo], snoozed: [SnoozeInfo]) {
         self.accounts = accounts
+        accountsLoaded = true
         self.sections = sections
         self.snoozed = snoozed
         if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }

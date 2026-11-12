@@ -29,6 +29,12 @@ struct ContentView: View {
         .sheet(item: Binding(get: { model.focusSheet }, set: { model.focusSheet = $0 })) { _ in
             FocusSheet(model: model) { model.focusSheet = nil }
         }
+        .sheet(isPresented: Binding(get: { model.addingIMAP }, set: { model.addingIMAP = $0 })) {
+            AddIMAPAccount(model: model) { added in
+                model.addingIMAP = false
+                if let added { model.notify("Added \(added.address). Jolta is syncing it now.") }
+            }
+        }
         .overlay(alignment: .trailing) {
             // Over the list and reader; the list stays underneath for the keys.
             if model.isInboxZero, model.mode == .mail {
@@ -160,20 +166,24 @@ extension ContentView {
                 .frame(width: Theme.sidebarWidth)
                 .background(Color(Theme.side))
                 .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
-            // The chosen width, sized before the reader (which keeps its 480 pt
-            // minimum): a narrow window takes width from the list first.
-            ListColumn(model: model)
-                .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
-                .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
-                .layoutPriority(1)
-                .zIndex(1)
-            ReaderColumn(model: model)
-                .frame(minWidth: model.showsDayPanel ? 360 : 480, maxWidth: .infinity)
-                .background(Color(Theme.reader))
-            if model.showsDayPanel {
-                DayPanel(model: model)
-                    .frame(width: 300)
-                    .transition(.move(edge: .trailing))
+            if model.needsAccount {
+                Welcome(model: model)
+            } else {
+                // The chosen width, sized before the reader (which keeps its 480 pt
+                // minimum): a narrow window takes width from the list first.
+                ListColumn(model: model)
+                    .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
+                    .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
+                    .layoutPriority(1)
+                    .zIndex(1)
+                ReaderColumn(model: model)
+                    .frame(minWidth: model.showsDayPanel ? 360 : 480, maxWidth: .infinity)
+                    .background(Color(Theme.reader))
+                if model.showsDayPanel {
+                    DayPanel(model: model)
+                        .frame(width: 300)
+                        .transition(.move(edge: .trailing))
+                }
             }
         }
         .animation(Theme.settle, value: model.showsDayPanel)
