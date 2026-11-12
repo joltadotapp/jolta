@@ -272,7 +272,8 @@ private struct KitButtonStyle: ButtonStyle {
 
 extension View {
     /// The box around a text field or a value that opens a picker: a
-    /// hairline that turns to the accent while the keyboard is in it.
+    /// hairline that turns to the accent while the keyboard is in it. The
+    /// field's caret is the accent too.
     func fieldBox(focused: Bool = false, width: CGFloat? = nil, height: CGFloat? = Theme.control, chevrons: Bool = false,
                   fill: NSColor = Theme.raise) -> some View {
         padding(.horizontal, 8)
@@ -285,6 +286,7 @@ extension View {
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color(Theme.text3)).padding(.trailing, 7).allowsHitTesting(false)
                 }
             }
+            .tint(Color(Theme.accent))
     }
 }
 

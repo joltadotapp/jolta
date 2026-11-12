@@ -19,6 +19,12 @@ enum Theme {
     static var fill: NSColor { ThemeStore.shared.color(\.text, alpha: \ThemeTokens.fillAlpha) }
     static var hover: NSColor { ThemeStore.shared.color(\.text, alpha: \ThemeTokens.hoverAlpha) }
     static var accent: NSColor { ThemeStore.shared.color(\.accent) }
+    /// Behind selected text in an editor: the accent at 30%, read from the
+    /// theme each time it draws.
+    static let selection = NSColor(name: nil) { appearance in
+        let mode: ThemeMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        return NSColor(hex: ThemeStore.tokens(mode).accent, alpha: 0.3)
+    }
     static var star: NSColor { ThemeStore.shared.color(\.star) }
     static var accentText: NSColor { ThemeStore.shared.color(\.accentText) }
     static var kbd: NSColor { ThemeStore.shared.color(\.kbd) }
