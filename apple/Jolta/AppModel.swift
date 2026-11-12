@@ -74,6 +74,10 @@ final class AppModel {
     /// The browser sign-in for a new account: waiting for the browser, or
     /// why the last one failed, until the next attempt.
     var signIn: SignInProgress?
+    /// The sign-in `signIn` waits on, for Cancel. Each attempt has a number,
+    /// so one that was cancelled or replaced reports nothing when it ends.
+    @ObservationIgnored var signInSession: SignIn?
+    @ObservationIgnored var signInAttempt = 0
     /// The iCloud or IMAP sheet over the main window.
     var addingIMAP = false
 

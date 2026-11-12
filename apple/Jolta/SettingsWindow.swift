@@ -200,7 +200,12 @@ struct SettingsView: View {
                         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                             if let title = group.title { GroupLabel(title) } else { Spacer().frame(height: 10) }
                             ForEach(group.items, id: \.page) { row($0) }
-                            if group.title == "Accounts" { addAccount }
+                            if group.title == "Accounts" {
+                                addAccount
+                                if let model, model.signIn != nil {
+                                    SignInStatusRow(model: model).padding(.horizontal, 10).padding(.vertical, 4)
+                                }
+                            }
                         }
                     } else {
                         Spacer().frame(height: 8)
@@ -236,8 +241,6 @@ struct SettingsView: View {
                     .foregroundStyle(Color(Theme.text3))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(14)
-            } else if let model, model.signIn != nil {
-                SignInStatusRow(model: model).padding(14)
             }
         }
     }

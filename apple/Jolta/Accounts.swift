@@ -56,6 +56,8 @@ struct AccountPage: View {
     @State private var message: (text: String, failed: Bool)?
     @State private var removal: Confirmation?
     @State private var signingIn = false
+    /// Why the account's settings couldn't be read.
+    @State private var loadFailure: String?
 
     private var isIMAP: Bool { section.account.kind == "imap" }
     private var changed: Bool { draft != saved || !password.isEmpty || !smtpPassword.isEmpty }
@@ -66,6 +68,18 @@ struct AccountPage: View {
     var body: some View {
         if draft != nil {
             page
+        } else if let loadFailure {
+            VStack(spacing: 8) {
+                Text("Jolta couldn't read this account's settings").font(.system(size: Theme.body, weight: .medium))
+                Text(loadFailure)
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(Color(Theme.dangerText))
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 420)
+                KitButton(title: "Retry", action: load).padding(.top, 6)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity).onAppear(perform: load)
         }
@@ -217,8 +231,9 @@ struct AccountPage: View {
             let settings = try model.core.accountSettings(accountId: section.id)
             saved = settings
             draft = settings
+            loadFailure = nil
         } catch {
-            message = ("\(error)", true)
+            loadFailure = "\(error)"
         }
     }
 

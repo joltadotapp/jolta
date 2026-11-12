@@ -44,22 +44,39 @@ extension AppModel {
     func signIn(_ provider: OAuthProvider, added: @escaping (AccountInfo) -> Void = { _ in }) {
         guard signIn != .waiting else { return }
         signIn = .waiting
+        signInAttempt += 1
+        let attempt = signInAttempt
         if !needsAccount { notify("Continue in your browser…") }
         Task {
             do {
                 let session = try await core.beginSignIn(provider: provider)
+                // Cancelled while the core set the sign-in up.
+                guard attempt == signInAttempt, signIn == .waiting else { return session.cancel() }
+                signInSession = session
                 if let url = URL(string: session.url()) { NSWorkspace.shared.open(url) }
                 let account = try await session.finish()
-                signIn = nil
                 reloadAccounts()
                 notify("Signed in as \(account.address). Jolta is syncing it now.")
                 added(account)
+                guard attempt == signInAttempt else { return }
+                signInSession = nil
+                signIn = nil
             } catch {
+                guard attempt == signInAttempt, signIn == .waiting else { return }
+                signInSession = nil
                 let failure = "Sign-in failed: \(error)"
                 signIn = .failed(failure)
                 if !needsAccount { notify(failure) }
             }
         }
+    }
+
+    /// Stops waiting for the browser. Finishing in the browser afterwards
+    /// adds nothing.
+    func cancelSignIn() {
+        signInSession?.cancel()
+        signInSession = nil
+        signIn = nil
     }
 }
 
@@ -93,17 +110,18 @@ struct Welcome: View {
     }
 }
 
-/// How a browser sign-in is going: waiting for the browser, or why the last
-/// one failed. Empty otherwise.
+/// How a browser sign-in is going: waiting for the browser, with Cancel, or
+/// why the last one failed, until the next attempt. Empty otherwise.
 struct SignInStatusRow: View {
     let model: AppModel
 
     var body: some View {
         switch model.signIn {
         case .waiting:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Continue in your browser…").foregroundStyle(Color(Theme.text2))
+            // Cancel goes under the words where the row is narrow, as in Settings' sidebar.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { waiting; cancel }
+                VStack(alignment: .leading, spacing: 6) { waiting; cancel }
             }
             .font(.system(size: Theme.small))
         case .failed(let message):
@@ -115,5 +133,17 @@ struct SignInStatusRow: View {
         case nil:
             EmptyView()
         }
+    }
+
+    private var waiting: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Continue in your browser…").foregroundStyle(Color(Theme.text2)).fixedSize()
+        }
+    }
+
+    private var cancel: some View {
+        KitButton(title: "Cancel", size: .small) { model.cancelSignIn() }
+            .accessibilityIdentifier("sign-in-cancel")
     }
 }
