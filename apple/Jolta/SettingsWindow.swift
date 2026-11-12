@@ -155,9 +155,7 @@ struct SettingsView: View {
                     .onExitCommand { search = ""; searching = false }
                 if !searching && search.isEmpty { KeyCap(key: "⌘F") }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
+            .fieldBox(focused: searching)
             .padding(.horizontal, 12)
             .padding(.bottom, 6)
             ScrollView {
@@ -404,25 +402,14 @@ struct SettingsBlock<Content: View>: View {
 }
 
 extension View {
-    /// A text field drawn the Graphite way, for the right side of a row.
+    /// A text field for the right side of a row.
     func settingsField(width: CGFloat? = 260, mono: Bool = false) -> some View {
-        self
-            .textFieldStyle(.plain)
-            .font(.system(size: 12.5, design: mono ? .monospaced : .default))
-            .padding(.horizontal, 8)
-            .frame(width: width, height: 26)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+        modifier(SettingsField(width: width, mono: mono))
     }
 
-    /// The frame of a multi-line editor inside a card.
+    /// The frame of a rich text editor inside a card.
     func settingsEditor(height: CGFloat) -> some View {
-        self
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(height: height)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+        SettingsEditor(height: height) { self }
     }
 
     /// A switch in the accent colour, label hidden (the row names it).
@@ -433,6 +420,35 @@ extension View {
     /// A pop-up menu sized to its choice, label hidden.
     func settingsMenu() -> some View {
         self.pickerStyle(.menu).labelsHidden().fixedSize()
+    }
+}
+
+private struct SettingsField: ViewModifier {
+    let width: CGFloat?
+    let mono: Bool
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .textFieldStyle(.plain)
+            .font(.system(size: Theme.body, design: mono ? .monospaced : .default))
+            .focused($focused)
+            .fieldBox(focused: focused, width: width, fill: Theme.bg)
+    }
+}
+
+private struct SettingsEditor<Content: View>: View {
+    let height: CGFloat
+    @ViewBuilder let content: Content
+    @Environment(\.controlActiveState) private var window
+
+    var body: some View {
+        // The editor is an AppKit view, outside SwiftUI's focus. A settings
+        // page shows one at most, so the key window's editor is this one.
+        content
+            .padding(.horizontal, 2)
+            .padding(.vertical, 8)
+            .fieldBox(focused: window == .key && FormatState.shared.editing, height: height, fill: Theme.bg)
     }
 }
 

@@ -288,10 +288,7 @@ struct RsvpNotePanel: View {
             TextField("Running ten minutes late", text: $model.answerChoices.note)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .padding(.horizontal, 8)
-                .frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                .fieldBox(focused: focused, fill: Theme.bg)
                 .focused($focused)
                 .onSubmit { model.answerInvitation(standard, message: invitation.messageId) }
                 .onExitCommand { model.rsvpPanel = nil }
@@ -395,10 +392,7 @@ struct RsvpProposePanel: View {
             TextField("Note to \(organizer) (optional)", text: $note)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .padding(.horizontal, 8)
-                .frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                .fieldBox(focused: focus == .note, fill: Theme.bg)
                 .focused($focus, equals: .note)
                 .onSubmit { send(.maybe) }
                 .accessibilityIdentifier("propose-note")
@@ -495,6 +489,7 @@ struct EventAnswerRow: View {
     @State private var choices = AnswerChoices()
     @State private var sending: InvitationAnswer?
     @State private var showsNote = false
+    @FocusState private var noteFocused: Bool
 
     private var given: InvitationAnswer? { sending ?? detail.myResponse?.invitationAnswer }
 
@@ -534,9 +529,8 @@ struct EventAnswerRow: View {
                 TextField("Note to \(detail.organizer.map { $0.name.isEmpty ? $0.address : $0.name } ?? "the organizer")", text: $choices.note)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .padding(.horizontal, 7)
-                    .frame(height: 24)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                    .fieldBox(focused: noteFocused, height: Theme.controlSmall)
+                    .focused($noteFocused)
                     .onSubmit { send(given ?? .accept) }
             }
         }

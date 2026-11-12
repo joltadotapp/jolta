@@ -682,12 +682,17 @@ struct SearchField: View {
             } else if !focused {
                 KeyCap(key: "/")
             }
+            if !model.search.isEmpty {
+                Button { model.search = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                }
+                .buttonStyle(.plain)
+                .help("Clear the search")
+                .accessibilityLabel("Clear the search")
+            }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 5)
-        .frame(minWidth: 130, idealWidth: 196, maxWidth: 196)
-        .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
+        .frame(minWidth: 114, idealWidth: 180, maxWidth: 180)
+        .fieldBox(focused: focused)
         .onChange(of: model.focusSearchRequest) { focused = true }
         .onChange(of: focused) { _, now in model.searchFocused = now }
     }

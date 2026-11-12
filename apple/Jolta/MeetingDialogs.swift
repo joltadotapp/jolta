@@ -94,6 +94,7 @@ private struct SendPromptView: View {
     let prompt: SendPrompt
     let dismiss: () -> Void
     @State private var message = ""
+    @FocusState private var writing: Bool
     @State private var emailGuests = false
 
     private func choice(_ style: ChoiceStyle) -> SendChoice? { prompt.dialog.choices.first { $0.style == style } }
@@ -106,7 +107,8 @@ private struct SendPromptView: View {
                     .textFieldStyle(.plain)
                     .lineLimit(2...5)
                     .padding(.vertical, 6)
-                    .fieldBox(height: nil)
+                    .fieldBox(focused: writing, height: nil)
+                    .focused($writing)
                     .padding(.top, 12)
                     .accessibilityIdentifier("send-message")
             } else if let label = prompt.dialog.emailGuests {
@@ -213,6 +215,7 @@ private struct CancelPromptView: View {
     let prompt: CancelPrompt
     let dismiss: () -> Void
     @State private var message = ""
+    @FocusState private var writing: Bool
     @State private var emailGuests = false
 
     var body: some View {
@@ -223,7 +226,8 @@ private struct CancelPromptView: View {
                     .textFieldStyle(.plain)
                     .lineLimit(2...5)
                     .padding(.vertical, 6)
-                    .fieldBox(height: nil)
+                    .fieldBox(focused: writing, height: nil)
+                    .focused($writing)
                     .padding(.top, 12)
                     .accessibilityIdentifier("cancel-message")
             } else if let label = prompt.dialog.emailGuests {

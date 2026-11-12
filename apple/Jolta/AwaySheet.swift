@@ -36,6 +36,7 @@ struct AwaySheet: View {
     @State private var loaded = false
     @State private var working = false
     @State private var failure: String?
+    @FocusState private var replyFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -98,10 +99,10 @@ struct AwaySheet: View {
                 TextEditor(text: $message)
                     .font(.system(size: 13))
                     .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .frame(height: 84)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.raise)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, -2)
+                    .fieldBox(focused: replyFocused, height: 84)
+                    .focused($replyFocused)
             }
             if tickedRows.contains(where: \.setsReplies) {
                 field("Outside") {
