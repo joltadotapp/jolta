@@ -6,6 +6,7 @@ import AppKit
 @MainActor
 enum Command: String, CaseIterable, Identifiable {
     case next, previous, open, search
+    case scrollDown, scrollUp, find
     case select, archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
     case toggleVIP, unsubscribe, summarize, saveAttachments, nextSection, help
@@ -21,6 +22,9 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "k"
         case .open: "↩"
         case .search: "/"
+        case .scrollDown: "space"
+        case .scrollUp: "⇧space"
+        case .find: "⌘F"
         case .select: "x"
         case .archive: "e"
         case .trash: "#"
@@ -60,6 +64,9 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "Previous Conversation"
         case .open: "Open Conversation"
         case .search: "Search"
+        case .scrollDown: "Scroll Conversation Down"
+        case .scrollUp: "Scroll Conversation Up"
+        case .find: "Find in Conversation…"
         case .select: "Select or Deselect Conversation"
         case .archive: "Archive"
         case .trash: "Move to Trash"
@@ -99,6 +106,9 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "arrow.up"
         case .open: "envelope.open"
         case .search: "magnifyingglass"
+        case .scrollDown: "arrow.down.to.line"
+        case .scrollUp: "arrow.up.to.line"
+        case .find: "text.magnifyingglass"
         case .select: "checkmark.square"
         case .archive: "archivebox"
         case .trash: "trash"
@@ -137,6 +147,7 @@ enum Command: String, CaseIterable, Identifiable {
         switch self {
         case .select, .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
         case .accept, .maybe, .decline, .propose, .book: true
+        case .scrollDown, .scrollUp, .find: true
         default: false
         }
     }
@@ -202,6 +213,9 @@ extension AppModel {
         case .next, .previous, .open, .nextSection:
             break
         case .search: requestSearchFocus()
+        case .scrollDown: scrollReader(pages: 1)
+        case .scrollUp: scrollReader(pages: -1)
+        case .find: findInConversation()
         case .select: togglePicked()
         case .archive: act(.archive, label: "Archived")
         case .trash: act(.trash, label: "Moved to Trash")

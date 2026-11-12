@@ -207,6 +207,22 @@ final class ReaderPage {
         Task { _ = await call(script, arguments: arguments) }
     }
 
+    /// Scrolls by a page less two lines, which stay in sight to read on from.
+    func scroll(pages: Int) {
+        let smooth = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        run("scrollBy({ top: pages * (innerHeight - 44), behavior: smooth ? 'smooth' : 'instant' })", arguments: ["pages": pages, "smooth": smooth])
+    }
+
+    /// Selects the next or previous place the text occurs and scrolls to
+    /// it, around the ends. False when it occurs nowhere.
+    func find(_ text: String, backwards: Bool) async -> Bool {
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.caseSensitive = false
+        configuration.wraps = true
+        return (try? await webView.find(text, configuration: configuration))?.matchFound ?? false
+    }
+
     /// Expands or collapses messages by id, as the user left them before
     /// the page loaded again.
     func expand(_ states: [Int64: Bool]) {
@@ -595,6 +611,11 @@ struct ReaderView: View {
     @State private var shownThread: Int64?
     /// Another conversation is loading: it fades in once its page is in.
     @State private var arriving = false
+    /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
+    @State private var finding = false
+    @State private var findText = ""
+    @State private var findMissed = false
+    @FocusState private var findFocused: Bool
 
     private var trusted: Bool { trustOverride ?? thread.imagesTrusted }
     private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
@@ -663,6 +684,61 @@ struct ReaderView: View {
             }
         default: break
         }
+    }
+
+    private func find(backwards: Bool) {
+        let text = findText
+        guard !text.isEmpty else { return findMissed = false }
+        Task {
+            let found = await reader.find(text, backwards: backwards)
+            if text == findText { findMissed = !found }
+        }
+    }
+
+    private func closeFind() {
+        finding = false
+        model.requestListFocus()
+    }
+
+    /// Return finds the next place, ⇧Return the one before, Esc closes.
+    private var findBar: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                TextField("Find in conversation", text: $findText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: Theme.small))
+                    .focused($findFocused)
+                    .onKeyPress(.return, phases: .down) { press in
+                        find(backwards: press.modifiers.contains(.shift))
+                        return .handled
+                    }
+                    .onChange(of: findText) { find(backwards: false) }
+                    .accessibilityIdentifier("reader-find")
+                if findMissed {
+                    Text("No matches").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).fixedSize()
+                }
+            }
+            .fieldBox(focused: findFocused, width: 240)
+            KitButton(title: "Previous Match", key: "⇧↩", icon: "chevron.up", kind: .quiet, size: .small, showsTitle: false, showsKey: false) { find(backwards: true) }
+                .help("Previous match (⇧↩)")
+            KitButton(title: "Next Match", key: "↩", icon: "chevron.down", kind: .quiet, size: .small, showsTitle: false, showsKey: false) { find(backwards: false) }
+                .help("Next match (↩)")
+            KitButton(title: "Done", key: "esc", kind: .quiet, size: .small, action: closeFind)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 40)
+        .menuPanel()
+        .padding(.top, 8)
+        .padding(.trailing, 16)
+        .onExitCommand(perform: closeFind)
+        // The palette that ran Find gives the keyboard to the list on the
+        // next turn of the run loop; take it again after that.
+        .onAppear {
+            findFocused = true
+            DispatchQueue.main.async { findFocused = true }
+        }
+        .transition(.panel(anchor: .topTrailing))
     }
 
     @ViewBuilder private var rsvpPanel: some View {
@@ -772,9 +848,17 @@ struct ReaderView: View {
             }
             ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
+                .overlay(alignment: .topTrailing) { if finding { findBar } }
         }
         .opacity(arriving ? 0 : 1)
         .animation(Theme.quick, value: model.rsvpPanel)
+        .animation(Theme.quick, value: finding)
+        .onChange(of: model.readerScroll.count) { reader.scroll(pages: model.readerScroll.pages) }
+        .onChange(of: model.findRequest) {
+            finding = true
+            findFocused = true
+            DispatchQueue.main.async { findFocused = true }
+        }
         .onChange(of: model.answerChoices) { reflect() }
         .onChange(of: model.pendingAnswer) { reflect() }
         .onChange(of: model.pendingRemoval) { old, new in

@@ -60,6 +60,9 @@ struct JoltaApp: App {
                 }
             }
             CommandMenu("Conversation") {
+                Button(Command.find.title) { model?.findInConversation() }
+                    .keyboardShortcut("f")
+                    .disabled(model?.readsConversation != true)
                 // While a text editor has the keyboard, ⌘U underlines.
                 Button("Unsubscribe") { model?.run(.unsubscribe) }
                     .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("u"))

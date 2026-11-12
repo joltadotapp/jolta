@@ -409,6 +409,11 @@ struct MessageList: NSViewRepresentable {
                 guard model.showsSections else { return false }
                 model.nextSection(backwards: event.modifierFlags.contains(.shift))
                 return true
+            case 49:
+                // Space reads on in the open conversation; ⇧Space goes back up.
+                guard model.readsConversation else { return false }
+                model.scrollReader(pages: event.modifierFlags.contains(.shift) ? -1 : 1)
+                return true
             case 53: return clearSelection() || model.backToList()
             default: break
             }

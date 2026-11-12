@@ -681,6 +681,23 @@ final class AppModel {
         focusSearchRequest += 1
     }
 
+    /// Space and ⇧Space in the list: the reader scrolls the open
+    /// conversation by `pages`. The count tells one press from the next.
+    private(set) var readerScroll = (count: 0, pages: 0)
+    /// ⌘F: counts up to ask the reader for its find bar.
+    private(set) var findRequest = 0
+
+    /// A conversation is open in a reader that is in sight.
+    var readsConversation: Bool { mode == .mail && openThread != nil && compose == nil && (!singleColumn || readerUp) }
+
+    func scrollReader(pages: Int) {
+        if readsConversation { readerScroll = (readerScroll.count + 1, pages) }
+    }
+
+    func findInConversation() {
+        if readsConversation { findRequest += 1 }
+    }
+
     /// Return or a click on a row, in one column: the conversation comes over the list.
     func showReader() {
         guard singleColumn, !readerUp else { return }
