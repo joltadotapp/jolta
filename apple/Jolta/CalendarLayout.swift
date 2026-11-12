@@ -99,10 +99,15 @@ enum CalendarLayout {
         }
     }
 
-    /// `10:00–11:00`.
+    /// `10:00 to 11:00`, the one way the app writes a time range, as the
+    /// core's sentences do ("Fri 13 Nov, 12:30 to 13:00").
+    static func range(_ start: Date, _ end: Date) -> String {
+        "\(CalendarModel.clockTime(start)) to \(CalendarModel.clockTime(end))"
+    }
+
     static func range(_ e: CalEvent) -> String {
         guard let start = e.start, let end = e.end else { return "all day" }
-        return "\(CalendarModel.clockTime(start))–\(CalendarModel.clockTime(end))"
+        return range(start, end)
     }
 
     /// The line under the title: the meeting's provider, else the place.

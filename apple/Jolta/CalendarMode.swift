@@ -776,7 +776,7 @@ struct AgendaRow: View {
             Text(e.isLong ? "all day" : CalendarLayout.range(e))
                 .font(.system(size: Theme.small, weight: .medium, design: .monospaced))
                 .foregroundStyle(Color(Theme.text3))
-                .frame(width: 92, alignment: .trailing)
+                .frame(width: 106, alignment: .trailing)
             RoundedRectangle(cornerRadius: 1.5)
                 .fill(e.isFree ? .clear : Color(CalendarColor.color(e.record.color, .bar)))
                 .strokeBorder(e.isFree ? Color(CalendarColor.color(e.record.color, .bar)) : .clear, lineWidth: 1)

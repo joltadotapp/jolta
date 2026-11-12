@@ -53,7 +53,7 @@ extension DraftBlock {
         guard let day = days.firstIndex(where: { $0.start <= start && start < $0.end }) else { return nil }
         let top = start.timeIntervalSince(days[day].start) / 60
         self.init(day: day, top: top, bottom: min(max(end.timeIntervalSince(days[day].start) / 60, top + 15), 24 * 60), title: title,
-                  range: "\(CalendarModel.clockTime(start)) – \(CalendarModel.clockTime(end))", color: color, start: start, end: end)
+                  range: CalendarLayout.range(start, end), color: color, start: start, end: end)
     }
 
     /// The editor's draft, or nil when it is all-day or elsewhere.
