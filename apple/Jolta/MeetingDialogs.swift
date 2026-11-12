@@ -85,6 +85,7 @@ private struct EmailGuestsBox: View {
             HStack(spacing: 6) { Text(label); KeyCap(key: "⌘E", style: .inherit) }
         }
         .toggleStyle(.checkbox)
+        .tint(Color(Theme.accent))
         .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text2))
         .keyboardShortcut("e", modifiers: .command)
@@ -181,6 +182,7 @@ private struct SenderPromptView: View {
                 }
             }
             .pickerStyle(.radioGroup)
+            .tint(Color(Theme.accent))
             .labelsHidden()
             .font(.system(size: 13))
             .padding(.top, 14)
@@ -271,6 +273,7 @@ private struct DeclinePromptView: View {
             DialogText(title: prompt.info.title, text: prompt.info.body, note: nil)
             Toggle("Tell \(prompt.info.organizer)", isOn: $tell)
                 .toggleStyle(.checkbox)
+                .tint(Color(Theme.accent))
                 .font(.system(size: 13))
                 .foregroundStyle(Color(Theme.text))
                 .padding(.top, 12)

@@ -293,6 +293,7 @@ struct OrganizerOptions: View {
             Spacer()
             Toggle("", isOn: Binding(get: { editor.draft.options[keyPath: key] }, set: { editor.draft.options[keyPath: key] = $0 }))
                 .toggleStyle(.switch)
+                .tint(Color(Theme.accent))
                 .controlSize(.mini)
                 .labelsHidden()
                 .disabled(!has)

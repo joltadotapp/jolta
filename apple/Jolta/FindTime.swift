@@ -344,6 +344,7 @@ struct FindTimePanel: View {
                 HStack(spacing: 6) {
                     Toggle("Their working hours", isOn: $theirHours)
                         .toggleStyle(.switch)
+                        .tint(Color(Theme.accent))
                         .controlSize(.mini)
                         .labelsHidden()
                         .accessibilityIdentifier("find-time-their-hours")
@@ -524,6 +525,7 @@ struct FindTimePanel: View {
         return HStack(spacing: 6) {
             Toggle("Hold these times", isOn: Binding(get: { holding }, set: { _ in toggleHolding() }))
                 .toggleStyle(.switch)
+                .tint(Color(Theme.accent))
                 .controlSize(.mini)
                 .labelsHidden()
                 .disabled(holdChoice == nil || reason != nil)
