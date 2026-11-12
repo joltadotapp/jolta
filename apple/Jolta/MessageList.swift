@@ -166,7 +166,7 @@ struct MessageList: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let cell = (tableView.makeView(withIdentifier: ThreadCell.id, owner: nil) as? ThreadCell) ?? ThreadCell()
             if let r = self.row(at: row) { cell.show(r) }
-            cell.mark = tableView.isRowSelected(row) ? (tableView.numberOfSelectedRows > 1 ? .selected : .cursor) : .none
+            cell.mark = (tableView as? KeyTableView)?.mark(row: row) ?? .none
             return cell
         }
 
@@ -280,6 +280,7 @@ struct MessageList: NSViewRepresentable {
             }
             switch event.keyCode {
             case 36, 76:
+                takeKeyboard()
                 // With nothing open yet, Return opens the top, as j does.
                 if (table?.selectedRow ?? 0) < 0 { move(1) } else { openSelected() }
                 return true
@@ -298,6 +299,7 @@ struct MessageList: NSViewRepresentable {
             let after = prefix
             prefix = nil
             guard let command = Command.forKey(typed, after: after) else { return after != nil }
+            takeKeyboard()
             switch command {
             case .next: move(1)
             case .previous: move(-1)
@@ -305,6 +307,14 @@ struct MessageList: NSViewRepresentable {
             default: model.run(command)
             }
             return true
+        }
+
+        /// A list key typed while something else has the keyboard, such as
+        /// the message after a click in it, gives the keyboard to the list:
+        /// the caret then shows where the key landed.
+        private func takeKeyboard() {
+            guard let table, let window = table.window, window.firstResponder !== table else { return }
+            window.makeFirstResponder(table)
         }
 
         private var prefix: String?
@@ -315,11 +325,60 @@ struct MessageList: NSViewRepresentable {
 final class KeyTableView: NSTableView {
     override var acceptsFirstResponder: Bool { true }
 
+    private var isFirstResponder = false
+    private var keyObservers: [NSObjectProtocol] = []
+
+    /// The list is where typed keys go: it is the first responder of the
+    /// key window. Only then does the cursor row show its caret and keys.
+    private(set) var hasKeyboard = false {
+        didSet {
+            guard hasKeyboard != oldValue else { return }
+            enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
+        }
+    }
+
+    /// One selected row is the keyboard cursor while the list has the
+    /// keyboard; several, or one without the keyboard, are a selection.
+    func mark(row: Int) -> ThreadCell.Mark {
+        guard isRowSelected(row) else { return .none }
+        return numberOfSelectedRows == 1 && hasKeyboard ? .cursor : .selected
+    }
+
     /// The list has the keyboard as soon as it is in the window, not at
     /// SwiftUI's next update, which may come after the user clicked Search.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.makeFirstResponder(self)
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+        keyObservers = []
+        guard let window else { return hasKeyboard = false }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.keyboardChanged() }
+            })
+        }
+        window.makeFirstResponder(self)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became {
+            isFirstResponder = true
+            keyboardChanged()
+        }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            isFirstResponder = false
+            keyboardChanged()
+        }
+        return resigned
+    }
+
+    private func keyboardChanged() {
+        hasKeyboard = isFirstResponder && window?.isKeyWindow == true
     }
 }
 
@@ -340,10 +399,13 @@ final class ThreadRowView: NSTableRowView {
         didSet { updateMark() }
     }
 
-    /// One selected row is the keyboard cursor; several are a selection.
+    private var showsCursor: Bool {
+        guard let table = superview as? KeyTableView else { return false }
+        return isSelected && table.numberOfSelectedRows == 1 && table.hasKeyboard
+    }
+
     func updateMark() {
-        let several = ((superview as? NSTableView)?.numberOfSelectedRows ?? 0) > 1
-        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = isSelected ? (several ? .selected : .cursor) : .none
+        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = !isSelected ? .none : showsCursor ? .cursor : .selected
         needsDisplay = true
     }
 
@@ -361,7 +423,7 @@ final class ThreadRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.fill.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
-        guard ((superview as? NSTableView)?.numberOfSelectedRows ?? 0) <= 1 else { return }
+        guard showsCursor else { return }
         Theme.accent.setFill()
         let caret = NSBezierPath()
         let y = bounds.midY
@@ -391,7 +453,8 @@ final class ThreadCell: NSTableCellView {
     enum Mark { case none, selected, cursor }
 
     /// The cursor row trades its date for action key hints; rows in a
-    /// selection of several keep their dates.
+    /// selection, and the selected row while the list doesn't have the
+    /// keyboard, keep their dates.
     var mark = Mark.none {
         didSet {
             guard mark != oldValue else { return }
