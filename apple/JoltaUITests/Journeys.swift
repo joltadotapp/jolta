@@ -854,7 +854,8 @@ final class Journeys: XCTestCase {
     /// edge makes it 30 minutes longer. Three ⌥↓ presses save once, so one Z
     /// takes all three back, and ⌥↑ moves it 15 minutes earlier. ⌥-drag
     /// copies an event without its meeting link. Dragging a meeting with
-    /// guests asks which events, then Send an update?, where Return sends.
+    /// guests asks which events, then Send an update?, where Esc puts the
+    /// meeting back without opening the editor and Return sends.
     func testGridDragAndKeys() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
@@ -932,6 +933,15 @@ final class Journeys: XCTestCase {
         app.typeKey("1", modifierFlags: [])
         let dialog = app.descendants(matching: .any).matching(identifier: "send-dialog").firstMatch
         XCTAssertTrue(dialog.waitForExistence(timeout: 5), "then Send an update?, never a toast alone")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Esc closes it")
+        XCTAssertFalse(app.textFields["editor-title"].waitForExistence(timeout: 2), "without opening the editor at the new time")
+        XCTAssertTrue(waitUntil { sync.label.hasPrefix("Team sync, 13:00 to 13:30") }, "and the meeting is back at 13:00: \(sync.label)")
+
+        held.click(forDuration: 0.1, thenDragTo: held.withOffset(CGVector(dx: 0, dy: 48)))
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Return sends")
         XCTAssertTrue(text(app, "Update sent to 2 people").waitForExistence(timeout: 5), "the toast offers Undo while the update waits")
@@ -1007,8 +1017,8 @@ final class Journeys: XCTestCase {
     }
 
     /// An event saved outside the hours on screen is selected, and the hours
-    /// scroll to it: 05:00 lies above the first hour the week opens on in the
-    /// daytime, and below the window at night.
+    /// scroll to it: 05:00 is above the first hour the journeys open on,
+    /// 23:00 below the window.
     func testSelectionScrollsIntoView() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
