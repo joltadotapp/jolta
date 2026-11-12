@@ -735,12 +735,12 @@ struct ReaderView: View {
                     .padding(.top, 8)
                 }
             }
-            .padding(.horizontal, 56)
+            .padding(.horizontal, Theme.gutter)
             .padding(.top, 30)
             .padding(.bottom, 16)
             if let line = model.holdLine {
                 HoldsLineView(line: line, model: model)
-                    .padding(.horizontal, 56)
+                    .padding(.horizontal, Theme.gutter)
                     .padding(.bottom, 12)
             }
             ReaderPageView(page: reader, menu: imageMenu)
@@ -804,7 +804,7 @@ enum ReaderStyle {
     :root { color-scheme: light dark; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx);
       font: 14px/22px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
-    body { padding: 0 clamp(16px, 5vw, 56px) 40px; }
+    body { padding: 0 \(Int(Theme.gutter))px 40px; }
     ::selection { background: color-mix(in oklab, var(--acc) 30%, transparent); }
     .jolta-message { border-top: 1px solid var(--line2); }
     .jolta-message > summary { list-style: none; cursor: default; display: flex; gap: 14px; align-items: center;

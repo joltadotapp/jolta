@@ -18,6 +18,12 @@ extension Theme {
     nonisolated static let controlSmall: CGFloat = 24
     nonisolated static let control: CGFloat = 28
 
+    /// The left edge everything in a column starts at. In the list: its
+    /// title, the section tabs, each row's sender and the footer. In the
+    /// reader and compose: the toolbar's first icon, the subject, cards,
+    /// each message's header and body, the fields and the format bar.
+    nonisolated static let gutter: CGFloat = 28
+
     /// Popovers, panels and overlays appearing.
     static var quick: Animation? { motion(.snappy(duration: 0.16)) }
     /// Toasts and sliding panes.

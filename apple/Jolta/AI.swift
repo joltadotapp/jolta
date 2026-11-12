@@ -152,7 +152,7 @@ struct SummaryCard: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
             .card()
-            .padding(.horizontal, 20)
+            .padding(.horizontal, Theme.gutter)
             .padding(.top, 14)
             .padding(.bottom, 2)
             .transition(.opacity)
@@ -354,7 +354,7 @@ struct WriteBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .card()
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.gutter)
         .padding(.top, 12)
         .onAppear { focused.wrappedValue = .ai }
     }

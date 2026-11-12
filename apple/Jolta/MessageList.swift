@@ -589,7 +589,7 @@ final class ThreadRowView: NSTableRowView {
     /// The caret where the keyboard is, else the seal or the dot.
     private func drawSlot() {
         if showsCaret { return drawCaret() }
-        let middle = NSPoint(x: ThreadCell.senderLeading - 8, y: bounds.midY)
+        let middle = NSPoint(x: ThreadCell.senderLeading - 9, y: bounds.midY)
         switch lead {
         case .none: break
         case .unread:
@@ -629,7 +629,7 @@ final class ThreadCell: NSTableCellView {
     private var row: ThreadRow?
 
     /// Where every sender starts; the row view's slot lies in front of it.
-    static let senderLeading: CGFloat = 26
+    static let senderLeading = Theme.gutter
     /// The date and the cursor row's three key caps share this width and
     /// the same right edge, so the badges beside them stay put as the cursor moves.
     private static let trailingWidth: CGFloat = 3 * 17 + 2 * 4

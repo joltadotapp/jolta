@@ -71,7 +71,7 @@ struct ComposeView: View {
                     actions(showsKeys: false)
                 }
             }
-            .padding(.leading, 28)
+            .padding(.leading, Theme.gutter)
             .padding(.trailing, 16)
             .frame(height: Theme.headerHeight)
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -158,7 +158,7 @@ struct ComposeView: View {
                 }
                 ImageSizeBar(model: model, changed: scheduleSave)
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, Theme.gutter)
             .textFieldStyle(.plain)
             // Suggestions hang over the subject and the body.
             .zIndex(1)
@@ -182,7 +182,7 @@ struct ComposeView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 28)
+                    .padding(.horizontal, Theme.gutter)
                     .padding(.top, 12)
                     .accessibilityIdentifier("compose-error")
             }
@@ -194,7 +194,7 @@ struct ComposeView: View {
                 guard let c = model.compose, !c.to.isEmpty else { focus = .to; return }
                 body.focus(after: model.core.written(body: c.body, accountId: c.accountId), core: model.core)
             }
-                .padding(.horizontal, 28)
+                .padding(.horizontal, Theme.gutter)
                 .padding(.top, 14)
                 .environment(\.pasteTarget, PasteTarget(core: model.core, attach: attach, failed: model.notify))
 
@@ -217,7 +217,7 @@ struct ComposeView: View {
                             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(Theme.line), lineWidth: 1))
                         }
                     }
-                    .padding(.horizontal, 28)
+                    .padding(.horizontal, Theme.gutter)
                 }
                 .scrollIndicators(.never)
                 .padding(.bottom, 16)

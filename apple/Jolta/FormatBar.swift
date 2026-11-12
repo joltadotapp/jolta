@@ -335,7 +335,8 @@ struct FormatBar: View {
                 row(Self.layouts[i])
             }
         }
-        .padding(.horizontal, 22)
+        // The first control's glyph sits 6 points inside it.
+        .padding(.horizontal, Theme.gutter - 6)
         .frame(height: 36)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }

@@ -556,7 +556,7 @@ struct ListColumn: View {
                 SortMenu(model: model)
                 SearchField(model: model)
             }
-            .padding(.leading, 22)
+            .padding(.leading, Theme.gutter)
             .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
             .background(TitleBarArea())
@@ -599,7 +599,9 @@ struct SectionBar: View {
             .padding(.trailing, 9)
         }
         .font(.system(size: Theme.body))
-        .padding(.horizontal, 17)
+        // A tab's words sit 9 points inside it.
+        .padding(.leading, Theme.gutter - 9)
+        .padding(.trailing, 11)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
 
@@ -839,7 +841,8 @@ struct KeyFooter: View {
         }
         .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
-        .padding(.horizontal, 20)
+        .padding(.leading, Theme.gutter)
+        .padding(.trailing, 20)
         .frame(height: 34)
         .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
@@ -930,7 +933,9 @@ struct ReaderColumn: View {
                 bar(titles: false, replyTitles: false, position: true, jk: true)
                 bar(titles: false, replyTitles: false, position: false, jk: false)
             }
-            .padding(.horizontal, 20)
+            // A toolbar button's icon sits 7 points inside it.
+            .padding(.leading, Theme.gutter - 7)
+            .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
             .background(TitleBarArea())
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
