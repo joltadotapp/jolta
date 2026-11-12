@@ -116,7 +116,7 @@ struct RepeatPopover: View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Repeat")
                 .font(.system(size: 13, weight: .semibold))
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
                 .padding(.top, 2)
                 .padding(.bottom, 8)
             list
@@ -133,7 +133,7 @@ struct RepeatPopover: View {
             }
             .padding(.top, 14)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .padding(.top, 12)
         .padding(.bottom, 14)
         .frame(width: 340)
@@ -230,8 +230,8 @@ struct RepeatPopover: View {
                 ProblemLine(problem: DraftProblem(field: .repeat, text: failure, blocking: true))
             }
         }
-        .padding(.leading, 31)
-        .padding(.trailing, 8)
+        .padding(.leading, 33)
+        .padding(.trailing, 10)
         .padding(.top, 10)
         .padding(.bottom, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -268,7 +268,7 @@ struct RepeatPopover: View {
                 ProblemLine(problem: DraftProblem(field: .repeat, text: refusal, blocking: true)).padding(.top, 4)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.top, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -298,13 +298,10 @@ private struct RadioRow: View {
                 }
             }
             .foregroundStyle(Color(reason == nil ? Theme.text : Theme.text3))
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 10)
             .padding(.vertical, reason == nil ? 0 : 3)
             .frame(minHeight: 24)
-            .background { if focused { RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)) } }
-            .overlay(alignment: .leading) {
-                if focused { Caret().padding(.leading, -11) }
-            }
+            .selectedRow(focused, radius: Theme.radiusControl)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -312,20 +309,6 @@ private struct RadioRow: View {
         .accessibilityLabel(reason.map { "\(title), \($0)" } ?? title)
         .accessibilityAddTraits(on ? .isSelected : [])
         .accessibilityIdentifier("repeat-row")
-    }
-}
-
-/// The accent triangle beside the row the keyboard is on.
-private struct Caret: View {
-    var body: some View {
-        Path { p in
-            p.move(to: .zero)
-            p.addLine(to: CGPoint(x: 7, y: 6))
-            p.addLine(to: CGPoint(x: 0, y: 12))
-            p.closeSubpath()
-        }
-        .fill(Color(Theme.accent))
-        .frame(width: 7, height: 12)
     }
 }
 

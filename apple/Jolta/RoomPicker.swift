@@ -272,7 +272,7 @@ struct RoomPicker: View {
             .foregroundStyle(Color(taken ? Theme.text3 : Theme.text))
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
-            .background(Rectangle().fill(current ? Color(Theme.fill) : .clear))
+            .selectedRow(current, radius: 0)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

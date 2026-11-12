@@ -383,7 +383,7 @@ struct NavRow: View {
                     Image(systemName: icon)
                         .font(.system(size: 13))
                         .frame(width: 16)
-                        .foregroundStyle(Color(selected ? Theme.accent : Theme.text3))
+                        .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
                 }
                 Text(title)
                     .fontWeight(selected ? .medium : .regular)
@@ -400,7 +400,8 @@ struct NavRow: View {
             .padding(.trailing, 10)
             .frame(height: 28)
             .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(selected ? Theme.fill : hovering ? Theme.hover : .clear)))
+            // The sidebar's selection is not where the keyboard is, so no caret.
+            .selectedRow(selected, marked: false, hovering: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

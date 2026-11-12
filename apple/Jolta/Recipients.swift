@@ -129,9 +129,9 @@ struct SuggestionRow: View {
             }
         }
         .font(.system(size: 13))
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 10)
         .frame(height: 30)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color(on ? Theme.fill : hovering ? Theme.hover : .clear)))
+        .selectedRow(on, hovering: hovering)
         .contentShape(Rectangle())
         .onTapGesture(perform: choose)
         .onHover { hovering = $0 }

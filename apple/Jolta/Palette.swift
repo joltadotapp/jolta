@@ -431,10 +431,7 @@ struct PaletteView: View {
         .font(.system(size: 13))
         .padding(.horizontal, 10)
         .frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: 8).fill(on ? Color(Theme.fill) : .clear))
-        .overlay(alignment: .leading) {
-            if on { Image(systemName: "arrowtriangle.right.fill").font(.system(size: 8)).foregroundStyle(Color(Theme.accent)).offset(x: -9) }
-        }
+        .selectedRow(on)
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
     }

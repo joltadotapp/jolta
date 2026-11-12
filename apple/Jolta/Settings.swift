@@ -162,10 +162,10 @@ struct SnippetsSettings: View {
                                 Text(s.name.isEmpty ? "Untitled" : s.name).fontWeight(.medium)
                                 Text(preview(s.body)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                                 Spacer()
-                                if s.id == selected { Image(systemName: "pencil").foregroundStyle(Color(Theme.accent)) }
+                                if s.id == selected { Image(systemName: "pencil").foregroundStyle(Color(Theme.text2)) }
                             }
                         }
-                        .background(s.id == selected ? Color(Theme.fill) : .clear)
+                        .selectedRow(s.id == selected, marked: false, radius: 0)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)

@@ -139,12 +139,7 @@ private struct Marked: ViewModifier {
     let on: Bool
 
     func body(content: Content) -> some View {
-        content
-            .background { if on { RoundedRectangle(cornerRadius: 7).fill(Color(Theme.fill)).padding(3) } }
-            .overlay(alignment: .leading) {
-                if on {
-                    Image(systemName: "arrowtriangle.right.fill").font(.system(size: 7)).foregroundStyle(Color(Theme.accent)).padding(.leading, 5)
-                }
-            }
+        // Inset, so the fill stays clear of the card's edge and its dividers.
+        content.background { Color.clear.selectedRow(on, radius: Theme.radiusControl).padding(3) }
     }
 }

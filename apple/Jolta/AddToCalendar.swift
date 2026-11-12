@@ -78,7 +78,7 @@ struct AddCalendarPanel: View {
             Text("Add to")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color(Theme.text3))
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
                 .padding(.top, 4)
                 .padding(.bottom, 2)
             ForEach(model.addChoices, id: \.calendarId) { choice in
@@ -108,9 +108,9 @@ struct AddCalendarPanel: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 10)
             .frame(height: 36)
-            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
+            .selectedRow(on)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -380,7 +380,7 @@ struct CalendarRow: View {
             .padding(.horizontal, 8)
             .frame(height: 26)
             .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(hovering ? Theme.hover : .clear)))
+            .selectedRow(false, hovering: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -704,10 +704,7 @@ struct AgendaRow: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 40)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(selected ? Theme.fill : .clear)))
-        .overlay(alignment: .leading) {
-            if selected { RoundedRectangle(cornerRadius: 1).fill(Color(Theme.accent)).frame(width: 2, height: 18).padding(.leading, 1) }
-        }
+        .selectedRow(selected)
         .opacity(EventStyle.alpha(e, now: cal.now))
         .reportsSelection(selected)
         .padding(.horizontal, 12)

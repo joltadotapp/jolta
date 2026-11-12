@@ -472,7 +472,8 @@ struct RsvpScopePanel: View {
             }
             .padding(.horizontal, 8)
             .frame(height: 26)
-            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
+            // The checkmark already marks the row.
+            .selectedRow(on, marked: false, radius: Theme.radiusControl)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

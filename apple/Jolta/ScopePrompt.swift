@@ -94,13 +94,7 @@ private struct ScopePromptView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background {
-                if first {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(Theme.fill))
-                        .strokeBorder(Color(Theme.accent), lineWidth: 2)
-                }
-            }
+            .selectedRow(first)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
