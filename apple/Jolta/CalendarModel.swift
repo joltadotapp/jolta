@@ -88,6 +88,8 @@ struct CalEvent: Identifiable, Equatable {
     var isTentative: Bool { record.status == .tentative || record.showAs == .tentative || record.myResponse == .tentative }
     var isFree: Bool { record.showAs == .free }
     var isDeclined: Bool { record.myResponse == .declined }
+    /// An invitation the user hasn't answered yet.
+    var isUnanswered: Bool { record.myResponse == .needsAction && !isCancelled }
     var isCancelled: Bool { record.status == .cancelled }
 
     /// A timed event after its end; an all-day one after its last day.

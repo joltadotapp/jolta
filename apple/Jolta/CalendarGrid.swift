@@ -490,8 +490,17 @@ final class DayStrip: CanvasView {
             }
             cg.saveGState()
             if alpha < 1 { cg.setAlpha(alpha) }
-            (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .allDay, on: surface)).setFill()
-            NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            if e.isUnanswered {
+                // Hollow until answered, as in the hours below.
+                surface.color.setFill()
+                NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+                let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 4.5, yRadius: 4.5)
+                CalendarColor.color(e.record.color, .bar, on: surface).setStroke()
+                edge.stroke()
+            } else {
+                (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .allDay, on: surface)).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            }
             cg.restoreGState()
             EventStyle.drawMark(e, in: r)
             var title = line(e.title, Self.laneFont)
@@ -861,13 +870,23 @@ final class HourCanvas: CanvasView {
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
         let surface = content.surface
         let bar = CalendarColor.color(e.record.color, .bar, on: surface)
-        if e.isFree {
+        if e.isUnanswered || e.isFree {
+            // Hollow: time that isn't taken. An invitation still to answer
+            // keeps its color bar; an event shown as free is an outline alone.
             surface.color.setFill()
             box.fill()
-            bar.withAlphaComponent(0.6).setStroke()
-            let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 5.5, yRadius: 5.5)
-            edge.lineWidth = 1
+            let width: CGFloat = e.isUnanswered ? 1 : 1.5
+            let edge = NSBezierPath(roundedRect: r.insetBy(dx: width / 2, dy: width / 2), xRadius: 6 - width / 2, yRadius: 6 - width / 2)
+            edge.lineWidth = width
+            bar.setStroke()
             edge.stroke()
+            if e.isUnanswered {
+                cg.saveGState()
+                box.addClip()
+                bar.setFill()
+                CGRect(x: r.minX, y: r.minY, width: 3, height: r.height).fill()
+                cg.restoreGState()
+            }
         } else {
             (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .fill, on: surface)).setFill()
             box.fill()
