@@ -292,6 +292,38 @@ pub fn mark_read(conn: &Connection, messages: &[MessageId]) -> Result<Vec<(Accou
     Ok(ops)
 }
 
+/// After a reply or forward went out: marks read the message it answered,
+/// found by `replying_to` or else by the last of its `references`, and the
+/// conversation's older messages. Mail that came in after it stays unread.
+pub fn read_answered(
+    conn: &Connection,
+    account: AccountId,
+    replying_to: Option<MessageId>,
+    references: &[String],
+) -> Result<Option<(AccountId, OpId)>> {
+    let original = match (replying_to, references.last()) {
+        (Some(m), _) => Some(m),
+        (None, Some(id)) => conn
+            .query_row(
+                "SELECT id FROM message WHERE account_id = ?1 AND message_id = ?2 ORDER BY id DESC LIMIT 1",
+                params![account, id],
+                |r| r.get(0),
+            )
+            .optional()?,
+        (None, None) => None,
+    };
+    let Some(original) = original else { return Ok(None) };
+    let unread = ids(
+        conn,
+        &format!(
+            "SELECT id FROM message WHERE thread_id = (SELECT thread_id FROM message WHERE id = ?1) AND id <= ?1 AND (flags & {}) = 0",
+            Flags::SEEN
+        ),
+        [original],
+    )?;
+    queue(conn, account, &OpKind::Flags { add: Flags::SEEN, remove: 0 }, &unread)
+}
+
 /// Empties a folder for good: its messages leave the store now, and the
 /// queued op empties the server folder, including mail Jolta never
 /// downloaded. Not undoable.
@@ -635,6 +667,26 @@ mod tests {
             .write(|c| {
                 let (op, _) = store::op(c, ops[0].1)?.unwrap();
                 assert_eq!(op.messages.iter().map(|(m, _)| m.0).collect::<Vec<_>>(), [1], "message 3 was already read");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn answering_reads_up_to_the_answered_message() {
+        let (_dir, store) = store();
+        let read = |c: &Connection| -> Result<Vec<i64>> {
+            Ok(c.prepare("SELECT id FROM message WHERE flags & 1 ORDER BY id")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+        };
+        store
+            .write(|c| {
+                assert_eq!(read_answered(c, AccountId(1), None, &[])?, None, "a new message answers nothing");
+                read_answered(c, AccountId(1), Some(MessageId(1)), &[])?.expect("a reply to message 1");
+                assert_eq!(read(c)?, [1, 3], "message 2 came in after it and stays unread");
+
+                c.execute("UPDATE message SET message_id = 'two@x' WHERE id = 2", [])?;
+                read_answered(c, AccountId(1), None, &["one@x".into(), "two@x".into()])?.expect("a forward of message 2");
+                assert_eq!(read(c)?, [1, 2, 3]);
                 Ok(())
             })
             .unwrap();

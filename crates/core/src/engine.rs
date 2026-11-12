@@ -760,9 +760,15 @@ impl Engine {
                                     store::insert_op(tx, done.account, &kind, &changed)?;
                                 }
                             }
-                            Ok(made)
+                            let read = actions::read_answered(tx, done.account, done.replying_to, &mime::parse_envelope(&mail).references)?;
+                            Ok((made, read.is_some()))
                         })
                         .await?;
+                    let (made, read) = made;
+                    if read {
+                        (self.sink)(Event::ListsChanged);
+                        self.wake(account_id);
+                    }
                     let subject = mime::parse_envelope(&raw).subject;
                     (self.sink)(Event::Sent { account: account_id, subject });
                     if let Some(made) = made {
