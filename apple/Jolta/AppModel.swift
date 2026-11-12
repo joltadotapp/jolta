@@ -63,6 +63,10 @@ final class AppModel {
     var showsDayPanel = UserDefaults.standard.bool(forKey: AppModel.key("DayPanel")) {
         didSet { UserDefaults.standard.set(showsDayPanel, forKey: Self.key("DayPanel")) }
     }
+    /// When an open conversation counts as read.
+    var markRead = MarkRead(rawValue: UserDefaults.standard.string(forKey: AppModel.key("MarkRead")) ?? "") ?? .afterOneSecond {
+        didSet { UserDefaults.standard.set(markRead.rawValue, forKey: Self.key("MarkRead")) }
+    }
     /// The sidebar is folded away (⌃⌘S), in mail and in the calendar.
     var sidebarCollapsed = UserDefaults.standard.bool(forKey: AppModel.key("SidebarCollapsed")) {
         didSet { UserDefaults.standard.set(sidebarCollapsed, forKey: Self.key("SidebarCollapsed")) }
@@ -1288,11 +1292,12 @@ final class AppModel {
         cursor = (0, 0)
     }
 
-    /// Marks the conversation read once it has been open for a second.
+    /// Marks the conversation read once it has been open as long as the setting asks.
     private func markReadSoon(_ threadID: Int64) {
         markReadTask?.cancel()
+        guard let delay = markRead.delay else { return }
         markReadTask = Task {
-            try? await Task.sleep(for: .seconds(1))
+            if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled, selectedThreadID == threadID else { return }
             _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
         }
@@ -1486,6 +1491,30 @@ extension AppModel {
             } catch {
                 show(Toast(text: "\(error)", undo: nil))
             }
+        }
+    }
+}
+
+/// Settings › General › Reading. With `never`, a conversation turns read
+/// only by hand, or when a reply or forward of it goes out.
+enum MarkRead: String, CaseIterable {
+    case immediately, afterOneSecond, afterFiveSeconds, never
+
+    var delay: Duration? {
+        switch self {
+        case .immediately: .zero
+        case .afterOneSecond: .seconds(1)
+        case .afterFiveSeconds: .seconds(5)
+        case .never: nil
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .immediately: "Immediately"
+        case .afterOneSecond: "After 1 second"
+        case .afterFiveSeconds: "After 5 seconds"
+        case .never: "Never"
         }
     }
 }

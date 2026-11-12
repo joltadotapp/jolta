@@ -52,8 +52,8 @@ struct SettingsView: View {
         return [
             (nil, [
                 Item(page: .general, title: "General", icon: "gearshape",
-                     rows: ["Notifications", "Notify me about", "Play a sound", "Dock badge", "Writing", "New messages from", "Suggest people from Contacts"],
-                     keywords: "banners new mail vip important unread menu bar time sensitive focus address suggestions autocomplete default sender"),
+                     rows: ["Notifications", "Notify me about", "Play a sound", "Dock badge", "Reading", "Mark as read", "Writing", "New messages from", "Suggest people from Contacts"],
+                     keywords: "banners new mail vip important unread read seen menu bar time sensitive focus address suggestions autocomplete default sender"),
                 Item(page: .appearance, title: "Appearance", icon: "paintpalette",
                      rows: ["Theme", "Match macOS", "Always use one theme", "Light", "Dark"],
                      keywords: "themes mode graphite omarchy colors"),
@@ -575,6 +575,15 @@ struct GeneralSettings: View {
                     }
                     .settingsMenu()
                     .accessibilityIdentifier("dock-badge")
+                }
+            }
+            SettingsSection("Reading", footer: "Replying to or forwarding a conversation always marks it read, up to the message you answered.") {
+                SettingsRow(title: "Mark as read", detail: "How long a conversation stays open before it counts as read. With Never, it stays unread until you mark it read.") {
+                    Picker("Mark as read", selection: Binding(get: { model.markRead }, set: { model.markRead = $0 })) {
+                        ForEach(MarkRead.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .settingsMenu()
+                    .accessibilityIdentifier("mark-read")
                 }
             }
             SettingsSection("Writing", footer: "Jolta suggests people you've written to or replied to as you type in To, Cc and Bcc, the most frequent and recent first. Hover over a suggestion and click × to stop suggesting it.") {

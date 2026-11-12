@@ -380,6 +380,29 @@ final class Journeys: XCTestCase {
         XCTAssertFalse(body.exists, "the reader leaves it unopened")
     }
 
+    /// With Mark as read set to Never, a conversation stays unread however
+    /// long it is open.
+    func testNeverMarkReadKeepsItUnread() throws {
+        let app = try launch()
+        let unread = app.staticTexts.matching(NSPredicate(format: "value ENDSWITH ' unread' OR label ENDSWITH ' unread'")).firstMatch
+        XCTAssertTrue(unread.waitForExistence(timeout: 10), "the inbox shows its unread count")
+        let count = { unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label }
+        let before = count()
+
+        app.typeKey(",", modifierFlags: .command)
+        let picker = app.popUpButtons["mark-read"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "General has Mark as read")
+        picker.click()
+        app.menuItems["Never"].click()
+        app.typeKey("w", modifierFlags: .command)
+
+        text(app, "Lunch on Friday").click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "the conversation opens")
+        RunLoop.current.run(until: Date() + 3)
+        XCTAssertEqual(count(), before, "it stays unread")
+    }
+
     func testOpenConversation() throws {
         let app = try launch()
         text(app, "Re: Quarterly numbers").click()
