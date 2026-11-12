@@ -226,8 +226,9 @@ struct WeekGrid: NSViewRepresentable {
     let cal: CalendarModel
     let source: CalendarWeekView.Source
     var gutter = CalendarLayout.gutter
-    /// The hour at the top when it first shows.
-    var firstHour = 7.5
+    /// The hour at the top when it first shows; nil puts now a third of the
+    /// way down when today is among the days, and 07:30 on top otherwise.
+    var firstHour: Double?
     var surface = CalendarSurface.bg
     var select: ((CalEvent) -> Void)?
     var open: ((CalEvent) -> Void)?
@@ -286,7 +287,7 @@ final class CalendarWeekView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(source: Source, gutter: CGFloat, firstHour: Double, surface: CalendarSurface) {
+    init(source: Source, gutter: CGFloat, firstHour: Double?, surface: CalendarSurface) {
         self.source = source
         self.surface = surface
         strip = DayStrip(gutter: gutter, showsNames: source == .period, showsEmptyLane: source == .period, surface: surface)
@@ -356,6 +357,11 @@ final class CalendarWeekView: NSView {
         let h = strip.height
         strip.frame = CGRect(x: 0, y: 0, width: bounds.width, height: h)
         hours.frame = CGRect(x: 0, y: h, width: bounds.width, height: max(0, bounds.height - h))
+    }
+
+    /// T: the hours scroll to now, when today is among the days.
+    func revealNow() {
+        if source == .period { hours.scrollToNow() }
     }
 
     /// Scrolls the hours to the selected event when it is a timed one out of sight.
@@ -714,7 +720,7 @@ final class DayStrip: CanvasView {
 final class HourScrollView: NSScrollView {
     let canvas = HourCanvas()
     private let document = Document()
-    var firstHour = 7.5
+    var firstHour: Double?
     var swipe: (Int) -> Void = { _ in }
     private var placedFirstHour = false
     private var swiped = 0.0
@@ -745,11 +751,21 @@ final class HourScrollView: NSScrollView {
         if document.frame.size != size { document.frame.size = size }
         if !placedFirstHour, contentView.bounds.height > 0 {
             placedFirstHour = true
-            let y = min(firstHour * CalendarLayout.hourHeight, size.height - contentView.bounds.height)
-            contentView.scroll(to: NSPoint(x: 0, y: max(0, y)))
-            reflectScrolledClipView(contentView)
+            if let firstHour {
+                scroll(to: firstHour * CalendarLayout.hourHeight)
+            } else if !scrollToNow() {
+                scroll(to: 7.5 * CalendarLayout.hourHeight)
+            }
         }
         follow()
+    }
+
+    /// Puts the current time a third of the way down. False when today isn't among the days.
+    @discardableResult func scrollToNow() -> Bool {
+        guard canvas.content.today != nil, let start = canvas.content.todayStart else { return false }
+        let now = canvas.content.now.timeIntervalSince(start) / 3600 * CalendarLayout.hourHeight
+        scroll(to: now - contentView.bounds.height / 3)
+        return true
     }
 
     @objc private func scrolled() { follow() }

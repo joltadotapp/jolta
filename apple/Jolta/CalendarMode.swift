@@ -486,8 +486,13 @@ struct WeekView: View {
     let cal: CalendarModel
     @State private var selectedFrame: CGRect?
 
+    /// `-JoltaFirstHour 7.5` opens the hours there whatever the time is, so
+    /// scripts and UI journeys find the same events in sight at any hour.
+    private static let pinnedFirstHour: Double? = UserDefaults.standard.object(forKey: "JoltaFirstHour") == nil
+        ? nil : UserDefaults.standard.double(forKey: "JoltaFirstHour")
+
     var body: some View {
-        WeekGrid(cal: cal, source: .period, selectedFrame: { selectedFrame = $0 })
+        WeekGrid(cal: cal, source: .period, firstHour: Self.pinnedFirstHour, selectedFrame: { selectedFrame = $0 })
             .overlay(alignment: .topLeading) {
                 if let f = selectedFrame {
                     Color.clear.frame(width: f.width, height: f.height).reportsSelection(true).offset(x: f.minX, y: f.minY).allowsHitTesting(false)

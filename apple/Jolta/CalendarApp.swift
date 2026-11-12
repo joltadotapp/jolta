@@ -29,6 +29,7 @@ extension AppModel {
         }
         // Launch arguments for checking the calendar from scripts:
         // `-JoltaMode calendar -JoltaSpan month -JoltaOpenEvent "Design review" -JoltaDayPanel YES`.
+        // `-JoltaFirstHour 7.5` is read by `WeekView`.
         let defaults = UserDefaults.standard
         if let span = defaults.string(forKey: "JoltaSpan").flatMap(CalendarSpan.init(rawValue:)) { calendar.span = span }
         if defaults.string(forKey: "JoltaDayPanel") != nil { showsDayPanel = defaults.bool(forKey: "JoltaDayPanel") }

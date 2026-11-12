@@ -17,7 +17,8 @@ final class Journeys: XCTestCase {
             throw XCTSkip("No test data in \(folder); run the UI tests with scripts/ui-tests.sh")
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-JoltaTestData", name] + arguments
+        // The hours open around now; the journeys click events of the working day at any hour.
+        app.launchArguments = ["-JoltaTestData", name, "-JoltaFirstHour", "7.5"] + arguments
         app.launch()
         addTeardownBlock { @MainActor in app.terminate() }
         // With another Jolta running (the one installed on this Mac) the test

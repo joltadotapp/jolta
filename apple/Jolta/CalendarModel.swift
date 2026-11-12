@@ -384,8 +384,10 @@ final class CalendarModel {
         reload()
     }
 
+    /// T: the period with today in it, its hours scrolled to now.
     func goToday() {
         go(to: .now)
+        for grid in grids.allObjects { grid.revealNow() }
     }
 
     /// Reads the occurrences for the period on screen: a key press's whole
