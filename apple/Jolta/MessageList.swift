@@ -136,9 +136,9 @@ struct MessageList: NSViewRepresentable {
                     table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<min(count, visible.location + visible.length)),
                                      columnIndexes: [0])
                 }
-                // Reloading cells leaves row views alone, and they draw the unread dot.
+                // Reloading cells leaves row views alone, and they draw the unread dot and the VIP seal.
                 table.enumerateAvailableRowViews { view, row in
-                    (view as? ThreadRowView)?.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
+                    (view as? ThreadRowView)?.lead = self.lead(at: row)
                 }
             }
             guard count > 0 else { return setPick(nil) }
@@ -175,6 +175,11 @@ struct MessageList: NSViewRepresentable {
             return i < rows.count ? rows[i] : nil
         }
 
+        private func lead(at index: Int) -> ThreadRowView.Lead {
+            guard let r = row(at: index) else { return .none }
+            return r.vip ? .vip : r.unreadCount > 0 ? .unread : .none
+        }
+
         func numberOfRows(in tableView: NSTableView) -> Int { count }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -186,7 +191,7 @@ struct MessageList: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let view = (tableView.makeView(withIdentifier: ThreadRowView.id, owner: nil) as? ThreadRowView) ?? ThreadRowView()
-            view.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
+            view.lead = lead(at: row)
             view.hovering = row == (tableView as? KeyTableView)?.hoverRow
             return view
         }
@@ -521,10 +526,17 @@ final class KeyTableView: NSTableView {
 }
 
 /// Graphite's cursor row: a soft fill and an accent caret. Unread rows get a
-/// neutral dot; the accent is reserved for keyboard focus.
+/// neutral dot; the accent is reserved for keyboard focus. The caret, the
+/// dot and a VIP's seal share one slot in front of the sender, so every
+/// sender starts at the same place.
 final class ThreadRowView: NSTableRowView {
     static let id = NSUserInterfaceItemIdentifier("ThreadRowView")
-    var unread = false { didSet { needsDisplay = true } }
+
+    /// What stands in front of the sender. A VIP's unread mail shows the
+    /// seal; its bold sender and subject say it is unread.
+    enum Lead { case none, unread, vip }
+
+    var lead = Lead.none { didSet { if lead != oldValue { needsDisplay = true } } }
     var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
 
     init() {
@@ -565,16 +577,30 @@ final class ThreadRowView: NSTableRowView {
             NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: Theme.radiusRow, yRadius: Theme.radiusRow).fill()
         }
         // While X picks, the caret also stands on rows that aren't picked.
-        if showsCaret { return drawCaret() }
-        guard unread else { return }
-        Theme.text.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 15, y: bounds.midY - 3, width: 6, height: 6)).fill()
+        drawSlot()
     }
 
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.fill.setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: Theme.radiusRow, yRadius: Theme.radiusRow).fill()
-        if showsCaret { drawCaret() }
+        drawSlot()
+    }
+
+    /// The caret where the keyboard is, else the seal or the dot.
+    private func drawSlot() {
+        if showsCaret { return drawCaret() }
+        let middle = NSPoint(x: ThreadCell.senderLeading - 8, y: bounds.midY)
+        switch lead {
+        case .none: break
+        case .unread:
+            Theme.text.setFill()
+            NSBezierPath(ovalIn: NSRect(x: middle.x - 3, y: middle.y - 3, width: 6, height: 6)).fill()
+        case .vip:
+            guard let seal = ThreadCell.vipSeal else { return }
+            let size = seal.size
+            seal.draw(in: NSRect(x: (middle.x - size.width / 2).rounded(), y: (middle.y - size.height / 2).rounded(), width: size.width, height: size.height),
+                      from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
     }
 
     private func drawCaret() {
@@ -600,9 +626,13 @@ final class ThreadCell: NSTableCellView {
     /// The paperclip, the calendar mark and the answer, right of the subject.
     private let badges = NSStackView()
     private let keys = NSStackView()
-    private var badgesBesideDate: NSLayoutConstraint!
-    private var badgesBesideKeys: NSLayoutConstraint!
     private var row: ThreadRow?
+
+    /// Where every sender starts; the row view's slot lies in front of it.
+    static let senderLeading: CGFloat = 26
+    /// The date and the cursor row's three key caps share this width and
+    /// the same right edge, so the badges beside them stay put as the cursor moves.
+    private static let trailingWidth: CGFloat = 3 * 17 + 2 * 4
 
     enum Mark { case none, selected, cursor }
 
@@ -614,9 +644,6 @@ final class ThreadCell: NSTableCellView {
             guard mark != oldValue else { return }
             keys.isHidden = mark != .cursor
             date.isHidden = mark == .cursor
-            // The paperclip and the invitation stay, left of the key hints on the cursor row.
-            badgesBesideDate.isActive = mark != .cursor
-            badgesBesideKeys.isActive = mark == .cursor
         }
     }
 
@@ -652,38 +679,43 @@ final class ThreadCell: NSTableCellView {
         subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         date.alignment = .right
         NSLayoutConstraint.activate([
-            sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
+            sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.senderLeading),
             sender.widthAnchor.constraint(equalToConstant: Theme.senderWidth),
             sender.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.leadingAnchor.constraint(equalTo: sender.trailingAnchor, constant: 12),
             subject.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.trailingAnchor.constraint(lessThanOrEqualTo: badges.leadingAnchor, constant: -8),
             badges.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badges.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10),
             date.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            date.widthAnchor.constraint(equalToConstant: 52),
+            date.widthAnchor.constraint(equalToConstant: Self.trailingWidth),
             date.centerYAnchor.constraint(equalTo: centerYAnchor),
-            keys.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            keys.trailingAnchor.constraint(equalTo: date.trailingAnchor),
             keys.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        badgesBesideDate = badges.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10)
-        badgesBesideKeys = badges.trailingAnchor.constraint(equalTo: keys.leadingAnchor, constant: -10)
-        badgesBesideDate.isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// The seal in front of a VIP's name. It leads the name so truncation never hides it.
-    private static let vipMark = mark("checkmark.seal.fill", label: "VIP")
+    /// A VIP's seal, which the row view draws in the slot in front of the sender.
+    static let vipSeal = symbol("checkmark.seal.fill", label: "VIP")
     /// In front of the subject when AI sorting says the conversation waits for a reply.
     private static let replyMark = mark("arrowshape.turn.up.left.fill", label: "Needs your reply")
     /// In front of the subject of a starred conversation.
     private static let starMark = mark("star.fill", label: "Starred", tint: Theme.star)
 
-    private static func mark(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSTextAttachment {
-        let mark = NSTextAttachment()
+    /// One line that ends in an ellipsis. A label shows an attributed string
+    /// by the string's own paragraph style; without one it clips mid-letter.
+    private static let oneLine: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        return style
+    }()
+
+    private static func symbol(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSImage? {
         let config = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
         guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: label)?
-            .withSymbolConfiguration(config) else { return mark }
+            .withSymbolConfiguration(config) else { return nil }
         // Tinted as it draws, so cut-outs stay cut out and the colour follows the appearance.
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
@@ -692,8 +724,14 @@ final class ThreadCell: NSTableCellView {
             return true
         }
         image.accessibilityDescription = label
+        return image
+    }
+
+    private static func mark(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSTextAttachment {
+        let mark = NSTextAttachment()
+        guard let image = symbol(symbolName, label: label, tint: tint) else { return mark }
         mark.image = image
-        mark.bounds = NSRect(x: 0, y: -1.5, width: symbol.size.width, height: symbol.size.height)
+        mark.bounds = NSRect(x: 0, y: -1.5, width: image.size.width, height: image.size.height)
         return mark
     }
 
@@ -701,10 +739,6 @@ final class ThreadCell: NSTableCellView {
         row = r
         let unread = r.unreadCount > 0
         let name = NSMutableAttributedString()
-        if r.vip {
-            name.append(NSAttributedString(attachment: Self.vipMark))
-            name.append(NSAttributedString(string: " "))
-        }
         name.append(NSAttributedString(string: r.fromName.isEmpty ? r.fromAddr : r.fromName, attributes: [
             .font: Theme.font(weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
@@ -714,7 +748,10 @@ final class ThreadCell: NSTableCellView {
                 .font: Theme.font(11.5), .foregroundColor: Theme.text3,
             ]))
         }
+        name.addAttribute(.paragraphStyle, value: Self.oneLine, range: NSRange(location: 0, length: name.length))
         sender.attributedStringValue = name
+        // The seal is drawn beside the name, so VoiceOver hears it here.
+        sender.setAccessibilityHelp(r.vip ? "VIP" : nil)
         let line = NSMutableAttributedString()
         if r.flagged {
             line.append(NSAttributedString(attachment: Self.starMark))
@@ -733,6 +770,7 @@ final class ThreadCell: NSTableCellView {
                 .font: Theme.font(), .foregroundColor: Theme.text3,
             ]))
         }
+        line.addAttribute(.paragraphStyle, value: Self.oneLine, range: NSRange(location: 0, length: line.length))
         subject.attributedStringValue = line
         date.attributedStringValue = NSAttributedString(string: Theme.shortDate(r.date), attributes: [
             .font: Theme.timeFont, .foregroundColor: Theme.text3,

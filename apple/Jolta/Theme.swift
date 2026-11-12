@@ -45,7 +45,7 @@ enum Theme {
         .systemFont(ofSize: size, weight: weight)
     }
 
-    /// Digits line up; letters stay proportional so `26/10/24` fits the 52 pt date column.
+    /// Digits line up; letters stay proportional so `26/10/24` fits the list's date column.
     static let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
 
     private static let time: DateFormatter = {
