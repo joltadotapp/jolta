@@ -467,9 +467,9 @@ struct MiniDay: View, Equatable {
     var body: some View {
         Button(action: go) {
             Text("\(Calendar.current.component(.day, from: day.start))")
-                .font(.system(size: 11, weight: today ? .semibold : .regular).monospacedDigit())
+                // Days of the months around it are lighter in weight, not fainter: text3 at 60% fell to 2.4:1.
+                .font(.system(size: 11, weight: today ? .semibold : day.outside ? .light : .regular).monospacedDigit())
                 .foregroundStyle(Color(today ? Theme.accentText : day.outside ? Theme.text3 : Theme.text2))
-                .opacity(day.outside ? 0.6 : 1)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .bottom) {
                     if busy { Circle().fill(Color(Theme.text3)).frame(width: 4, height: 4).padding(.bottom, 1) }
