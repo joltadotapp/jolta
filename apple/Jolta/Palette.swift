@@ -444,13 +444,7 @@ struct PaletteView: View {
 
     private func close() {
         model.palette = nil
-        // While a message is being written the keyboard goes back to it: in
-        // the list a typed letter is a command.
-        if model.compose != nil, let body = RichTextView.messageBody {
-            body.window?.makeFirstResponder(body)
-        } else {
-            model.requestListFocus()
-        }
+        model.returnKeyboard()
     }
 }
 

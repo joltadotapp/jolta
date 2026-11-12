@@ -64,7 +64,12 @@ struct ContentView: View {
                     // Light while picking a theme, so the preview behind the palette shows.
                     Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
                         .ignoresSafeArea()
-                        .onTapGesture { model.palette = nil; model.showsHelp = false; model.findTime = nil }
+                        .onTapGesture {
+                            model.palette = nil
+                            model.showsHelp = false
+                            model.findTime = nil
+                            model.returnKeyboard()
+                        }
                         .transition(.opacity)
                 }
             }

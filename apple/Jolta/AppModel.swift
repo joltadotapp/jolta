@@ -599,6 +599,17 @@ final class AppModel {
         focusListRequest += 1
     }
 
+    /// Gives the keyboard back when a panel over the window closes: to the
+    /// message being written, else to the list, where a typed letter is a
+    /// command.
+    func returnKeyboard() {
+        if compose != nil, let body = RichTextView.messageBody {
+            body.window?.makeFirstResponder(body)
+        } else {
+            requestListFocus()
+        }
+    }
+
     /// Asks the search field to take keyboard focus.
     private(set) var focusSearchRequest = 0
 
