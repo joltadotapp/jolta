@@ -53,6 +53,13 @@ final class Journeys: XCTestCase {
         text(app, subject).exists
     }
 
+    /// The conversations in the list. After a conversation that was open
+    /// for a while is archived, a label with its subject is still found in
+    /// the app, so a journey that archives one counts the rows.
+    private func rowCount(_ app: XCUIApplication) -> Int {
+        app.tables.firstMatch.tableRows.count
+    }
+
     func testArchiveAndUndoWithKeys() throws {
         let app = try launch()
         text(app, "Lunch on Friday").click()
@@ -69,11 +76,12 @@ final class Journeys: XCTestCase {
     func testMessageMenuAndUndo() throws {
         let app = try launch()
         text(app, "Lunch on Friday").click()
+        let rows = rowCount(app)
         app.menuBars.menuBarItems["Message"].click()
         app.menuBars.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "Archive")).firstMatch.click()
-        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "Message › Archive archives the conversation")
+        XCTAssertTrue(waitUntil { rowCount(app) == rows - 1 }, "Message › Archive archives the conversation")
         app.typeKey("z", modifierFlags: .command)
-        XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "⌘Z brings it back")
+        XCTAssertTrue(waitUntil { rowCount(app) == rows }, "⌘Z brings it back")
     }
 
     /// A right-click on a row offers the list's commands for that
@@ -116,8 +124,9 @@ final class Journeys: XCTestCase {
         XCTAssertFalse(app.textFields["compose-to"].exists, "the letters and Return ran no command")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(find.waitForNonExistence(timeout: 5), "Esc closes the bar")
+        let rows = rowCount(app)
         app.typeKey("e", modifierFlags: [])
-        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "and the list has the keys again")
+        XCTAssertTrue(waitUntil { rowCount(app) == rows - 1 }, "and the list has the keys again: E archives")
     }
 
     /// Z takes the last action back after its message has left the screen.
@@ -206,8 +215,9 @@ final class Journeys: XCTestCase {
         XCTAssertFalse(app.textFields["compose-to"].exists, "the letters ran no command")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(filter.waitForNonExistence(timeout: 5), "Esc closes the sheet")
+        let rows = rowCount(app)
         app.typeKey("e", modifierFlags: [])
-        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "and the list has the keys again")
+        XCTAssertTrue(waitUntil { rowCount(app) == rows - 1 }, "and the list has the keys again: E archives")
     }
 
     /// Discard takes the message away at once, and Z brings it back.
