@@ -211,8 +211,11 @@ struct ComposeView: View {
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
         }
         .onExitCommand {
-            // Esc closes an open panel, then stops, undoes or closes AI
-            // writing, and only then closes the message.
+            // Esc closes the shortcut sheet or Find a time, then the palette,
+            // then stops, undoes or closes AI writing, and only then closes
+            // the message.
+            if model.showsHelp { model.showsHelp = false; return }
+            if model.findTime != nil { model.findTime = nil; return }
             if model.palette != nil { model.palette = nil; return }
             guard let writer else { return model.closeCompose() }
             switch writer.state {
