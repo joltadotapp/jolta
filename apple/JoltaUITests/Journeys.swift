@@ -76,6 +76,27 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "⌘Z brings it back")
     }
 
+    /// A right-click on a row offers the list's commands for that
+    /// conversation without opening it; one on an event in the week offers
+    /// Open, Edit, Duplicate and Delete.
+    func testContextMenus() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").rightClick()
+        app.menuItems["Archive"].click()
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "the row's menu archives it")
+        XCTAssertFalse(app.webViews.firstMatch.exists, "and opens nothing")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
+
+        app.typeKey("2", modifierFlags: .command)
+        let climbing = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Climbing, 10:00 to 12:30")).firstMatch
+        XCTAssertTrue(climbing.waitForExistence(timeout: 5), "the week shows the fixture's Saturday event")
+        climbing.rightClick()
+        XCTAssertTrue(app.menuItems["Duplicate"].waitForExistence(timeout: 5), "the event's menu offers Duplicate")
+        app.menuItems["Open"].click()
+        XCTAssertTrue(app.staticTexts.matching(identifier: "event-detail-title").firstMatch.waitForExistence(timeout: 5), "and Open opens the event")
+    }
+
     /// Z takes the last action back after its message has left the screen.
     func testUndoOutlivesItsToast() throws {
         let app = try launch()
