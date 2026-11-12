@@ -1036,8 +1036,8 @@ final class CalendarModel {
                 let text = try await self.core.declineAndRemove(eventId: id, time: time, occurrenceOnly: occurrenceOnly, tell: tell)
                 if self.editor != nil { self.dropEditor() }
                 self.closeDetail()
-                self.selectedID = nil
                 self.refresh()
+                self.selectNeighbour(of: event)
                 self.toast?(text, nil)
             } catch {
                 self.toast?("\(error)", nil)
@@ -1081,11 +1081,24 @@ final class CalendarModel {
     }
 
     private func deleted(_ saved: SavedEdit) {
+        let gone = editor?.event ?? selected ?? detailEvent
         if editor != nil { dropEditor() }
         closeDetail()
-        selectedID = nil
         refresh()
+        selectNeighbour(of: gone)
         toast?(saved.message, saved.token)
+    }
+
+    /// After `gone` left the period: the event nearest to it in time takes
+    /// the selection, so the next key has something to act on. An event that
+    /// is still there, as a cancelled meeting can be, keeps it.
+    private func selectNeighbour(of gone: CalEvent?) {
+        guard let gone else { return selectedID = nil }
+        let moment = { (e: CalEvent) in e.start ?? Self.date(key: e.dayKeys.first) ?? .distantPast }
+        let at = moment(gone)
+        let nearest = events.min { abs(moment($0).timeIntervalSince(at)) < abs(moment($1).timeIntervalSince(at)) }
+        selectedID = events.contains { $0.id == gone.id } ? gone.id : nearest?.id
+        showSelection()
     }
 
     /// Undo of a calendar edit from the toast.
