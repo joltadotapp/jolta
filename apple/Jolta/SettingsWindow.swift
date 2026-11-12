@@ -29,38 +29,59 @@ struct SettingsView: View {
         let page: SettingsPage
         let title: String
         let icon: String
-        /// Words on the page, so search finds the page that holds a setting.
+        /// The page's section and row titles as it shows them, so a search
+        /// for a setting's name finds its page. Add a new row's title here.
+        var rows: [String] = []
+        /// Other words for what the page holds.
         let keywords: String
+
+        func matches(_ needle: String) -> Bool {
+            ([title] + rows + [keywords]).joined(separator: " ").lowercased().contains(needle)
+        }
     }
 
     private var groups: [(title: String?, items: [Item])] {
         let all = model?.accounts ?? []
         let accounts = all.map { a in
             Item(page: .account(a.id), title: a.title, icon: Self.icon(a.account.provider),
-                 keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove send mail as alias aliases from default sender new messages")
+                 rows: ["Account", "Provider", "Name", "Email address", "Send mail as", "Signature", "Incoming mail (IMAP)", "Outgoing mail (SMTP)",
+                        "Server", "Port", "Security", "Username", "Password", "Sign in with", "Verify server certificates", "Sign-in",
+                        "Folders in the sidebar", "Remove this account"],
+                 keywords: "\(a.account.address) \(a.account.provider) imap smtp folders sign in again alias aliases from sender")
         }
         return [
             (nil, [
                 Item(page: .general, title: "General", icon: "gearshape",
-                     keywords: "notifications banners new mail vip contacts address suggestions autocomplete"),
+                     rows: ["Notifications", "Notify me about", "Play a sound", "Dock badge", "Writing", "New messages from", "Suggest people from Contacts"],
+                     keywords: "banners new mail vip important unread menu bar time sensitive focus address suggestions autocomplete default sender"),
                 Item(page: .appearance, title: "Appearance", icon: "paintpalette",
-                     keywords: "theme themes dark light mode macos graphite omarchy colors always match"),
+                     rows: ["Theme", "Match macOS", "Always use one theme", "Light", "Dark"],
+                     keywords: "themes mode graphite omarchy colors"),
             ]),
             ("Accounts", accounts),
             ("Calendar", [Item(page: .calendar, title: "Calendar", icon: "calendar",
-                               keywords: "calendars google microsoft caldav icloud subscription webcal feed holidays color busy reminders notifications invitations responses replies file archive")]),
+                               rows: ["Accounts", "On this Mac only", "New calendar on this Mac", "New events", "Default calendar", "Default length",
+                                      "Zoom", "Zoom personal link", "Invitations", "File responses automatically", "Out of office", "Set out of office",
+                                      "Working hours", "Subscribe", "Add a calendar subscription", "Open webcal:// links in Jolta"],
+                               keywords: "calendars google microsoft caldav icloud feed holidays color busy reminders notifications replies archive automatic replies video call meeting availability find a time")]),
             ("Inbox", [
-                Item(page: .sections, title: "Sections", icon: "rectangle.split.3x1", keywords: "split inbox tabs query newsletters notifications"),
-                Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people"),
+                Item(page: .sections, title: "Sections", icon: "rectangle.split.3x1", rows: ["Inbox sections"],
+                     keywords: "split inbox tabs query newsletters notifications"),
+                Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people seal"),
             ]),
-            ("Writing", [Item(page: .snippets, title: "Snippets", icon: "text.badge.plus", keywords: "templates canned replies text")]),
+            ("Writing", [Item(page: .snippets, title: "Snippets", icon: "text.badge.plus", rows: ["Edit snippet", "Name"],
+                              keywords: "templates canned replies text")]),
             ("Intelligence", [Item(page: .ai, title: "AI", icon: "sparkles",
-                                   keywords: "summary summaries write draft model gemma local openai anthropic claude gpt api key download")]),
+                                   rows: ["Model", "Model on this Mac", "OpenAI account", "Anthropic account", "API key", "API address", "Features",
+                                          "Sort new mail", "Needs reply section", "Summarize long conversations as they open", "Write with AI"],
+                                   keywords: "summary summaries draft gemma local claude gpt download ollama lm studio advanced categories")]),
             ("Agents", [
-                Item(page: .agents, title: "Agents", icon: "cpu", keywords: "mcp claude pause grants revoke connect"),
-                Item(page: .activity, title: "Activity", icon: "list.bullet.rectangle", keywords: "audit log history"),
+                Item(page: .agents, title: "Agents", icon: "cpu", rows: ["Pause all agents", "Connect an agent", "Connected agents"],
+                     keywords: "mcp claude grants revoke allow path"),
+                Item(page: .activity, title: "Activity", icon: "list.bullet.rectangle", rows: ["Recent activity"], keywords: "audit log history requests"),
             ]),
-            (nil, [Item(page: .about, title: "About", icon: "info.circle", keywords: "version updates sparkle data folder")]),
+            (nil, [Item(page: .about, title: "About", icon: "info.circle", rows: ["Jolta", "Version", "Updates", "Data folder"],
+                        keywords: "sparkle check for updates show in finder")]),
         ]
     }
 
@@ -247,7 +268,7 @@ struct SettingsView: View {
 
     private var filtered: [Item] {
         let needle = search.lowercased().trimmingCharacters(in: .whitespaces)
-        return groups.flatMap(\.items).filter { "\($0.title) \($0.keywords)".lowercased().contains(needle) }
+        return groups.flatMap(\.items).filter { $0.matches(needle) }
     }
 
     /// The open page's row carries the caret while the arrow keys move it.
