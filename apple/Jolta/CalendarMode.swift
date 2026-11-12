@@ -609,18 +609,20 @@ struct MonthLine: View {
     var body: some View {
         let e = event
         let selected = cal.selectedID == e.id
+        // A past or declined event dims its dot and fill; its text stays readable.
+        let alpha = EventStyle.alpha(e, now: cal.now)
+        let ink = EventStyle.ink(e, now: cal.now)
         HStack(spacing: 5) {
             if let start = e.start, !e.isLong {
-                Circle().fill(Color(CalendarColor.color(e.record.color, .bar))).frame(width: 6, height: 6)
+                Circle().fill(Color(CalendarColor.color(e.record.color, .bar))).frame(width: 6, height: 6).opacity(alpha)
                 Text(CalendarModel.clockTime(start)).font(.system(size: Theme.caption, weight: .medium, design: .monospaced)).foregroundStyle(Color(Theme.text3))
             }
-            Text(e.title).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
+            Text(e.title).font(.system(size: Theme.small)).foregroundStyle(Color(ink.title)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
         }
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
-        .background { if e.isLong { RoundedRectangle(cornerRadius: 4).fill(Color(CalendarColor.color(e.record.color, .allDay))) } }
+        .background { if e.isLong { RoundedRectangle(cornerRadius: 4).fill(Color(CalendarColor.color(e.record.color, .allDay))).opacity(alpha) } }
         .overlay { if selected { RoundedRectangle(cornerRadius: 5).strokeBorder(Color(Theme.accent), lineWidth: 2).padding(-1) } }
-        .opacity(EventStyle.alpha(e, now: cal.now))
         .reportsSelection(selected)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { cal.openDetail(e) }
@@ -688,6 +690,8 @@ struct AgendaRow: View {
     var body: some View {
         let e = event
         let selected = cal.selectedID == e.id
+        let alpha = EventStyle.alpha(e, now: cal.now)
+        let ink = EventStyle.ink(e, now: cal.now)
         HStack(spacing: 12) {
             Text(e.isLong ? "all day" : CalendarLayout.range(e))
                 .font(.system(size: Theme.small, weight: .medium, design: .monospaced))
@@ -697,8 +701,9 @@ struct AgendaRow: View {
                 .fill(e.isFree ? .clear : Color(CalendarColor.color(e.record.color, .bar)))
                 .strokeBorder(e.isFree ? Color(CalendarColor.color(e.record.color, .bar)) : .clear, lineWidth: 1)
                 .frame(width: 3, height: 22)
+                .opacity(alpha)
             VStack(alignment: .leading, spacing: 1) {
-                Text(e.title).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
+                Text(e.title).foregroundStyle(Color(ink.title)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
                 let sub = [CalendarLayout.subtitle(e), e.isTentative ? "tentative" : "", e.isDeclined ? "declined" : ""].filter { !$0.isEmpty }
                 if !sub.isEmpty {
                     Text(sub.joined(separator: " · ")).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
@@ -714,7 +719,6 @@ struct AgendaRow: View {
         .padding(.horizontal, 12)
         .frame(height: 40)
         .selectedRow(selected)
-        .opacity(EventStyle.alpha(e, now: cal.now))
         .reportsSelection(selected)
         .padding(.horizontal, 12)
         .contentShape(Rectangle())

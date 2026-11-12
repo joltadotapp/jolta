@@ -110,9 +110,17 @@ enum EventStyle {
         return CGRect(x: x, y: y, width: max(w, 4), height: h)
     }
 
+    /// How strongly the fill and bar of a past or declined event show. Its
+    /// text keeps full strength in a quieter color (`ink`), so it still reads.
     static func alpha(_ e: CalEvent, now: Date) -> CGFloat {
         if e.isDeclined || e.isCancelled { return 0.45 }
         return e.isPast(now) ? 0.55 : 1
+    }
+
+    /// The colors of an event's title and of the lines under it.
+    static func ink(_ e: CalEvent, now: Date) -> (title: NSColor, sub: NSColor) {
+        if e.isDeclined || e.isCancelled { return (Theme.text3, Theme.text3) }
+        return e.isPast(now) ? (Theme.text2, Theme.text3) : (Theme.text, Theme.text2)
     }
 
     private static let ascent = ceil(titleFont.ascender)
@@ -158,8 +166,9 @@ enum EventStyle {
     /// Title, times and place, top down, as many lines as the box holds. A
     /// box under 30 points tall gets the title and start on one line; one too
     /// narrow to read gets none.
-    static func drawText(_ e: CalEvent, in r: CGRect, cg: CGContext) {
+    static func drawText(_ e: CalEvent, in r: CGRect, now: Date, cg: CGContext) {
         drawMark(e, in: r)
+        let ink = ink(e, now: now)
         let width = r.width - 10 - markWidth(e)
         guard width >= 14 else { return }
         let x = r.minX + 7
@@ -183,15 +192,15 @@ enum EventStyle {
             let frame = CGRect(x: x + titleWidth + 4, y: top + ascent - size.height + 1, width: size.width, height: size.height)
             moon.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
-        draw(titleLine, Theme.text)
+        draw(titleLine, ink.title)
         if struck {
-            Theme.text.setFill()
+            ink.title.setFill()
             CGRect(x: x, y: r.minY + (short ? 1 : 3) + ascent - 4, width: min(titleWidth, width), height: 1).fill()
         }
         guard !short else { return }
-        if top + lineHeight <= r.maxY + 2 { draw(line([(CalendarLayout.range(e), timeFont)], width: width), Theme.text2) }
+        if top + lineHeight <= r.maxY + 2 { draw(line([(CalendarLayout.range(e), timeFont)], width: width), ink.sub) }
         let sub = CalendarLayout.subtitle(e)
-        if !sub.isEmpty, top + lineHeight <= r.maxY + 2 { draw(line([(sub, subFont)], width: width), Theme.text2) }
+        if !sub.isEmpty, top + lineHeight <= r.maxY + 2 { draw(line([(sub, subFont)], width: width), ink.sub) }
     }
 }
 
@@ -464,31 +473,31 @@ final class DayStrip: CanvasView {
         for item in content.lanes where item.lane < Self.maxLanes {
             if moved != nil, press?.copy == false, item.id == moved?.id { continue }
             let e = item.event, r = box(item)
-            cg.saveGState()
             let alpha = EventStyle.alpha(e, now: content.now)
-            if alpha < 1 { cg.setAlpha(alpha) }
+            let ink = EventStyle.ink(e, now: content.now)
             if let place = e.place {
-                drawPlace(place, item: item, cg: cg)
-                cg.restoreGState()
+                drawPlace(place, item: item, alpha: alpha, ink: ink.sub, cg: cg)
                 ring(e, r)
                 continue
             }
+            cg.saveGState()
+            if alpha < 1 { cg.setAlpha(alpha) }
             (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .allDay)).setFill()
             NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            cg.restoreGState()
             EventStyle.drawMark(e, in: r)
             var title = line(e.title, Self.laneFont)
             let width = r.width - 14 - EventStyle.markWidth(e)
             if CTLineGetTypographicBounds(title, nil, nil, nil) > width {
                 title = CTLineCreateTruncatedLine(title, max(0, width), .end, line("…", Self.laneFont)) ?? title
             }
-            cg.setFillColor(Theme.text.cgColor)
+            cg.setFillColor(ink.title.cgColor)
             cg.textPosition = CGPoint(x: r.minX + 7, y: r.minY + 14)
             CTLineDraw(title, cg)
             if e.isDeclined || e.isCancelled {
-                Theme.text.setFill()
+                ink.title.setFill()
                 CGRect(x: r.minX + 7, y: r.midY, width: min(CTLineGetTypographicBounds(title, nil, nil, nil), width), height: 1).fill()
             }
-            cg.restoreGState()
             ring(e, r)
         }
         if let moved { drawMoved(moved, cg: cg) }
@@ -507,7 +516,7 @@ final class DayStrip: CanvasView {
     private static let placeFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
     /// A working location: no box, its place with a glyph in each of its days.
-    private func drawPlace(_ place: (label: String, at: Workplace), item: LaneEvent, cg: CGContext) {
+    private func drawPlace(_ place: (label: String, at: Workplace), item: LaneEvent, alpha: CGFloat, ink: NSColor, cg: CGContext) {
         let symbol = switch place.at {
         case .home: "house"
         case .office: "building.2"
@@ -521,7 +530,7 @@ final class DayStrip: CanvasView {
             var x = cell.minX + 5
             if let glyph {
                 glyph.draw(in: CGRect(x: x, y: cell.midY - glyph.size.height / 2, width: glyph.size.width, height: glyph.size.height),
-                           from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                           from: .zero, operation: .sourceOver, fraction: alpha, respectFlipped: true, hints: nil)
                 x += glyph.size.width + 4
             }
             var text = line(place.label, Self.placeFont)
@@ -529,7 +538,7 @@ final class DayStrip: CanvasView {
             if CTLineGetTypographicBounds(text, nil, nil, nil) > width {
                 text = CTLineCreateTruncatedLine(text, max(0, width), .end, line("…", Self.placeFont)) ?? text
             }
-            cg.setFillColor(Theme.text2.cgColor)
+            cg.setFillColor(ink.cgColor)
             cg.textPosition = CGPoint(x: x, y: r.minY + 14)
             CTLineDraw(text, cg)
         }
@@ -871,8 +880,8 @@ final class HourCanvas: CanvasView {
             CGRect(x: r.minX, y: r.minY, width: 3, height: r.height).fill()
             cg.restoreGState()
         }
-        EventStyle.drawText(e, in: r, cg: cg)
         cg.restoreGState()
+        EventStyle.drawText(e, in: r, now: content.now, cg: cg)
         if e.id == content.selectedID {
             Theme.accent.setStroke()
             let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 7.5, yRadius: 7.5)

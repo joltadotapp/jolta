@@ -91,9 +91,10 @@ struct CalEvent: Identifiable, Equatable {
     var isDeclined: Bool { record.myResponse == .declined }
     var isCancelled: Bool { record.status == .cancelled }
 
+    /// A timed event after its end; an all-day one after its last day.
     func isPast(_ now: Date) -> Bool {
         if let end { return end <= now }
-        return false
+        return dayKeys.last < CalendarModel.todayKey(now)
     }
 
     /// The first and last day keys it covers (inclusive).
@@ -304,6 +305,17 @@ final class CalendarModel {
     /// DateFormatter formats safely from any thread.
     nonisolated static func dayKey(_ date: Date) -> String {
         keyFormat.string(from: date)
+    }
+
+    private static var keyOfNow: (now: Date, key: String)?
+
+    /// The day key of `now`. Kept between calls: every all-day event asks
+    /// for it on each draw, and `now` moves twice a minute.
+    static func todayKey(_ now: Date) -> String {
+        if let kept = keyOfNow, kept.now == now { return kept.key }
+        let key = dayKey(now)
+        keyOfNow = (now, key)
+        return key
     }
 
     /// The days on screen for the span around `anchor`.
