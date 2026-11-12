@@ -324,6 +324,10 @@ struct MessageList: NSViewRepresentable {
         func handle(_ event: NSEvent) -> Bool {
             // ⌘ shortcuts belong to the menus (⌘U is Unsubscribe, not U).
             if event.modifierFlags.contains(.command) { return false }
+            // In calendar mode the list is out of sight. A key the calendar
+            // leaves alone (an arrow on one of the editor's stops) must not
+            // move or archive mail behind it.
+            if model.mode == .calendar { return false }
             // While a panel is up, keys that reach the list close it rather than act on mail.
             if model.findTime != nil {
                 if event.keyCode == 53 { model.findTime = nil }

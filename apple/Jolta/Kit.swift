@@ -292,7 +292,6 @@ extension View {
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color(Theme.text3)).padding(.trailing, 7).allowsHitTesting(false)
                 }
             }
-            .tint(Color(Theme.accent))
     }
 }
 

@@ -410,9 +410,6 @@ struct EventEditorPanel: View {
         .onChange(of: model.findTime != nil) { _, open in
             if !open { DispatchQueue.main.async { focus = lastFocus ?? firstFocus } }
         }
-        .background {
-            Button("") { focus = .calendar }.keyboardShortcut("c", modifiers: [.command, .shift]).hidden()
-        }
         // Find a time over the editor takes Esc, Return and ⌘Return.
         .disabled(model.findTime != nil)
         .accessibilityElement(children: .contain)
@@ -935,7 +932,12 @@ struct EventEditorPanel: View {
                         .accessibilityIdentifier("editor-calendar")
                         .stepped(by: stepCalendar, focus: $focus, field: .calendar)
                         .help("The calendar. ⇧⌘C puts the keyboard here; ↑ and ↓ pick another.")
-                        KeyCap(key: "⇧⌘C", focused: focus == .calendar)
+                        // The cap is the button that carries the shortcut: one on a
+                        // hidden or empty view never fires.
+                        Button { focus = .calendar } label: { KeyCap(key: "⇧⌘C", focused: focus == .calendar) }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut("c", modifiers: [.command, .shift])
+                            .accessibilityLabel("Go to the calendar")
                     } else {
                         CalendarDot(color: current?.color)
                         Text(current?.name ?? "")
