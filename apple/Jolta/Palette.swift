@@ -378,7 +378,7 @@ struct PaletteView: View {
                         if list.isEmpty {
                             Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”"
                                  : mode == .snippets && text.isEmpty ? "No snippets yet. Add them in Settings › Snippets."
-                                 : mode == .label && text.isEmpty ? "This account has no labels yet. Make them in Gmail." : "Nothing matches")
+                                 : mode == .label && text.isEmpty ? "This account has no labels yet. Make them in Gmail." : "No matches")
                                 .foregroundStyle(Color(Theme.text3))
                                 .padding(20)
                         }

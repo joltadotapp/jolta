@@ -662,7 +662,7 @@ struct EmptyList: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 260)
             } else {
-                Text(model.search.isEmpty ? "No conversations" : "Nothing matches “\(model.search)”")
+                Text(model.search.isEmpty ? "No conversations" : "No matches for “\(model.search)”")
                     .foregroundStyle(Color(Theme.text3))
                 if model.searchLooksLikeRequest {
                     Text("Press ⌘J in the search field to search with AI.")
@@ -894,7 +894,8 @@ struct ReaderColumn: View {
                     .fixedSize()
                     .padding(.trailing, 6)
             }
-            if jk { HStack(spacing: 3) { KeyCap(key: "K"); KeyCap(key: "J") } }
+            // With nothing open, the reader's own hint says what J does.
+            if jk, model.openThread != nil { HStack(spacing: 3) { KeyCap(key: "K"); KeyCap(key: "J") } }
         }
     }
 
@@ -951,9 +952,20 @@ struct ReaderColumn: View {
                 ReaderView(thread: thread, model: model, onAttachment: model.openAttachment,
                            onSaveAll: { model.saveAttachments(message: $0) }, onUnsubscribe: model.unsubscribe)
             } else {
-                Text(model.listCount == 0 ? "Nothing here" : "")
-                    .foregroundStyle(Color(Theme.text3))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Rows but none open: at launch, or after the open one left by
+                // itself. Nothing while one loads or the list is empty, which
+                // says so itself.
+                VStack(spacing: 10) {
+                    if model.listCount > 0, model.selectedThreadID == nil {
+                        Text("No conversation open").foregroundStyle(Color(Theme.text3))
+                        HStack(spacing: 5) {
+                            KeyCap(key: "J")
+                            KeyCap(key: "↩")
+                            Text("open the first one").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
