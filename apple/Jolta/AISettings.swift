@@ -145,6 +145,7 @@ private struct SortMailRow: View {
 private struct LocalModels: View {
     let model: AppModel
     @State private var lowSpace: String?
+    @State private var removal: Confirmation?
 
     private var appleSilicon: Bool {
         var info = utsname()
@@ -167,6 +168,7 @@ private struct LocalModels: View {
         } message: {
             Text(lowSpace ?? "")
         }
+        .confirmation($removal)
     }
 
     private func row(_ m: LocalModelInfo) -> some View {
@@ -270,13 +272,10 @@ private struct LocalModels: View {
     }
 
     private func remove(_ m: LocalModelInfo) {
-        let alert = NSAlert()
-        alert.messageText = "Remove \(m.name)?"
-        alert.informativeText = "This frees \(Self.bytes(m.size)). Summaries already made stay. You can download it again any time."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        try? model.core.removeModel(id: m.id)
+        removal = Confirmation(
+            title: "Remove \(m.name)?",
+            message: "This frees \(Self.bytes(m.size)). Summaries already made stay. You can download it again any time.",
+            action: "Remove") { [model] in try? model.core.removeModel(id: m.id) }
     }
 
     static func bytes(_ n: UInt64) -> String {
