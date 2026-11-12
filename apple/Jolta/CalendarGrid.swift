@@ -128,6 +128,13 @@ enum EventStyle {
         ring.stroke()
     }
 
+    /// The outline an event being dragged leaves where it came from.
+    static func ghost(_ r: CGRect, radius: CGFloat, color: NSColor) {
+        let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: radius - 0.5, yRadius: radius - 0.5)
+        color.withAlphaComponent(0.5).setStroke()
+        edge.stroke()
+    }
+
     /// The colors of an event's title and of the lines under it.
     static func ink(_ e: CalEvent, now: Date) -> (title: NSColor, sub: NSColor) {
         if e.isDeclined || e.isCancelled { return (Theme.text3, Theme.text3) }
@@ -546,7 +553,10 @@ final class DayStrip: CanvasView {
             CTLineDraw(line("+\(count)", Self.laneFont), cg)
         }
         for item in content.lanes where item.lane < maxLanes {
-            if moved != nil, press?.copy == false, item.id == moved?.id { continue }
+            if moved != nil, press?.copy == false, item.id == moved?.id {
+                EventStyle.ghost(box(item), radius: 5, color: CalendarColor.color(item.event.record.color, .bar, on: surface))
+                continue
+            }
             let e = item.event, r = box(item)
             if e.id == content.selectedID { ringed = r }
             let alpha = EventStyle.alpha(e, now: content.now)
@@ -912,9 +922,14 @@ final class HourCanvas: CanvasView {
             let content = self.content, press = self.press
             let hidden = press?.hides
             var selected: [CGRect] = []
-            for p in content.placed where p.event.id != hidden {
+            for p in content.placed {
                 let r = self.box(p)
                 guard r.intersects(visible) else { continue }
+                // An event being dragged leaves its outline where it came from.
+                if p.event.id == hidden {
+                    EventStyle.ghost(r, radius: 6, color: CalendarColor.color(p.event.record.color, .bar, on: content.surface))
+                    continue
+                }
                 self.draw(p.event, in: r, cg: cg)
                 if p.event.id == content.selectedID { selected.append(r) }
             }
@@ -928,10 +943,20 @@ final class HourCanvas: CanvasView {
                 else if content.pending != nil { .pending }
                 else { .selection }
             if ring == .selection { for r in selected { EventStyle.ring(r, radius: 6) } }
-            if let draft = content.draft, press?.hidesDraft != true { self.drawDraft(draft, ringed: ring == .draft, cg: cg) }
-            if let pending = content.pending { self.drawDraft(pending, ringed: ring == .pending, cg: cg) }
-            if let press, !press.refused, let preview = press.preview { self.drawDraft(preview, ringed: ring == .preview, cg: cg) }
+            if let draft = content.draft {
+                if press?.hidesDraft == true {
+                    EventStyle.ghost(self.rect(draft), radius: 6, color: CalendarColor.color(draft.color, .bar, on: content.surface))
+                } else {
+                    self.drawDraft(draft, ringed: ring == .draft, cg: cg)
+                }
+            }
+            let preview = press.flatMap { $0.refused ? nil : $0.preview }
+            // The tag below says the times of the one block on the move.
+            if let pending = content.pending { self.drawDraft(pending, ringed: ring == .pending, times: preview != nil, cg: cg) }
+            if let preview { self.drawDraft(preview, ringed: ring == .preview, times: false, cg: cg) }
             self.drawNow(cg: cg)
+            // The times of a block on the move, over everything else.
+            if let moving = preview ?? content.pending { self.drawTimes(moving, visible: visible, cg: cg) }
         }
         if let bench = CalendarBench.shared { bench.time("draw (hour grid)", paint) } else { paint() }
         CalendarBench.shared?.drew()
@@ -1048,7 +1073,7 @@ final class HourCanvas: CanvasView {
 
     /// A block that isn't saved yet: dashed in its calendar's color, with
     /// its title and times, and the accent ring when `ringed`.
-    private func drawDraft(_ d: DraftBlock, ringed: Bool, cg: CGContext) {
+    private func drawDraft(_ d: DraftBlock, ringed: Bool, times: Bool = true, cg: CGContext) {
         let r = rect(d)
         let bar = CalendarColor.color(d.color, .bar, on: content.surface)
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
@@ -1066,7 +1091,7 @@ final class HourCanvas: CanvasView {
         let width = r.width - 12
         guard width > 14 else { return }
         var top = r.minY + (r.height < 30 ? 1 : 3)
-        for (text, font, color) in [(d.title, EventStyle.titleFont, Theme.text), (d.range, EventStyle.timeFont, Theme.text2)] {
+        for (text, font, color) in [(d.title, EventStyle.titleFont, Theme.text), (d.range, EventStyle.timeFont, Theme.text2)].prefix(times ? 2 : 1) {
             guard top + 12 <= r.maxY + 2 else { break }
             let attributed = NSAttributedString(string: text, attributes: [.font: font, kCTForegroundColorFromContextAttributeName as NSAttributedString.Key: true])
             var line = CTLineCreateWithAttributedString(attributed)
@@ -1079,6 +1104,28 @@ final class HourCanvas: CanvasView {
             CTLineDraw(line, cg)
             top += 14
         }
+    }
+
+    /// The times of a block that is dragged or moved with the keys, in a
+    /// tag above it, or below it at the top of the view. The block itself
+    /// has room for them only from 45 minutes up.
+    private func drawTimes(_ d: DraftBlock, visible: CGRect, cg: CGContext) {
+        let r = rect(d)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: d.range, attributes: [
+            .font: EventStyle.timeFont, kCTForegroundColorFromContextAttributeName as NSAttributedString.Key: true,
+        ]))
+        let size = CGSize(width: ceil(CTLineGetTypographicBounds(line, nil, nil, nil)) + 12, height: 18)
+        let above = r.minY - size.height - 5
+        let tag = CGRect(x: min(r.minX, bounds.width - size.width - 4), y: above < visible.minY + 2 ? r.maxY + 5 : above, width: size.width, height: size.height)
+        let shape = NSBezierPath(roundedRect: tag, xRadius: Theme.radiusKey, yRadius: Theme.radiusKey)
+        Theme.raise.setFill()
+        shape.fill()
+        Theme.line.setStroke()
+        NSBezierPath(roundedRect: tag.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.radiusKey - 0.5, yRadius: Theme.radiusKey - 0.5).stroke()
+        cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        cg.setFillColor(Theme.text.cgColor)
+        cg.textPosition = CGPoint(x: tag.minX + 6, y: tag.minY + 13)
+        CTLineDraw(line, cg)
     }
 
     /// Tells SwiftUI where the selected event is, for the detail card.
