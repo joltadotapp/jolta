@@ -148,8 +148,8 @@ impl Graph {
     }
 
     /// One request with the account's token and its answer, whatever the
-    /// status. Throttling (429) and brief outages (503, 504) are retried
-    /// after the server's Retry-After.
+    /// status. Throttling (429) and brief outages (502, 503, 504) are
+    /// retried after the server's Retry-After.
     async fn respond(&self, method: reqwest::Method, url: &str, body: Option<(&str, Vec<u8>)>) -> Result<(reqwest::StatusCode, Vec<u8>)> {
         let url = if url.starts_with("https://") { url.to_string() } else { format!("{BASE}{url}") };
         for attempt in 0..5 {
@@ -164,7 +164,12 @@ impl Graph {
             }
             let resp = req.send().await.map_err(http_error)?;
             let status = resp.status();
-            if matches!(status.as_u16(), 429 | 503 | 504) && attempt < 4 {
+            // Microsoft can revoke a token before it expires; a fresh one gets one more try.
+            if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                oauth::forget(&self.account);
+                continue;
+            }
+            if matches!(status.as_u16(), 429 | 502 | 503 | 504) && attempt < 4 {
                 let wait = resp
                     .headers()
                     .get("Retry-After")

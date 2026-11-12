@@ -1292,13 +1292,13 @@ final class AppModel {
         cursor = (0, 0)
     }
 
-    /// Marks the conversation read once it has been open as long as the setting asks.
+    /// Marks the conversation read once it has been on screen as long as the setting asks.
     private func markReadSoon(_ threadID: Int64) {
         markReadTask?.cancel()
         guard let delay = markRead.delay else { return }
         markReadTask = Task {
             if delay > .zero { try? await Task.sleep(for: delay) }
-            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            guard !Task.isCancelled, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
             _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
         }
     }
@@ -1316,13 +1316,19 @@ final class AppModel {
         showSummary(for: threadID)
         let opening = ContinuousClock.now
         markReadTask?.cancel()
-        if !singleColumn || readerUp { markReadSoon(threadID) }
         let offset = Int32(TimeZone.current.secondsFromGMT())
+        // A conversation whose mail is still downloading must not sit behind
+        // the one open before; the reader says it is loading instead.
+        Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            if selectedThreadID == threadID, openThread != nil, openThread?.threadId != threadID { openThread = nil }
+        }
         Task {
             do {
                 let view = try await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: offset)
                 if selectedThreadID == threadID {
                     openThread = view
+                    if !singleColumn || readerUp { markReadSoon(threadID) }
                     let ms = (ContinuousClock.now - opening).components
                     Self.timing(String(format: "open thread %lld: %.1f ms (%d messages)", threadID,
                                        Double(ms.seconds) * 1000 + Double(ms.attoseconds) / 1e15, view.messageCount))
