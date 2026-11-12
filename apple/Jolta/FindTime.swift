@@ -134,25 +134,27 @@ struct FindTimePanel: View {
             footer
         }
         .frame(width: 820)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 24, y: 10)
+        .panel()
         .background(keyField)
         .overlay(alignment: .topTrailing) {
-            if pickingRoom, case .ready(let info) = phase {
-                RoomPicker(
-                    core: model.core,
-                    accountId: info.accountId,
-                    slot: slots.indices.contains(selected) ? slots[selected] : nil,
-                    fallbackStart: info.days.first?.start ?? Int64(Date().timeIntervalSince1970),
-                    people: info.people.count,
-                    taken: Set(rooms.map { $0.address.lowercased() }),
-                    add: { room in addRoom(room.address, info: info) },
-                    close: closeRoomPicker
-                )
-                .padding(.top, 40)
-                .padding(.trailing, 12)
+            ZStack {
+                if pickingRoom, case .ready(let info) = phase {
+                    RoomPicker(
+                        core: model.core,
+                        accountId: info.accountId,
+                        slot: slots.indices.contains(selected) ? slots[selected] : nil,
+                        fallbackStart: info.days.first?.start ?? Int64(Date().timeIntervalSince1970),
+                        people: info.people.count,
+                        taken: Set(rooms.map { $0.address.lowercased() }),
+                        add: { room in addRoom(room.address, info: info) },
+                        close: closeRoomPicker
+                    )
+                    .padding(.top, 40)
+                    .padding(.trailing, 12)
+                    .transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: pickingRoom)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("find-time")

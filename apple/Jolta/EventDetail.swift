@@ -192,9 +192,7 @@ struct EventDetailCard: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(width: 340, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 28, y: 14)
+        .panel()
         .onAppear(perform: render)
         .onChange(of: detail.descriptionHtml) { render() }
         .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }

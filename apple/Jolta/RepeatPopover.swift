@@ -139,19 +139,15 @@ struct RepeatPopover: View {
         .frame(width: 340)
         .font(.system(size: 12.5))
         .foregroundStyle(Color(Theme.text))
-        .background(alignment: .topTrailing) {
-            // The mockup's arrow: a square turned 45° half out of the right edge.
+        .panel()
+        .overlay(alignment: .topTrailing) {
+            // The arrow: a square turned 45° half out of the right edge, over the panel's border there.
             RoundedRectangle(cornerRadius: 2)
                 .fill(Color(Theme.raise))
                 .frame(width: 12, height: 12)
                 .rotationEffect(.degrees(45))
                 .offset(x: 6, y: max(arrowY - 6, 14))
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(Theme.raise))
-                .shadow(color: .black.opacity(0.3), radius: 28, y: 16)
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+                .allowsHitTesting(false)
         }
         .onAppear {
             // Off the editor's text fields, so ↑, ↓, Return and Esc reach

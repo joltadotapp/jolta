@@ -654,7 +654,7 @@ struct ReaderView: View {
             // Hidden, not closed, behind Find a time, so Escape brings it back as it was.
             .opacity(model.findTime == nil ? 1 : 0)
             .accessibilityHidden(model.findTime != nil)
-            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .topLeading)))
+            .transition(.panel(anchor: .topLeading))
         }
     }
 
@@ -746,7 +746,7 @@ struct ReaderView: View {
             ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
         }
-        .animation(.snappy(duration: 0.16), value: model.rsvpPanel)
+        .animation(Theme.quick, value: model.rsvpPanel)
         .onChange(of: model.answerChoices) { reflect() }
         .onChange(of: model.pendingAnswer) { reflect() }
         .onChange(of: model.pendingRemoval) { old, new in
@@ -990,8 +990,7 @@ struct HoldsLineView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: 720, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+        .card()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("holds-line")
     }

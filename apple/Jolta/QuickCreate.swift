@@ -62,9 +62,8 @@ struct QuickCreateView: View {
             .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
         }
         .frame(width: 560)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .panel()
         .onAppear {
             focused = true
             DispatchQueue.main.async { focused = true }

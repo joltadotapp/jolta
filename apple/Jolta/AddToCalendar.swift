@@ -87,9 +87,7 @@ struct AddCalendarPanel: View {
         }
         .padding(4)
         .frame(width: Self.width)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
         .accessibilityIdentifier("add-to-calendar")
     }
 

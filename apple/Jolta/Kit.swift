@@ -68,9 +68,14 @@ extension View {
             .overlay(RoundedRectangle(cornerRadius: Theme.radiusPanel).strokeBorder(Color(Theme.line), lineWidth: 1).allowsHitTesting(false))
     }
 
-    /// The shell of a panel that floats over the window: the palette, a card, a picker.
+    /// The shell of a panel that floats over the window: the palette, a picker, an event's detail.
     func panel() -> some View {
         panelShell().panelShadow()
+    }
+
+    /// The same shell lying in the page, without a shadow.
+    func card() -> some View {
+        panelShell()
     }
 
     /// The shell of a small one: a menu, a toast, a list of suggestions.

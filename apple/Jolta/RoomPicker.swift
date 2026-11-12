@@ -54,9 +54,7 @@ struct RoomPicker: View {
             footer
         }
         .frame(width: 440)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.35), radius: 28, y: 12)
+        .panel()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("room-picker")
         .task { await load() }

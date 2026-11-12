@@ -339,8 +339,7 @@ struct SettingsCard<Content: View>: View {
                 }
             }
         }
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
+        .card()
     }
 }
 

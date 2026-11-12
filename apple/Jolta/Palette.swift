@@ -382,9 +382,8 @@ struct PaletteView: View {
             .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
         }
         .frame(width: 560)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .panel()
         // The editor of a message being written takes the keyboard back on
         // the next turn of the run loop; take it again after that.
         .onAppear {
@@ -493,8 +492,7 @@ struct HelpView: View {
         }
         .padding(24)
         .frame(width: 600)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .panel()
         .onExitCommand { model.showsHelp = false }
         .onTapGesture { model.showsHelp = false }
     }

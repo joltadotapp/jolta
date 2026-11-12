@@ -311,9 +311,7 @@ struct RsvpNotePanel: View {
         }
         .padding(12)
         .frame(width: 300)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
         .onAppear { focused = true }
     }
 }
@@ -409,9 +407,7 @@ struct RsvpProposePanel: View {
         }
         .padding(12)
         .frame(width: 330)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
         .onExitCommand { model.rsvpPanel = nil }
         .onAppear { if model.findTime == nil { focus = .start } }
         .onDisappear { model.proposedSlot = nil }
@@ -454,9 +450,7 @@ struct RsvpScopePanel: View {
         }
         .padding(4)
         .frame(width: 190)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
     }
 
     private func row(_ title: String, only: Bool) -> some View {

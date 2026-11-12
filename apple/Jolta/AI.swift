@@ -151,8 +151,7 @@ struct SummaryCard: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
+            .card()
             .padding(.horizontal, 20)
             .padding(.top, 14)
             .padding(.bottom, 2)
@@ -354,8 +353,7 @@ struct WriteBar: View {
         .font(.system(size: 13))
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 1))
+        .card()
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .onAppear { focused.wrappedValue = .ai }

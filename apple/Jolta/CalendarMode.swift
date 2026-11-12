@@ -40,12 +40,15 @@ struct CalendarModeView: View {
                         let anchor = frame ?? CGRect(x: geo.size.width - 380, y: 60, width: 0, height: 0)
                         let x = anchor.maxX + 12 + 340 <= geo.size.width ? anchor.maxX + 12 : max(12, anchor.minX - 352)
                         let y = min(max(anchor.minY - 8, 56), max(56, geo.size.height - cardHeight - 12))
+                        // The card grows from its own middle, not from the corner its offset starts at.
+                        let height = cardHeight > 0 ? cardHeight : 260
                         EventDetailCard(model: model, cal: cal, detail: detail, event: event)
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeight = $0 }
                             .offset(x: x, y: y)
-                            .transition(.opacity)
+                            .transition(.panel(anchor: UnitPoint(x: (x + 170) / 340, y: (y + height / 2) / height)))
                     }
                 }
+                .animation(Theme.quick, value: cal.detail != nil)
             }
             if let editor = cal.editor {
                 EventEditorPanel(model: model, editor: editor)
@@ -54,16 +57,22 @@ struct CalendarModeView: View {
             }
         }
         .overlayPreferenceValue(RepeatRowAnchor.self) { anchor in
-            if let editor = cal.editor, let picker = editor.repeatPicker, let anchor {
-                RepeatPopoverLayer(editor: editor, picker: picker, row: anchor)
+            ZStack {
+                if let editor = cal.editor, let picker = editor.repeatPicker, let anchor {
+                    RepeatPopoverLayer(editor: editor, picker: picker, row: anchor).transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: cal.editor?.repeatPicker != nil)
         }
         .overlayPreferenceValue(RoomRowAnchor.self) { anchor in
-            if let editor = cal.editor, editor.roomsOpen, let anchor, let account = cal.calendarInfo(editor.draft.calendarId)?.accountId {
-                RoomPickerLayer(core: model.core, editor: editor, accountId: account, row: anchor)
+            ZStack {
+                if let editor = cal.editor, editor.roomsOpen, let anchor, let account = cal.calendarInfo(editor.draft.calendarId)?.accountId {
+                    RoomPickerLayer(core: model.core, editor: editor, accountId: account, row: anchor).transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: cal.editor?.roomsOpen == true)
         }
-        .animation(.snappy(duration: 0.2), value: cal.editor.map(ObjectIdentifier.init))
+        .animation(Theme.settle, value: cal.editor.map(ObjectIdentifier.init))
         .confirmation(Binding(get: { cal.discard }, set: { cal.discard = $0 }))
         .overlay {
             if let message = cal.lastError {

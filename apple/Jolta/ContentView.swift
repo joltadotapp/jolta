@@ -55,31 +55,47 @@ struct ContentView: View {
         .foregroundStyle(Color(Theme.text))
         .font(.system(size: 13))
         .ignoresSafeArea()
+        // Each overlay animates inside its own stack, so what a command
+        // changes in the window behind doesn't move with the panel.
         .overlay {
-            if model.palette != nil || model.showsHelp || model.findTime != nil {
-                // Light while picking a theme, so the preview behind the palette shows.
-                Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
-                    .ignoresSafeArea()
-                    .onTapGesture { model.palette = nil; model.showsHelp = false; model.findTime = nil }
+            let dimmed = model.palette != nil || model.showsHelp || model.findTime != nil
+            ZStack {
+                if dimmed {
+                    // Light while picking a theme, so the preview behind the palette shows.
+                    Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
+                        .ignoresSafeArea()
+                        .onTapGesture { model.palette = nil; model.showsHelp = false; model.findTime = nil }
+                        .transition(.opacity)
+                }
             }
+            .animation(Theme.quick, value: dimmed)
         }
         .overlay {
-            if let request = model.findTime {
-                FindTimePanel(model: model, request: request).id(request)
+            ZStack {
+                if let request = model.findTime {
+                    FindTimePanel(model: model, request: request).id(request).transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: model.findTime)
         }
         .overlay(alignment: .top) {
-            if let mode = model.palette, mode == .quickEvent || mode == .goToDate {
-                QuickCreateView(model: model, mode: mode)
-                    .id(mode)
-                    .padding(.top, 110)
-            } else if let mode = model.palette {
-                PaletteView(model: model, mode: mode)
-                    .id(mode)
-                    .padding(.top, 110)
-            } else if model.showsHelp {
-                HelpView(model: model).padding(.top, 110)
+            ZStack(alignment: .top) {
+                if let mode = model.palette, mode == .quickEvent || mode == .goToDate {
+                    QuickCreateView(model: model, mode: mode)
+                        .id(mode)
+                        .padding(.top, 110)
+                        .transition(.panel())
+                } else if let mode = model.palette {
+                    PaletteView(model: model, mode: mode)
+                        .id(mode)
+                        .padding(.top, 110)
+                        .transition(.panel())
+                } else if model.showsHelp {
+                    HelpView(model: model).padding(.top, 110).transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: model.palette)
+            .animation(Theme.quick, value: model.showsHelp)
         }
     }
 }
@@ -155,7 +171,7 @@ extension ContentView {
                     .transition(.move(edge: .trailing))
             }
         }
-        .animation(.snappy(duration: 0.2), value: model.showsDayPanel)
+        .animation(Theme.settle, value: model.showsDayPanel)
     }
 
     private func emptyTrash(_ list: ListSource) -> Confirmation {
@@ -711,7 +727,7 @@ struct ToastLayer: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.snappy(duration: 0.22), value: model.toast)
+        .animation(Theme.settle, value: model.toast)
     }
 }
 
@@ -750,9 +766,7 @@ struct ToastView: View {
         .fixedSize()
         .padding(.horizontal, 14)
         .frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+        .menuPanel()
     }
 }
 
