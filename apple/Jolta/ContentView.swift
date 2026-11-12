@@ -58,7 +58,7 @@ struct ContentView: View {
                 if let added { model.notify("Added \(added.address). Jolta is syncing it now.") }
             }
         }
-        .animation(.easeInOut(duration: 0.4), value: model.isInboxZero)
+        .animation(Theme.motion(.easeInOut(duration: 0.4)), value: model.isInboxZero)
         .onChange(of: model.settingsRequest, initial: true) { _, page in
             // The settings window takes the request and switches to the page.
             if page != nil { openWindow(id: "settings") }
@@ -433,7 +433,7 @@ struct GroupLabel: View {
 
     var body: some View {
         if let collapsed {
-            Button { withAnimation(.easeOut(duration: 0.15)) { collapsed.wrappedValue.toggle() } } label: {
+            Button { withAnimation(Theme.quick) { collapsed.wrappedValue.toggle() } } label: {
                 HStack(spacing: 5) {
                     label
                     // Shown on hover, as in Finder, and always while folded so the hidden rows are findable.
@@ -1056,6 +1056,7 @@ struct ReaderColumn: View {
             if model.compose != nil {
                 ComposeView(model: model)
                     .id(model.composeSession)
+                    .transition(.opacity)
             } else if model.isMultiSelection {
                 VStack(spacing: 6) {
                     Text("\(model.selectedThreads.count) conversations selected")
@@ -1083,7 +1084,7 @@ struct ReaderColumn: View {
             } else if let thread = model.openThread {
                 if let summary = model.summary, summary.threadID == thread.threadId {
                     SummaryCard(summary: summary, label: model.ai.label) { model.openSettings(.ai) }
-                        .animation(.easeInOut(duration: 0.2), value: summary.state)
+                        .animation(Theme.quick, value: summary.state)
                 }
                 ReaderView(thread: thread, model: model, onAttachment: model.openAttachment,
                            onSaveAll: { model.saveAttachments(message: $0) }, onUnsubscribe: model.unsubscribe)
@@ -1104,5 +1105,6 @@ struct ReaderColumn: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .animation(Theme.quick, value: model.compose != nil)
     }
 }

@@ -29,8 +29,9 @@ extension Theme {
     /// Toasts and sliding panes.
     static var settle: Animation? { motion(.snappy(duration: 0.22)) }
 
-    /// Nothing moves while macOS's Reduce Motion is on.
-    private static func motion(_ animation: Animation) -> Animation? {
+    /// Nothing moves while macOS's Reduce Motion is on. `quick` and `settle`
+    /// are the app's two; the empty inbox's slow fade is the one other caller.
+    static func motion(_ animation: Animation) -> Animation? {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : animation
     }
 }

@@ -571,18 +571,23 @@ struct ReaderView: View {
     /// Set when the user trusts or stops trusting the sender in this view.
     @State private var trustOverride: Bool?
     @State private var shownThread: Int64?
+    /// Another conversation is loading: it fades in once its page is in.
+    @State private var arriving = false
 
     private var trusted: Bool { trustOverride ?? thread.imagesTrusted }
     private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
 
     private func render() {
         if shownThread != thread.threadId {
+            // Not the first one, which comes with the reader itself, and not under Reduce Motion.
+            arriving = shownThread != nil && Theme.quick != nil
             shownThread = thread.threadId
             imagesLoaded = false
             trustOverride = nil
         }
         reader.images.allowsRemote = imagesLoaded || trusted
         reader.show(html: thread.html) {
+            if arriving { withAnimation(Theme.quick) { arriving = false } }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
             let expanded = model.expandedMessages
@@ -746,6 +751,7 @@ struct ReaderView: View {
             ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
         }
+        .opacity(arriving ? 0 : 1)
         .animation(Theme.quick, value: model.rsvpPanel)
         .onChange(of: model.answerChoices) { reflect() }
         .onChange(of: model.pendingAnswer) { reflect() }
@@ -896,31 +902,27 @@ enum ReaderStyle {
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-rsvp + .jolta-join, .jolta-remove + .jolta-join { margin-left: auto; }
     .jolta-remove { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 6px;
-      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default;
-      transition: background-color .16s ease; }
+      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-remove:hover { background: var(--fill); }
-    .jolta-sending .jolta-remove { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-add, .jolta-update { display: inline-flex; align-items: center; gap: 5px; height: 22px; box-sizing: border-box; padding: 0 8px;
       margin: -3px -4px -3px 0; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-size: 11.5px;
-      font-weight: 500; text-decoration: none; cursor: default; transition: background-color .16s ease; }
+      font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-add:hover, .jolta-update:hover { background: var(--fill); }
-    .jolta-sending .jolta-add, .jolta-sending .jolta-update { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-decline-proposal, .jolta-accept-proposal { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box;
       padding: 0 5px 0 10px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
-      text-decoration: none; cursor: default; transition: background-color .16s ease; }
+      text-decoration: none; cursor: default; }
     .jolta-decline-proposal:hover, .jolta-accept-proposal:hover { background: var(--fill); }
     .jolta-accept-proposal { margin-right: 6px; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 55%, var(--line2)); }
     .jolta-decline-proposal kbd, .jolta-accept-proposal kbd, .jolta-rsvp-propose kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px;
       border-radius: 4px; text-align: center; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3);
       font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
     .jolta-rsvp-propose kbd { min-width: 14px; height: 14px; padding: 0 3px; font-size: 9.5px; line-height: 14px; }
-    .jolta-sending .jolta-decline-proposal { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-invite-hint { color: var(--tx3); font-size: 12px; }
     .jolta-rsvp-fixed { color: var(--tx3); }
     .jolta-rsvp { display: inline-flex; gap: 6px; }
     .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
       border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
-      cursor: default; transition: background-color .16s ease, box-shadow .16s ease; }
+      cursor: default; }
     .jolta-rsvp a:hover { background: var(--fill); }
     .jolta-rsvp kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px; border-radius: 4px; text-align: center;
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3); font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
@@ -928,8 +930,17 @@ enum ReaderStyle {
     .jolta-rsvp a.jolta-chosen { padding-left: 8px; font-weight: 600; background: color-mix(in oklab, var(--tx) 11%, var(--bg));
       box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 40%, transparent); }
     .jolta-rsvp a.jolta-chosen svg { display: block; color: var(--tx); }
-    .jolta-sending .jolta-rsvp a.jolta-chosen { animation: jolta-sending .7s ease-in-out infinite alternate; }
     @keyframes jolta-sending { to { opacity: .45; } }
+    @media (prefers-reduced-motion: no-preference) {
+      .jolta-remove, .jolta-add, .jolta-update, .jolta-decline-proposal, .jolta-accept-proposal { transition: background-color .16s ease; }
+      .jolta-rsvp a { transition: background-color .16s ease, box-shadow .16s ease; }
+      .jolta-sending .jolta-remove, .jolta-sending .jolta-add, .jolta-sending .jolta-update, .jolta-sending .jolta-decline-proposal,
+      .jolta-sending .jolta-rsvp a.jolta-chosen { animation: jolta-sending .7s ease-in-out infinite alternate; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .jolta-sending .jolta-remove, .jolta-sending .jolta-add, .jolta-sending .jolta-update, .jolta-sending .jolta-decline-proposal,
+      .jolta-sending .jolta-rsvp a.jolta-chosen { opacity: .6; }
+    }
     .jolta-rsvp-options { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 8px; font-size: 12px; }
     .jolta-rsvp-options a { display: inline-flex; align-items: center; gap: 5px; max-width: 240px; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; color: var(--tx3); text-decoration: none; cursor: default; }

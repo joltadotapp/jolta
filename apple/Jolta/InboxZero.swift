@@ -97,7 +97,7 @@ private final class SkyLayers: NSView {
 
     func show(_ sky: Sky) {
         CATransaction.begin()
-        CATransaction.setAnimationDuration(1)
+        CATransaction.setAnimationDuration(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 1)
         gradient.colors = [NSColor(hex: sky.top).cgColor, NSColor(hex: sky.bottom).cgColor]
         far.fillColor = NSColor(hex: sky.far).cgColor
         near.fillColor = NSColor(hex: sky.near).cgColor

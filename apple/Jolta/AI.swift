@@ -178,7 +178,7 @@ struct SummaryCard: View {
                 iconButton("arrow.clockwise", help: "Summarize again  ⌘J") { summary.start(automatic: false, fresh: true, label: label) }
             }
             iconButton(collapsed ? "chevron.down" : "chevron.up", help: collapsed ? "Show summary" : "Hide summary") {
-                withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
+                withAnimation(Theme.quick) { collapsed.toggle() }
             }
         }
         .foregroundStyle(Color(Theme.text2))

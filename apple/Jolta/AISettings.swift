@@ -326,7 +326,7 @@ private struct RemoteAccount: View {
         }
         .confirmation($removal)
         VStack(alignment: .leading, spacing: 10) {
-            Button { withAnimation(.easeInOut(duration: 0.15)) { advanced.toggle() } } label: {
+            Button { withAnimation(Theme.quick) { advanced.toggle() } } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).rotationEffect(.degrees(advanced ? 90 : 0))
                     Text("Advanced").font(.system(size: 13, weight: .semibold))
