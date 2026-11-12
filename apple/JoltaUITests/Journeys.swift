@@ -181,6 +181,32 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil { list.value(forKey: "hasKeyboardFocus") as? Bool == true }, "j gives it back to the list")
     }
 
+    /// ⇧J and ⇧K extend the selection as ⇧↓ and ⇧↑ do, Esc clears it, and X
+    /// picks conversations one by one while J and K move the caret.
+    func testSelectionKeys() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        let two = text(app, "2 conversations selected")
+        app.typeKey("j", modifierFlags: .shift)
+        XCTAssertTrue(two.waitForExistence(timeout: 5), "⇧J adds the next conversation")
+        app.typeKey("k", modifierFlags: .shift)
+        XCTAssertTrue(two.waitForNonExistence(timeout: 5), "⇧K takes it off again")
+        app.typeKey("j", modifierFlags: .shift)
+        XCTAssertTrue(two.waitForExistence(timeout: 5), "⇧J adds it again")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(two.waitForNonExistence(timeout: 5), "Esc clears the selection")
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "and leaves one conversation open")
+
+        app.typeKey("x", modifierFlags: [])
+        app.typeKey("k", modifierFlags: [])
+        app.typeKey("k", modifierFlags: [])
+        XCTAssertFalse(two.exists, "the caret moves without selecting")
+        app.typeKey("x", modifierFlags: [])
+        XCTAssertTrue(two.waitForExistence(timeout: 5), "X picks the conversation under the caret, two rows from the first")
+        app.typeKey("x", modifierFlags: [])
+        XCTAssertTrue(two.waitForNonExistence(timeout: 5), "X on a picked conversation takes it off")
+    }
+
     /// Mail that arrives at inbox zero stays unread and unopened until it is
     /// opened, so it can notify. The data folder also has an account on the
     /// local Dovecot (`scripts/test-servers.sh up`), and `scripts/ui-tests.sh`
