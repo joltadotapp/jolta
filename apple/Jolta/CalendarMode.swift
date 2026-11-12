@@ -16,6 +16,7 @@ struct CalendarModeView: View {
                 .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
             VStack(spacing: 0) {
                 CalendarHeader(cal: cal)
+                if let message = cal.lastError { CalendarProblem(message: message) { cal.retry() } }
                 Group {
                     switch cal.span {
                     case .day, .workWeek, .week: WeekView(cal: cal)
@@ -74,11 +75,6 @@ struct CalendarModeView: View {
         }
         .animation(Theme.settle, value: cal.editor.map(ObjectIdentifier.init))
         .confirmation(Binding(get: { cal.discard }, set: { cal.discard = $0 }))
-        .overlay {
-            if let message = cal.lastError {
-                Text(message).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).padding().allowsHitTesting(false)
-            }
-        }
         .overlay(alignment: .bottom) { ToastLayer(model: model).padding(.bottom, 34) }
     }
 }
@@ -142,6 +138,30 @@ private struct RoomPickerLayer: View {
                 .offset(x: max(12, field.maxX - 440), y: min(field.maxY + 6, max(12, geo.size.height - height - 12)))
             }
         }
+    }
+}
+
+/// What went wrong reading the calendar, above the view, with a way to try again.
+private struct CalendarProblem: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.dangerText))
+            Text(message).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text)).lineLimit(2).textSelection(.enabled)
+            Spacer(minLength: 8)
+            KitButton(title: "Try Again", size: .small, action: retry)
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .card()
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("calendar-problem")
     }
 }
 
@@ -702,10 +722,14 @@ struct AgendaView: View {
                         ForEach(list, id: \.id) { e in AgendaRow(cal: cal, event: e).id(day.key + "/" + e.id) }
                     }
                     if byDay.isEmpty {
-                        Text("Nothing in these \(CalendarSpan.agendaDays) days")
-                            .foregroundStyle(Color(Theme.text3))
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 80)
+                        VStack(spacing: 10) {
+                            Text("Nothing in these \(CalendarSpan.agendaDays) days").foregroundStyle(Color(Theme.text2))
+                            HStack(spacing: 6) { KeyCap(key: "C"); Text("new event") }
+                                .font(.system(size: Theme.small))
+                                .foregroundStyle(Color(Theme.text3))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
                     }
                 }
                 .padding(.bottom, 20)

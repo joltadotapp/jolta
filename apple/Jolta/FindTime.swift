@@ -379,9 +379,15 @@ struct FindTimePanel: View {
             }
             .frame(maxWidth: .infinity, minHeight: 120)
         case .failed(let message):
-            Text(message)
-                .foregroundStyle(Color(Theme.text2))
-                .frame(maxWidth: .infinity, minHeight: 120)
+            VStack(spacing: 10) {
+                Text(message)
+                    .foregroundStyle(Color(Theme.text2))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                KitButton(title: "Try Again", size: .small) { Task { await load() } }
+                    .accessibilityIdentifier("find-time-retry")
+            }
+            .frame(maxWidth: .infinity, minHeight: 120)
         case .calendarOff(let accountId, let address, let needsConsent):
             VStack(spacing: 10) {
                 Text("Calendar is off for \(address)")

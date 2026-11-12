@@ -541,6 +541,13 @@ final class CalendarModel {
         }
     }
 
+    /// Try Again on the message above the view: reads the calendars and the period again.
+    func retry() {
+        lastError = nil
+        reloadCalendars()
+        refresh()
+    }
+
     // MARK: Calendars
 
     func reloadCalendars() {
