@@ -497,10 +497,14 @@ struct NavRow: View {
                         .frame(width: 16)
                         .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
                 }
-                Text(title)
-                    .fontWeight(selected ? .medium : .regular)
-                    .foregroundStyle(Color(selected ? Theme.text : Theme.text2))
-                    .lineLimit(1)
+                // A name cut short shows in full under the pointer. A scheduled
+                // or snoozed row keeps its own tooltip.
+                ViewThatFits(in: .horizontal) {
+                    Text(title).fixedSize()
+                    if time == nil { Text(title).lineLimit(1).help(title) } else { Text(title).lineLimit(1) }
+                }
+                .fontWeight(selected ? .medium : .regular)
+                .foregroundStyle(Color(selected ? Theme.text : Theme.text2))
                 Spacer(minLength: 4)
                 if count > 0 {
                     Text("\(count)")
@@ -855,8 +859,10 @@ struct SearchField: View {
             if !model.search.isEmpty {
                 Button { model.search = "" } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.horizontal, -5)
                 .help("Clear the search")
                 .accessibilityLabel("Clear the search")
             }
@@ -903,17 +909,22 @@ struct ToastView: View {
             .help(toast.text(at: .now))
             if toast.undo != nil {
                 Button(action: undo) {
-                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z") }
+                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z") }.frame(height: Theme.controlSmall).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Undo")
             }
             if let draft = toast.review {
-                Button("Review") { review(draft) }.buttonStyle(.plain).fontWeight(.medium)
-            }
-            if let set = toast.release {
-                Button("Release") { release(set) }
+                Button { review(draft) } label: { Text("Review").frame(height: Theme.controlSmall).contentShape(Rectangle()) }
                     .buttonStyle(.plain)
                     .fontWeight(.medium)
+                    .accessibilityLabel("Review the draft")
+            }
+            if let set = toast.release {
+                Button { release(set) } label: { Text("Release").frame(height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+                    .fontWeight(.medium)
+                    .accessibilityLabel("Release these holds")
                     .help("Release these holds now")
                     .accessibilityIdentifier("toast-release")
             }

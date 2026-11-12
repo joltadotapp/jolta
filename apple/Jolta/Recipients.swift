@@ -120,10 +120,14 @@ struct SuggestionRow: View {
             if hovering || on {
                 Button(action: forget) {
                     Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color(Theme.text3))
+                // The glyph stays where it was, 10 points from the row's edge.
+                .padding(.trailing, -7)
                 .help("Don't suggest \(person.address) until you write to it again")
+                .accessibilityLabel("Forget \(person.address)")
             }
         }
         .font(.system(size: 13))

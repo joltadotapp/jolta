@@ -92,10 +92,13 @@ struct ComposeView: View {
                 FieldRow(label: "To") {
                     recipientField(draft.to, .to)
                     if !showCc {
-                        Button("Cc Bcc") { showCc = true; focus = .cc }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color(Theme.text3))
+                        Button { showCc = true; focus = .cc } label: {
+                            Text("Cc Bcc").frame(height: Theme.controlSmall).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text3))
+                        .accessibilityLabel("Add Cc and Bcc")
                     }
                 }
                 .zIndex(focus == .to ? 1 : 0)
@@ -116,7 +119,9 @@ struct ComposeView: View {
                             return .handled
                         }
                     if !showsFormatBar {
-                        Button("Aa") { showsFormatBar = true }
+                        Button { showsFormatBar = true } label: {
+                            Text("Aa").frame(minWidth: Theme.controlSmall, minHeight: Theme.controlSmall).contentShape(Rectangle())
+                        }
                             .buttonStyle(.plain)
                             .font(.system(size: 12))
                             .foregroundStyle(Color(Theme.text3))
@@ -131,10 +136,13 @@ struct ComposeView: View {
                         Text("Scheduled for \(schedule.label). Esc keeps it scheduled.").foregroundStyle(Color(Theme.text2))
                         Button { model.composeSchedule = nil } label: {
                             Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                                .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
+                        .padding(.leading, -7)
                         .help("Don't send it then; keep it as a draft")
+                        .accessibilityLabel("Don't send it then")
                         Spacer()
                     }
                     .font(.system(size: Theme.body))
@@ -147,10 +155,13 @@ struct ComposeView: View {
                         Text("Back in your inbox on \(reminder.label) if nobody replies").foregroundStyle(Color(Theme.text2))
                         Button { model.composeReminder = nil } label: {
                             Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                                .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
+                        .padding(.leading, -7)
                         .help("No reminder")
+                        .accessibilityLabel("Remove the reminder")
                         Spacer()
                     }
                     .font(.system(size: Theme.body))
@@ -208,9 +219,14 @@ struct ComposeView: View {
                                 Text(file.name).lineLimit(1)
                                 Button { model.compose?.attachments.remove(at: i); scheduleSave() } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color(Theme.text3))
+                                // The glyph stays where it was in the chip.
+                                .padding(.horizontal, -7)
+                                .help("Remove \(file.name)")
+                                .accessibilityLabel("Remove \(file.name)")
                             }
                             .font(.system(size: Theme.body))
                             .padding(.horizontal, 12)

@@ -142,6 +142,7 @@ struct MessageList: NSViewRepresentable {
                 // Reloading cells leaves row views alone, and they draw the unread dot and the VIP seal.
                 table.enumerateAvailableRowViews { view, row in
                     (view as? ThreadRowView)?.lead = self.lead(at: row)
+                    (view as? ThreadRowView)?.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
                 }
             }
             guard count > 0 else { return setPick(nil) }
@@ -195,6 +196,7 @@ struct MessageList: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let view = (tableView.makeView(withIdentifier: ThreadRowView.id, owner: nil) as? ThreadRowView) ?? ThreadRowView()
             view.lead = lead(at: row)
+            view.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
             view.hovering = row == (tableView as? KeyTableView)?.hoverRow
             return view
         }
@@ -591,6 +593,8 @@ final class ThreadRowView: NSTableRowView {
     enum Lead { case none, unread, vip }
 
     var lead = Lead.none { didSet { if lead != oldValue { needsDisplay = true } } }
+    /// VoiceOver hears "unread" on the row; the dot and the bold type only show it.
+    var unread = false { didSet { setAccessibilityValue(unread ? "unread" : nil) } }
     var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
 
     init() {
@@ -669,7 +673,7 @@ final class ThreadRowView: NSTableRowView {
     }
 }
 
-final class ThreadCell: NSTableCellView {
+final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
     static let id = NSUserInterfaceItemIdentifier("ThreadCell")
     private let sender = NSTextField(labelWithString: "")
     private let subject = NSTextField(labelWithString: "")
@@ -710,6 +714,8 @@ final class ThreadCell: NSTableCellView {
             f.translatesAutoresizingMaskIntoConstraints = false
             addSubview(f)
         }
+        // A sender cut short shows in full under the pointer.
+        sender.allowsExpansionToolTips = true
         clip.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Has attachments")
         invitation.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: "Invitation")
         for icon in [clip, invitation] {
@@ -750,6 +756,22 @@ final class ThreadCell: NSTableCellView {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// The subject's tooltip covers the label, wherever layout put it.
+    override func layout() {
+        super.layout()
+        removeAllToolTips()
+        addToolTip(subject.frame, owner: self, userData: nil)
+    }
+
+    /// A subject cut short shows in full under the pointer. The preview
+    /// after it is always cut, so it alone brings no tooltip.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
+        guard let row, !row.subject.isEmpty else { return "" }
+        let marks = CGFloat((row.flagged ? 1 : 0) + (row.needsReply ? 1 : 0)) * 18
+        let width = NSAttributedString(string: row.subject, attributes: [.font: Theme.font(weight: row.unreadCount > 0 ? .semibold : .regular)]).size().width
+        return marks + width > subject.frame.width ? row.subject : ""
+    }
 
     /// A VIP's seal, which the row view draws in the slot in front of the sender.
     static let vipSeal = symbol("checkmark.seal.fill", label: "VIP")
