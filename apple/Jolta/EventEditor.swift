@@ -26,6 +26,9 @@ final class EventEditorModel {
     var repeatPicker: RepeatPicker?
     /// The stored occurrence being edited, hidden in the grid while the draft shows.
     let event: CalEvent?
+    /// The draft as the editor opened on it, to tell what the user changed
+    /// from what a new event starts with.
+    let opened: EventDraft
     @ObservationIgnored var onChange: (() -> Void)?
     /// What the draft's calendar can do: which organizer options it has.
     private(set) var caps: CapabilitiesInfo?
@@ -88,6 +91,7 @@ final class EventEditorModel {
         self.core = core
         self.draft = draft
         self.event = event
+        opened = draft
         repeatText = draft.repeat
         if draft.base != nil {
             moveChoices = Dictionary(((try? core.moveChoices(draft: draft)) ?? []).map { ($0.calendarId, $0) }) { a, _ in a }
@@ -847,7 +851,11 @@ struct EventEditorPanel: View {
                     .textFieldStyle(.plain)
                     .focused($focus, equals: .room)
                     // The picker closed with the keyboard still here: these open it again.
-                    .onKeyPress(keys: [.downArrow, .return, .space]) { _ in editor.roomsOpen = true; return .handled }
+                    .onKeyPress(keys: [.downArrow, .return, .space]) { press in
+                        guard press.modifiers.isDisjoint(with: [.command, .option, .control, .shift]) else { return .ignored }
+                        editor.roomsOpen = true
+                        return .handled
+                    }
                     .help(editor.draft.room.isEmpty ? "↓ lists the rooms" : editor.draft.room)
                     .accessibilityIdentifier("editor-room")
                 if !editor.draft.room.isEmpty {

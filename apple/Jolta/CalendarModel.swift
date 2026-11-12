@@ -880,8 +880,11 @@ final class CalendarModel {
     private func hasChanges(_ editor: EventEditorModel) -> Bool {
         if editor.isReadOnly { return false }
         if editor.isNew {
-            let d = editor.draft
+            // What the user typed or picked. The time, the calendar and a
+            // video call the draft opened with are not theirs to lose.
+            let d = editor.draft, first = editor.opened
             return !d.title.isEmpty || !d.description.isEmpty || !d.location.isEmpty || !d.room.isEmpty || d.rule != nil || !d.people.isEmpty
+                || d.video != first.video || d.zoom != first.zoom || d.calendarId != first.calendarId
         }
         return (try? core.planSave(draft: editor.draft))?.unchanged == false
     }
