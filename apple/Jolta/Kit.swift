@@ -10,6 +10,14 @@ extension Theme {
     nonisolated static let title: CGFloat = 15
     nonisolated static let display: CGFloat = 21
 
+    /// The reader's body text and its line, before `ReadingSize` scales them.
+    nonisolated static let readerBody: CGFloat = 14
+    nonisolated static let readerLine: CGFloat = 22
+
+    /// A size of the message list's rows or the reader's text at the text
+    /// size chosen in Settings › Appearance, to the whole point.
+    static func scaled(_ size: CGFloat) -> CGFloat { (size * ThemeStore.shared.textSize.scale).rounded() }
+
     nonisolated static let radiusKey: CGFloat = 4
     nonisolated static let radiusControl: CGFloat = 6
     nonisolated static let radiusRow: CGFloat = 8
@@ -33,6 +41,31 @@ extension Theme {
     /// are the app's two; the empty inbox's slow fade is the one other caller.
     static func motion(_ animation: Animation) -> Animation? {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : animation
+    }
+}
+
+/// Settings › Appearance › Text size: how large the message list's rows
+/// and the reader's text are.
+nonisolated enum ReadingSize: String, CaseIterable, Identifiable, Sendable {
+    case small, standard, large
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .small: "Small"
+        case .standard: "Default"
+        case .large: "Large"
+        }
+    }
+
+    /// 12, 13 or 15 points for the list's 13, and the rest in step.
+    var scale: CGFloat {
+        switch self {
+        case .small: 12 / Theme.body
+        case .standard: 1
+        case .large: 15 / Theme.body
+        }
     }
 }
 

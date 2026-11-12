@@ -305,7 +305,8 @@ struct FormatMenu: View {
     /// editor has the keyboard.
     private func item(_ tool: FormatTool) -> some View {
         Button(tool.title) { RichTextView.focused.map(tool.perform) }
-            .keyboardShortcut(tool == .underline && !state.editing ? nil : tool.shortcut)
+            // Without an editor, ⌘U unsubscribes and ⌘+ and ⌘- zoom the reader.
+            .keyboardShortcut([.underline, .bigger, .smaller].contains(tool) && !state.editing ? nil : tool.shortcut)
             .disabled(!state.editing)
     }
 

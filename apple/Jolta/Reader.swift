@@ -891,6 +891,8 @@ struct ReaderView: View {
             model.holdLine = line
         }
         .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }
+        .onChange(of: ThemeStore.shared.textSize) { reader.applyTheme() }
+        .onChange(of: model.readerZoom, initial: true) { reader.webView.pageZoom = model.readerZoom }
     }
 }
 
@@ -898,7 +900,14 @@ enum ReaderStyle {
     /// The variables `css` uses, from the light and the dark theme on screen.
     static var themeCSS: String {
         let pair = ThemeStore.shared.active
-        return ":root { \(variables(pair.light)) } @media (prefers-color-scheme: dark) { :root { \(variables(pair.dark)) } }"
+        return ":root { \(variables(pair.light)) } @media (prefers-color-scheme: dark) { :root { \(variables(pair.dark)) } } \(textCSS)"
+    }
+
+    /// The body text at the chosen text size. It comes after `css` in the
+    /// page, so it replaces the size there. Mail that sets its own sizes
+    /// keeps them; ⌘+ zooms those.
+    private static var textCSS: String {
+        "html, body { font-size: \(Int(Theme.scaled(Theme.readerBody)))px; line-height: \(Int(Theme.scaled(Theme.readerLine)))px; }"
     }
 
     private static func variables(_ t: ThemeTokens) -> String {
@@ -915,7 +924,7 @@ enum ReaderStyle {
     static let css = """
     :root { color-scheme: light dark; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx);
-      font: 14px/22px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
+      font: \(Int(Theme.readerBody))px/\(Int(Theme.readerLine))px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
     body { padding: 0 \(Int(Theme.gutter))px 40px; }
     ::selection { background: color-mix(in oklab, var(--acc) 30%, transparent); }
     .jolta-message { border-top: 1px solid var(--line2); }

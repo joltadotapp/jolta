@@ -23,6 +23,10 @@ final class ThemeStore {
     static let shared = ThemeStore()
 
     private(set) var choice: ThemeChoice
+    /// Settings › Appearance › Text size, saved beside the theme.
+    var textSize: ReadingSize {
+        didSet { UserDefaults.standard.set(textSize.rawValue, forKey: keyPrefix + "TextSize") }
+    }
     private(set) var preview: ThemePalette?
     /// What every theme color resolves to right now.
     private(set) var active: ThemePair
@@ -38,8 +42,12 @@ final class ThemeStore {
         let test = AppModel.isTestData ? defaults.string(forKey: "JoltaTestData") ?? "" : ""
         let prefix = test.isEmpty ? "" : test + "."
         // UI tests save under their own keys and start from Graphite each launch.
-        if !test.isEmpty { ThemeChoice.forget(defaults, prefix: prefix) }
+        if !test.isEmpty {
+            ThemeChoice.forget(defaults, prefix: prefix)
+            defaults.removeObject(forKey: prefix + "TextSize")
+        }
         keyPrefix = prefix
+        textSize = defaults.string(forKey: prefix + "TextSize").flatMap(ReadingSize.init(rawValue:)) ?? .standard
         let choice = ThemeChoice.load(defaults, prefix: prefix)
         self.choice = choice
         active = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)

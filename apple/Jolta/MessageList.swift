@@ -13,7 +13,7 @@ struct MessageList: NSViewRepresentable {
         let table = KeyTableView()
         table.headerView = nil
         table.style = .plain
-        table.rowHeight = Theme.rowHeight
+        table.rowHeight = Theme.scaled(Theme.rowHeight)
         table.intercellSpacing = .zero
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .regular
@@ -55,10 +55,16 @@ struct MessageList: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
         _ = model.listRevision
+        // Another text size: the rows take their new height and type.
+        let height = Theme.scaled(Theme.rowHeight)
+        if let table = c.table, table.rowHeight != height {
+            table.rowHeight = height
+            c.lastRevision = -1
+        }
         if c.lastQuery != model.query {
             c.reload(full: true)
         } else if c.lastRevision != model.listRevision {
-            c.reload(full: false, resorted: c.lastSort != model.sort)
+            c.reload(full: false, resorted: c.lastSort != model.sort || c.lastRevision == -1)
         }
         c.lastRevision = model.listRevision
         if let table = c.table, c.focusRequest != model.focusListRequest {
@@ -690,6 +696,7 @@ final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
     private let badges = NSStackView()
     private let keys = NSStackView()
     private var row: ThreadRow?
+    private var senderWidth: NSLayoutConstraint?
 
     /// Where every sender starts; the row view's slot lies in front of it.
     static let senderLeading = Theme.gutter
@@ -745,7 +752,6 @@ final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
         date.alignment = .right
         NSLayoutConstraint.activate([
             sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.senderLeading),
-            sender.widthAnchor.constraint(equalToConstant: Theme.senderWidth),
             sender.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.leadingAnchor.constraint(equalTo: sender.trailingAnchor, constant: 12),
             subject.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -758,6 +764,8 @@ final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
             keys.trailingAnchor.constraint(equalTo: date.trailingAnchor),
             keys.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        senderWidth = sender.widthAnchor.constraint(equalToConstant: Theme.scaled(Theme.senderWidth))
+        senderWidth?.isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -774,7 +782,7 @@ final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
         guard let row, !row.subject.isEmpty else { return "" }
         let marks = CGFloat((row.flagged ? 1 : 0) + (row.needsReply ? 1 : 0)) * 18
-        let width = NSAttributedString(string: row.subject, attributes: [.font: Theme.font(weight: row.unreadCount > 0 ? .semibold : .regular)]).size().width
+        let width = NSAttributedString(string: row.subject, attributes: [.font: Theme.font(Theme.scaled(Theme.body), weight: row.unreadCount > 0 ? .semibold : .regular)]).size().width
         return marks + width > subject.frame.width ? row.subject : ""
     }
 
@@ -819,14 +827,17 @@ final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
     func show(_ r: ThreadRow) {
         row = r
         let unread = r.unreadCount > 0
+        // The row's type at the chosen text size; the sender's column follows it.
+        let size = Theme.scaled(Theme.body)
+        senderWidth?.constant = Theme.scaled(Theme.senderWidth)
         let name = NSMutableAttributedString()
         name.append(NSAttributedString(string: r.fromName.isEmpty ? r.fromAddr : r.fromName, attributes: [
-            .font: Theme.font(weight: unread ? .semibold : .regular),
+            .font: Theme.font(size, weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
         ]))
         if r.messageCount > 1 {
             name.append(NSAttributedString(string: "  \(r.messageCount)", attributes: [
-                .font: Theme.font(11.5), .foregroundColor: Theme.text3,
+                .font: Theme.font(size - 1.5), .foregroundColor: Theme.text3,
             ]))
         }
         name.addAttribute(.paragraphStyle, value: Self.oneLine, range: NSRange(location: 0, length: name.length))
@@ -843,12 +854,12 @@ final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
             line.append(NSAttributedString(string: " "))
         }
         line.append(NSAttributedString(string: r.subject.isEmpty ? "(no subject)" : r.subject, attributes: [
-            .font: Theme.font(weight: unread ? .semibold : .regular),
+            .font: Theme.font(size, weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
         ]))
         if !r.snippet.isEmpty {
             line.append(NSAttributedString(string: "  " + r.snippet, attributes: [
-                .font: Theme.font(), .foregroundColor: Theme.text3,
+                .font: Theme.font(size), .foregroundColor: Theme.text3,
             ]))
         }
         line.addAttribute(.paragraphStyle, value: Self.oneLine, range: NSRange(location: 0, length: line.length))

@@ -42,6 +42,18 @@ struct JoltaApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.control, .command])
                 .disabled(model?.sidebarFits != true)
+                Divider()
+                // While a text editor has the keyboard, ⌘+ and ⌘- are Format › Size's Bigger and Smaller.
+                Button("Zoom In") { model?.zoomReader(1) }
+                    .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("+"))
+                    .disabled(model?.readsConversation != true)
+                Button("Zoom Out") { model?.zoomReader(-1) }
+                    .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("-"))
+                    .disabled(model?.readsConversation != true)
+                Button("Actual Size") { model?.zoomReader(nil) }
+                    .keyboardShortcut("0")
+                    .disabled(model?.readsConversation != true || model?.readerZoom == 1)
+                Divider()
             }
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo") { model?.undoFromMenu() }

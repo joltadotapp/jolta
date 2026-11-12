@@ -12,11 +12,11 @@ struct AppearanceSettings: View {
 
     private var focused: Bool { focus.wrappedValue == .page }
 
-    private enum Row: Hashable { case follow, light, dark, always }
+    private enum Row: Hashable { case follow, light, dark, always, textSize }
 
     private var choice: ThemeChoice { store.choice }
 
-    private var rows: [Row] { choice.fixed == nil ? [.follow, .light, .dark] : [.follow, .always] }
+    private var rows: [Row] { (choice.fixed == nil ? [.follow, .light, .dark] : [.follow, .always]) + [.textSize] }
 
     private var current: Row { rows.contains(marked) ? marked : .follow }
 
@@ -49,6 +49,16 @@ struct AppearanceSettings: View {
                         themeRow(.dark, title: "Dark", detail: "While macOS is in dark mode.", selected: choice.dark)
                     }
                 }
+                SettingsSection("Text") {
+                    SettingsRow(title: "Text size", detail: "The conversations in the list and the mail you read. ⌘+ and ⌘- zoom the open conversation until you quit.") {
+                        Picker("Text size", selection: Binding(get: { store.textSize }, set: { store.textSize = $0 })) {
+                            ForEach(ReadingSize.allCases) { Text($0.name).tag($0) }
+                        }
+                        .settingsMenu()
+                        .accessibilityIdentifier("text-size")
+                    }
+                    .modifier(MarkedSettingsRow(on: focused && current == .textSize))
+                }
                 HStack(spacing: 16) {
                     HStack(spacing: 5) { KeyCap(key: "↑"); KeyCap(key: "↓"); Text("choose a row") }
                     HStack(spacing: 5) { KeyCap(key: "←"); KeyCap(key: "→"); Text("change it") }
@@ -77,7 +87,7 @@ struct AppearanceSettings: View {
         switch row {
         case .light: ThemePalette.all.filter { $0.mode == .light }
         case .dark: ThemePalette.all.filter { $0.mode == .dark }
-        case .always, .follow: ThemePalette.all
+        case .always, .follow, .textSize: ThemePalette.all
         }
     }
 
@@ -111,6 +121,12 @@ struct AppearanceSettings: View {
 
     private func change(_ step: Int) {
         if current == .follow { return follow(step < 0) }
+        if current == .textSize {
+            let sizes = ReadingSize.allCases
+            let i = (sizes.firstIndex(of: store.textSize) ?? 1) + step
+            if sizes.indices.contains(i) { store.textSize = sizes[i] }
+            return
+        }
         let selected = current == .always ? choice.fixed : current == .dark ? choice.dark : choice.light
         let list = themes(current)
         guard let i = list.firstIndex(where: { $0 == selected }) else { return }

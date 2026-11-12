@@ -681,6 +681,14 @@ final class AppModel {
         focusSearchRequest += 1
     }
 
+    /// The reader's zoom (⌘+, ⌘-, ⌘0), until Jolta quits.
+    private(set) var readerZoom = 1.0
+
+    /// One step in or out, between half and three times the size; nil goes back to the actual size.
+    func zoomReader(_ step: Int?) {
+        readerZoom = step.map { min(max(((readerZoom + Double($0) * 0.1) * 10).rounded() / 10, 0.5), 3) } ?? 1
+    }
+
     /// Space and ⇧Space in the list: the reader scrolls the open
     /// conversation by `pages`. The count tells one press from the next.
     private(set) var readerScroll = (count: 0, pages: 0)

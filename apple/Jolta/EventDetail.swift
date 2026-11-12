@@ -194,6 +194,7 @@ struct EventDetailCard: View {
         .onAppear(perform: render)
         .onChange(of: detail.descriptionHtml) { render() }
         .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }
+        .onChange(of: ThemeStore.shared.textSize) { reader.applyTheme() }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Event detail")
     }
