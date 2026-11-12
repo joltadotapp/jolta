@@ -834,7 +834,9 @@ final class AppModel {
     func act(_ action: ThreadAction, label: String, threadID: Int64? = nil) {
         let threads = threadID.map { [$0] } ?? (isMultiSelection ? selectedThreads : selectedThreadID.map { [$0] } ?? [])
         guard !threads.isEmpty else { return }
-        userChangedList = true
+        // A change to a conversation outside the selection, from its
+        // right-click menu, leaves the cursor where it is.
+        if threads.contains(where: selectedThreads.contains) { userChangedList = true }
         do {
             let tokens = try core.perform(action: action, threadIds: threads, context: source.actionContext)
             let text = threads.count > 1 ? "\(label): \(threads.count) conversations" : label

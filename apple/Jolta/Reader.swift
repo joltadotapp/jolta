@@ -33,7 +33,7 @@ final class ReaderPage {
         set { links.onToggle = newValue }
     }
     /// The context menu's items after Copy, for the page on screen.
-    var menuExtras: () -> [ReaderMenuItem] = { [] }
+    var menuExtras: () -> [MenuEntry] = { [] }
     private let links = LinkActions()
     private let navigator: Navigator
     /// The last page shown, loaded again if its web content process ends.
@@ -235,7 +235,7 @@ final class ReaderPage {
     /// Open Link… and Copy Link on a link the reader would open, then Copy
     /// and the view's own items.
     private func menuItems(link: URL?) -> [NSMenuItem] {
-        var items: [ReaderMenuItem] = []
+        var items: [MenuEntry] = []
         if let link, Navigator.opens(link) {
             items += [
                 .button("Open Link…") { Navigator.confirmOpen(link) },
@@ -251,12 +251,13 @@ final class ReaderPage {
     }
 }
 
-/// One entry of the reader's context menu.
-enum ReaderMenuItem {
+/// One entry of a right-click menu built in AppKit: the reader's, a list
+/// row's, an event's in the week.
+enum MenuEntry {
     case button(String, @MainActor () -> Void)
     case divider
 
-    @MainActor fileprivate var menuItem: NSMenuItem {
+    @MainActor var menuItem: NSMenuItem {
         switch self {
         case .divider:
             return .separator()
@@ -268,6 +269,27 @@ enum ReaderMenuItem {
             item.representedObject = target
             return item
         }
+    }
+}
+
+/// `MenuEntry`s as the items of a SwiftUI context menu.
+struct MenuEntries: View {
+    let entries: () -> [MenuEntry]
+
+    var body: some View {
+        ForEach(Array(entries().enumerated()), id: \.offset) { _, entry in
+            switch entry {
+            case .divider: Divider()
+            case .button(let title, let action): Button(title, action: action)
+            }
+        }
+    }
+}
+
+extension NSMenu {
+    convenience init(entries: [MenuEntry]) {
+        self.init()
+        for entry in entries { addItem(entry.menuItem) }
     }
 }
 
@@ -309,7 +331,7 @@ final class ReaderWebView: WKWebView {
 /// SwiftUI's host for a `ReaderPage`'s one web view.
 struct ReaderPageView: NSViewRepresentable {
     let page: ReaderPage
-    var menu: () -> [ReaderMenuItem] = { [] }
+    var menu: () -> [MenuEntry] = { [] }
 
     func makeNSView(context: Context) -> ReaderWebView { page.webView }
 
@@ -664,9 +686,9 @@ struct ReaderView: View {
     }
 
     /// The context menu's image items, after Copy.
-    private func imageMenu() -> [ReaderMenuItem] {
+    private func imageMenu() -> [MenuEntry] {
         if imagesBlocked {
-            var items: [ReaderMenuItem] = [.button("Load Images", loadImages)]
+            var items: [MenuEntry] = [.button("Load Images", loadImages)]
             if !thread.imageSender.isEmpty {
                 items.append(.button("Always Load Images from \(thread.imageSender)") { trustSender(true) })
             }

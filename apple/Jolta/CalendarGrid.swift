@@ -258,6 +258,7 @@ struct WeekGrid: NSViewRepresentable {
     func updateNSView(_ view: CalendarWeekView, context: Context) {
         view.select = select ?? cal.select
         view.open = open ?? cal.openDetail
+        view.eventMenu = source == .period ? { cal.menu(for: $0) } : nil
         view.swipe = { cal.shift($0) }
         view.selectedFrame = selectedFrame
         view.hours.canvas.create = source == .period ? { day, minute in
@@ -286,6 +287,8 @@ final class CalendarWeekView: NSView {
     let hours = HourScrollView()
     var select: (CalEvent) -> Void = { _ in } { didSet { strip.select = select; hours.canvas.select = select } }
     var open: (CalEvent) -> Void = { _ in } { didSet { strip.open = open; hours.canvas.open = open } }
+    /// An event's right-click menu; nil where a click only jumps to the calendar.
+    var eventMenu: ((CalEvent) -> [MenuEntry])? { didSet { strip.eventMenu = eventMenu; hours.canvas.eventMenu = eventMenu } }
     var swipe: (Int) -> Void = { _ in } { didSet { hours.swipe = swipe } }
     var selectedFrame: (CGRect?) -> Void = { _ in }
     private var stripFrame: CGRect?
@@ -426,6 +429,7 @@ final class DayStrip: CanvasView {
     }
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
+    var eventMenu: ((CalEvent) -> [MenuEntry])?
     var selectedFrame: (CGRect?) -> Void = { _ in }
     /// A click on a day's "+N": the day view of that day.
     var openDay: ((Int) -> Void)?
@@ -667,6 +671,14 @@ final class DayStrip: CanvasView {
         min(max(Int(floor((x - gutter) / columnWidth)), 0), max(content.days.count - 1, 0))
     }
 
+    /// A right-click on an event selects it and offers its menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let eventMenu, let hit = content.lanes.last(where: { $0.lane < maxLanes && box($0).contains(point) }) else { return super.menu(for: event) }
+        select(hit.event)
+        return NSMenu(entries: eventMenu(hit.event))
+    }
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let day = moreDay(at: point), let openDay { return openDay(day) }
@@ -856,6 +868,7 @@ final class HourCanvas: CanvasView {
     }
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
+    var eventMenu: ((CalEvent) -> [MenuEntry])?
     /// Double-click on empty time: the day's index and the minute clicked.
     var create: ((Int, Int) -> Void)?
     /// A drag let go; nil where the grid only shows, as beside mail.
@@ -1151,6 +1164,15 @@ final class HourCanvas: CanvasView {
         if top, point.y - r.minY <= 4 { return .top }
         if bottom, r.maxY - point.y <= 4 { return .bottom }
         return .body
+    }
+
+    /// A right-click on an event selects it and offers its menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let doc = CGPoint(x: point.x, y: point.y + frame.minY)
+        guard let eventMenu, let hit = content.placed.last(where: { box($0).contains(doc) }) else { return super.menu(for: event) }
+        select(hit.event)
+        return NSMenu(entries: eventMenu(hit.event))
     }
 
     override func mouseDown(with event: NSEvent) {

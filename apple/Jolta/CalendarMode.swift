@@ -726,6 +726,7 @@ struct MonthLine: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { cal.openDetail(e) }
         .onTapGesture { cal.select(e) }
+        .contextMenu { MenuEntries { cal.menu(for: e) } }
         .accessibilityElement()
         .accessibilityLabel(e.accessibilityLabel)
         .accessibilityAddTraits(.isButton)
@@ -827,6 +828,7 @@ struct AgendaRow: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { cal.openDetail(e) }
         .onTapGesture { cal.select(e) }
+        .contextMenu { MenuEntries { cal.menu(for: e) } }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(e.accessibilityLabel)
         .accessibilityAddTraits(.isButton)

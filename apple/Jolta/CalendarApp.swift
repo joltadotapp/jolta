@@ -7,6 +7,7 @@ extension AppModel {
         calendar.onChange = { [weak self] in self?.scheduleReminders() }
         calendar.toast = { [weak self] text, token in self?.notify(text, calendarUndo: token) }
         calendar.openCompose = { [weak self] compose in self?.openCompose(compose) }
+        calendar.answer = { [weak self] event, answer in self?.answer(event, with: answer) }
         notifier.onOpenEvent = { [weak self] id, fireAt in
             guard let self else { return }
             showMainWindow()
@@ -172,8 +173,12 @@ extension AppModel {
     /// Y, N and ⇧M: answers the selected event when it is an invitation,
     /// with the detail's default choices.
     private func answerSelectedEvent(_ answer: InvitationAnswer) {
-        guard let event = calendar.selected ?? calendar.detailEvent,
-              let detail = event == calendar.detailEvent ? calendar.detail : try? core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: ""),
+        if let event = calendar.selected ?? calendar.detailEvent { self.answer(event, with: answer) }
+    }
+
+    /// The same for one event, from its right-click menu.
+    private func answer(_ event: CalEvent, with answer: InvitationAnswer) {
+        guard let detail = event == calendar.detailEvent ? calendar.detail : try? core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: ""),
               detail.canAnswer else { return }
         Task { _ = await answerEvent(event.record.eventId, time: event.record.time, answer: answer, choices: AnswerChoices()) }
     }

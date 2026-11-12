@@ -846,6 +846,45 @@ final class CalendarModel {
         if let event = selected { edit(event) }
     }
 
+    /// Answers an invitation in the calendar; the app sends it.
+    @ObservationIgnored var answer: ((CalEvent, InvitationAnswer) -> Void)?
+
+    /// Whether the event is an invitation the user can answer. Only one
+    /// that holds an answer of the user's can be, so the others cost no read.
+    func canAnswer(_ event: CalEvent) -> Bool {
+        guard event.record.myResponse != nil, !event.isCancelled else { return false }
+        return (try? core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: ""))?.canAnswer == true
+    }
+
+    /// An event's right-click menu, in the week, the month and the agenda.
+    func menu(for event: CalEvent) -> [MenuEntry] {
+        var entries: [MenuEntry] = [
+            .button("Open") { self.openDetail(event) },
+            .button("Edit") {
+                self.selectedID = event.id
+                self.edit(event)
+            },
+            .button("Duplicate") {
+                self.selectedID = event.id
+                self.duplicateSelected()
+            },
+            .button("Delete") {
+                self.selectedID = event.id
+                self.deleteSelected()
+            },
+        ]
+        if canAnswer(event) {
+            entries.append(.divider)
+            entries += [("Accept", InvitationAnswer.accept), ("Maybe", .maybe), ("Decline", .decline)].map { title, answer in
+                .button(title) {
+                    self.selectedID = event.id
+                    self.answer?(event, answer)
+                }
+            }
+        }
+        return entries
+    }
+
     /// ⌘D: a new event like the selected one, at the same time.
     func duplicateSelected() {
         guard let event = selected, confirmLeaving({ self.duplicateSelected() }) else { return }

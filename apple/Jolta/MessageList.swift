@@ -32,6 +32,9 @@ struct MessageList: NSViewRepresentable {
         table.target = context.coordinator
         table.action = #selector(Coordinator.clicked)
         table.doubleAction = #selector(Coordinator.openSelected)
+        let menu = NSMenu()
+        menu.delegate = context.coordinator
+        table.menu = menu
         KeyRouter.shared.handler = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
         model.togglePicked = { [weak coordinator = context.coordinator] in coordinator?.togglePick() }
         context.coordinator.table = table
@@ -65,7 +68,7 @@ struct MessageList: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         let model: AppModel
         weak var table: KeyTableView?
         var lastQuery = ""
@@ -257,6 +260,39 @@ struct MessageList: NSViewRepresentable {
         @objc func clicked() {
             guard let table, table.clickedRow >= 0, table.numberOfSelectedRows == 1 else { return }
             if model.showsDrafts { openSelected() } else { model.showReader() }
+        }
+
+        /// A row's right-click menu. It acts on the clicked conversation, or
+        /// on the selection when the click is in it. Archive, Trash, read
+        /// and star don't open a conversation outside the selection; the
+        /// pickers work on the one under the cursor, so they move it there.
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            menu.removeAllItems()
+            guard let table, table.clickedRow >= 0, let r = row(at: table.clickedRow) else { return }
+            let clicked = table.clickedRow
+            let inSelection = table.selectedRowIndexes.contains(clicked)
+            let model = model
+            let act = { (action: ThreadAction, label: String) in
+                model.act(action, label: label, threadID: inSelection ? nil : r.threadId)
+            }
+            let pick = { (command: Command) in
+                if !inSelection { table.selectRowIndexes([clicked], byExtendingSelection: false) }
+                model.run(command)
+            }
+            let unread = r.unreadCount > 0
+            let entries: [MenuEntry] = [
+                .button(Command.archive.title) { act(.archive, "Archived") },
+                .button(Command.trash.title) { act(.trash, "Moved to Trash") },
+                .button(unread ? "Mark as Read" : "Mark as Unread") { act(unread ? .markRead : .markUnread, unread ? "Marked read" : "Marked unread") },
+                .button(r.flagged ? "Unstar" : "Star") { act(r.flagged ? .unflag : .flag, r.flagged ? "Unstarred" : "Starred") },
+                .divider,
+                .button(Command.snooze.title) { pick(.snooze) },
+                .button(Command.move.title) { pick(.move) },
+                .button(Command.label.title) { pick(.label) },
+                .divider,
+                .button(Command.reply.title) { model.reply(.reply, threadID: r.threadId) },
+            ]
+            entries.forEach { menu.addItem($0.menuItem) }
         }
 
         func move(_ delta: Int) {
