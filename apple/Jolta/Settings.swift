@@ -259,6 +259,7 @@ struct AddIMAPAccount: View {
     @State private var smtpHost = ""
     @State private var working = false
     @State private var failure: String?
+    @FocusState private var addressFocused: Bool
 
     private var knowsServers: Bool { model?.core.knowsServers(address: address) ?? false }
     private var needsServers: Bool { address.contains("@") && !knowsServers }
@@ -272,6 +273,7 @@ struct AddIMAPAccount: View {
             Form {
                 TextField("Email", text: $address, prompt: Text("you@icloud.com"))
                     .textContentType(.emailAddress)
+                    .focused($addressFocused)
                 SecureField("Password", text: $password, prompt: Text("App-specific password"))
                 if needsServers {
                     TextField("IMAP server", text: $imapHost, prompt: Text("imap.example.com"))
@@ -299,6 +301,7 @@ struct AddIMAPAccount: View {
         .frame(width: 420)
         .background(Color(Theme.bg))
         .foregroundStyle(Color(Theme.text))
+        .onAppear { addressFocused = true }
     }
 
     private func add() {

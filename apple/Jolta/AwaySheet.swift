@@ -37,6 +37,7 @@ struct AwaySheet: View {
     @State private var working = false
     @State private var failure: String?
     @FocusState private var replyFocused: Bool
+    @FocusState private var fromFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -64,6 +65,7 @@ struct AwaySheet: View {
         .foregroundStyle(Color(Theme.text))
         .accessibilityIdentifier("away-sheet")
         .onAppear(perform: load)
+        .onAppear { fromFocused = true }
         .onChange(of: allDay) { replan() }
         .onChange(of: from) {
             if until < from { until = from.addingTimeInterval(allDay ? 0 : 3600) }
@@ -84,6 +86,7 @@ struct AwaySheet: View {
                 DatePicker("From", selection: $from, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute])
                     .labelsHidden()
                     .datePickerStyle(.field)
+                    .focused($fromFocused)
                 Toggle("All day", isOn: $allDay).toggleStyle(.checkbox)
                 Spacer()
             }

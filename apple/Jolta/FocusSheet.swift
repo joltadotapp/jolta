@@ -48,6 +48,7 @@ struct FocusSheet: View {
     @State private var loaded = false
     @State private var working = false
     @State private var failure: String?
+    @FocusState private var startFocused: Bool
 
     private var calendars: [CalendarInfo] {
         let list = model.calendar.list
@@ -62,6 +63,7 @@ struct FocusSheet: View {
                     DatePicker("Starts", selection: $start, displayedComponents: [.date, .hourAndMinute])
                         .labelsHidden()
                         .datePickerStyle(.field)
+                        .focused($startFocused)
                     Spacer()
                 }
                 field("For") {
@@ -133,6 +135,7 @@ struct FocusSheet: View {
         .foregroundStyle(Color(Theme.text))
         .accessibilityIdentifier("focus-sheet")
         .onAppear(perform: load)
+        .onAppear { startFocused = true }
         .onChange(of: start) { replan() }
         .onChange(of: minutes) { replan() }
         .onChange(of: calendarId) { replan() }
