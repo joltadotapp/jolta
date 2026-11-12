@@ -882,7 +882,11 @@ struct ReaderColumn: View {
         HStack(spacing: 4) {
             ActionButton(icon: "archivebox", title: "Archive", key: "E", showsTitle: titles) { model.act(.archive, label: "Archived") }
             ActionButton(icon: "trash", title: "Trash", key: "#", showsTitle: titles) { model.act(.trash, label: "Moved to Trash") }
-            ActionButton(icon: "envelope.badge", title: "Unread", key: "U", showsTitle: titles) { model.act(.markUnread, label: "Marked unread") }
+            // As U: what it does follows the conversation under the cursor.
+            let unread = (model.cursorRow?.unreadCount ?? 0) > 0
+            ActionButton(icon: unread ? "envelope.open" : "envelope.badge", title: unread ? "Read" : "Unread", key: "U", showsTitle: titles) {
+                model.run(.toggleRead)
+            }
             let starred = model.cursorRow?.flagged == true
             ActionButton(icon: starred ? "star.fill" : "star", title: starred ? "Unstar" : "Star", key: "S", showsTitle: titles,
                          iconTint: starred ? Color(Theme.star) : nil) { model.run(.star) }
