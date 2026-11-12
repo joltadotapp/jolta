@@ -299,6 +299,7 @@ struct MessageList: NSViewRepresentable {
         private func extend(_ delta: Int, like event: NSEvent) {
             guard let table, count > 0 else { return }
             takeKeyboard()
+            setPick(nil)
             let arrow = String(UnicodeScalar(delta > 0 ? NSDownArrowFunctionKey : NSUpArrowFunctionKey).map(Character.init) ?? " ")
             guard let key = NSEvent.keyEvent(with: .keyDown, location: event.locationInWindow, modifierFlags: [.shift, .numericPad, .function],
                                              timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
@@ -452,9 +453,20 @@ final class KeyTableView: NSTableView {
         hoverArea = area
     }
 
-    override func mouseEntered(with event: NSEvent) { hover(at: event.locationInWindow) }
-    override func mouseMoved(with event: NSEvent) { hover(at: event.locationInWindow) }
-    override func mouseExited(with event: NSEvent) { hoverRow = -1 }
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        hover(at: event.locationInWindow)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        hover(at: event.locationInWindow)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        hoverRow = -1
+    }
 
     /// A tracking area also reports the pointer over what lies on top of
     /// the list (the palette, a toast), so the row must be what it hits.
