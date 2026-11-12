@@ -58,6 +58,8 @@ struct AccountPage: View {
     @State private var signingIn = false
     /// Why the account's settings couldn't be read.
     @State private var loadFailure: String?
+    /// Why Remove Account didn't remove it.
+    @State private var removeFailure: String?
 
     private var isIMAP: Bool { section.account.kind == "imap" }
     private var changed: Bool { draft != saved || !password.isEmpty || !smtpPassword.isEmpty }
@@ -173,14 +175,21 @@ struct AccountPage: View {
                 .disabled(folders.isEmpty)
             }
             SettingsSection("Remove") {
-                SettingsRow(title: "Remove this account", detail: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.") {
+                SettingsRow(title: "Remove this account",
+                            detail: removeFailure ?? "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.",
+                            detailColor: Color(removeFailure == nil ? Theme.text3 : Theme.dangerText)) {
                     Button("Remove…", role: .destructive) {
                         removal = Confirmation(
                             title: "Remove \(section.account.address)?",
                             message: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries."
                                 + (section.account.kind == "gmail" ? " This also signs the account out of Jolta on your other Macs." : ""),
                             action: "Remove Account") {
-                                try? model.core.removeAccount(accountId: section.id)
+                                do {
+                                    try model.core.removeAccount(accountId: section.id)
+                                } catch {
+                                    removeFailure = "Jolta couldn't remove this account: \(error)"
+                                    return model.reloadAccounts()
+                                }
                                 model.reloadAccounts()
                                 removed()
                             }

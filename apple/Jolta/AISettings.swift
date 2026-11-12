@@ -304,6 +304,7 @@ private struct RemoteAccount: View {
     @State private var address = ""
     @State private var addressProblem: String?
     @State private var advanced = false
+    @State private var removal: Confirmation?
 
     private var name: String { provider == .openAi ? "OpenAI" : "Anthropic" }
     private var saved: Bool { provider == .openAi ? model.ai.openaiKeySaved : model.ai.anthropicKeySaved }
@@ -323,6 +324,7 @@ private struct RemoteAccount: View {
             KitButton(title: "Get a Key ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(keysPage) }
                 .padding(.trailing, -7)
         }
+        .confirmation($removal)
         VStack(alignment: .leading, spacing: 10) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { advanced.toggle() } } label: {
                 HStack(spacing: 6) {
@@ -370,10 +372,11 @@ private struct RemoteAccount: View {
             HStack(spacing: 6) {
                 Text("••••••••••••").font(.system(size: Theme.body, design: .monospaced)).foregroundStyle(Color(Theme.text2))
                 Button("Replace…") { replacing = true; key = "" }
-                Button("Remove") {
-                    try? model.core.setAiKey(provider: provider, key: "")
-                    models = []
-                    model.reloadAI()
+                Button("Remove…") {
+                    removal = Confirmation(
+                        title: "Remove the \(name) API key?",
+                        message: "Jolta deletes the key from your Mac's Keychain. Summaries, drafts and sorting with \(name) stop until you save a key again.",
+                        action: "Remove Key", perform: removeKey)
                 }
             }
         } else {
@@ -406,6 +409,17 @@ private struct RemoteAccount: View {
             }
             .settingsMenu()
         }
+    }
+
+    private func removeKey() {
+        do {
+            try model.core.setAiKey(provider: provider, key: "")
+            problem = nil
+            models = []
+        } catch {
+            problem = "Jolta couldn't remove the key: \(error)"
+        }
+        model.reloadAI()
     }
 
     private func setModel(_ id: String) {

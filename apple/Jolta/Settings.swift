@@ -151,6 +151,9 @@ struct SnippetsSettings: View {
     @State private var name = ""
     @State private var text = ""
     @State private var saveTask: Task<Void, Never>?
+    @State private var removal: Confirmation?
+    /// Why the last save, new snippet or delete didn't happen.
+    @State private var failure: String?
 
     var body: some View {
         SettingsScroll {
@@ -173,6 +176,9 @@ struct SnippetsSettings: View {
                 if snippets.isEmpty {
                     SettingsRow("No snippets yet", detail: "Snippets are text you reuse while writing, like a thank-you or directions.")
                 }
+                if let failure, selected == nil {
+                    SettingsBlock { Text(failure).foregroundStyle(Color(Theme.dangerText)).font(.system(size: Theme.small)) }
+                }
             } accessory: {
                 Button("New Snippet", action: add)
             }
@@ -186,11 +192,20 @@ struct SnippetsSettings: View {
                             .settingsEditor(height: 180)
                             .onChange(of: text) { scheduleSave() }
                     }
+                    if let failure {
+                        SettingsBlock { Text(failure).foregroundStyle(Color(Theme.dangerText)).font(.system(size: Theme.small)) }
+                    }
                 } accessory: {
-                    Button("Delete", role: .destructive, action: remove)
+                    Button("Delete…", role: .destructive) {
+                        removal = Confirmation(
+                            title: "Delete “\(name.isEmpty ? "Untitled" : name)”?",
+                            message: "The snippet is deleted for good. Messages you wrote with it keep its text.",
+                            action: "Delete Snippet", perform: remove)
+                    }
                 }
             }
         }
+        .confirmation($removal)
         .onAppear(perform: load)
         .onDisappear { if let selected { save(selected) } }
     }
@@ -214,16 +229,26 @@ struct SnippetsSettings: View {
     }
 
     private func add() {
-        guard let id = try? model.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: "")) else { return }
-        if let old = selected { save(old) }
-        snippets = (try? model.core.snippets()) ?? []
-        pick(id)
+        do {
+            let id = try model.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: ""))
+            if let old = selected { save(old) }
+            snippets = (try? model.core.snippets()) ?? []
+            pick(id)
+        } catch {
+            failure = "Jolta couldn't add a snippet: \(error)"
+        }
     }
 
     private func remove() {
         guard let id = selected else { return }
         saveTask?.cancel()
-        try? model.core.deleteSnippet(id: id)
+        do {
+            try model.core.deleteSnippet(id: id)
+        } catch {
+            failure = "Jolta couldn't delete this snippet: \(error)"
+            return
+        }
+        failure = nil
         snippets = (try? model.core.snippets()) ?? []
         selected = nil
         pick(snippets.first?.id)
@@ -243,8 +268,13 @@ struct SnippetsSettings: View {
         guard let index = snippets.firstIndex(where: { $0.id == id }),
               snippets[index].name != name || snippets[index].body != text else { return }
         let updated = SnippetInfo(id: id, name: name, body: text)
-        _ = try? model.core.saveSnippet(snippet: updated)
-        snippets[index] = updated
+        do {
+            _ = try model.core.saveSnippet(snippet: updated)
+            snippets[index] = updated
+            failure = nil
+        } catch {
+            failure = "Not saved: \(error)"
+        }
     }
 }
 

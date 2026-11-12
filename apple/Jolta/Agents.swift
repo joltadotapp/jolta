@@ -51,14 +51,17 @@ struct AgentsSettings: View {
     let model: AppModel
     @State private var agents: [AgentInfo] = []
     @State private var paused = false
+    /// Why the pause switch, or Revoke or Allow, didn't take.
+    @State private var pauseFailure: String?
+    @State private var agentFailure: String?
 
     var body: some View {
         SettingsScroll {
             SettingsSection("Agents", footer: "Agents connect through Jolta's MCP server. They never see your passwords, everything they do is logged under Activity, and they cannot send mail: drafts wait in Jolta for you.") {
-                SettingsRow(title: "Pause all agents", detail: "Refuses every agent request until you turn this off.") {
-                    Toggle("Pause all agents", isOn: $paused)
+                SettingsRow(title: "Pause all agents", detail: pauseFailure ?? "Refuses every agent request until you turn this off.",
+                            detailColor: Color(pauseFailure == nil ? Theme.text3 : Theme.dangerText)) {
+                    Toggle("Pause all agents", isOn: Binding(get: { paused }, set: pause))
                         .settingsSwitch()
-                        .onChange(of: paused) { _, on in try? model.core.setAgentsPaused(paused: on) }
                 }
                 SettingsRow(title: "Connect an agent", detail: model.mcpStatus) {
                     Button("Copy Command") {
@@ -80,11 +83,14 @@ struct AgentsSettings: View {
                                 ? "Allowed: \(a.grants.isEmpty ? "nothing" : a.grants.joined(separator: ", "))"
                                 : a.state.capitalized) {
                         if a.state == "approved" {
-                            Button("Revoke") { try? model.core.decideAgent(agentId: a.id, approve: false, grants: []); reload() }
+                            Button("Revoke") { decide(a, approve: false, grants: []) }
                         } else {
-                            Button("Allow Read and Drafts") { try? model.core.decideAgent(agentId: a.id, approve: true, grants: ["read", "draft"]); reload() }
+                            Button("Allow Read and Drafts") { decide(a, approve: true, grants: ["read", "draft"]) }
                         }
                     }
+                }
+                if let agentFailure {
+                    SettingsBlock { Text(agentFailure).foregroundStyle(Color(Theme.dangerText)).font(.system(size: Theme.small)) }
                 }
                 if agents.isEmpty {
                     SettingsRow("No agents yet", detail: "An agent shows up here the first time it connects, and Jolta asks you to allow it.")
@@ -98,6 +104,27 @@ struct AgentsSettings: View {
     private func reload() {
         agents = (try? model.core.agents()) ?? []
         paused = (try? model.core.agentsPaused()) ?? false
+    }
+
+    /// The switch moves only when the core took the change.
+    private func pause(_ on: Bool) {
+        do {
+            try model.core.setAgentsPaused(paused: on)
+            paused = on
+            pauseFailure = nil
+        } catch {
+            pauseFailure = "Jolta couldn't \(on ? "pause" : "resume") the agents: \(error)"
+        }
+    }
+
+    private func decide(_ agent: AgentInfo, approve: Bool, grants: [String]) {
+        do {
+            try model.core.decideAgent(agentId: agent.id, approve: approve, grants: grants)
+            agentFailure = nil
+        } catch {
+            agentFailure = "Jolta couldn't change \(agent.name): \(error)"
+        }
+        reload()
     }
 }
 
