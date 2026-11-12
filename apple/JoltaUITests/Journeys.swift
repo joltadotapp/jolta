@@ -193,6 +193,21 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil { list.tableRows.firstMatch.isSelected }, "Sent opens at its top")
     }
 
+    /// ⌃⌘S folds the sidebar away and brings it back, and the list keeps
+    /// the keyboard: J still opens the top conversation with it hidden.
+    func testSidebarFoldsAway() throws {
+        let app = try launch()
+        let starred = app.buttons["Starred"]
+        XCTAssertTrue(starred.waitForExistence(timeout: 5), "the sidebar shows")
+        app.typeKey("s", modifierFlags: [.control, .command])
+        XCTAssertTrue(starred.waitForNonExistence(timeout: 5), "⌃⌘S hides the sidebar")
+        XCTAssertTrue(app.buttons["mode-calendar"].exists, "the mode buttons stay")
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "j opens a conversation")
+        app.typeKey("s", modifierFlags: [.control, .command])
+        XCTAssertTrue(starred.waitForExistence(timeout: 5), "⌃⌘S shows it again")
+    }
+
     /// Return right after launch opens the top conversation, as j does.
     func testReturnAtLaunchOpensTheTop() throws {
         let app = try launch()
