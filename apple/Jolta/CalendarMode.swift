@@ -11,7 +11,7 @@ struct CalendarModeView: View {
         let cal = model.calendar
         HStack(spacing: 0) {
             CalendarSidebar(model: model)
-                .frame(width: 240)
+                .frame(width: Theme.sidebarWidth)
                 .background(Color(Theme.side))
                 .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
             VStack(spacing: 0) {
@@ -237,7 +237,7 @@ struct CalendarHeader: View {
             Spacer(minLength: 8)
             SpanSwitcher(cal: cal)
         }
-        .padding(.leading, 24)
+        .padding(.leading, 22)
         .padding(.trailing, 20)
         .frame(height: Theme.headerHeight)
         .background(TitleBarArea())
@@ -431,7 +431,8 @@ struct MiniMonth: View {
         return f
     }()
 
-    private static let cell = CGSize(width: 29.5, height: 24)
+    /// Seven across the sidebar, which is as wide as mail's.
+    private static let cell = CGSize(width: (Theme.sidebarWidth - 32) / 7, height: 24)
 
     var body: some View {
         let days = cal.miniDays
