@@ -64,6 +64,18 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
     }
 
+    /// The Message menu archives as E does, and Edit › Undo (⌘Z) takes it
+    /// back while no text field has typing to undo.
+    func testMessageMenuAndUndo() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        app.menuBars.menuBarItems["Message"].click()
+        app.menuBars.menuItems.matching(NSPredicate(format: "title BEGINSWITH %@", "Archive")).firstMatch.click()
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "Message › Archive archives the conversation")
+        app.typeKey("z", modifierFlags: .command)
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "⌘Z brings it back")
+    }
+
     /// Z takes the last action back after its message has left the screen.
     func testUndoOutlivesItsToast() throws {
         let app = try launch()
