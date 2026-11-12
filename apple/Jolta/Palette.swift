@@ -141,40 +141,40 @@ struct PaletteView: View {
             })
         }
         if model.compose != nil {
-            out.append(PaletteItem(id: "insert-availability", title: "Insert my availability", detail: "Free times in the next working days",
+            out.append(PaletteItem(id: "insert-availability", title: "Insert My Availability", detail: "Free times in the next working days",
                                    icon: "calendar.badge.clock") { [model] in model.insertMyAvailability() })
         } else if model.selectedThreadID != nil {
-            out.append(PaletteItem(id: "find-time", title: "Find a time", detail: "With the people on this conversation",
+            out.append(PaletteItem(id: "find-time", title: "Find a Time", detail: "With the people on this conversation",
                                    icon: "calendar.badge.clock") { [model] in model.findTimeForConversation() })
         }
-        out.append(PaletteItem(id: "new-event", title: "New event", detail: "Type it: Lunch with Jan fri 12:30 at Mok", icon: "calendar.badge.plus",
+        out.append(PaletteItem(id: "new-event", title: "New Event", detail: "Type it: Lunch with Jan fri 12:30 at Mok", icon: "calendar.badge.plus",
                                keys: model.mode == .calendar ? CalendarCommand.quickCreate.keys : nil, keepsOpen: true) { [model] in
             model.palette = .quickEvent
         })
         if model.mode == .calendar {
-            out.append(PaletteItem(id: "go-to-date", title: "Go to date", detail: "fri, 14 dec, morgen", icon: "calendar",
+            out.append(PaletteItem(id: "go-to-date", title: "Go to Date", detail: "fri, 14 dec, morgen", icon: "calendar",
                                    keys: CalendarCommand.goToDate.keys, keepsOpen: true) { [model] in model.palette = .goToDate })
         }
-        out.append(PaletteItem(id: "join-next", title: "Join next meeting", detail: model.calendar.nextMeeting?.title ?? "",
+        out.append(PaletteItem(id: "join-next", title: "Join Next Meeting", detail: model.calendar.nextMeeting?.title ?? "",
                                icon: "video", keys: CalendarCommand.joinNext.keys) { [model] in model.joinNextMeeting() })
         let emailing = model.mode == .calendar ? model.calendar.selected?.title : nil
-        out.append(PaletteItem(id: "email-guests", title: "Email guests", detail: emailing ?? "The meeting now or next, with other people",
+        out.append(PaletteItem(id: "email-guests", title: "Email Guests", detail: emailing ?? "The meeting now or next, with other people",
                                icon: "envelope") { [model] in model.emailGuestsOfNextMeeting() })
         if model.mode == .mail {
             out.append(PaletteItem(id: "calendar", title: "Go to Calendar", icon: "calendar", keys: CalendarCommand.calendar.keys) { [model] in
                 model.mode = .calendar
             })
-            out.append(PaletteItem(id: "day-panel", title: model.showsDayPanel ? "Hide today beside mail" : "Show today beside mail",
+            out.append(PaletteItem(id: "day-panel", title: model.showsDayPanel ? "Hide Today Beside Mail" : "Show Today Beside Mail",
                                    icon: "sidebar.right", keys: CalendarCommand.dayPanel.keys) { [model] in model.showsDayPanel.toggle() })
         } else {
             out.append(PaletteItem(id: "mail", title: "Go to Mail", icon: "tray", keys: CalendarCommand.mail.keys) { [model] in model.mode = .mail })
         }
-        out.append(PaletteItem(id: "out-of-office", title: "Out of office…", detail: "Automatic replies and an out-of-office event",
+        out.append(PaletteItem(id: "out-of-office", title: "Out of Office…", detail: "Automatic replies and an out-of-office event",
                                icon: "airplane") { [model] in model.openAwaySheet() })
-        out.append(PaletteItem(id: "focus-time", title: "Focus time…", detail: "Block time to work, from the next free 2 hours",
+        out.append(PaletteItem(id: "focus-time", title: "Focus Time…", detail: "Block time to work, from the next free 2 hours",
                                icon: "moon") { [model] in model.openFocusSheet() })
         out.append(PaletteItem(id: "calendar-settings", title: "Calendar Settings…", icon: "gearshape") { [model] in model.openSettings(.calendar) })
-        out.append(PaletteItem(id: "sync", title: "Sync now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
+        out.append(PaletteItem(id: "sync", title: "Sync Now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
             model.showsHelp = true
         })
@@ -330,7 +330,7 @@ struct PaletteView: View {
                     }
                     .onChange(of: text) { selected = 0 }
                 if let row = model.cursorRow, [.snooze, .move, .label].contains(mode) {
-                    Text(row.subject).lineLimit(1).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
+                    Text(row.subject).lineLimit(1).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
                 }
             }
             .padding(.horizontal, 18)
@@ -374,7 +374,7 @@ struct PaletteView: View {
                 HStack(spacing: 5) { KeyCap(key: "↩"); Text("run") }
                 HStack(spacing: 5) { KeyCap(key: "esc"); Text("close") }
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(Theme.text3))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18)
@@ -417,7 +417,7 @@ struct PaletteView: View {
             Spacer()
             if let theme = item.theme, let use = ThemeStore.shared.choice.use(of: theme) {
                 HStack(spacing: 4) { Image(systemName: "checkmark"); Text(use.label) }
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
             if item.checked {
@@ -471,14 +471,14 @@ struct HelpView: View {
                 }
                 HStack(spacing: 10) {
                     KeyCap(key: "⌘K").frame(width: 52, alignment: .leading)
-                    Text("Command palette").foregroundStyle(Color(Theme.text2))
+                    Text("Command Palette").foregroundStyle(Color(Theme.text2))
                 }
                 HStack(spacing: 10) {
                     KeyCap(key: "⌘N").frame(width: 52, alignment: .leading)
-                    Text("New message").foregroundStyle(Color(Theme.text2))
+                    Text("New Message").foregroundStyle(Color(Theme.text2))
                 }
             }
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
             Text("Calendar").font(.system(size: 13, weight: .semibold)).padding(.top, 4)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
                 ForEach(CalendarCommand.allCases) { c in
@@ -488,7 +488,7 @@ struct HelpView: View {
                     }
                 }
             }
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
         }
         .padding(24)
         .frame(width: 600)

@@ -51,7 +51,7 @@ struct AppearanceSettings: View {
                     HStack(spacing: 5) { KeyCap(key: "↑"); KeyCap(key: "↓"); Text("choose a row") }
                     HStack(spacing: 5) { KeyCap(key: "←"); KeyCap(key: "→"); Text("change it") }
                 }
-                .font(.system(size: 11.5))
+                .font(.system(size: Theme.small))
                 .foregroundStyle(Color(Theme.text3))
                 .padding(.horizontal, 4)
                 .opacity(focused ? 1 : 0)

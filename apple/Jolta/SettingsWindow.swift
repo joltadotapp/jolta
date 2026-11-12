@@ -83,7 +83,7 @@ struct SettingsView: View {
                     Text(title).foregroundStyle(Color(Theme.text)).lineLimit(1)
                     Spacer()
                 }
-                .font(.system(size: 14))
+                .font(.system(size: Theme.title))
                 .padding(.horizontal, 28)
                 .frame(height: Theme.headerHeight)
                 .background(TitleBarArea())
@@ -276,7 +276,7 @@ struct SettingsSection<Content: View, Accessory: View>: View {
             SettingsCard { content }
             if let footer {
                 Text(footer)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 4)
@@ -309,8 +309,8 @@ struct ChoiceCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 6) {
                 Image(systemName: icon).font(.system(size: 14))
-                Text(title).font(.system(size: 12.5, weight: .semibold))
-                Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                Text(title).font(.system(size: Theme.body, weight: .semibold))
+                Text(detail).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)

@@ -45,7 +45,7 @@ struct PeopleField: View {
             .zIndex(1)
             if !guests.isEmpty {
                 Text(selected == nil ? "⇥ on a person switches Required and Optional" : "⇥ switches Required and Optional, ⌫ removes")
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
         }
@@ -224,7 +224,7 @@ private struct PersonChip: View {
                 .background(Circle().fill(Color(Theme.fill)))
             Text(name).lineLimit(1)
             if person.role == .optional {
-                Text("Optional").font(.system(size: 10.5)).foregroundStyle(Color(selected ? Theme.onAccent : Theme.text3)).opacity(selected ? 0.8 : 1)
+                Text("Optional").font(.system(size: Theme.caption)).foregroundStyle(Color(selected ? Theme.onAccent : Theme.text3)).opacity(selected ? 0.8 : 1)
             }
             if saved, let glyph = answerGlyph {
                 Image(systemName: glyph.0).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(selected ? Color(Theme.onAccent) : glyph.1)
@@ -285,7 +285,7 @@ struct OrganizerOptions: View {
             Text(label).foregroundStyle(Color(has ? Theme.text : Theme.text3))
             if !has {
                 Text(google && tag == "Not here" ? "Not on Google" : tag)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: Theme.caption))
                     .foregroundStyle(Color(Theme.text3))
                     .padding(.horizontal, 5)
                     .background(Capsule().strokeBorder(Color(Theme.line), lineWidth: 1))

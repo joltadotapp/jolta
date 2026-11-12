@@ -498,9 +498,9 @@ struct CalendarIntroSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Which calendars should Jolta show?").font(.system(size: 17, weight: .semibold))
+            Text("Which calendars should Jolta show?").font(.system(size: Theme.title, weight: .semibold))
             Text("Calendar is off for every account until you turn it on here. You can change this later in Settings › Calendar.")
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text2))
                 .fixedSize(horizontal: false, vertical: true)
             SettingsCard {

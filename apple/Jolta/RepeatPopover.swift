@@ -137,7 +137,7 @@ struct RepeatPopover: View {
         .padding(.top, 12)
         .padding(.bottom, 14)
         .frame(width: 340)
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .panel()
         .overlay(alignment: .topTrailing) {
@@ -189,7 +189,7 @@ struct RepeatPopover: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .frame(width: 76, alignment: .leading)
-                .fieldBox(chevrons: true)
+                .fieldBox(height: Theme.controlSmall, chevrons: true)
                 .accessibilityIdentifier("repeat-unit")
             }
             if picker.custom.unit == .week {
@@ -217,7 +217,7 @@ struct RepeatPopover: View {
                     SmallRadio(on: picker.custom.ends == .never) { picker.custom.ends = .never } label: { Text("Never") }
                     SmallRadio(on: endCount != nil) { picker.custom.ends = .after(count: endCount ?? 10) } label: {
                         Text("After")
-                        NumberField(value: Binding(get: { endCount ?? 10 }, set: { picker.custom.ends = .after(count: $0) }), id: "repeat-count", height: 24)
+                        NumberField(value: Binding(get: { endCount ?? 10 }, set: { picker.custom.ends = .after(count: $0) }), id: "repeat-count")
                         Text("times")
                     }
                 }
@@ -257,7 +257,7 @@ struct RepeatPopover: View {
                 .accessibilityIdentifier("repeat-summary")
             if !picker.summary.next.isEmpty {
                 Text("Next: " + picker.summary.next.joined(separator: ", "))
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
             if let refusal = picker.summary.refusal {
@@ -350,9 +350,9 @@ private struct WeekdayToggle: View {
     var body: some View {
         Button(action: toggle) {
             Text(letter)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(.system(size: Theme.small, weight: .semibold))
                 .foregroundStyle(Color(on ? Theme.raise : Theme.text2))
-                .frame(width: 26, height: 26)
+                .frame(width: Theme.controlSmall, height: Theme.controlSmall)
                 .background {
                     Circle().fill(Color(on ? Theme.text : Theme.raise))
                     if !on { Circle().strokeBorder(Color(Theme.line), lineWidth: 1) }
@@ -369,7 +369,6 @@ private struct WeekdayToggle: View {
 private struct NumberField: View {
     @Binding var value: UInt32
     let id: String
-    var height: CGFloat = 26
     @State private var text = ""
     @FocusState private var focused: Bool
 
@@ -379,7 +378,7 @@ private struct NumberField: View {
             .font(.system(size: 12, weight: .medium, design: .monospaced))
             .multilineTextAlignment(.center)
             .frame(width: 22)
-            .fieldBox(focused: focused, height: height)
+            .fieldBox(focused: focused, height: Theme.controlSmall)
             .focused($focused)
             .onAppear { text = "\(value)" }
             .onChange(of: value) { if UInt32(text) != value { text = "\(value)" } }
@@ -399,7 +398,7 @@ private struct EndDayChip: View {
 
     var body: some View {
         Button { open.toggle() } label: {
-            Text(Self.format.string(from: day)).font(.system(size: 12)).fieldBox(focused: open, height: 24)
+            Text(Self.format.string(from: day)).font(.system(size: 12)).fieldBox(focused: open, height: Theme.controlSmall)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("repeat-until")

@@ -40,7 +40,7 @@ struct AwaySheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Out of office").font(.system(size: 17, weight: .semibold))
+            Text("Out of office").font(.system(size: Theme.title, weight: .semibold))
             fields
             accounts
             if let failure {
@@ -52,7 +52,7 @@ struct AwaySheet: View {
                 }
                 Spacer()
                 KitButton(title: "Cancel", key: "esc", action: close).keyboardShortcut(.cancelAction)
-                KitButton(title: "Turn on", key: "⌘↩", kind: .primary, action: turnOn)
+                KitButton(title: "Turn On", key: "⌘↩", kind: .primary, action: turnOn)
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!canTurnOn)
                     .accessibilityIdentifier("away-turn-on")
@@ -143,7 +143,7 @@ struct AwaySheet: View {
 
     private func label(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
             .foregroundStyle(Color(Theme.text2))
             .frame(width: 56, alignment: .leading)
             .padding(.top, title == "Reply" ? 6 : 0)
@@ -159,7 +159,7 @@ struct AwaySheet: View {
             }
             if loaded && rows.isEmpty {
                 Text("No account has a calendar Jolta can write to.")
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .foregroundStyle(Color(Theme.text3))
                     .padding(12)
             }
@@ -191,7 +191,7 @@ struct AwaySheet: View {
                         KitButton(title: "\(title) ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(url) }
                     }
                     if row.calendarOff {
-                        KitButton(title: "Turn on calendar", kind: .quiet, size: .small) {
+                        KitButton(title: "Turn On Calendar", kind: .quiet, size: .small) {
                             close()
                             model.openSettings(.calendar)
                         }
@@ -202,7 +202,7 @@ struct AwaySheet: View {
                 if let current = row.current {
                     HStack(spacing: 8) {
                         Text(current).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.accentText))
-                        KitButton(title: "Turn off", size: .small) { turnOff(row) }
+                        KitButton(title: "Turn Off", size: .small) { turnOff(row) }
                             .disabled(working)
                             .accessibilityIdentifier("away-turn-off-\(row.accountId)")
                     }

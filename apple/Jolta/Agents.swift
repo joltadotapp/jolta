@@ -18,7 +18,7 @@ struct AgentApproval: View {
                 Text("\(name) wants to use your mail").font(.system(size: 15, weight: .semibold))
             }
             Text("Agents connect through Jolta's MCP server. They never see your passwords, everything they do is logged, and they cannot send mail: drafts wait here for you.")
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text2))
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 8) {
@@ -122,7 +122,7 @@ struct ActivitySettings: View {
                             Text(e.summary).font(.system(size: 11, design: .monospaced)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                             if e.outcome != "ok" { Text(e.outcome).font(.system(size: 11)).foregroundStyle(Color(Theme.warningText)).lineLimit(2) }
                         }
-                        .font(.system(size: 12.5))
+                        .font(.system(size: Theme.body))
                     }
                 }
                 if log.isEmpty {

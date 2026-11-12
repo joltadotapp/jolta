@@ -82,7 +82,7 @@ private struct EmailGuestsBox: View {
             HStack(spacing: 6) { Text(label); KeyCap(key: "⌘E", style: .inherit) }
         }
         .toggleStyle(.checkbox)
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text2))
         .keyboardShortcut("e", modifiers: .command)
         .padding(.top, 12)

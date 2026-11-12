@@ -712,7 +712,7 @@ struct ReaderView: View {
                             .help("Leave this mailing list and archive the conversation")
                         }
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                 }
                 if imagesBlocked {
                     HStack(spacing: 10) {
@@ -731,7 +731,7 @@ struct ReaderView: View {
                                 .help("Load remote images from this sender without asking")
                         }
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .padding(.top, 8)
                 }
             }
@@ -849,7 +849,7 @@ enum ReaderStyle {
     .jolta-file span { display: flex; flex-direction: column; min-width: 0; }
     .jolta-file b { font-weight: 500; font-size: 12.5px; line-height: 16px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .jolta-file small { color: var(--tx3); font-size: 11.5px; line-height: 15px; }
-    .jolta-save-all { margin-left: 4px; padding: 4px 8px; border-radius: 7px; font-size: 12.5px; color: var(--tx2);
+    .jolta-save-all { margin-left: 4px; padding: 4px 8px; border-radius: 6px; font-size: 12.5px; color: var(--tx2);
       text-decoration: none; cursor: default; }
     .jolta-save-all:hover, .jolta-file:hover { background: var(--fill); }
     .jolta-clip { display: inline-flex; align-items: center; gap: 3px; color: var(--tx3); font-size: 11.5px; margin-right: 10px; }
@@ -892,10 +892,10 @@ enum ReaderStyle {
       box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 35%, transparent); }
     .jolta-strip .jolta-strip-beside { width: max-content; background: var(--bg); box-shadow: none; padding: 0 4px 0 5px; border-radius: 0; }
     .jolta-invite-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
-    .jolta-join { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
+    .jolta-join { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 6px;
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-rsvp + .jolta-join, .jolta-remove + .jolta-join { margin-left: auto; }
-    .jolta-remove { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
+    .jolta-remove { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 6px;
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default;
       transition: background-color .16s ease; }
     .jolta-remove:hover { background: var(--fill); }
@@ -906,7 +906,7 @@ enum ReaderStyle {
     .jolta-add:hover, .jolta-update:hover { background: var(--fill); }
     .jolta-sending .jolta-add, .jolta-sending .jolta-update { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-decline-proposal, .jolta-accept-proposal { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box;
-      padding: 0 5px 0 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
+      padding: 0 5px 0 10px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
       text-decoration: none; cursor: default; transition: background-color .16s ease; }
     .jolta-decline-proposal:hover, .jolta-accept-proposal:hover { background: var(--fill); }
     .jolta-accept-proposal { margin-right: 6px; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 55%, var(--line2)); }
@@ -919,7 +919,7 @@ enum ReaderStyle {
     .jolta-rsvp-fixed { color: var(--tx3); }
     .jolta-rsvp { display: inline-flex; gap: 6px; }
     .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
-      border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
+      border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
       cursor: default; transition: background-color .16s ease, box-shadow .16s ease; }
     .jolta-rsvp a:hover { background: var(--fill); }
     .jolta-rsvp kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px; border-radius: 4px; text-align: center;
@@ -937,7 +937,7 @@ enum ReaderStyle {
     .jolta-rsvp-options a.jolta-on { color: var(--tx); }
     .jolta-rsvp-options .jolta-rsvp-note { display: block; }
     .jolta-invite a:focus { outline: none; }
-    .jolta-invite a:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; border-radius: 7px; }
+    .jolta-invite a:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; border-radius: 6px; }
     .jolta-rsvp-quiet .jolta-tick { opacity: 0; }
     .jolta-rsvp-quiet.jolta-on .jolta-tick { opacity: 1; }
     .jolta-join:hover { background: var(--fill); }
@@ -967,14 +967,14 @@ struct HoldsLineView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 2).fill(Color(CalendarColor.color(Self.hue, .bar))).frame(width: 8, height: 8)
-                Text(line.title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                Text(line.title).font(.system(size: Theme.body, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 8)
                 if let slot = cursor {
                     KitButton(title: "Book \(Self.short(slot))", key: "B", size: .small) { model.bookHold(slot) }
                         .help("Open the event editor at this time with the people you wrote to")
                         .accessibilityIdentifier("holds-book")
                 }
-                KitButton(title: "Release all", kind: .quiet, size: .small) { model.releaseHolds(line.setId) }
+                KitButton(title: "Release All", kind: .quiet, size: .small) { model.releaseHolds(line.setId) }
                     .help("Delete every hold of this message from your calendar")
                     .accessibilityIdentifier("holds-release")
             }
@@ -1005,10 +1005,10 @@ struct HoldsLineView: View {
                 if slot.state == .booked { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
                 Text(slot.label).strikethrough(slot.state == .taken)
             }
-            .font(.system(size: 11.5, weight: .medium))
+            .font(.system(size: Theme.small, weight: .medium))
             .foregroundStyle(Color(current || slot.state == .booked ? Theme.text : Theme.text2))
             .padding(.horizontal, 8)
-            .frame(height: 22)
+            .frame(height: Theme.controlSmall)
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(current ? Theme.accent : Theme.line), lineWidth: current ? 1.5 : 1))
             .opacity(slot.state == .taken ? 0.5 : 1)
             .contentShape(Rectangle())

@@ -39,7 +39,7 @@ struct DayPanel: View {
                 HStack(spacing: 5) { KeyCap(key: "⌘2"); Text("calendar") }
                 Spacer()
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(Theme.text3))
             .padding(.horizontal, 16)
             .frame(height: 34)

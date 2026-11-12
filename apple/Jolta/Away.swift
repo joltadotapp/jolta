@@ -22,13 +22,13 @@ struct AwayStrip: View {
             Spacer(minLength: 6)
             if info.editable {
                 KitButton(title: "Edit", size: .small) { model.openAwaySheet(account: info.accountId) }
-                KitButton(title: "Turn off", size: .small) { model.turnOffAway(info) }
+                KitButton(title: "Turn Off", size: .small) { model.turnOffAway(info) }
                     .disabled(model.turningOffAway.contains(info.accountId))
             } else {
                 KitButton(title: info.settingsTitle, size: .small) { model.openAwaySettings(info) }
             }
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -68,12 +68,12 @@ struct OutOfOfficeRows: View {
                 switch row.state {
                 case .calendarOff:
                     if let switches, let account = model.calendar.list.accounts.first(where: { $0.account.id == row.accountId }) {
-                        Button("Turn on calendar") { switches.set(account, on: true) }
+                        Button("Turn On Calendar") { switches.set(account, on: true) }
                     }
                 case _ where !row.editable:
                     Button(row.settingsTitle) { model.openAwaySettings(row) }
                 case .on:
-                    Button("Turn off") { model.turnOffAway(row) }
+                    Button("Turn Off") { model.turnOffAway(row) }
                         .disabled(model.turningOffAway.contains(row.accountId))
                 default:
                     Button("Edit…") { sheet = AwaySheetRequest(accountId: row.accountId) }

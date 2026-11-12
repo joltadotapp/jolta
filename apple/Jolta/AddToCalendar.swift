@@ -101,7 +101,7 @@ struct AddCalendarPanel: View {
                     .fill(Color(CalendarColor.color(choice.color, .bar)))
                     .frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(choice.name).font(.system(size: 12.5)).lineLimit(1)
+                    Text(choice.name).font(.system(size: Theme.body)).lineLimit(1)
                     Text(choice.account).font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                 }
                 Spacer(minLength: 0)

@@ -171,7 +171,7 @@ private struct LocalModels: View {
                     }
                 }
                 Text(m.detail).font(.system(size: 12)).foregroundStyle(Color(Theme.text2))
-                Text(stateLine(m)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(stateColor(m))
+                Text(stateLine(m)).font(.system(size: Theme.small).monospacedDigit()).foregroundStyle(stateColor(m))
                     .fixedSize(horizontal: false, vertical: true)
                 if case .downloading(let done, _) = m.state {
                     ProgressView(value: Double(done), total: Double(m.size)).progressViewStyle(.linear).tint(Color(Theme.text2))
@@ -301,7 +301,7 @@ private struct RemoteAccount: View {
             }
             SettingsRow(title: "Model", detail: modelDetail) { modelControl }
         } accessory: {
-            KitButton(title: "Get a key ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(keysPage) }
+            KitButton(title: "Get a Key ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(keysPage) }
                 .padding(.trailing, -7)
         }
         VStack(alignment: .leading, spacing: 10) {
@@ -349,7 +349,7 @@ private struct RemoteAccount: View {
     @ViewBuilder private var keyControl: some View {
         if saved && !replacing {
             HStack(spacing: 6) {
-                Text("••••••••••••").font(.system(size: 12.5, design: .monospaced)).foregroundStyle(Color(Theme.text2))
+                Text("••••••••••••").font(.system(size: Theme.body, design: .monospaced)).foregroundStyle(Color(Theme.text2))
                 Button("Replace…") { replacing = true; key = "" }
                 Button("Remove") {
                     try? model.core.setAiKey(provider: provider, key: "")

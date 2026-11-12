@@ -128,7 +128,7 @@ struct SuggestionRow: View {
         }
         .font(.system(size: 13))
         .padding(.horizontal, 10)
-        .frame(height: 30)
+        .frame(height: Theme.control)
         .selectedRow(on, hovering: hovering)
         .contentShape(Rectangle())
         .onTapGesture(perform: choose)

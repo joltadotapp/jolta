@@ -304,7 +304,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
         app.typeText("invitation")
-        XCTAssertFalse(paletteRow(app, "Accept invitation").waitForExistence(timeout: 2), "the palette offers no answer either")
+        XCTAssertFalse(paletteRow(app, "Accept Invitation").waitForExistence(timeout: 2), "the palette offers no answer either")
         app.typeKey(.escape, modifierFlags: [])
 
         XCTAssertTrue(waitUntil { header.exists && header.isHittable })
@@ -312,7 +312,7 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(link("Declined").waitForExistence(timeout: 5), "expanded again, the card is back")
         app.typeKey("k", modifierFlags: .command)
         app.typeText("Accept invitation")
-        XCTAssertTrue(paletteRow(app, "Accept invitation").waitForExistence(timeout: 5), "the palette offers the answers again")
+        XCTAssertTrue(paletteRow(app, "Accept Invitation").waitForExistence(timeout: 5), "the palette offers the answers again")
         app.typeKey(.escape, modifierFlags: [])
         app.typeKey("y", modifierFlags: [])
         XCTAssertTrue(link("Accepted").waitForExistence(timeout: 5), "y accepts the card on screen")
@@ -1027,7 +1027,7 @@ final class Journeys: XCTestCase {
         let strip = app.descendants(matching: .any).matching(identifier: "away-strip").firstMatch
         XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while replies are on")
         XCTAssertTrue(text(app, "Automatic replies are on").exists)
-        strip.buttons["Turn off"].click()
+        strip.buttons["Turn Off"].click()
         XCTAssertTrue(text(app, "Out of office is off for me@test.invalid.").waitForExistence(timeout: 5), "the toast says so")
         XCTAssertTrue(strip.waitForNonExistence(timeout: 5), "and the strip goes")
     }
@@ -1041,7 +1041,7 @@ final class Journeys: XCTestCase {
         let strip = app.descendants(matching: .any).matching(identifier: "away-strip").firstMatch
         XCTAssertTrue(strip.waitForExistence(timeout: 10), "the strip shows while Gmail's replies are on")
         XCTAssertTrue(strip.buttons["Open Gmail settings"].exists, "the strip offers Gmail's settings")
-        XCTAssertFalse(strip.buttons["Turn off"].exists, "and no Turn off")
+        XCTAssertFalse(strip.buttons["Turn Off"].exists, "and no Turn off")
         XCTAssertFalse(strip.buttons["Edit"].exists, "and no Edit")
 
         app.typeKey("k", modifierFlags: .command)
@@ -1052,7 +1052,7 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(set.waitForExistence(timeout: 5), "Settings › Calendar shows Out of office")
         XCTAssertTrue(text(app, "On, with no end set.").waitForExistence(timeout: 5), "the account's row says the replies are on")
         XCTAssertTrue(app.buttons["Open Gmail settings"].exists, "the row offers Gmail's settings")
-        XCTAssertFalse(app.buttons["Turn off"].exists, "and no Turn off")
+        XCTAssertFalse(app.buttons["Turn Off"].exists, "and no Turn off")
         app.typeKey("w", modifierFlags: .command)
     }
 
@@ -1089,7 +1089,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
         app.typeText("Focus time")
-        XCTAssertTrue(paletteRow(app, "Focus time").waitForExistence(timeout: 5), "the palette offers Focus time…")
+        XCTAssertTrue(paletteRow(app, "Focus Time").waitForExistence(timeout: 5), "the palette offers Focus time…")
         app.typeKey(.return, modifierFlags: [])
         let sheet = app.descendants(matching: .any).matching(identifier: "focus-sheet").firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the sheet opens")
@@ -1108,7 +1108,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
         app.typeText("Out of office")
-        let row = paletteRow(app, "Out of office")
+        let row = paletteRow(app, "Out of Office")
         XCTAssertTrue(row.waitForExistence(timeout: 5), "the palette offers Out of office…")
         app.typeKey(.return, modifierFlags: [])
         let sheet = app.descendants(matching: .any).matching(identifier: "away-sheet").firstMatch
@@ -1126,7 +1126,7 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(text(app, "Out of office on").waitForExistence(timeout: 5), "the row says out of office is set")
-        app.buttons["Turn off"].firstMatch.click()
+        app.buttons["Turn Off"].firstMatch.click()
         XCTAssertTrue(text(app, "Out of office is off for me@test.invalid.").waitForExistence(timeout: 5), "Turn off ends it")
         XCTAssertTrue(text(app, "Out of office on").waitForNonExistence(timeout: 5), "and the row no longer offers it")
         app.typeKey(.escape, modifierFlags: [])
@@ -1147,7 +1147,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5), "⌘K opens the palette")
         app.typeText("Insert my availability")
-        XCTAssertTrue(paletteRow(app, "Insert my availability").waitForExistence(timeout: 5))
+        XCTAssertTrue(paletteRow(app, "Insert My Availability").waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         let zone = app.descendants(matching: .any).matching(identifier: "find-time-their-zone").firstMatch
         XCTAssertTrue(zone.waitForExistence(timeout: 10), "the header names their clock")
@@ -1207,7 +1207,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
         app.typeText("Insert my availability")
-        XCTAssertTrue(paletteRow(app, "Insert my availability").waitForExistence(timeout: 5))
+        XCTAssertTrue(paletteRow(app, "Insert My Availability").waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         let hold = app.descendants(matching: .any).matching(identifier: "find-time-hold").firstMatch
         XCTAssertTrue(hold.waitForExistence(timeout: 10), "the panel offers Hold these times")
@@ -1237,7 +1237,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
         app.typeText("Find a time")
-        XCTAssertTrue(paletteRow(app, "Find a time").waitForExistence(timeout: 5))
+        XCTAssertTrue(paletteRow(app, "Find a Time").waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         let panel = app.descendants(matching: .any).matching(identifier: "find-time").firstMatch
         XCTAssertTrue(panel.waitForExistence(timeout: 5), "the palette opens Find a time")
@@ -1275,7 +1275,7 @@ final class Journeys: XCTestCase {
         app.typeKey("k", modifierFlags: .command)
         XCTAssertTrue(app.textFields.firstMatch.waitForExistence(timeout: 5))
         app.typeText("Find a time")
-        XCTAssertTrue(paletteRow(app, "Find a time").waitForExistence(timeout: 5))
+        XCTAssertTrue(paletteRow(app, "Find a Time").waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         let invite = app.descendants(matching: .any).matching(identifier: "find-time-invite").firstMatch
         XCTAssertTrue(invite.waitForExistence(timeout: 10), "a conversation's Find a time offers Invite")

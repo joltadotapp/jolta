@@ -52,7 +52,7 @@ struct EventDetailCard: View {
                     Image(systemName: "lock.fill").font(.system(size: 11)).foregroundStyle(Color(Theme.text3))
                 }
                 Text(detail.title.isEmpty ? "(no title)" : detail.title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: Theme.title, weight: .semibold))
                     .strikethrough(detail.status == .cancelled)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("event-detail-title")
@@ -165,7 +165,7 @@ struct EventDetailCard: View {
                         .accessibilityIdentifier("event-detail-delete")
                 }
                 if detail.emailGuests {
-                    KitButton(title: "Email guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
+                    KitButton(title: "Email Guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
                         .help("Write to the people on this event, for what isn't a calendar update")
                         .accessibilityIdentifier("event-detail-email-guests")
                 }

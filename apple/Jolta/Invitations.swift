@@ -373,13 +373,13 @@ struct RsvpProposePanel: View {
             }
             .labelsHidden()
             .datePickerStyle(.field)
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
             HStack {
                 Text(summary)
                     .font(.system(size: 11))
                     .foregroundStyle(Color(valid ? Theme.text3 : Theme.accentText))
                 Spacer(minLength: 0)
-                KitButton(title: "Find a time…", kind: .quiet, size: .small) {
+                KitButton(title: "Find a Time…", kind: .quiet, size: .small) {
                     model.findTime(for: .propose(message: invitation.messageId, organizer: invitation.organizer),
                                    minutes: Int64(end.timeIntervalSince(start) / 60))
                 }
@@ -461,11 +461,11 @@ struct RsvpScopePanel: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).opacity(on ? 1 : 0)
-                Text(title).font(.system(size: 12.5))
+                Text(title).font(.system(size: Theme.body))
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
-            .frame(height: 26)
+            .frame(height: Theme.control)
             // The checkmark already marks the row.
             .selectedRow(on, marked: false, radius: Theme.radiusControl)
             .contentShape(Rectangle())
@@ -498,9 +498,9 @@ struct EventAnswerRow: View {
                             if on { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
                             Text(on ? a.done : a.title)
                         }
-                        .font(.system(size: 11.5, weight: on ? .semibold : .medium))
+                        .font(.system(size: Theme.small, weight: on ? .semibold : .medium))
                         .padding(.horizontal, 9)
-                        .frame(height: 22)
+                        .frame(height: Theme.controlSmall)
                         .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
                         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(on ? Theme.text3 : Theme.line), lineWidth: 1))
                         .opacity(sending == a ? 0.6 : 1)

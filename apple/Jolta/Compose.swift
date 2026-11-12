@@ -128,7 +128,7 @@ struct ComposeView: View {
                         .help("Don't send it then; keep it as a draft")
                         Spacer()
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .frame(height: 34)
                     .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
                 }
@@ -144,7 +144,7 @@ struct ComposeView: View {
                         .help("No reminder")
                         Spacer()
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .frame(height: 34)
                     .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
                 }
@@ -191,7 +191,7 @@ struct ComposeView: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color(Theme.text3))
                             }
-                            .font(.system(size: 12.5))
+                            .font(.system(size: Theme.body))
                             .padding(.horizontal, 12)
                             .frame(height: 34)
                             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(Theme.line), lineWidth: 1))
@@ -302,12 +302,12 @@ private struct FieldRow<Content: View>: View {
     var body: some View {
         HStack(spacing: 12) {
             Text(label)
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text3))
                 .frame(width: 52, alignment: .leading)
             content
         }
-        .font(.system(size: 13.5))
+        .font(.system(size: Theme.body))
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 40)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -402,7 +402,7 @@ private struct ImageSizeBar: View {
                     }
                     Spacer()
                 }
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .frame(height: 34)
                 .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
             }

@@ -575,7 +575,7 @@ final class ChipView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         Theme.line.setStroke()
-        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.radiusKey, yRadius: Theme.radiusKey)
         box.lineWidth = 1
         box.stroke()
         let label = label

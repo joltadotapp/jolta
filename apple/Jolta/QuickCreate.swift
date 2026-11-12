@@ -55,7 +55,7 @@ struct QuickCreateView: View {
                 Spacer()
                 if creating { Text("English, Nederlands, Français") }
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(Theme.text3))
             .padding(.horizontal, 18)
             .frame(height: 36)
@@ -96,7 +96,7 @@ struct QuickCreateView: View {
             .accessibilityIdentifier("quick-create-preview")
             if p.asksAi {
                 Label("The AI reads the rest when you press Return.", systemImage: "sparkles")
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
         } else {

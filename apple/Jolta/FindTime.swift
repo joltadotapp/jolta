@@ -267,7 +267,7 @@ struct FindTimePanel: View {
             }
             .font(.system(size: 12))
             .padding(.horizontal, 8)
-            .frame(height: 22)
+            .frame(height: Theme.controlSmall)
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
             .contentShape(Rectangle())
         }
@@ -306,7 +306,7 @@ struct FindTimePanel: View {
         if let zone = theirZone, zone.source != .mine {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(zone.zone.city).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
+                    Text(zone.zone.city).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
                     Text("Their \(Self.minutesClock(zone.hours.start)) to \(Self.minutesClock(zone.hours.end))")
                         .font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                 }
@@ -354,11 +354,11 @@ struct FindTimePanel: View {
                 .padding(.trailing, 4)
             }
             HStack(spacing: 2) {
-                Button { length(-1) } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
+                Button { length(-1) } label: { Image(systemName: "minus").frame(width: 22, height: Theme.controlSmall) }
                 Text(lengthText(minutes))
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                     .frame(minWidth: 64)
-                Button { length(1) } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
+                Button { length(1) } label: { Image(systemName: "plus").frame(width: 22, height: Theme.controlSmall) }
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color(Theme.text2))
@@ -411,7 +411,7 @@ struct FindTimePanel: View {
                     let width = geo.size.width / CGFloat(max(info.days.count, 1))
                     ForEach(Array(info.days.enumerated()), id: \.offset) { i, day in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(day.title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Color(Theme.text2))
+                            Text(day.title).font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(Color(Theme.text2))
                             HStack {
                                 Text(Self.clock(day.start))
                                 Spacer()
@@ -432,7 +432,7 @@ struct FindTimePanel: View {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 3) {
-                            Text(person.name).font(.system(size: 12.5, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
+                            Text(person.name).font(.system(size: Theme.body, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
                             if person.isRoom {
                                 Spacer(minLength: 0)
                                 Button { rooms.removeAll { $0.address == person.address } } label: {
@@ -480,7 +480,7 @@ struct FindTimePanel: View {
                         .foregroundStyle(Color(Theme.text2))
                 } else if slots.indices.contains(selected) {
                     let slot = slots[selected]
-                    Text(Self.span(slot)).font(.system(size: 12.5, weight: .medium))
+                    Text(Self.span(slot)).font(.system(size: Theme.body, weight: .medium))
                     if !slot.missing.isEmpty {
                         Text("Not known: \(slot.missing.joined(separator: ", "))")
                             .foregroundStyle(Color(Theme.text3))
@@ -492,9 +492,9 @@ struct FindTimePanel: View {
             }
             if forAvailability { holdToggle }
             Spacer(minLength: 8)
-            hint("↑↓", listsStretches ? nil : "Move")
-            hint("Space", holding ? "Pick" : nil)
-            hint("− +", "Length")
+            hint("↑↓", listsStretches ? nil : "move")
+            hint("space", holding ? "pick" : nil)
+            hint("− +", "length")
             // Invite is the panel's main action where it is offered.
             KitButton(title: pickVerb, key: "↩", kind: invites ? .secondary : .primary, size: .small) { pick() }
                 .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone || (holding && picked.isEmpty))
@@ -728,7 +728,7 @@ struct FindTimeRow: View {
             let width = size.width / CGFloat(max(days.count, 1))
             for (i, day) in days.enumerated() {
                 let column = FindTimeSlots.column(i, of: days.count, in: size)
-                context.fill(Path(roundedRect: column, cornerRadius: 5), with: .color(Color(Theme.bg)))
+                context.fill(Path(roundedRect: column, cornerRadius: Theme.radiusControl), with: .color(Color(Theme.bg)))
                 if person.unknown != nil {
                     hatch(column, in: &context)
                 }
@@ -738,7 +738,7 @@ struct FindTimeRow: View {
                 for b in person.busy {
                     if let r = FindTimeSlots.span(b.start, b.end, day: day, column: column) { block(r, kind: b.kind, in: &context) }
                 }
-                context.stroke(Path(roundedRect: column.insetBy(dx: 0.25, dy: 0.25), cornerRadius: 5), with: .color(Color(Theme.line2)), lineWidth: 0.5)
+                context.stroke(Path(roundedRect: column.insetBy(dx: 0.25, dy: 0.25), cornerRadius: Theme.radiusControl), with: .color(Color(Theme.line2)), lineWidth: 0.5)
             }
         }
     }
@@ -764,7 +764,7 @@ struct FindTimeRow: View {
     /// the unknown hatch, so the two never read alike.
     private func shade(_ r: CGRect, column: CGRect, in context: inout GraphicsContext) {
         var clipped = context
-        clipped.clip(to: Path(roundedRect: column, cornerRadius: 5))
+        clipped.clip(to: Path(roundedRect: column, cornerRadius: Theme.radiusControl))
         clipped.fill(Path(r), with: .color(Color(Theme.fill)))
         var path = Path()
         var x = r.minX - r.height
@@ -779,7 +779,7 @@ struct FindTimeRow: View {
 
     private func hatch(_ r: CGRect, in context: inout GraphicsContext) {
         var clipped = context
-        clipped.clip(to: Path(roundedRect: r, cornerRadius: 5))
+        clipped.clip(to: Path(roundedRect: r, cornerRadius: Theme.radiusControl))
         stripes(r, color: Color(Theme.line), width: 1, in: &clipped)
     }
 

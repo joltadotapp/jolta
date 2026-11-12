@@ -56,7 +56,7 @@ struct FocusSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Focus time").font(.system(size: 17, weight: .semibold))
+            Text("Focus time").font(.system(size: Theme.title, weight: .semibold))
             VStack(alignment: .leading, spacing: 8) {
                 field("Starts") {
                     DatePicker("Starts", selection: $start, displayedComponents: [.date, .hourAndMinute])
@@ -103,7 +103,7 @@ struct FocusSheet: View {
             }
             if let line = plan?.line {
                 Text(line)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .foregroundStyle(Color(Theme.text2))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(12)
@@ -155,7 +155,7 @@ struct FocusSheet: View {
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 12) {
             Text(title)
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text2))
                 .frame(width: 64, alignment: .leading)
             content()

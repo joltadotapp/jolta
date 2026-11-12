@@ -86,7 +86,7 @@ private struct ScopePromptView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(choice.label).font(.system(size: 13, weight: .medium)).foregroundStyle(Color(Theme.text))
                     if let detail = choice.detail {
-                        Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).fixedSize(horizontal: false, vertical: true)
+                        Text(detail).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Spacer(minLength: 0)

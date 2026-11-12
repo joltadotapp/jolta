@@ -370,7 +370,7 @@ struct EventEditorPanel: View {
         .frame(maxHeight: .infinity)
         .background(Color(Theme.side))
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .defaultFocus($focus, firstFocus)
         .onAppear {
@@ -404,7 +404,7 @@ struct EventEditorPanel: View {
                 .foregroundStyle(Color(Theme.text3))
             if editor.readByAI {
                 Label("Read by AI", systemImage: "sparkles")
-                    .font(.system(size: 10.5))
+                    .font(.system(size: Theme.caption))
                     .foregroundStyle(Color(Theme.text2))
                     .padding(.horizontal, 6)
                     .frame(height: 18)
@@ -483,7 +483,7 @@ struct EventEditorPanel: View {
                     .accessibilityIdentifier("editor-title")
             }
         }
-        .font(.system(size: 20, weight: .semibold))
+        .font(.system(size: Theme.display, weight: .semibold))
         .tracking(-0.3)
         .padding(.vertical, 5)
         .padding(.leading, 30)
@@ -576,7 +576,7 @@ struct EventEditorPanel: View {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color(Theme.text3))
                 }
                 .padding(.horizontal, 6)
-                .frame(height: 26)
+                .frame(height: Theme.control)
                 .background { if editor.repeatPicker != nil { RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)) } }
                 .contentShape(Rectangle())
             }
@@ -643,13 +643,13 @@ struct EventEditorPanel: View {
                         Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
                         Spacer(minLength: 0)
                         if canFindTime {
-                            KitButton(title: "Find a time", key: "⇧⌘F", kind: .quiet, size: .small) { findTime() }
+                            KitButton(title: "Find a Time", key: "⇧⌘F", kind: .quiet, size: .small) { findTime() }
                                 .keyboardShortcut("f", modifiers: [.command, .shift])
                                 .help("See when everyone is free and pick a time (⇧⌘F)")
                                 .accessibilityIdentifier("editor-find-time")
                         }
                         if let event = emailable {
-                            KitButton(title: "Email guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
+                            KitButton(title: "Email Guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
                                 .help("Write to the people on this event, for what isn't a calendar update")
                                 .accessibilityIdentifier("editor-email-guests")
                         }
@@ -857,10 +857,10 @@ struct EventEditorPanel: View {
                             .accessibilityIdentifier("editor-description")
                     }
                     if let note = editor.draft.descriptionNote {
-                        Text(note).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                        Text(note).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                     }
                     if editor.draft.meeting != nil && !editor.locked(.description) {
-                        Text("The meeting's join details stay below your text.").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                        Text("The meeting's join details stay below your text.").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                     }
                 }
             }
@@ -918,7 +918,7 @@ struct EventEditorPanel: View {
         EditorSection {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Your settings").font(.system(size: 11, weight: .semibold)).tracking(0.2).foregroundStyle(Color(Theme.text3))
-                Text("Only you see these. Never emailed.").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                Text("Only you see these. Never emailed.").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             }
             .padding(.top, 2)
             .padding(.bottom, 3)
@@ -928,7 +928,7 @@ struct EventEditorPanel: View {
                 }
             }
             if let note = editor.draft.showAsNote {
-                Text(note).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).padding(.leading, 104)
+                Text(note).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).padding(.leading, 104)
             }
             SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word) {
                 ForEach(DraftReminder.menu(isNew: editor.isNew), id: \.self) { choice in
@@ -1080,7 +1080,7 @@ private struct PersonLine: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(name).lineLimit(1)
-            Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            Text(detail).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             Spacer(minLength: 4)
             LockGlyph()
         }
@@ -1093,7 +1093,7 @@ struct ProblemLine: View {
 
     var body: some View {
         Label(problem.text, systemImage: problem.blocking ? "exclamationmark.circle" : "info.circle")
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(problem.blocking ? Color(Theme.dangerText) : Color(Theme.text3))
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("editor-problem")

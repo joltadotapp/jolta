@@ -260,7 +260,7 @@ struct SpanSwitcher: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Color(on ? Theme.text : Theme.text2))
                     .padding(.horizontal, 10)
-                    .frame(height: 22)
+                    .frame(height: Theme.controlSmall)
                     .background {
                         if on {
                             RoundedRectangle(cornerRadius: 6).fill(Color(Theme.raise))
@@ -299,7 +299,7 @@ struct CalendarFooter: View {
             Spacer()
             Text("Times in \(zone)")
         }
-        .font(.system(size: 11.5))
+        .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
         .padding(.horizontal, 20)
         .frame(height: 34)
@@ -387,7 +387,7 @@ struct CalendarRow: View {
                 if let n = entry.number { KeyCap(key: "\(n)") }
             }
             .padding(.horizontal, 8)
-            .frame(height: 26)
+            .frame(height: Theme.control)
             .contentShape(Rectangle())
             .selectedRow(false, hovering: hovering)
         }
@@ -612,9 +612,9 @@ struct MonthLine: View {
         HStack(spacing: 5) {
             if let start = e.start, !e.isLong {
                 Circle().fill(Color(CalendarColor.color(e.record.color, .bar))).frame(width: 6, height: 6)
-                Text(CalendarModel.clockTime(start)).font(.system(size: 10.5, weight: .medium, design: .monospaced)).foregroundStyle(Color(Theme.text3))
+                Text(CalendarModel.clockTime(start)).font(.system(size: Theme.caption, weight: .medium, design: .monospaced)).foregroundStyle(Color(Theme.text3))
             }
-            Text(e.title).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
+            Text(e.title).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
         }
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
@@ -690,7 +690,7 @@ struct AgendaRow: View {
         let selected = cal.selectedID == e.id
         HStack(spacing: 12) {
             Text(e.isLong ? "all day" : CalendarLayout.range(e))
-                .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                .font(.system(size: Theme.small, weight: .medium, design: .monospaced))
                 .foregroundStyle(Color(Theme.text3))
                 .frame(width: 92, alignment: .trailing)
             RoundedRectangle(cornerRadius: 1.5)
@@ -701,7 +701,7 @@ struct AgendaRow: View {
                 Text(e.title).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
                 let sub = [CalendarLayout.subtitle(e), e.isTentative ? "tentative" : "", e.isDeclined ? "declined" : ""].filter { !$0.isEmpty }
                 if !sub.isEmpty {
-                    Text(sub.joined(separator: " · ")).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                    Text(sub.joined(separator: " · ")).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                 }
             }
             Spacer(minLength: 8)

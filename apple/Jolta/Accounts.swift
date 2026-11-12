@@ -294,7 +294,7 @@ private struct SendAsSection: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(alias.address)
                             Text(alias.fromProvider ? "From \(account.provider)" : "Added by you")
-                                .font(.system(size: 11.5))
+                                .font(.system(size: Theme.small))
                                 .foregroundStyle(Color(Theme.text3))
                         }
                         Spacer()

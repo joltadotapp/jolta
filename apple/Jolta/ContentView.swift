@@ -476,7 +476,7 @@ struct SyncFooter: View {
             Circle().fill(Color(model.lastError == nil && model.syncErrors.isEmpty ? Theme.text2 : Theme.accent)).frame(width: 6, height: 6)
             Text(status).lineLimit(2)
         }
-        .font(.system(size: 11.5))
+        .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -558,7 +558,7 @@ struct SectionBar: View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 5) {
                     KeyCap(key: "⇥")
-                    Text("next").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                    Text("next").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                 }
                 .fixedSize()
                 .padding(.leading, 8)
@@ -567,7 +567,7 @@ struct SectionBar: View {
             .padding(.bottom, 8)
             .padding(.trailing, 9)
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .padding(.horizontal, 17)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
@@ -583,7 +583,7 @@ struct SectionBar: View {
                             .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
                         let n = model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " "))
                         if n > 0 {
-                            Text("\(n)").font(.system(size: 11.5).monospacedDigit()).foregroundStyle(Color(Theme.text3))
+                            Text("\(n)").font(.system(size: Theme.small).monospacedDigit()).foregroundStyle(Color(Theme.text3))
                         }
                     }
                     .padding(.top, 6)
@@ -682,7 +682,7 @@ struct SearchField: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            Image(systemName: "magnifyingglass").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             TextField("Search", text: $model.search)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
@@ -761,7 +761,7 @@ struct ToastView: View {
                     .accessibilityIdentifier("toast-release")
             }
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .fixedSize()
         .padding(.horizontal, 14)
@@ -780,7 +780,7 @@ struct KeyFooter: View {
             Spacer()
             HStack(spacing: 5) { KeyCap(key: "⌘K", focused: true); Text("commands") }.fixedSize()
         }
-        .font(.system(size: 11.5))
+        .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
         .padding(.horizontal, 20)
         .frame(height: 34)

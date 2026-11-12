@@ -165,14 +165,14 @@ struct SummaryCard: View {
             Text("Summary").font(.system(size: 12, weight: .semibold))
             if !summary.model.isEmpty && summary.state == .done {
                 Text(summary.outdated ? "\(summary.model) · new messages since" : summary.model)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
             if case .working(let phase) = summary.state, !(phase == .writing && !summary.text.isEmpty) {
                 ProgressView().controlSize(.mini)
-                Text(phase.line(label)).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                Text(phase.line(label)).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
             }
             if summary.state == .done {
                 iconButton("arrow.clockwise", help: "Summarize again  ⌘J") { summary.start(automatic: false, fresh: true, label: label) }
@@ -193,7 +193,7 @@ struct SummaryCard: View {
                 Spacer(minLength: 8)
                 KitButton(title: "Choose a Model…", size: .small, action: openSettings)
             }
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
         case .failed(let message):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(message).foregroundStyle(Color(Theme.text2)).textSelection(.enabled)
@@ -201,7 +201,7 @@ struct SummaryCard: View {
                 KitButton(title: "Try Again", size: .small) { summary.start(automatic: false, fresh: true, label: label) }
                 if message.contains("Settings") { KitButton(title: "AI Settings…", size: .small, action: openSettings) }
             }
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
         default:
             if !summary.text.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
@@ -345,7 +345,7 @@ struct WriteBar: View {
                     Text(status).lineLimit(2).textSelection(.enabled)
                     if writer.state == .notSetUp { KitButton(title: "Choose a Model…", size: .small) { model.openSettings(.ai) } }
                 }
-                .font(.system(size: 11.5))
+                .font(.system(size: Theme.small))
                 .foregroundStyle(Color(Theme.text3))
                 .padding(.leading, 22)
             }

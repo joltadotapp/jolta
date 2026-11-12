@@ -37,9 +37,9 @@ struct ModeSwitcher: View {
             }
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(Color(on ? Theme.accent : Theme.text3))
-                .frame(width: 26, height: 22)
+                .font(.system(size: Theme.body, weight: .medium))
+                .foregroundStyle(Color(on ? Theme.text : Theme.text3))
+                .frame(width: 26, height: Theme.controlSmall)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(on ? Theme.fill : .clear)))
                 .overlay(alignment: .topTrailing) {
                     if dot {

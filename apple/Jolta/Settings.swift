@@ -79,7 +79,7 @@ struct SaveBar: View {
             KitButton(title: "Revert", action: revert).disabled(working)
             KitButton(title: "Save", kind: .primary, action: save).keyboardShortcut(.defaultAction).disabled(working)
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .padding(.horizontal, 32)
         .frame(height: 52)
         .background(Color(Theme.bg))
