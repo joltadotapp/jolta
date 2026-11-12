@@ -134,6 +134,26 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(to.waitForNonExistence(timeout: 5), "a second Esc closes the message")
     }
 
+    /// The shortcut sheet opens with the keyboard in its filter: typing
+    /// narrows the shortcuts and runs none of them, and Esc closes the
+    /// sheet and gives the keys back to the list.
+    func testShortcutsSheetFilters() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        app.typeKey("/", modifierFlags: .command)
+        let filter = app.textFields["help-filter"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 5), "⌘/ shows the shortcuts with a filter")
+        XCTAssertTrue(text(app, "Reply All").exists, "all of them at first")
+        app.typeText("archi")
+        XCTAssertTrue(text(app, "Reply All").waitForNonExistence(timeout: 5), "typing narrows them")
+        XCTAssertTrue(text(app, "Go to Archive").exists, "to the ones that match")
+        XCTAssertFalse(app.textFields["compose-to"].exists, "the letters ran no command")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(filter.waitForNonExistence(timeout: 5), "Esc closes the sheet")
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "and the list has the keys again")
+    }
+
     /// Discard takes the message away at once, and Z brings it back.
     func testDiscardCanBeUndone() throws {
         let app = try launch()
