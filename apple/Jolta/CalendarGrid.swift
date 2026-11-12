@@ -296,6 +296,10 @@ final class CalendarWeekView: NSView {
         addSubview(hours)
         addSubview(strip)
         strip.selectedFrame = { [weak self] in self?.stripFrame = $0; self?.reportSelection() }
+        strip.openDay = source == .period ? { [weak self] index in
+            guard let cal = self?.model, cal.days.indices.contains(index) else { return }
+            cal.openDay(cal.days[index])
+        } : nil
         hours.canvas.selectedFrame = { [weak self] in self?.gridFrame = $0; self?.reportSelection() }
     }
 
@@ -373,7 +377,9 @@ struct DayStripContent {
     static let empty = DayStripContent(days: [], lanes: [], selectedID: nil, now: .now, revision: -1)
 }
 
-/// Day names, then all-day and multi-day events in up to three lanes.
+/// Day names, then all-day and multi-day events in lanes: up to three above
+/// several days, with "+N" under a day that has more, and all of them above
+/// a single day.
 final class DayStrip: CanvasView {
     let gutter: CGFloat
     let showsNames: Bool
@@ -384,13 +390,19 @@ final class DayStrip: CanvasView {
             guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID
                     || content.now != oldValue.now || content.days != oldValue.days else { return }
             elements = nil
+            more = content.days.indices.map { day in content.lanes.filter { $0.lane >= maxLanes && $0.first <= day && day <= $0.last }.count }
             needsDisplay = true
             reportSelection()
+            window?.invalidateCursorRects(for: self)
         }
     }
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
     var selectedFrame: (CGRect?) -> Void = { _ in }
+    /// A click on a day's "+N": the day view of that day.
+    var openDay: ((Int) -> Void)?
+    /// Per day, the events that have no lane.
+    private var more: [Int] = []
     /// An event dragged to other days: by how many, and whether ⌥ copied it.
     var drop: ((CalEvent, Int, Bool) -> Void)?
     var canMove: (CalEvent) -> Bool = { _ in false }
@@ -418,7 +430,6 @@ final class DayStrip: CanvasView {
 
     private static let namesHeight: CGFloat = 36
     private static let laneHeight: CGFloat = 20
-    private static let maxLanes = 3
     private static let weekdayFont = NSFont.systemFont(ofSize: 12)
     private static let dayFont = NSFont.monospacedDigitSystemFont(ofSize: 17, weight: .semibold)
     private static let laneFont = NSFont.systemFont(ofSize: 11.5)
@@ -434,11 +445,14 @@ final class DayStrip: CanvasView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    private var laneCount: Int { min(Self.maxLanes, (content.lanes.map(\.lane).max() ?? -1) + 1) }
+    private var maxLanes: Int { content.days.count == 1 ? .max : CalendarLayout.maxLanes }
+    private var laneCount: Int { min(maxLanes, (content.lanes.map(\.lane).max() ?? -1) + 1) }
     private var lanesTop: CGFloat { showsNames ? Self.namesHeight + 1 : 0 }
 
     var height: CGFloat {
-        let lanes = laneCount == 0 && !showsEmptyLane ? 0 : max(1, laneCount)
+        // The "+N" cells take a row of their own under the lanes.
+        let rows = laneCount + (more.contains { $0 > 0 } ? 1 : 0)
+        let lanes = rows == 0 && !showsEmptyLane ? 0 : max(1, rows)
         let laneArea = lanes == 0 ? 0 : 4 + CGFloat(lanes) * (Self.laneHeight + 3) - 3 + 6 + 1
         return lanesTop + laneArea
     }
@@ -448,6 +462,21 @@ final class DayStrip: CanvasView {
     private func box(_ item: LaneEvent) -> CGRect {
         CGRect(x: gutter + columnWidth * CGFloat(item.first) + 3, y: lanesTop + 4 + CGFloat(item.lane) * (Self.laneHeight + 3),
                width: columnWidth * CGFloat(item.last - item.first + 1) - 6, height: Self.laneHeight)
+    }
+
+    /// Where a day says "+N" for its events without a lane.
+    private func moreBox(_ day: Int) -> CGRect {
+        CGRect(x: gutter + columnWidth * CGFloat(day) + 3, y: lanesTop + 4 + CGFloat(laneCount) * (Self.laneHeight + 3),
+               width: columnWidth - 6, height: Self.laneHeight)
+    }
+
+    private func moreDay(at point: CGPoint) -> Int? {
+        more.indices.first { more[$0] > 0 && moreBox($0).contains(point) }
+    }
+
+    /// The selected event when it has no lane: its day's "+N" stands for it.
+    private var selectedBehindMore: LaneEvent? {
+        content.lanes.first { $0.lane >= maxLanes && $0.event.id == content.selectedID }
     }
 
     private static let weekday: DateFormatter = {
@@ -488,8 +517,14 @@ final class DayStrip: CanvasView {
             CTLineDraw(label, cg)
         }
         let moved = press?.moved(content.days.count)
-        var ringed: CGRect?
-        for item in content.lanes where item.lane < Self.maxLanes {
+        var ringed = selectedBehindMore.map { moreBox($0.first) }
+        for (day, count) in more.enumerated() where count > 0 {
+            let r = moreBox(day)
+            cg.setFillColor(Theme.text2.cgColor)
+            cg.textPosition = CGPoint(x: r.minX + 7, y: r.minY + 14)
+            CTLineDraw(line("+\(count)", Self.laneFont), cg)
+        }
+        for item in content.lanes where item.lane < maxLanes {
             if moved != nil, press?.copy == false, item.id == moved?.id { continue }
             let e = item.event, r = box(item)
             if e.id == content.selectedID { ringed = r }
@@ -590,7 +625,7 @@ final class DayStrip: CanvasView {
     }
 
     func reportSelection() {
-        let frame = content.lanes.first { $0.event.id == content.selectedID }.map(box)
+        let frame = content.lanes.first { $0.event.id == content.selectedID }.map { $0.lane < maxLanes ? box($0) : moreBox($0.first) }
         guard lastReported != .some(frame) else { return }
         lastReported = .some(frame)
         let report = selectedFrame
@@ -603,7 +638,8 @@ final class DayStrip: CanvasView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let hit = content.lanes.last(where: { $0.lane < Self.maxLanes && box($0).contains(point) }) else { return super.mouseDown(with: event) }
+        if let day = moreDay(at: point), let openDay { return openDay(day) }
+        guard let hit = content.lanes.last(where: { $0.lane < maxLanes && box($0).contains(point) }) else { return super.mouseDown(with: event) }
         if event.clickCount == 2 { return open(hit.event) }
         select(hit.event)
         if drop != nil { press = Press(item: hit, point: point, column: column(at: point.x)) }
@@ -635,19 +671,32 @@ final class DayStrip: CanvasView {
         if press.days != 0 { drop?(press.item.event, press.days, event.modifierFlags.contains(.option)) }
     }
 
+    override func resetCursorRects() {
+        guard openDay != nil else { return }
+        for day in more.indices where more[day] > 0 { addCursorRect(moreBox(day), cursor: .pointingHand) }
+    }
+
     override func isAccessibilityElement() -> Bool { false }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { "All-day events" }
 
     override func accessibilityChildren() -> [Any]? {
         if elements == nil {
-            elements = content.lanes.filter { $0.lane < Self.maxLanes }.map { item in
+            var list = content.lanes.filter { $0.lane < maxLanes }.map { item in
                 let event = item.event, rect = box(item)
-                let element = EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)",
-                                           place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.open(event) }
-                element.setAccessibilityParent(self)
-                return element
+                return EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)",
+                                    place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.open(event) }
             }
+            let behind = selectedBehindMore
+            for day in more.indices where more[day] > 0 {
+                let rect = moreBox(day), count = more[day]
+                list.append(EventElement(label: "\(count) more all-day \(count == 1 ? "event" : "events"), \(CalendarModel.spokenDay(content.days[day].key))",
+                                         identifier: "more-\(content.days[day].key)",
+                                         value: behind.map { $0.first <= day && day <= $0.last } == true ? "selected" : nil,
+                                         place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.openDay?(day) })
+            }
+            for element in list { element.setAccessibilityParent(self) }
+            elements = list
         }
         return elements
     }
@@ -1150,13 +1199,14 @@ nonisolated final class EventElement: NSAccessibilityElement {
     private let open: @MainActor @Sendable () -> Void
     private let place: @MainActor @Sendable () -> CGRect
 
-    init(label: String, identifier: String, place: @escaping @MainActor @Sendable () -> CGRect, open: @escaping @MainActor @Sendable () -> Void) {
+    init(label: String, identifier: String, value: String? = nil, place: @escaping @MainActor @Sendable () -> CGRect, open: @escaping @MainActor @Sendable () -> Void) {
         self.open = open
         self.place = place
         super.init()
         setAccessibilityRole(.button)
         setAccessibilityLabel(label)
         setAccessibilityIdentifier(identifier)
+        if let value { setAccessibilityValue(value) }
     }
 
     override func accessibilityFrame() -> NSRect {

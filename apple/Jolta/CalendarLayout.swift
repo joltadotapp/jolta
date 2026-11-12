@@ -28,6 +28,8 @@ enum CalendarLayout {
     static let gutter: CGFloat = 64
     /// Events shorter than this draw at this height, so packing treats them as this long.
     static let shortestMinutes = 20.0
+    /// Lanes of all-day events above several days; the rest are behind a day's "+N". A day view shows every lane.
+    static let maxLanes = 3
 
     /// Timed events of less than a day per day column, packed: overlapping
     /// events share the column's width, each taking the first free column

@@ -218,6 +218,8 @@ final class CalendarModel {
     private(set) var todayRevision = 0
     /// Bumped when `events` changes, so the grid redraws once per change.
     private(set) var revision = 0
+    /// All-day events the week has no lane for, which a day's "+N" stands for.
+    @ObservationIgnored private var behindMore: Set<String> = []
     var selectedID: String? { didSet { if selectedID != oldValue { updateGrids() } } }
     /// The event whose detail is open.
     private(set) var detail: EventDetail?
@@ -408,6 +410,8 @@ final class CalendarModel {
             lastError = "\(error)"
         }
         if let id = selectedID, !events.contains(where: { $0.id == id }) { selectedID = nil }
+        behindMore = span.isGrid && days.count > 1
+            ? Set(CalendarLayout.lanes(events, days: days).filter { $0.lane >= CalendarLayout.maxLanes }.map(\.event.id)) : []
         revision += 1
         updateGrids()
         if !Self.calendar.isDate(miniMonth, equalTo: anchor, toGranularity: .month) { miniMonth = anchor }
@@ -606,8 +610,11 @@ final class CalendarModel {
         }
         switch key {
         case .up, .down:
-            let list = dayEvents(days[dayIndex])
-            guard let i = list.firstIndex(of: current) else { return }
+            // The events behind a day's "+N" are one stop, on the first of them.
+            let all = dayEvents(days[dayIndex])
+            let stop = all.first { behindMore.contains($0.id) }
+            let list = all.filter { !behindMore.contains($0.id) || $0 == stop }
+            guard let i = list.firstIndex(of: behindMore.contains(current.id) ? stop ?? current : current) else { return }
             let j = i + (key == .down ? 1 : -1)
             if list.indices.contains(j) { select(list[j]) }
         case .left, .right:
@@ -646,7 +653,23 @@ final class CalendarModel {
     }
 
     func openSelected() {
-        if let event = selected { openDetail(event) } else { selectFirst(); if let event = selected { openDetail(event) } }
+        if selected == nil { selectFirst() }
+        guard let event = selected else { return }
+        // Behind a day's "+N": Return opens that day, where every lane shows.
+        if behindMore.contains(event.id), let day = days.first(where: { dayEvents($0).contains(event) }) {
+            return openDay(day, keeping: event.id)
+        }
+        openDetail(event)
+    }
+
+    /// The day view on `day`, from month view's day number and "N more" and
+    /// from the week's "+N".
+    func openDay(_ day: CalendarDay, keeping selection: String? = nil) {
+        anchor = day.start
+        selectedID = nil
+        closeDetail()
+        span = .day
+        if let selection, events.contains(where: { $0.id == selection }) { selectedID = selection }
     }
 
     func openDetail(_ event: CalEvent) {

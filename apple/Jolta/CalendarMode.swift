@@ -575,7 +575,7 @@ struct MonthCell: View {
                 .foregroundStyle(Color(day.isToday ? Theme.accentText : day.outside ? Theme.text3 : Theme.text2))
                 .padding(.horizontal, 6)
                 .padding(.bottom, 2)
-                .onTapGesture { cal.span = .day; cal.go(to: day.start) }
+                .onTapGesture { cal.openDay(day) }
             ForEach(list.prefix(shown)) { e in
                 MonthLine(cal: cal, event: e)
                     .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(MonthView.space))
