@@ -29,6 +29,7 @@ extension AppModel {
         }
         // Launch arguments for checking the calendar from scripts:
         // `-JoltaMode calendar -JoltaSpan month -JoltaOpenEvent "Design review" -JoltaDayPanel YES`.
+        // `-JoltaFirstHour 7.5` is read by `WeekView`.
         let defaults = UserDefaults.standard
         if let span = defaults.string(forKey: "JoltaSpan").flatMap(CalendarSpan.init(rawValue:)) { calendar.span = span }
         if defaults.string(forKey: "JoltaDayPanel") != nil { showsDayPanel = defaults.bool(forKey: "JoltaDayPanel") }
@@ -192,6 +193,8 @@ extension AppModel {
             return true
         }
         let cal = calendar
+        // Esc during a drag ends the drag; it doesn't also close or deselect.
+        if event.keyCode == 53, cal.cancelDrag() { return true }
         // The repeat popover moves with ↑ and ↓; Return is Done, Esc Cancel.
         if let editor = cal.editor, let picker = editor.repeatPicker, cal.discard == nil {
             switch event.keyCode {

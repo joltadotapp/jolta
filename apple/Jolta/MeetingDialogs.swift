@@ -7,6 +7,8 @@ struct SendPrompt: Identifiable {
     let dialog: UpdateDialogInfo
     /// Keep editing or Esc: nothing is saved.
     var back: () -> Void = {}
+    /// What the back button says where there is no editor to go back to.
+    var backTitle: String?
     /// The chosen button's notify, the message where the dialog has a
     /// field, and whether Email guests opens once it is saved.
     let perform: (NotifyChoice, String?, Bool) -> Void
@@ -21,6 +23,7 @@ struct SenderPrompt: Identifiable {
     let senders: [SenderInfo]
     /// Keep editing or Esc: nothing is saved.
     var cancel: () -> Void = {}
+    var backTitle = "Keep editing"
     let perform: (SenderInfo) -> Void
 
     var id: String { calendar }
@@ -82,6 +85,7 @@ private struct EmailGuestsBox: View {
             HStack(spacing: 6) { Text(label); KeyCap(key: "⌘E", style: .inherit) }
         }
         .toggleStyle(.checkbox)
+        .tint(Color(Theme.accent))
         .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text2))
         .keyboardShortcut("e", modifiers: .command)
@@ -122,7 +126,7 @@ private struct SendPromptView: View {
                 }
                 Spacer()
                 if let back = choice(.back) {
-                    KitButton(title: back.label, key: "esc", action: goBack)
+                    KitButton(title: prompt.backTitle ?? back.label, key: "esc", action: goBack)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("send-back")
                 }
@@ -178,13 +182,14 @@ private struct SenderPromptView: View {
                 }
             }
             .pickerStyle(.radioGroup)
+            .tint(Color(Theme.accent))
             .labelsHidden()
             .font(.system(size: 13))
             .padding(.top, 14)
             .accessibilityIdentifier("sender-list")
             HStack(spacing: 8) {
                 Spacer()
-                KitButton(title: "Keep editing", key: "esc", action: goBack)
+                KitButton(title: prompt.backTitle, key: "esc", action: goBack)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("sender-back")
                 KitButton(title: "Continue", key: "↩", kind: .primary) {
@@ -268,6 +273,7 @@ private struct DeclinePromptView: View {
             DialogText(title: prompt.info.title, text: prompt.info.body, note: nil)
             Toggle("Tell \(prompt.info.organizer)", isOn: $tell)
                 .toggleStyle(.checkbox)
+                .tint(Color(Theme.accent))
                 .font(.system(size: 13))
                 .foregroundStyle(Color(Theme.text))
                 .padding(.top, 12)

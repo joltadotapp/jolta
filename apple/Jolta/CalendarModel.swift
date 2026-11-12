@@ -52,7 +52,6 @@ struct CalendarDay: Identifiable, Equatable {
     let end: Date
     let key: String
     let isToday: Bool
-    let isWeekend: Bool
     /// Month view: the day belongs to the month around it, not the one shown.
     let outside: Bool
 
@@ -89,11 +88,14 @@ struct CalEvent: Identifiable, Equatable {
     var isTentative: Bool { record.status == .tentative || record.showAs == .tentative || record.myResponse == .tentative }
     var isFree: Bool { record.showAs == .free }
     var isDeclined: Bool { record.myResponse == .declined }
+    /// An invitation the user hasn't answered yet.
+    var isUnanswered: Bool { record.myResponse == .needsAction && !isCancelled }
     var isCancelled: Bool { record.status == .cancelled }
 
+    /// A timed event after its end; an all-day one after its last day.
     func isPast(_ now: Date) -> Bool {
         if let end { return end <= now }
-        return false
+        return dayKeys.last < CalendarModel.todayKey(now)
     }
 
     /// The first and last day keys it covers (inclusive).
@@ -119,11 +121,13 @@ struct CalEvent: Identifiable, Equatable {
         }
     }
 
-    /// What VoiceOver reads: "Standup, 9:30 to 9:45, Teams meeting, accepted".
+    /// What VoiceOver reads: "Standup, 9:30 to 9:45, Monday, Teams meeting, accepted".
     var accessibilityLabel: String {
         var parts = [title]
         if let start, let end {
             parts.append("\(CalendarModel.spoken(start)) to \(CalendarModel.spoken(end))")
+            // After the times, which journeys match as the label's start.
+            parts.append(CalendarModel.spokenWeekday(start))
         } else {
             let (first, last) = dayKeys
             parts.append(first == last ? "all day" : "all day, \(CalendarModel.spokenDay(first)) to \(CalendarModel.spokenDay(last))")
@@ -216,6 +220,8 @@ final class CalendarModel {
     private(set) var todayRevision = 0
     /// Bumped when `events` changes, so the grid redraws once per change.
     private(set) var revision = 0
+    /// All-day events the week has no lane for, which a day's "+N" stands for.
+    @ObservationIgnored private var behindMore: Set<String> = []
     var selectedID: String? { didSet { if selectedID != oldValue { updateGrids() } } }
     /// The event whose detail is open.
     private(set) var detail: EventDetail?
@@ -237,6 +243,12 @@ final class CalendarModel {
     var senderPrompt: SenderPrompt?
     /// An event moved on the grid and not saved yet (`GridEditing.swift`).
     var gridChange: GridChange?
+    /// Month view: the day an event being dragged would land on.
+    var dropDay: String?
+    /// Where month view's drag under way began, and the one Esc ended: the
+    /// rest of that gesture does nothing.
+    @ObservationIgnored var monthDrag: CGPoint?
+    @ObservationIgnored var cancelledMonthDrag: CGPoint?
     /// Saves `gridChange` a second after the last key that changed it.
     @ObservationIgnored var gathering: Task<Void, Never>?
     /// Shows a toast, with the token Undo takes back.
@@ -248,6 +260,8 @@ final class CalendarModel {
     }
     /// Calendars the user can write to, whose events show resize cursors.
     @ObservationIgnored private(set) var writableCalendars: Set<Int64> = []
+    /// The days and hours of Settings › Calendar, which the views leave unshaded.
+    private(set) var workingHours: WorkingHoursInfo
     /// Ticks every 30 seconds: the now line, past events and Join buttons follow it.
     private(set) var now: Date = .now
     private(set) var nextMeeting: NextMeetingRecord?
@@ -274,6 +288,7 @@ final class CalendarModel {
 
     init(core: Core) {
         self.core = core
+        workingHours = (try? core.workingHours()) ?? core.standardWorkingHours()
         reloadCalendars()
         refresh()
         ticker = Task { [weak self] in
@@ -304,6 +319,17 @@ final class CalendarModel {
     /// DateFormatter formats safely from any thread.
     nonisolated static func dayKey(_ date: Date) -> String {
         keyFormat.string(from: date)
+    }
+
+    private static var keyOfNow: (now: Date, key: String)?
+
+    /// The day key of `now`. Kept between calls: every all-day event asks
+    /// for it on each draw, and `now` moves twice a minute.
+    static func todayKey(_ now: Date) -> String {
+        if let kept = keyOfNow, kept.now == now { return kept.key }
+        let key = dayKey(now)
+        keyOfNow = (now, key)
+        return key
     }
 
     /// The days on screen for the span around `anchor`.
@@ -341,7 +367,7 @@ final class CalendarModel {
             guard let start = cal.date(byAdding: .day, value: i, to: first),
                   let end = cal.date(byAdding: .day, value: 1, to: start) else { return nil }
             let key = keyFormat.string(from: start)
-            return CalendarDay(start: start, end: end, key: key, isToday: key == todayKey, isWeekend: cal.isDateInWeekend(start),
+            return CalendarDay(start: start, end: end, key: key, isToday: key == todayKey,
                                outside: month.map { !$0.contains(start) } ?? false)
         }
     }
@@ -366,8 +392,10 @@ final class CalendarModel {
         reload()
     }
 
+    /// T: the period with today in it, its hours scrolled to now.
     func goToday() {
         go(to: .now)
+        for grid in grids.allObjects { grid.revealNow() }
     }
 
     /// Reads the occurrences for the period on screen: a key press's whole
@@ -392,6 +420,8 @@ final class CalendarModel {
             lastError = "\(error)"
         }
         if let id = selectedID, !events.contains(where: { $0.id == id }) { selectedID = nil }
+        behindMore = span.isGrid && days.count > 1
+            ? Set(CalendarLayout.lanes(events, days: days).filter { $0.lane >= CalendarLayout.maxLanes }.map(\.event.id)) : []
         revision += 1
         updateGrids()
         if !Self.calendar.isDate(miniMonth, equalTo: anchor, toGranularity: .month) { miniMonth = anchor }
@@ -430,6 +460,15 @@ final class CalendarModel {
         }
     }
 
+    /// The working hours of `day` as minutes after its midnight, or nil on a day off.
+    func workSpan(_ day: CalendarDay) -> Range<Int>? {
+        // Monday first, as the setting lists its days.
+        let weekday = (Self.calendar.component(.weekday, from: day.start) + 5) % 7
+        guard workingHours.days.indices.contains(weekday), workingHours.days[weekday] else { return nil }
+        let (start, end) = (Int(workingHours.start), Int(workingHours.end))
+        return start < end ? start..<end : 0..<1440
+    }
+
     func attach(_ grid: CalendarWeekView) {
         grids.add(grid)
     }
@@ -438,12 +477,19 @@ final class CalendarModel {
         for grid in grids.allObjects { grid.update() }
     }
 
+    /// After the keys or a save moved the selection: the hours scroll to it.
+    /// A click doesn't, as its event is under the pointer already.
+    private func showSelection() {
+        for grid in grids.allObjects { grid.revealSelection() }
+    }
+
     /// After calendars or their events changed: the period, the mini
     /// month's dots, today, the next meeting and the reminders.
     func refresh() {
         now = .now
         busyMonth = nil
         ahead = [:]
+        workingHours = (try? core.workingHours()) ?? core.standardWorkingHours()
         load()
         if let open = detailEvent {
             let same = events.first { $0.record.calendarId == open.record.calendarId && $0.record.uid == open.record.uid && $0.record.time == open.record.time }
@@ -495,6 +541,13 @@ final class CalendarModel {
             miniMonth = next
             reloadBusyDays()
         }
+    }
+
+    /// Try Again on the message above the view: reads the calendars and the period again.
+    func retry() {
+        lastError = nil
+        reloadCalendars()
+        refresh()
     }
 
     // MARK: Calendars
@@ -573,6 +626,7 @@ final class CalendarModel {
     /// the next period. Without a selection, the first event at or after now
     /// (or the period's first) is selected.
     func moveSelection(_ key: SelectionMove) {
+        defer { showSelection() }
         guard let current = selected, let dayIndex = days.firstIndex(where: { dayEvents($0).contains(current) }) else {
             if key == .left || key == .right, selectedID == nil { return shift(key == .right ? 1 : -1) }
             selectFirst()
@@ -580,8 +634,11 @@ final class CalendarModel {
         }
         switch key {
         case .up, .down:
-            let list = dayEvents(days[dayIndex])
-            guard let i = list.firstIndex(of: current) else { return }
+            // The events behind a day's "+N" are one stop, on the first of them.
+            let all = dayEvents(days[dayIndex])
+            let stop = all.first { behindMore.contains($0.id) }
+            let list = all.filter { !behindMore.contains($0.id) || $0 == stop }
+            guard let i = list.firstIndex(of: behindMore.contains(current.id) ? stop ?? current : current) else { return }
             let j = i + (key == .down ? 1 : -1)
             if list.indices.contains(j) { select(list[j]) }
         case .left, .right:
@@ -620,7 +677,24 @@ final class CalendarModel {
     }
 
     func openSelected() {
-        if let event = selected { openDetail(event) } else { selectFirst(); if let event = selected { openDetail(event) } }
+        if selected == nil { selectFirst() }
+        guard let event = selected else { return }
+        defer { showSelection() }
+        // Behind a day's "+N": Return opens that day, where every lane shows.
+        if behindMore.contains(event.id), let day = days.first(where: { dayEvents($0).contains(event) }) {
+            return openDay(day, keeping: event.id)
+        }
+        openDetail(event)
+    }
+
+    /// The day view on `day`, from month view's day number and "N more" and
+    /// from the week's "+N".
+    func openDay(_ day: CalendarDay, keeping selection: String? = nil) {
+        anchor = day.start
+        selectedID = nil
+        closeDetail()
+        span = .day
+        if let selection, events.contains(where: { $0.id == selection }) { selectedID = selection }
     }
 
     func openDetail(_ event: CalEvent) {
@@ -662,6 +736,7 @@ final class CalendarModel {
         let match = events.first { $0.record.eventId == eventID && (time == nil || $0.record.time == time) }
             ?? events.first { $0.record.eventId == eventID }
         if let match { openDetail(match) }
+        showSelection()
     }
 
     /// Styles for the description document in the detail.
@@ -814,14 +889,32 @@ final class CalendarModel {
     private func hasChanges(_ editor: EventEditorModel) -> Bool {
         if editor.isReadOnly { return false }
         if editor.isNew {
-            let d = editor.draft
+            // What the user typed or picked. The time, the calendar and a
+            // video call the draft opened with are not theirs to lose.
+            let d = editor.draft, first = editor.opened
             return !d.title.isEmpty || !d.description.isEmpty || !d.location.isEmpty || !d.room.isEmpty || d.rule != nil || !d.people.isEmpty
+                || d.video != first.video || d.zoom != first.zoom || d.calendarId != first.calendarId
         }
         return (try? core.planSave(draft: editor.draft))?.unchanged == false
     }
 
-    /// Esc or Cancel: closes, asking first when changes would be lost.
+    /// Esc while an event is dragged: the drag ends and the event stays
+    /// where it was. False when nothing was being dragged.
+    func cancelDrag() -> Bool {
+        var cancelled = false
+        for grid in grids.allObjects where grid.cancelDrag() { cancelled = true }
+        if dropDay != nil {
+            dropDay = nil
+            cancelledMonthDrag = monthDrag
+            cancelled = true
+        }
+        return cancelled
+    }
+
+    /// Esc or Cancel: closes, asking first when changes would be lost. Esc
+    /// during a drag of the draft ends the drag and leaves the editor open.
     func closeEditor() {
+        guard !cancelDrag() else { return }
         guard confirmLeaving({}) else { return }
         dropEditor()
     }
@@ -853,20 +946,21 @@ final class CalendarModel {
     /// its calendar has no account to mail from yet, the scope prompt for one
     /// occurrence of a series, and Send an update? when the guests hear about
     /// it. `perform` saves with the answers. Nothing is saved when the user
-    /// cancels the scope prompt (`cancel`) or picks Keep editing (`back`).
-    func confirmSave(_ draft: EventDraft, cancel: @escaping () -> Void = {}, back: @escaping () -> Void = {}, failed: @escaping (String) -> Void,
-                     perform: @escaping (EditScope?, NotifyChoice?, String?) -> Void) throws {
+    /// cancels the scope prompt (`cancel`) or picks Keep editing (`back`),
+    /// which reads `backTitle` where no editor is open to go back to.
+    func confirmSave(_ draft: EventDraft, cancel: @escaping () -> Void = {}, back: @escaping () -> Void = {}, backTitle: String? = nil,
+                     failed: @escaping (String) -> Void, perform: @escaping (EditScope?, NotifyChoice?, String?) -> Void) throws {
         let plan = try core.planSave(draft: draft)
         if !plan.senders.isEmpty {
-            return askSender(plan.senders, calendar: draft.calendarId, cancel: back) { [weak self] in
-                do { try self?.confirmSave(draft, cancel: cancel, back: back, failed: failed, perform: perform) } catch { failed("\(error)") }
+            return askSender(plan.senders, calendar: draft.calendarId, cancel: back, backTitle: backTitle) { [weak self] in
+                do { try self?.confirmSave(draft, cancel: cancel, back: back, backTitle: backTitle, failed: failed, perform: perform) } catch { failed("\(error)") }
             }
         }
         let send = { [weak self] (scope: EditScope?, prompted: Bool) in
             guard let self else { return }
             guard let dialog = plan.dialog else { return perform(scope, nil, nil) }
             self.after(prompted) {
-                self.sendPrompt = SendPrompt(dialog: dialog, back: back) { notify, message, email in
+                self.sendPrompt = SendPrompt(dialog: dialog, back: back, backTitle: backTitle) { notify, message, email in
                     perform(scope, notify, message)
                     // The save selects the event as it is now, at its new time.
                     if email, let event = self.selected { self.emailGuests(event) }
@@ -888,9 +982,9 @@ final class CalendarModel {
     }
 
     /// Send invitations from, then `next` once the calendar has its account.
-    private func askSender(_ senders: [SenderInfo], calendar id: Int64, cancel: @escaping () -> Void = {}, next: @escaping () -> Void) {
+    private func askSender(_ senders: [SenderInfo], calendar id: Int64, cancel: @escaping () -> Void = {}, backTitle: String? = nil, next: @escaping () -> Void) {
         let name = calendarInfo(id)?.name ?? "this calendar"
-        senderPrompt = SenderPrompt(calendar: name, senders: senders, cancel: cancel) { [weak self] sender in
+        senderPrompt = SenderPrompt(calendar: name, senders: senders, cancel: cancel, backTitle: backTitle ?? "Keep editing") { [weak self] sender in
             guard let self else { return }
             do {
                 try self.core.setSendFrom(calendarId: id, accountId: sender.accountId)
@@ -912,6 +1006,7 @@ final class CalendarModel {
             refresh()
             let mine = events.filter { $0.record.uid == saved.uid && $0.record.calendarId == (draft.moveTo ?? draft.calendarId) }
             if let event = mine.first(where: { $0.record.time == draft.time }) ?? mine.first { selectedID = event.id }
+            showSelection()
             toast?(saved.message, saved.token)
         } catch {
             failed("\(error)")
@@ -977,8 +1072,8 @@ final class CalendarModel {
                 let text = try await self.core.declineAndRemove(eventId: id, time: time, occurrenceOnly: occurrenceOnly, tell: tell)
                 if self.editor != nil { self.dropEditor() }
                 self.closeDetail()
-                self.selectedID = nil
                 self.refresh()
+                self.selectNeighbour(of: event)
                 self.toast?(text, nil)
             } catch {
                 self.toast?("\(error)", nil)
@@ -1022,11 +1117,24 @@ final class CalendarModel {
     }
 
     private func deleted(_ saved: SavedEdit) {
+        let gone = editor?.event ?? selected ?? detailEvent
         if editor != nil { dropEditor() }
         closeDetail()
-        selectedID = nil
         refresh()
+        selectNeighbour(of: gone)
         toast?(saved.message, saved.token)
+    }
+
+    /// After `gone` left the period: the event nearest to it in time takes
+    /// the selection, so the next key has something to act on. An event that
+    /// is still there, as a cancelled meeting can be, keeps it.
+    private func selectNeighbour(of gone: CalEvent?) {
+        guard let gone else { return selectedID = nil }
+        let moment = { (e: CalEvent) in e.start ?? Self.date(key: e.dayKeys.first) ?? .distantPast }
+        let at = moment(gone)
+        let nearest = events.min { abs(moment($0).timeIntervalSince(at)) < abs(moment($1).timeIntervalSince(at)) }
+        selectedID = events.contains { $0.id == gone.id } ? gone.id : nearest?.id
+        showSelection()
     }
 
     /// Undo of a calendar edit from the toast.
@@ -1103,6 +1211,16 @@ final class CalendarModel {
 
     static func spoken(_ date: Date) -> String {
         spokenTime.string(from: date)
+    }
+
+    private static let spokenWeekdayFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE"
+        return f
+    }()
+
+    static func spokenWeekday(_ date: Date) -> String {
+        spokenWeekdayFormat.string(from: date)
     }
 
     static func spokenDay(_ key: String) -> String {

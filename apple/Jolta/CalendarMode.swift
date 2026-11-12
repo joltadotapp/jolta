@@ -11,11 +11,12 @@ struct CalendarModeView: View {
         let cal = model.calendar
         HStack(spacing: 0) {
             CalendarSidebar(model: model)
-                .frame(width: 240)
+                .frame(width: Theme.sidebarWidth)
                 .background(Color(Theme.side))
                 .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
             VStack(spacing: 0) {
                 CalendarHeader(cal: cal)
+                if let message = cal.lastError { CalendarProblem(message: message) { cal.retry() } }
                 Group {
                     switch cal.span {
                     case .day, .workWeek, .week: WeekView(cal: cal)
@@ -74,11 +75,6 @@ struct CalendarModeView: View {
         }
         .animation(Theme.settle, value: cal.editor.map(ObjectIdentifier.init))
         .confirmation(Binding(get: { cal.discard }, set: { cal.discard = $0 }))
-        .overlay {
-            if let message = cal.lastError {
-                Text(message).font(.system(size: 12)).foregroundStyle(Color(Theme.text3)).padding().allowsHitTesting(false)
-            }
-        }
         .overlay(alignment: .bottom) { ToastLayer(model: model).padding(.bottom, 34) }
     }
 }
@@ -145,6 +141,30 @@ private struct RoomPickerLayer: View {
     }
 }
 
+/// What went wrong reading the calendar, above the view, with a way to try again.
+private struct CalendarProblem: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.dangerText))
+            Text(message).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text)).lineLimit(2).textSelection(.enabled)
+            Spacer(minLength: 8)
+            KitButton(title: "Try Again", size: .small, action: retry)
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .card()
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("calendar-problem")
+    }
+}
+
 enum CalendarSpace {
     static let main = "calendarMain"
 }
@@ -199,6 +219,16 @@ struct CalendarHeader: View {
         }
     }
 
+    /// What J and K move by, for the buttons' tooltips.
+    private var period: String {
+        switch cal.span {
+        case .day: "Day"
+        case .week, .workWeek: "Week"
+        case .month: "Month"
+        case .agenda: "\(CalendarSpan.agendaDays) Days"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -211,13 +241,24 @@ struct CalendarHeader: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([title.0, title.1].filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("calendar-title")
+            HStack(spacing: 0) {
+                KitButton(title: "Previous \(period)", icon: "chevron.left", kind: .quiet, size: .small, showsTitle: false) { cal.shift(-1) }
+                    .help("Previous \(period) (K)")
+                    .accessibilityIdentifier("calendar-previous")
+                KitButton(title: "Today", kind: .quiet, size: .small) { cal.goToday() }
+                    .help("Today (T)")
+                    .accessibilityIdentifier("calendar-today")
+                KitButton(title: "Next \(period)", icon: "chevron.right", kind: .quiet, size: .small, showsTitle: false) { cal.shift(1) }
+                    .help("Next \(period) (J)")
+                    .accessibilityIdentifier("calendar-next")
+            }
             if let next = cal.nextMeeting {
                 NextMeetingLine(next: next, now: cal.now)
             }
             Spacer(minLength: 8)
             SpanSwitcher(cal: cal)
         }
-        .padding(.leading, 24)
+        .padding(.leading, 22)
         .padding(.trailing, 20)
         .frame(height: Theme.headerHeight)
         .background(TitleBarArea())
@@ -375,7 +416,7 @@ struct CalendarRow: View {
         Button { cal.setShown(c, !c.shown) } label: {
             HStack(spacing: 9) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(c.shown ? Color(CalendarColor.color(c.color, .bar)) : .clear)
+                    .fill(c.shown ? Color(CalendarColor.color(c.color, .bar, on: .side)) : .clear)
                     .strokeBorder(c.shown ? .clear : Color(Theme.text3), lineWidth: 1.5)
                     .frame(width: 10, height: 10)
                 Text(c.name).lineLimit(1).foregroundStyle(Color(c.shown ? Theme.text2 : Theme.text3))
@@ -411,7 +452,8 @@ struct MiniMonth: View {
         return f
     }()
 
-    private static let cell = CGSize(width: 29.5, height: 24)
+    /// Seven across the sidebar, which is as wide as mail's.
+    private static let cell = CGSize(width: (Theme.sidebarWidth - 32) / 7, height: 24)
 
     var body: some View {
         let days = cal.miniDays
@@ -423,16 +465,13 @@ struct MiniMonth: View {
             HStack {
                 Text(Self.title.string(from: cal.miniMonth)).fontWeight(.semibold)
                 Spacer()
-                HStack(spacing: 2) {
-                    Button { cal.moveMiniMonth(-1) } label: { Image(systemName: "chevron.left") }
-                    Button { cal.moveMiniMonth(1) } label: { Image(systemName: "chevron.right") }
+                HStack(spacing: 0) {
+                    KitButton(title: "Previous Month", icon: "chevron.left", kind: .quiet, size: .small, showsTitle: false) { cal.moveMiniMonth(-1) }
+                    KitButton(title: "Next Month", icon: "chevron.right", kind: .quiet, size: .small, showsTitle: false) { cal.moveMiniMonth(1) }
                 }
-                .buttonStyle(.plain)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color(Theme.text3))
             }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            .padding(.leading, 8)
+            .padding(.bottom, 4)
             HStack(spacing: 0) {
                 ForEach(0..<7, id: \.self) { i in
                     Text(symbols[(first + i) % 7]).font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).frame(width: Self.cell.width)
@@ -467,9 +506,9 @@ struct MiniDay: View, Equatable {
     var body: some View {
         Button(action: go) {
             Text("\(Calendar.current.component(.day, from: day.start))")
-                .font(.system(size: 11, weight: today ? .semibold : .regular).monospacedDigit())
+                // Days of the months around it are lighter in weight, not fainter: text3 at 60% fell to 2.4:1.
+                .font(.system(size: 11, weight: today ? .semibold : day.outside ? .light : .regular).monospacedDigit())
                 .foregroundStyle(Color(today ? Theme.accentText : day.outside ? Theme.text3 : Theme.text2))
-                .opacity(day.outside ? 0.6 : 1)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .bottom) {
                     if busy { Circle().fill(Color(Theme.text3)).frame(width: 4, height: 4).padding(.bottom, 1) }
@@ -477,6 +516,7 @@ struct MiniDay: View, Equatable {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(CalendarModel.spokenDay(day.key) + (today ? ", today" : "") + (busy ? ", has events" : ""))
     }
 }
 
@@ -486,8 +526,13 @@ struct WeekView: View {
     let cal: CalendarModel
     @State private var selectedFrame: CGRect?
 
+    /// `-JoltaFirstHour 7.5` opens the hours there whatever the time is, so
+    /// scripts and UI journeys find the same events in sight at any hour.
+    private static let pinnedFirstHour: Double? = UserDefaults.standard.object(forKey: "JoltaFirstHour") == nil
+        ? nil : UserDefaults.standard.double(forKey: "JoltaFirstHour")
+
     var body: some View {
-        WeekGrid(cal: cal, source: .period, selectedFrame: { selectedFrame = $0 })
+        WeekGrid(cal: cal, source: .period, firstHour: Self.pinnedFirstHour, selectedFrame: { selectedFrame = $0 })
             .overlay(alignment: .topLeading) {
                 if let f = selectedFrame {
                     Color.clear.frame(width: f.width, height: f.height).reportsSelection(true).offset(x: f.minX, y: f.minY).allowsHitTesting(false)
@@ -504,8 +549,6 @@ extension MonthView {
 
 struct MonthView: View {
     let cal: CalendarModel
-    /// The day a dragged event would land on.
-    @State private var target: String?
 
     private static let weekday: DateFormatter = {
         let f = DateFormatter()
@@ -535,9 +578,15 @@ struct MonthView: View {
                     ForEach(0..<weeks, id: \.self) { w in
                         HStack(spacing: 0) {
                             ForEach(cal.days[w * 7..<w * 7 + 7]) { day in
-                                MonthCell(cal: cal, day: day, height: rowH, isTarget: target == day.key) { event, drag, ended in
+                                MonthCell(cal: cal, day: day, height: rowH, isTarget: cal.dropDay == day.key) { event, drag, ended in
+                                    // Esc ended this drag: nothing more until the mouse is let go.
+                                    if cal.cancelledMonthDrag == drag.startLocation {
+                                        if ended { cal.cancelledMonthDrag = nil }
+                                        return
+                                    }
+                                    cal.monthDrag = ended ? nil : drag.startLocation
                                     let to = index(drag.location)
-                                    target = ended ? nil : to.map { cal.days[$0].key }
+                                    cal.dropDay = ended ? nil : to.map { cal.days[$0].key }
                                     // By the cells the drag began and ended in, so a long event moves from where it was held.
                                     if ended, let to, let from = index(drag.startLocation), to != from {
                                         cal.move(event, days: to - from, copy: NSEvent.modifierFlags.contains(.option))
@@ -575,7 +624,7 @@ struct MonthCell: View {
                 .foregroundStyle(Color(day.isToday ? Theme.accentText : day.outside ? Theme.text3 : Theme.text2))
                 .padding(.horizontal, 6)
                 .padding(.bottom, 2)
-                .onTapGesture { cal.span = .day; cal.go(to: day.start) }
+                .onTapGesture { cal.openDay(day) }
             ForEach(list.prefix(shown)) { e in
                 MonthLine(cal: cal, event: e)
                     .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(MonthView.space))
@@ -583,14 +632,14 @@ struct MonthCell: View {
                         .onEnded { dragged(e, $0, true) })
             }
             if list.count > shown {
-                Text("\(list.count - shown) more").font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).padding(.horizontal, 6)
+                MonthMore(count: list.count - shown, day: day) { cal.openDay(day) }
             }
             Spacer(minLength: 0)
         }
         .padding(.top, 6)
         .padding(.horizontal, 3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(day.isWeekend || day.outside ? CalendarColor.offHours : .clear))
+        .background(Color(cal.workSpan(day) == nil || day.outside ? CalendarColor.offHours() : .clear))
         .overlay {
             if isTarget {
                 RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])).padding(2)
@@ -602,6 +651,31 @@ struct MonthCell: View {
     }
 }
 
+/// "3 more" under a month cell's events: opens that day.
+private struct MonthMore: View {
+    let count: Int
+    let day: CalendarDay
+    let open: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: open) {
+            Text("\(count) more")
+                .font(.system(size: Theme.caption))
+                .foregroundStyle(Color(hovering ? Theme.text : Theme.text2))
+                .padding(.horizontal, 5)
+                .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                .selectedRow(false, hovering: hovering, radius: Theme.radiusKey)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Show this day")
+        .accessibilityLabel("\(count) more \(count == 1 ? "event" : "events"), \(CalendarModel.spokenDay(day.key))")
+        .accessibilityIdentifier("month-more-\(day.key)")
+    }
+}
+
 struct MonthLine: View {
     let cal: CalendarModel
     let event: CalEvent
@@ -609,18 +683,20 @@ struct MonthLine: View {
     var body: some View {
         let e = event
         let selected = cal.selectedID == e.id
+        // A past or declined event dims its dot and fill; its text stays readable.
+        let alpha = EventStyle.alpha(e, now: cal.now)
+        let ink = EventStyle.ink(e, now: cal.now)
         HStack(spacing: 5) {
             if let start = e.start, !e.isLong {
-                Circle().fill(Color(CalendarColor.color(e.record.color, .bar))).frame(width: 6, height: 6)
+                Circle().fill(Color(CalendarColor.color(e.record.color, .bar))).frame(width: 6, height: 6).opacity(alpha)
                 Text(CalendarModel.clockTime(start)).font(.system(size: Theme.caption, weight: .medium, design: .monospaced)).foregroundStyle(Color(Theme.text3))
             }
-            Text(e.title).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
+            Text(e.title).font(.system(size: Theme.small)).foregroundStyle(Color(ink.title)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
         }
         .padding(.horizontal, 5)
         .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
-        .background { if e.isLong { RoundedRectangle(cornerRadius: 4).fill(Color(CalendarColor.color(e.record.color, .allDay))) } }
+        .background { if e.isLong { RoundedRectangle(cornerRadius: 4).fill(Color(CalendarColor.color(e.record.color, .allDay))).opacity(alpha) } }
         .overlay { if selected { RoundedRectangle(cornerRadius: 5).strokeBorder(Color(Theme.accent), lineWidth: 2).padding(-1) } }
-        .opacity(EventStyle.alpha(e, now: cal.now))
         .reportsSelection(selected)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { cal.openDetail(e) }
@@ -666,10 +742,14 @@ struct AgendaView: View {
                         ForEach(list, id: \.id) { e in AgendaRow(cal: cal, event: e).id(day.key + "/" + e.id) }
                     }
                     if byDay.isEmpty {
-                        Text("Nothing in these \(CalendarSpan.agendaDays) days")
-                            .foregroundStyle(Color(Theme.text3))
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 80)
+                        VStack(spacing: 10) {
+                            Text("Nothing in these \(CalendarSpan.agendaDays) days").foregroundStyle(Color(Theme.text2))
+                            HStack(spacing: 6) { KeyCap(key: "C"); Text("new event") }
+                                .font(.system(size: Theme.small))
+                                .foregroundStyle(Color(Theme.text3))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
                     }
                 }
                 .padding(.bottom, 20)
@@ -688,17 +768,20 @@ struct AgendaRow: View {
     var body: some View {
         let e = event
         let selected = cal.selectedID == e.id
+        let alpha = EventStyle.alpha(e, now: cal.now)
+        let ink = EventStyle.ink(e, now: cal.now)
         HStack(spacing: 12) {
             Text(e.isLong ? "all day" : CalendarLayout.range(e))
                 .font(.system(size: Theme.small, weight: .medium, design: .monospaced))
                 .foregroundStyle(Color(Theme.text3))
-                .frame(width: 92, alignment: .trailing)
+                .frame(width: 106, alignment: .trailing)
             RoundedRectangle(cornerRadius: 1.5)
                 .fill(e.isFree ? .clear : Color(CalendarColor.color(e.record.color, .bar)))
                 .strokeBorder(e.isFree ? Color(CalendarColor.color(e.record.color, .bar)) : .clear, lineWidth: 1)
                 .frame(width: 3, height: 22)
+                .opacity(alpha)
             VStack(alignment: .leading, spacing: 1) {
-                Text(e.title).foregroundStyle(Color(Theme.text)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
+                Text(e.title).foregroundStyle(Color(ink.title)).strikethrough(e.isDeclined || e.isCancelled).lineLimit(1)
                 let sub = [CalendarLayout.subtitle(e), e.isTentative ? "tentative" : "", e.isDeclined ? "declined" : ""].filter { !$0.isEmpty }
                 if !sub.isEmpty {
                     Text(sub.joined(separator: " · ")).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
@@ -714,7 +797,6 @@ struct AgendaRow: View {
         .padding(.horizontal, 12)
         .frame(height: 40)
         .selectedRow(selected)
-        .opacity(EventStyle.alpha(e, now: cal.now))
         .reportsSelection(selected)
         .padding(.horizontal, 12)
         .contentShape(Rectangle())

@@ -344,6 +344,7 @@ struct FindTimePanel: View {
                 HStack(spacing: 6) {
                     Toggle("Their working hours", isOn: $theirHours)
                         .toggleStyle(.switch)
+                        .tint(Color(Theme.accent))
                         .controlSize(.mini)
                         .labelsHidden()
                         .accessibilityIdentifier("find-time-their-hours")
@@ -354,11 +355,15 @@ struct FindTimePanel: View {
                 .padding(.trailing, 4)
             }
             HStack(spacing: 2) {
-                Button { length(-1) } label: { Image(systemName: "minus").frame(width: 22, height: Theme.controlSmall) }
+                Button { length(-1) } label: { Image(systemName: "minus").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .help("Shorter (−)")
+                    .accessibilityLabel("Shorter")
                 Text(lengthText(minutes))
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                     .frame(minWidth: 64)
-                Button { length(1) } label: { Image(systemName: "plus").frame(width: 22, height: Theme.controlSmall) }
+                Button { length(1) } label: { Image(systemName: "plus").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .help("Longer (+)")
+                    .accessibilityLabel("Longer")
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color(Theme.text2))
@@ -379,9 +384,15 @@ struct FindTimePanel: View {
             }
             .frame(maxWidth: .infinity, minHeight: 120)
         case .failed(let message):
-            Text(message)
-                .foregroundStyle(Color(Theme.text2))
-                .frame(maxWidth: .infinity, minHeight: 120)
+            VStack(spacing: 10) {
+                Text(message)
+                    .foregroundStyle(Color(Theme.text2))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                KitButton(title: "Try Again", size: .small) { Task { await load() } }
+                    .accessibilityIdentifier("find-time-retry")
+            }
+            .frame(maxWidth: .infinity, minHeight: 120)
         case .calendarOff(let accountId, let address, let needsConsent):
             VStack(spacing: 10) {
                 Text("Calendar is off for \(address)")
@@ -437,9 +448,12 @@ struct FindTimePanel: View {
                                 Spacer(minLength: 0)
                                 Button { rooms.removeAll { $0.address == person.address } } label: {
                                     Image(systemName: "xmark").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Color(Theme.text3))
+                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall)
+                                        .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .help("Remove this room")
+                                .accessibilityLabel("Remove \(person.name)")
                                 .accessibilityIdentifier("find-time-remove-room")
                             }
                         }
@@ -518,6 +532,7 @@ struct FindTimePanel: View {
         return HStack(spacing: 6) {
             Toggle("Hold these times", isOn: Binding(get: { holding }, set: { _ in toggleHolding() }))
                 .toggleStyle(.switch)
+                .tint(Color(Theme.accent))
                 .controlSize(.mini)
                 .labelsHidden()
                 .disabled(holdChoice == nil || reason != nil)

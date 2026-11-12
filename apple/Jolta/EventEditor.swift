@@ -26,6 +26,9 @@ final class EventEditorModel {
     var repeatPicker: RepeatPicker?
     /// The stored occurrence being edited, hidden in the grid while the draft shows.
     let event: CalEvent?
+    /// The draft as the editor opened on it, to tell what the user changed
+    /// from what a new event starts with.
+    let opened: EventDraft
     @ObservationIgnored var onChange: (() -> Void)?
     /// What the draft's calendar can do: which organizer options it has.
     private(set) var caps: CapabilitiesInfo?
@@ -88,6 +91,7 @@ final class EventEditorModel {
         self.core = core
         self.draft = draft
         self.event = event
+        opened = draft
         repeatText = draft.repeat
         if draft.base != nil {
             moveChoices = Dictionary(((try? core.moveChoices(draft: draft)) ?? []).map { ($0.calendarId, $0) }) { a, _ in a }
@@ -308,8 +312,12 @@ struct EventEditorPanel: View {
     let editor: EventEditorModel
     @FocusState private var focus: Focus?
     @State private var showsZone = false
+    /// Where the keyboard was before a popover or Find a time took it.
+    @State private var lastFocus: Focus?
+    /// The room picker was just closed: the Room field keeps the keyboard without opening it again.
+    @State private var roomClosed = false
 
-    enum Focus: Hashable { case title, start, end, people, room, location, description }
+    enum Focus: Hashable { case title, day, start, end, people, room, location, description, calendar, showAs, reminder, visibility }
 
     private var cal: CalendarModel { model.calendar }
 
@@ -382,11 +390,28 @@ struct EventEditorPanel: View {
         }
         .onChange(of: focus) { old, new in
             if old == .start || old == .end { editor.commit() }
-            if new == .room, roomAccount != nil, !editor.locked(.room) { editor.roomsOpen = true }
+            if let new { lastFocus = new }
+            if old == .room { roomClosed = false }
+            // Arriving at Room opens its picker, except back from Location with
+            // ⇧⇥ or after closing it, so ⇧⇥ and ⇥ pass the field in both directions.
+            if new == .room, old != .location, !roomClosed, roomAccount != nil, !editor.locked(.room) { editor.roomsOpen = true }
         }
         .onChange(of: editor.roomsOpen) { _, open in
-            // The picker had the keys; the field after the room takes them back.
-            if !open { focus = editor.locked(.location) ? nil : .location }
+            // The picker had the keys; its field takes them back.
+            if !open {
+                roomClosed = true
+                focus = .room
+            }
+        }
+        // The repeat popover and Find a time take the keyboard; it goes back where it was.
+        .onChange(of: editor.repeatPicker != nil) { _, open in
+            if !open { focus = lastFocus ?? firstFocus }
+        }
+        .onChange(of: model.findTime != nil) { _, open in
+            if !open { DispatchQueue.main.async { focus = lastFocus ?? firstFocus } }
+        }
+        .background {
+            Button("") { focus = .calendar }.keyboardShortcut("c", modifiers: [.command, .shift]).hidden()
         }
         // Find a time over the editor takes Esc, Return and ⌘Return.
         .disabled(model.findTime != nil)
@@ -505,7 +530,8 @@ struct EventEditorPanel: View {
                     }
                 } else {
                     HStack(spacing: 6) {
-                        DayChip(day: editor.day) { editor.setDay($0) }
+                        DayChip(day: editor.day, focused: focus == .day) { editor.setDay($0) }
+                            .focused($focus, equals: .day)
                         if editor.interval != nil {
                             timeField(timeText(start: true), focus: .start, id: "editor-start", start: true)
                             Text("to").foregroundStyle(Color(Theme.text3))
@@ -529,9 +555,14 @@ struct EventEditorPanel: View {
             EditorRow(icon: nil) {
                 HStack(spacing: 14) {
                     if !editor.locked(.time) {
-                        Toggle("All day", isOn: Binding(get: { editor.isAllDay }, set: { editor.setAllDay($0, defaultMinutes: cal.defaultLength) }))
-                            .toggleStyle(.checkbox)
-                            .foregroundStyle(Color(Theme.text2))
+                        Toggle(isOn: Binding(get: { editor.isAllDay }, set: { editor.setAllDay($0, defaultMinutes: cal.defaultLength) })) {
+                            HStack(spacing: 6) { Text("All day"); KeyCap(key: "⇧⌘A") }
+                        }
+                        .toggleStyle(.checkbox)
+                        .tint(Color(Theme.accent))
+                        .foregroundStyle(Color(Theme.text2))
+                        .keyboardShortcut("a", modifiers: [.command, .shift])
+                        .accessibilityLabel("All day")
                     }
                     Button { showsZone.toggle() } label: {
                         HStack(spacing: 5) {
@@ -743,7 +774,7 @@ struct EventEditorPanel: View {
                     HStack {
                         Text("\(editor.videoLabel(video)) · link made on save").foregroundStyle(Color(Theme.text2))
                         Spacer()
-                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color(Theme.text3))
                             .help("Remove the video call")
@@ -758,7 +789,7 @@ struct EventEditorPanel: View {
                         Text(Self.shortLink(link)).foregroundStyle(Color(Theme.text2)).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         if !editor.locked(.video) {
-                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color(Theme.text3))
                                 .help("Remove the Zoom link")
@@ -819,10 +850,16 @@ struct EventEditorPanel: View {
                 TextField("Add a room", text: .constant(editor.draft.roomName.isEmpty ? editor.draft.room : editor.draft.roomName))
                     .textFieldStyle(.plain)
                     .focused($focus, equals: .room)
-                    .help(editor.draft.room)
+                    // The picker closed with the keyboard still here: these open it again.
+                    .onKeyPress(keys: [.downArrow, .return, .space]) { press in
+                        guard press.modifiers.isDisjoint(with: [.command, .option, .control, .shift]) else { return .ignored }
+                        editor.roomsOpen = true
+                        return .handled
+                    }
+                    .help(editor.draft.room.isEmpty ? "↓ lists the rooms" : editor.draft.room)
                     .accessibilityIdentifier("editor-room")
                 if !editor.draft.room.isEmpty {
-                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill") }
+                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
                         .help("Remove the room")
@@ -891,11 +928,14 @@ struct EventEditorPanel: View {
                         }
                         .menuStyle(.borderlessButton)
                         .menuIndicator(.hidden)
-                        .frame(width: 170, alignment: .leading)
+                        .frame(width: 150, alignment: .leading)
                         .padding(.leading, 20)
-                        .fieldBox(chevrons: true)
+                        .fieldBox(focused: focus == .calendar, chevrons: true)
                         .overlay(alignment: .leading) { CalendarDot(color: current?.color).padding(.leading, 8).allowsHitTesting(false) }
                         .accessibilityIdentifier("editor-calendar")
+                        .stepped(by: stepCalendar, focus: $focus, field: .calendar)
+                        .help("The calendar. ⇧⌘C puts the keyboard here; ↑ and ↓ pick another.")
+                        KeyCap(key: "⇧⌘C", focused: focus == .calendar)
                     } else {
                         CalendarDot(color: current?.color)
                         Text(current?.name ?? "")
@@ -906,12 +946,24 @@ struct EventEditorPanel: View {
                             .foregroundStyle(Color(Theme.text3))
                             .font(.system(size: 12))
                             .lineLimit(1)
-                            .fixedSize()
                     }
                 }
             }
             ForEach(editor.problems(.calendar), id: \.text) { ProblemLine(problem: $0).padding(.leading, 30) }
         }
+    }
+
+    /// ↑ and ↓ on the calendar field: the next calendar the event can go to.
+    private func stepCalendar(_ step: Int) {
+        let open = cal.groups.flatMap(\.calendars).map(\.info).filter { editor.refusal($0) == nil }
+        guard let at = open.firstIndex(where: { $0.id == editor.shownCalendar }), open.indices.contains(at + step) else { return }
+        editor.pick(calendar: open[at + step].id)
+    }
+
+    /// ↑ and ↓ on one of Your settings: the choice before or after the current one.
+    private func step<Choice: Equatable>(_ choices: [Choice], from current: Choice, by step: Int, pick: (Choice) -> Void) {
+        guard let at = choices.firstIndex(of: current), choices.indices.contains(at + step) else { return }
+        pick(choices[at + step])
     }
 
     private var settingsSection: some View {
@@ -922,7 +974,8 @@ struct EventEditorPanel: View {
             }
             .padding(.top, 2)
             .padding(.bottom, 3)
-            SettingLine(label: "Show as", locked: editor.locked(.showAs), value: editor.draft.showAs.word) {
+            SettingLine(label: "Show as", locked: editor.locked(.showAs), value: editor.draft.showAs.word, focus: $focus, field: .showAs,
+                        step: { step(cal.showAsChoices(editor.draft.calendarId), from: editor.draft.showAs, by: $0) { editor.draft.showAs = $0 } }) {
                 ForEach(cal.showAsChoices(editor.draft.calendarId), id: \.self) { choice in
                     Button(choice.word) { editor.draft.showAs = choice }
                 }
@@ -930,12 +983,14 @@ struct EventEditorPanel: View {
             if let note = editor.draft.showAsNote {
                 Text(note).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).padding(.leading, 104)
             }
-            SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word) {
+            SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word, focus: $focus, field: .reminder,
+                        step: { step(DraftReminder.menu(isNew: editor.isNew), from: editor.draft.reminder, by: $0) { editor.draft.reminder = $0 } }) {
                 ForEach(DraftReminder.menu(isNew: editor.isNew), id: \.self) { choice in
                     Button(choice.word) { editor.draft.reminder = choice }
                 }
             }
-            SettingLine(label: "Visibility", locked: editor.locked(.visibility), value: editor.draft.visibility.word) {
+            SettingLine(label: "Visibility", locked: editor.locked(.visibility), value: editor.draft.visibility.word, focus: $focus, field: .visibility,
+                        step: { step([EventVisibility.default, .private], from: editor.draft.visibility, by: $0) { editor.draft.visibility = $0 } }) {
                 ForEach([EventVisibility.default, .private], id: \.self) { choice in
                     Button(choice.word) { editor.draft.visibility = choice }
                 }
@@ -992,17 +1047,33 @@ struct RepeatRowAnchor: PreferenceKey {
     static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
 }
 
-/// "Tue 24 Nov", which opens a month to pick another day.
+/// "Tue 24 Nov", which opens a month to pick another day. With the
+/// keyboard on it, ← and → move a day, ↑ and ↓ a week, and Space opens the month.
 private struct DayChip: View {
     let day: Date
+    let focused: Bool
     let pick: (Date) -> Void
     @State private var open = false
 
     var body: some View {
         Button { open.toggle() } label: {
-            Text(EventEditorPanel.dayText(day)).foregroundStyle(Color(Theme.text)).fieldBox(focused: open)
+            Text(EventEditorPanel.dayText(day)).foregroundStyle(Color(Theme.text)).fieldBox(focused: open || focused)
         }
         .buttonStyle(.plain)
+        .focusable(interactions: .edit)
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow], phases: [.down, .repeat]) { press in
+            let days = switch press.key {
+            case .leftArrow: -1
+            case .rightArrow: 1
+            case .upArrow: -7
+            default: 7
+            }
+            if let moved = Calendar.current.date(byAdding: .day, value: days, to: day) { pick(moved) }
+            return .handled
+        }
+        .onKeyPress(.space) { open.toggle(); return .handled }
+        .help("The day. ← and → move it a day, ↑ and ↓ a week.")
         .accessibilityIdentifier("editor-day")
         .popover(isPresented: $open, arrowEdge: .bottom) {
             DatePicker("Day", selection: Binding(get: { day }, set: { pick($0); open = false }), displayedComponents: .date)
@@ -1046,10 +1117,28 @@ private struct EditorRow<Content: View>: View {
     }
 }
 
+extension View {
+    /// Makes a field that opens a menu a stop for ⇥, where ↑ and ↓ pick the
+    /// choice before or after the current one: the menu itself opens only
+    /// with the mouse.
+    fileprivate func stepped(by step: @escaping (Int) -> Void, focus: FocusState<EventEditorPanel.Focus?>.Binding, field: EventEditorPanel.Focus) -> some View {
+        focusable(interactions: .edit)
+            .focusEffectDisabled()
+            .focused(focus, equals: field)
+            .onKeyPress(keys: [.upArrow, .downArrow], phases: [.down, .repeat]) { press in
+                step(press.key == .upArrow ? -1 : 1)
+                return .handled
+            }
+    }
+}
+
 private struct SettingLine<Choices: View>: View {
     let label: String
     let locked: Bool
     let value: String
+    let focus: FocusState<EventEditorPanel.Focus?>.Binding
+    let field: EventEditorPanel.Focus
+    let step: (Int) -> Void
     @ViewBuilder let choices: Choices
 
     var body: some View {
@@ -1064,8 +1153,10 @@ private struct SettingLine<Choices: View>: View {
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .frame(width: 134, alignment: .leading)
-                    .fieldBox(chevrons: true)
+                    .fieldBox(focused: focus.wrappedValue == field, chevrons: true)
                     .accessibilityIdentifier("editor-\(label.lowercased().replacingOccurrences(of: " ", with: "-"))")
+                    .stepped(by: step, focus: focus, field: field)
+                    .help("↑ and ↓ pick another")
                 Spacer()
             }
         }

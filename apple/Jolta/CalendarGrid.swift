@@ -6,7 +6,8 @@ import SwiftUI
 /// Everything the hour grid draws for one period.
 struct HourGridContent {
     let placed: [PlacedEvent]
-    let weekends: [Bool]
+    /// Per day, its working hours as minutes after midnight; nil on a day off.
+    let work: [Range<Int>?]
     /// The column of today, for the current-time line.
     let today: Int?
     let todayStart: Date?
@@ -23,10 +24,12 @@ struct HourGridContent {
     var columns: [CalendarDay] = []
     /// Calendars whose events show the resize cursor at their edges.
     var writable: Set<Int64> = []
+    /// What the grid lies on.
+    var surface = CalendarSurface.bg
 
-    var days: Int { weekends.count }
+    var days: Int { work.count }
 
-    static let empty = HourGridContent(placed: [], weekends: [false], today: nil, todayStart: nil, selectedID: nil, now: .now, gutter: 64, revision: -1)
+    static let empty = HourGridContent(placed: [], work: [nil], today: nil, todayStart: nil, selectedID: nil, now: .now, gutter: 64, revision: -1)
 }
 
 /// A dashed event on one day of the period: the editor's draft, an event
@@ -50,7 +53,7 @@ extension DraftBlock {
         guard let day = days.firstIndex(where: { $0.start <= start && start < $0.end }) else { return nil }
         let top = start.timeIntervalSince(days[day].start) / 60
         self.init(day: day, top: top, bottom: min(max(end.timeIntervalSince(days[day].start) / 60, top + 15), 24 * 60), title: title,
-                  range: "\(CalendarModel.clockTime(start)) – \(CalendarModel.clockTime(end))", color: color, start: start, end: end)
+                  range: CalendarLayout.range(start, end), color: color, start: start, end: end)
     }
 
     /// The editor's draft, or nil when it is all-day or elsewhere.
@@ -104,15 +107,38 @@ enum EventStyle {
         let colW = width / CGFloat(max(days, 1))
         let share = colW / CGFloat(p.columns)
         let x = CGFloat(p.day) * colW + share * CGFloat(p.column) + (p.column == 0 ? 3 : 1)
-        let w = share - (p.column == 0 ? 3 : 1) - (p.column == p.columns - 1 ? 4 : 1)
+        let w = share * CGFloat(p.span) - (p.column == 0 ? 3 : 1) - (p.column + p.span == p.columns ? 4 : 1)
         let y = p.top / 60 * CalendarLayout.hourHeight + 1
         let h = max(16, (p.bottom - p.top) / 60 * CalendarLayout.hourHeight - 2)
         return CGRect(x: x, y: y, width: max(w, 4), height: h)
     }
 
+    /// How strongly the fill and bar of a past or declined event show. Its
+    /// text keeps full strength in a quieter color (`ink`), so it still reads.
     static func alpha(_ e: CalEvent, now: Date) -> CGFloat {
         if e.isDeclined || e.isCancelled { return 0.45 }
         return e.isPast(now) ? 0.55 : 1
+    }
+
+    /// The accent ring around the box the keyboard acts on, `gap` points out from it.
+    static func ring(_ r: CGRect, radius: CGFloat, gap: CGFloat = 1.5) {
+        Theme.accent.setStroke()
+        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -gap, dy: -gap), xRadius: radius + gap, yRadius: radius + gap)
+        ring.lineWidth = 2
+        ring.stroke()
+    }
+
+    /// The outline an event being dragged leaves where it came from.
+    static func ghost(_ r: CGRect, radius: CGFloat, color: NSColor) {
+        let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: radius - 0.5, yRadius: radius - 0.5)
+        color.withAlphaComponent(0.5).setStroke()
+        edge.stroke()
+    }
+
+    /// The colors of an event's title and of the lines under it.
+    static func ink(_ e: CalEvent, now: Date) -> (title: NSColor, sub: NSColor) {
+        if e.isDeclined || e.isCancelled { return (Theme.text3, Theme.text3) }
+        return e.isPast(now) ? (Theme.text2, Theme.text3) : (Theme.text, Theme.text2)
     }
 
     private static let ascent = ceil(titleFont.ascender)
@@ -137,8 +163,8 @@ enum EventStyle {
         .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8.5, weight: .semibold).applying(NSImage.SymbolConfiguration(paletteColors: [Theme.text2])))
 
     /// An out-of-office band: the calendar's color at 45 percent, as Find a time draws it.
-    static func awayFill(_ e: CalEvent) -> NSColor {
-        CalendarColor.color(e.record.color, .bar).withAlphaComponent(0.45)
+    static func awayFill(_ e: CalEvent, on surface: CalendarSurface) -> NSColor {
+        CalendarColor.color(e.record.color, .bar, on: surface).withAlphaComponent(0.45)
     }
 
     /// The room the "not synced yet" mark takes at the box's right edge.
@@ -158,8 +184,9 @@ enum EventStyle {
     /// Title, times and place, top down, as many lines as the box holds. A
     /// box under 30 points tall gets the title and start on one line; one too
     /// narrow to read gets none.
-    static func drawText(_ e: CalEvent, in r: CGRect, cg: CGContext) {
+    static func drawText(_ e: CalEvent, in r: CGRect, now: Date, cg: CGContext) {
         drawMark(e, in: r)
+        let ink = ink(e, now: now)
         let width = r.width - 10 - markWidth(e)
         guard width >= 14 else { return }
         let x = r.minX + 7
@@ -183,15 +210,15 @@ enum EventStyle {
             let frame = CGRect(x: x + titleWidth + 4, y: top + ascent - size.height + 1, width: size.width, height: size.height)
             moon.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
-        draw(titleLine, Theme.text)
+        draw(titleLine, ink.title)
         if struck {
-            Theme.text.setFill()
+            ink.title.setFill()
             CGRect(x: x, y: r.minY + (short ? 1 : 3) + ascent - 4, width: min(titleWidth, width), height: 1).fill()
         }
         guard !short else { return }
-        if top + lineHeight <= r.maxY + 2 { draw(line([(CalendarLayout.range(e), timeFont)], width: width), Theme.text2) }
+        if top + lineHeight <= r.maxY + 2 { draw(line([(CalendarLayout.range(e), timeFont)], width: width), ink.sub) }
         let sub = CalendarLayout.subtitle(e)
-        if !sub.isEmpty, top + lineHeight <= r.maxY + 2 { draw(line([(sub, subFont)], width: width), Theme.text2) }
+        if !sub.isEmpty, top + lineHeight <= r.maxY + 2 { draw(line([(sub, subFont)], width: width), ink.sub) }
     }
 }
 
@@ -206,15 +233,17 @@ struct WeekGrid: NSViewRepresentable {
     let cal: CalendarModel
     let source: CalendarWeekView.Source
     var gutter = CalendarLayout.gutter
-    /// The hour at the top when it first shows.
-    var firstHour = 7.5
+    /// The hour at the top when it first shows; nil puts now a third of the
+    /// way down when today is among the days, and 07:30 on top otherwise.
+    var firstHour: Double?
+    var surface = CalendarSurface.bg
     var select: ((CalEvent) -> Void)?
     var open: ((CalEvent) -> Void)?
     /// The selected event's frame in this view, or nil when it isn't in sight.
     var selectedFrame: (CGRect?) -> Void = { _ in }
 
     func makeNSView(context: Context) -> CalendarWeekView {
-        let view = CalendarWeekView(source: source, gutter: gutter, firstHour: firstHour)
+        let view = CalendarWeekView(source: source, gutter: gutter, firstHour: firstHour, surface: surface)
         view.model = cal
         cal.attach(view)
         return view
@@ -251,6 +280,7 @@ final class CalendarWeekView: NSView {
     }
 
     let source: Source
+    let surface: CalendarSurface
     weak var model: CalendarModel?
     let strip: DayStrip
     let hours = HourScrollView()
@@ -264,15 +294,20 @@ final class CalendarWeekView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(source: Source, gutter: CGFloat, firstHour: Double) {
+    init(source: Source, gutter: CGFloat, firstHour: Double?, surface: CalendarSurface) {
         self.source = source
-        strip = DayStrip(gutter: gutter, showsNames: source == .period, showsEmptyLane: source == .period)
+        self.surface = surface
+        strip = DayStrip(gutter: gutter, showsNames: source == .period, showsEmptyLane: source == .period, surface: surface)
         super.init(frame: .zero)
         hours.firstHour = firstHour
         hours.canvas.gutter = gutter
         addSubview(hours)
         addSubview(strip)
         strip.selectedFrame = { [weak self] in self?.stripFrame = $0; self?.reportSelection() }
+        strip.openDay = source == .period ? { [weak self] index in
+            guard let cal = self?.model, cal.days.indices.contains(index) else { return }
+            cal.openDay(cal.days[index])
+        } : nil
         hours.canvas.selectedFrame = { [weak self] in self?.gridFrame = $0; self?.reportSelection() }
     }
 
@@ -308,11 +343,13 @@ final class CalendarWeekView: NSView {
         }
         guard !days.isEmpty else { return }
         let today = days.firstIndex(where: \.isToday)
-        strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days), selectedID: selected, now: cal.now, revision: revision)
-        hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), weekends: days.map(\.isWeekend), today: today,
+        // One ring: the strip leaves it to a draft or an unsaved move in the hours.
+        strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days),
+                                        selectedID: draft == nil && pending == nil ? selected : nil, now: cal.now, revision: revision)
+        hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), work: days.map(cal.workSpan), today: today,
                                                todayStart: today.map { days[$0].start }, selectedID: selected, now: cal.now,
                                                gutter: hours.canvas.gutter, revision: revision, draft: draft, pending: pending,
-                                               columns: days, writable: source == .period ? cal.writableCalendars : [])
+                                               columns: days, writable: source == .period ? cal.writableCalendars : [], surface: surface)
         if strip.frame.height != strip.height { needsLayout = true }
         // Draw now, inside the key's own pass, rather than at the next
         // display pass, which waited about 7 ms for the frame on a 120 Hz screen.
@@ -327,6 +364,26 @@ final class CalendarWeekView: NSView {
         let h = strip.height
         strip.frame = CGRect(x: 0, y: 0, width: bounds.width, height: h)
         hours.frame = CGRect(x: 0, y: h, width: bounds.width, height: max(0, bounds.height - h))
+    }
+
+    /// Esc: a drag under way ends and its event stays where it was. False when nothing was being dragged.
+    func cancelDrag() -> Bool {
+        let strip = strip.cancelDrag(), hours = hours.canvas.cancelDrag()
+        return strip || hours
+    }
+
+    /// T: the hours scroll to now, when today is among the days.
+    func revealNow() {
+        if source == .period { hours.scrollToNow() }
+    }
+
+    /// Scrolls the hours to the selected event when it is a timed one out of sight.
+    func revealSelection() {
+        guard source == .period else { return }
+        let content = hours.canvas.content
+        let parts = content.placed.filter { $0.event.id == content.selectedID }
+        guard let top = parts.map(\.top).min(), let bottom = parts.map(\.bottom).max() else { return }
+        hours.reveal(from: top / 60 * CalendarLayout.hourHeight, to: bottom / 60 * CalendarLayout.hourHeight)
     }
 
     private func reportSelection() {
@@ -348,23 +405,32 @@ struct DayStripContent {
     static let empty = DayStripContent(days: [], lanes: [], selectedID: nil, now: .now, revision: -1)
 }
 
-/// Day names, then all-day and multi-day events in up to three lanes.
+/// Day names, then all-day and multi-day events in lanes: up to three above
+/// several days, with "+N" under a day that has more, and all of them above
+/// a single day.
 final class DayStrip: CanvasView {
     let gutter: CGFloat
     let showsNames: Bool
     let showsEmptyLane: Bool
+    let surface: CalendarSurface
     var content = DayStripContent.empty {
         didSet {
             guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID
                     || content.now != oldValue.now || content.days != oldValue.days else { return }
             elements = nil
+            more = content.days.indices.map { day in content.lanes.filter { $0.lane >= maxLanes && $0.first <= day && day <= $0.last }.count }
             needsDisplay = true
             reportSelection()
+            window?.invalidateCursorRects(for: self)
         }
     }
     var select: (CalEvent) -> Void = { _ in }
     var open: (CalEvent) -> Void = { _ in }
     var selectedFrame: (CGRect?) -> Void = { _ in }
+    /// A click on a day's "+N": the day view of that day.
+    var openDay: ((Int) -> Void)?
+    /// Per day, the events that have no lane.
+    private var more: [Int] = []
     /// An event dragged to other days: by how many, and whether ⌥ copied it.
     var drop: ((CalEvent, Int, Bool) -> Void)?
     var canMove: (CalEvent) -> Bool = { _ in false }
@@ -392,26 +458,29 @@ final class DayStrip: CanvasView {
 
     private static let namesHeight: CGFloat = 36
     private static let laneHeight: CGFloat = 20
-    private static let maxLanes = 3
     private static let weekdayFont = NSFont.systemFont(ofSize: 12)
     private static let dayFont = NSFont.monospacedDigitSystemFont(ofSize: 17, weight: .semibold)
     private static let laneFont = NSFont.systemFont(ofSize: 11.5)
     private static let labelFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
 
-    init(gutter: CGFloat, showsNames: Bool, showsEmptyLane: Bool) {
+    init(gutter: CGFloat, showsNames: Bool, showsEmptyLane: Bool, surface: CalendarSurface) {
         self.gutter = gutter
         self.showsNames = showsNames
         self.showsEmptyLane = showsEmptyLane
+        self.surface = surface
         super.init(frame: .zero)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    private var laneCount: Int { min(Self.maxLanes, (content.lanes.map(\.lane).max() ?? -1) + 1) }
+    private var maxLanes: Int { content.days.count == 1 ? .max : CalendarLayout.maxLanes }
+    private var laneCount: Int { min(maxLanes, (content.lanes.map(\.lane).max() ?? -1) + 1) }
     private var lanesTop: CGFloat { showsNames ? Self.namesHeight + 1 : 0 }
 
     var height: CGFloat {
-        let lanes = laneCount == 0 && !showsEmptyLane ? 0 : max(1, laneCount)
+        // The "+N" cells take a row of their own under the lanes.
+        let rows = laneCount + (more.contains { $0 > 0 } ? 1 : 0)
+        let lanes = rows == 0 && !showsEmptyLane ? 0 : max(1, rows)
         let laneArea = lanes == 0 ? 0 : 4 + CGFloat(lanes) * (Self.laneHeight + 3) - 3 + 6 + 1
         return lanesTop + laneArea
     }
@@ -421,6 +490,21 @@ final class DayStrip: CanvasView {
     private func box(_ item: LaneEvent) -> CGRect {
         CGRect(x: gutter + columnWidth * CGFloat(item.first) + 3, y: lanesTop + 4 + CGFloat(item.lane) * (Self.laneHeight + 3),
                width: columnWidth * CGFloat(item.last - item.first + 1) - 6, height: Self.laneHeight)
+    }
+
+    /// Where a day says "+N" for its events without a lane.
+    private func moreBox(_ day: Int) -> CGRect {
+        CGRect(x: gutter + columnWidth * CGFloat(day) + 3, y: lanesTop + 4 + CGFloat(laneCount) * (Self.laneHeight + 3),
+               width: columnWidth - 6, height: Self.laneHeight)
+    }
+
+    private func moreDay(at point: CGPoint) -> Int? {
+        more.indices.first { more[$0] > 0 && moreBox($0).contains(point) }
+    }
+
+    /// The selected event when it has no lane: its day's "+N" stands for it.
+    private var selectedBehindMore: LaneEvent? {
+        content.lanes.first { $0.lane >= maxLanes && $0.event.id == content.selectedID }
     }
 
     private static let weekday: DateFormatter = {
@@ -461,67 +545,79 @@ final class DayStrip: CanvasView {
             CTLineDraw(label, cg)
         }
         let moved = press?.moved(content.days.count)
-        for item in content.lanes where item.lane < Self.maxLanes {
-            if moved != nil, press?.copy == false, item.id == moved?.id { continue }
-            let e = item.event, r = box(item)
-            cg.saveGState()
-            let alpha = EventStyle.alpha(e, now: content.now)
-            if alpha < 1 { cg.setAlpha(alpha) }
-            if let place = e.place {
-                drawPlace(place, item: item, cg: cg)
-                cg.restoreGState()
-                ring(e, r)
+        var ringed = selectedBehindMore.map { moreBox($0.first) }
+        for (day, count) in more.enumerated() where count > 0 {
+            let r = moreBox(day)
+            cg.setFillColor(Theme.text2.cgColor)
+            cg.textPosition = CGPoint(x: r.minX + 7, y: r.minY + 14)
+            CTLineDraw(line("+\(count)", Self.laneFont), cg)
+        }
+        for item in content.lanes where item.lane < maxLanes {
+            if moved != nil, press?.copy == false, item.id == moved?.id {
+                EventStyle.ghost(box(item), radius: 5, color: CalendarColor.color(item.event.record.color, .bar, on: surface))
                 continue
             }
-            (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .allDay)).setFill()
-            NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            let e = item.event, r = box(item)
+            if e.id == content.selectedID { ringed = r }
+            let alpha = EventStyle.alpha(e, now: content.now)
+            let ink = EventStyle.ink(e, now: content.now)
+            if let place = e.place {
+                drawPlace(place, item: item, alpha: alpha, ink: ink.sub, cg: cg)
+                continue
+            }
+            cg.saveGState()
+            if alpha < 1 { cg.setAlpha(alpha) }
+            if e.isUnanswered {
+                // Hollow until answered, as in the hours below.
+                surface.color.setFill()
+                NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+                let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 4.5, yRadius: 4.5)
+                CalendarColor.color(e.record.color, .bar, on: surface).setStroke()
+                edge.stroke()
+            } else {
+                (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .allDay, on: surface)).setFill()
+                NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+            }
+            cg.restoreGState()
             EventStyle.drawMark(e, in: r)
             var title = line(e.title, Self.laneFont)
             let width = r.width - 14 - EventStyle.markWidth(e)
             if CTLineGetTypographicBounds(title, nil, nil, nil) > width {
                 title = CTLineCreateTruncatedLine(title, max(0, width), .end, line("…", Self.laneFont)) ?? title
             }
-            cg.setFillColor(Theme.text.cgColor)
+            cg.setFillColor(ink.title.cgColor)
             cg.textPosition = CGPoint(x: r.minX + 7, y: r.minY + 14)
             CTLineDraw(title, cg)
             if e.isDeclined || e.isCancelled {
-                Theme.text.setFill()
+                ink.title.setFill()
                 CGRect(x: r.minX + 7, y: r.midY, width: min(CTLineGetTypographicBounds(title, nil, nil, nil), width), height: 1).fill()
             }
-            cg.restoreGState()
-            ring(e, r)
         }
+        // After every event, so none drawn later covers it.
+        if let ringed { EventStyle.ring(ringed, radius: 5) }
         if let moved { drawMoved(moved, cg: cg) }
         Theme.line2.setFill()
         CGRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
     }
 
-    private func ring(_ e: CalEvent, _ r: CGRect) {
-        guard e.id == content.selectedID else { return }
-        Theme.accent.setStroke()
-        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 6.5, yRadius: 6.5)
-        ring.lineWidth = 2
-        ring.stroke()
-    }
-
     private static let placeFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
     /// A working location: no box, its place with a glyph in each of its days.
-    private func drawPlace(_ place: (label: String, at: Workplace), item: LaneEvent, cg: CGContext) {
+    private func drawPlace(_ place: (label: String, at: Workplace), item: LaneEvent, alpha: CGFloat, ink: NSColor, cg: CGContext) {
         let symbol = switch place.at {
         case .home: "house"
         case .office: "building.2"
         case .other: "mappin.and.ellipse"
         }
         let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9.5, weight: .medium).applying(NSImage.SymbolConfiguration(paletteColors: [CalendarColor.color(item.event.record.color, .text)])))
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9.5, weight: .medium).applying(NSImage.SymbolConfiguration(paletteColors: [CalendarColor.color(item.event.record.color, .text, on: surface)])))
         let r = box(item)
         for day in item.first...item.last {
             let cell = CGRect(x: gutter + columnWidth * CGFloat(day) + 3, y: r.minY, width: columnWidth - 6, height: r.height)
             var x = cell.minX + 5
             if let glyph {
                 glyph.draw(in: CGRect(x: x, y: cell.midY - glyph.size.height / 2, width: glyph.size.width, height: glyph.size.height),
-                           from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                           from: .zero, operation: .sourceOver, fraction: alpha, respectFlipped: true, hints: nil)
                 x += glyph.size.width + 4
             }
             var text = line(place.label, Self.placeFont)
@@ -529,7 +625,7 @@ final class DayStrip: CanvasView {
             if CTLineGetTypographicBounds(text, nil, nil, nil) > width {
                 text = CTLineCreateTruncatedLine(text, max(0, width), .end, line("…", Self.placeFont)) ?? text
             }
-            cg.setFillColor(Theme.text2.cgColor)
+            cg.setFillColor(ink.cgColor)
             cg.textPosition = CGPoint(x: x, y: r.minY + 14)
             CTLineDraw(text, cg)
         }
@@ -538,9 +634,9 @@ final class DayStrip: CanvasView {
     /// The event being dragged, dashed on the days it would move to.
     private func drawMoved(_ item: LaneEvent, cg: CGContext) {
         let r = box(item)
-        let bar = CalendarColor.color(item.event.record.color, .bar)
+        let bar = CalendarColor.color(item.event.record.color, .bar, on: surface)
         let shape = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
-        Theme.bg.setFill()
+        surface.color.setFill()
         shape.fill()
         bar.withAlphaComponent(0.12).setFill()
         shape.fill()
@@ -560,7 +656,7 @@ final class DayStrip: CanvasView {
     }
 
     func reportSelection() {
-        let frame = content.lanes.first { $0.event.id == content.selectedID }.map(box)
+        let frame = content.lanes.first { $0.event.id == content.selectedID }.map { $0.lane < maxLanes ? box($0) : moreBox($0.first) }
         guard lastReported != .some(frame) else { return }
         lastReported = .some(frame)
         let report = selectedFrame
@@ -573,7 +669,8 @@ final class DayStrip: CanvasView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard let hit = content.lanes.last(where: { $0.lane < Self.maxLanes && box($0).contains(point) }) else { return super.mouseDown(with: event) }
+        if let day = moreDay(at: point), let openDay { return openDay(day) }
+        guard let hit = content.lanes.last(where: { $0.lane < maxLanes && box($0).contains(point) }) else { return super.mouseDown(with: event) }
         if event.clickCount == 2 { return open(hit.event) }
         select(hit.event)
         if drop != nil { press = Press(item: hit, point: point, column: column(at: point.x)) }
@@ -605,19 +702,41 @@ final class DayStrip: CanvasView {
         if press.days != 0 { drop?(press.item.event, press.days, event.modifierFlags.contains(.option)) }
     }
 
+    /// Without the press, the rest of the drag and its mouse-up do nothing.
+    func cancelDrag() -> Bool {
+        guard press?.moving == true else { return false }
+        press = nil
+        NSCursor.arrow.set()
+        needsDisplay = true
+        return true
+    }
+
+    override func resetCursorRects() {
+        guard openDay != nil else { return }
+        for day in more.indices where more[day] > 0 { addCursorRect(moreBox(day), cursor: .pointingHand) }
+    }
+
     override func isAccessibilityElement() -> Bool { false }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
     override func accessibilityLabel() -> String? { "All-day events" }
 
     override func accessibilityChildren() -> [Any]? {
         if elements == nil {
-            elements = content.lanes.filter { $0.lane < Self.maxLanes }.map { item in
+            var list = content.lanes.filter { $0.lane < maxLanes }.map { item in
                 let event = item.event, rect = box(item)
-                let element = EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)",
-                                           place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.open(event) }
-                element.setAccessibilityParent(self)
-                return element
+                return EventElement(label: event.accessibilityLabel, identifier: "event-\(event.title)",
+                                    place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.open(event) }
             }
+            let behind = selectedBehindMore
+            for day in more.indices where more[day] > 0 {
+                let rect = moreBox(day), count = more[day]
+                list.append(EventElement(label: "\(count) more all-day \(count == 1 ? "event" : "events"), \(CalendarModel.spokenDay(content.days[day].key))",
+                                         identifier: "more-\(content.days[day].key)",
+                                         value: behind.map { $0.first <= day && day <= $0.last } == true ? "selected" : nil,
+                                         place: { [weak self] in self?.screenRect(rect) ?? .zero }) { [weak self] in self?.openDay?(day) })
+            }
+            for element in list { element.setAccessibilityParent(self) }
+            elements = list
         }
         return elements
     }
@@ -626,7 +745,7 @@ final class DayStrip: CanvasView {
 final class HourScrollView: NSScrollView {
     let canvas = HourCanvas()
     private let document = Document()
-    var firstHour = 7.5
+    var firstHour: Double?
     var swipe: (Int) -> Void = { _ in }
     private var placedFirstHour = false
     private var swiped = 0.0
@@ -657,14 +776,44 @@ final class HourScrollView: NSScrollView {
         if document.frame.size != size { document.frame.size = size }
         if !placedFirstHour, contentView.bounds.height > 0 {
             placedFirstHour = true
-            let y = min(firstHour * CalendarLayout.hourHeight, size.height - contentView.bounds.height)
-            contentView.scroll(to: NSPoint(x: 0, y: max(0, y)))
-            reflectScrolledClipView(contentView)
+            if let firstHour {
+                scroll(to: firstHour * CalendarLayout.hourHeight)
+            } else if !scrollToNow() {
+                scroll(to: 7.5 * CalendarLayout.hourHeight)
+            }
         }
         follow()
     }
 
+    /// Puts the current time a third of the way down. False when today isn't among the days.
+    @discardableResult func scrollToNow() -> Bool {
+        guard canvas.content.today != nil, let start = canvas.content.todayStart else { return false }
+        let now = canvas.content.now.timeIntervalSince(start) / 3600 * CalendarLayout.hourHeight
+        scroll(to: now - contentView.bounds.height / 3)
+        return true
+    }
+
     @objc private func scrolled() { follow() }
+
+    private func scroll(to y: CGFloat) {
+        let top = max(0, min(y, document.frame.height - contentView.bounds.height))
+        guard abs(top - contentView.bounds.minY) > 0.5 else { return }
+        contentView.scroll(to: NSPoint(x: 0, y: top))
+        reflectScrolledClipView(contentView)
+    }
+
+    /// Scrolls as little as it takes to show the day from `top` to `bottom`
+    /// (points from midnight) with some room around it; something taller
+    /// than the view shows its start.
+    func reveal(from top: CGFloat, to bottom: CGFloat) {
+        let visible = contentView.bounds, room: CGFloat = 24
+        guard visible.height > 0 else { return }
+        if top - room < visible.minY {
+            scroll(to: top - room)
+        } else if bottom + room > visible.maxY {
+            scroll(to: min(top - room, bottom + room - visible.height))
+        }
+    }
 
     /// Keeps the canvas over the visible part of the day.
     private func follow() {
@@ -698,7 +847,7 @@ final class HourCanvas: CanvasView {
     var content = HourGridContent.empty {
         didSet {
             guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID || content.draft != oldValue.draft
-                    || content.pending != oldValue.pending || content.weekends != oldValue.weekends || content.now != oldValue.now || content.today != oldValue.today else { return }
+                    || content.pending != oldValue.pending || content.work != oldValue.work || content.now != oldValue.now || content.today != oldValue.today else { return }
             elements = nil
             needsDisplay = true
             reportSelection()
@@ -762,22 +911,52 @@ final class HourCanvas: CanvasView {
     private static let labelFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
     private static let nowFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .semibold)
 
+    private enum Ring { case preview, draft, pending, selection }
+
     override func paint(_ cg: CGContext) {
         CalendarBench.shared?.mark("draw start")
         let paint = {
             cg.translateBy(x: 0, y: -self.frame.minY)
             let visible = self.frame
             self.drawGrid(visible, cg: cg)
-            let hidden = self.press?.hides
-            for p in self.content.placed where p.event.id != hidden {
+            let content = self.content, press = self.press
+            let hidden = press?.hides
+            var selected: [CGRect] = []
+            for p in content.placed {
                 let r = self.box(p)
                 guard r.intersects(visible) else { continue }
+                // An event being dragged leaves its outline where it came from.
+                if p.event.id == hidden {
+                    EventStyle.ghost(r, radius: 6, color: CalendarColor.color(p.event.record.color, .bar, on: content.surface))
+                    continue
+                }
                 self.draw(p.event, in: r, cg: cg)
+                if p.event.id == content.selectedID { selected.append(r) }
             }
-            if let draft = self.content.draft, self.press?.hidesDraft != true { self.drawDraft(draft, cg: cg) }
-            if let pending = self.content.pending { self.drawDraft(pending, cg: cg) }
-            if let press = self.press, !press.refused, let preview = press.preview { self.drawDraft(preview, cg: cg) }
+            // One accent ring, on what the keyboard acts on: the block being
+            // dragged when it is the editor's draft or the selected event,
+            // else the editor's draft, else an event moved and not saved yet,
+            // else the selection. It is drawn after every event, so a
+            // neighbour drawn later can't cover it.
+            let ring: Ring = if press?.hidesDraft == true || (hidden != nil && hidden == content.selectedID) { .preview }
+                else if content.draft != nil { .draft }
+                else if content.pending != nil { .pending }
+                else { .selection }
+            if ring == .selection { for r in selected { EventStyle.ring(r, radius: 6) } }
+            if let draft = content.draft {
+                if press?.hidesDraft == true {
+                    EventStyle.ghost(self.rect(draft), radius: 6, color: CalendarColor.color(draft.color, .bar, on: content.surface))
+                } else {
+                    self.drawDraft(draft, ringed: ring == .draft, cg: cg)
+                }
+            }
+            let preview = press.flatMap { $0.refused ? nil : $0.preview }
+            // The tag below says the times of the one block on the move.
+            if let pending = content.pending { self.drawDraft(pending, ringed: ring == .pending, times: preview != nil, cg: cg) }
+            if let preview { self.drawDraft(preview, ringed: ring == .preview, times: false, cg: cg) }
             self.drawNow(cg: cg)
+            // The times of a block on the move, over everything else.
+            if let moving = preview ?? content.pending { self.drawTimes(moving, visible: visible, cg: cg) }
         }
         if let bench = CalendarBench.shared { bench.time("draw (hour grid)", paint) } else { paint() }
         CalendarBench.shared?.drew()
@@ -787,15 +966,15 @@ final class HourCanvas: CanvasView {
         let hh = CalendarLayout.hourHeight
         let colW = columnWidth, x0 = content.gutter
         let height = 24 * hh
-        CalendarColor.offHours.setFill()
-        for (i, weekend) in content.weekends.enumerated() {
+        CalendarColor.offHours(on: content.surface).setFill()
+        for (i, work) in content.work.enumerated() {
             let x = x0 + CGFloat(i) * colW
-            if weekend {
-                CGRect(x: x, y: 0, width: colW, height: height).fill()
-            } else {
-                CGRect(x: x, y: 0, width: colW, height: CGFloat(CalendarLayout.workStart) * hh).fill()
-                let end = CGFloat(CalendarLayout.workEnd) * hh
+            if let work {
+                CGRect(x: x, y: 0, width: colW, height: CGFloat(work.lowerBound) / 60 * hh).fill()
+                let end = CGFloat(work.upperBound) / 60 * hh
                 CGRect(x: x, y: end, width: colW, height: height - end).fill()
+            } else {
+                CGRect(x: x, y: 0, width: colW, height: height).fill()
             }
         }
         Theme.line2.setFill()
@@ -834,7 +1013,7 @@ final class HourCanvas: CanvasView {
         Theme.accent.setFill()
         CGRect(x: x, y: y - 0.75, width: columnWidth, height: 1.5).fill()
         NSBezierPath(ovalIn: CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)).fill()
-        drawLabel(CalendarModel.clockTime(content.now), font: Self.nowFont, color: Theme.accentText, y: y, background: Theme.bg, cg: cg)
+        drawLabel(CalendarModel.clockTime(content.now), font: Self.nowFont, color: Theme.accentText, y: y, background: content.surface.color, cg: cg)
     }
 
     private func draw(_ e: CalEvent, in r: CGRect, cg: CGContext) {
@@ -842,21 +1021,32 @@ final class HourCanvas: CanvasView {
         cg.saveGState()
         if alpha < 1 { cg.setAlpha(alpha) }
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-        let bar = CalendarColor.color(e.record.color, .bar)
-        if e.isFree {
-            Theme.bg.setFill()
+        let surface = content.surface
+        let bar = CalendarColor.color(e.record.color, .bar, on: surface)
+        if e.isUnanswered || e.isFree {
+            // Hollow: time that isn't taken. An invitation still to answer
+            // keeps its color bar; an event shown as free is an outline alone.
+            surface.color.setFill()
             box.fill()
-            bar.withAlphaComponent(0.6).setStroke()
-            let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 5.5, yRadius: 5.5)
-            edge.lineWidth = 1
+            let width: CGFloat = e.isUnanswered ? 1 : 1.5
+            let edge = NSBezierPath(roundedRect: r.insetBy(dx: width / 2, dy: width / 2), xRadius: 6 - width / 2, yRadius: 6 - width / 2)
+            edge.lineWidth = width
+            bar.setStroke()
             edge.stroke()
+            if e.isUnanswered {
+                cg.saveGState()
+                box.addClip()
+                bar.setFill()
+                CGRect(x: r.minX, y: r.minY, width: 3, height: r.height).fill()
+                cg.restoreGState()
+            }
         } else {
-            (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .fill)).setFill()
+            (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .fill, on: surface)).setFill()
             box.fill()
             cg.saveGState()
             box.addClip()
             if e.isTentative, !e.isAway {
-                Theme.bg.setStroke()
+                surface.color.setStroke()
                 let stripes = NSBezierPath()
                 stripes.lineWidth = 3.5
                 var x = r.minX
@@ -871,29 +1061,23 @@ final class HourCanvas: CanvasView {
             CGRect(x: r.minX, y: r.minY, width: 3, height: r.height).fill()
             cg.restoreGState()
         }
-        EventStyle.drawText(e, in: r, cg: cg)
         cg.restoreGState()
-        if e.id == content.selectedID {
-            Theme.accent.setStroke()
-            let ring = NSBezierPath(roundedRect: r.insetBy(dx: -1.5, dy: -1.5), xRadius: 7.5, yRadius: 7.5)
-            ring.lineWidth = 2
-            ring.stroke()
-        }
+        EventStyle.drawText(e, in: r, now: content.now, cg: cg)
     }
 
-    /// The editor's draft: dashed in its calendar's color, ringed with the
-    /// accent, with its title and times.
     private func rect(_ d: DraftBlock) -> CGRect {
         let hh = CalendarLayout.hourHeight
         return CGRect(x: content.gutter + CGFloat(d.day) * columnWidth + 3, y: d.top / 60 * hh + 1,
                       width: max(columnWidth - 7, 4), height: max(16, (d.bottom - d.top) / 60 * hh - 2))
     }
 
-    private func drawDraft(_ d: DraftBlock, cg: CGContext) {
+    /// A block that isn't saved yet: dashed in its calendar's color, with
+    /// its title and times, and the accent ring when `ringed`.
+    private func drawDraft(_ d: DraftBlock, ringed: Bool, times: Bool = true, cg: CGContext) {
         let r = rect(d)
-        let bar = CalendarColor.color(d.color, .bar)
+        let bar = CalendarColor.color(d.color, .bar, on: content.surface)
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-        Theme.bg.setFill()
+        content.surface.color.setFill()
         box.fill()
         bar.withAlphaComponent(0.12).setFill()
         box.fill()
@@ -902,15 +1086,12 @@ final class HourCanvas: CanvasView {
         edge.setLineDash([4, 3], count: 2, phase: 0)
         bar.withAlphaComponent(0.85).setStroke()
         edge.stroke()
-        let ring = NSBezierPath(roundedRect: r.insetBy(dx: -3, dy: -3), xRadius: 8.5, yRadius: 8.5)
-        ring.lineWidth = 2
-        Theme.accent.setStroke()
-        ring.stroke()
+        if ringed { EventStyle.ring(r, radius: 5.5, gap: 3) }
         cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         let width = r.width - 12
         guard width > 14 else { return }
         var top = r.minY + (r.height < 30 ? 1 : 3)
-        for (text, font, color) in [(d.title, EventStyle.titleFont, Theme.text), (d.range, EventStyle.timeFont, Theme.text2)] {
+        for (text, font, color) in [(d.title, EventStyle.titleFont, Theme.text), (d.range, EventStyle.timeFont, Theme.text2)].prefix(times ? 2 : 1) {
             guard top + 12 <= r.maxY + 2 else { break }
             let attributed = NSAttributedString(string: text, attributes: [.font: font, kCTForegroundColorFromContextAttributeName as NSAttributedString.Key: true])
             var line = CTLineCreateWithAttributedString(attributed)
@@ -923,6 +1104,28 @@ final class HourCanvas: CanvasView {
             CTLineDraw(line, cg)
             top += 14
         }
+    }
+
+    /// The times of a block that is dragged or moved with the keys, in a
+    /// tag above it, or below it at the top of the view. The block itself
+    /// has room for them only from 45 minutes up.
+    private func drawTimes(_ d: DraftBlock, visible: CGRect, cg: CGContext) {
+        let r = rect(d)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: d.range, attributes: [
+            .font: EventStyle.timeFont, kCTForegroundColorFromContextAttributeName as NSAttributedString.Key: true,
+        ]))
+        let size = CGSize(width: ceil(CTLineGetTypographicBounds(line, nil, nil, nil)) + 12, height: 18)
+        let above = r.minY - size.height - 5
+        let tag = CGRect(x: min(r.minX, bounds.width - size.width - 4), y: above < visible.minY + 2 ? r.maxY + 5 : above, width: size.width, height: size.height)
+        let shape = NSBezierPath(roundedRect: tag, xRadius: Theme.radiusKey, yRadius: Theme.radiusKey)
+        Theme.raise.setFill()
+        shape.fill()
+        Theme.line.setStroke()
+        NSBezierPath(roundedRect: tag.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.radiusKey - 0.5, yRadius: Theme.radiusKey - 0.5).stroke()
+        cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        cg.setFillColor(Theme.text.cgColor)
+        cg.textPosition = CGPoint(x: tag.minX + 6, y: tag.minY + 13)
+        CTLineDraw(line, cg)
     }
 
     /// Tells SwiftUI where the selected event is, for the detail card.
@@ -1050,6 +1253,16 @@ final class HourCanvas: CanvasView {
         drop?(dropped)
     }
 
+    /// Without the press, the rest of the drag and its mouse-up do nothing.
+    func cancelDrag() -> Bool {
+        guard press?.moving == true else { return false }
+        press = nil
+        NSCursor.arrow.set()
+        window?.invalidateCursorRects(for: self)
+        needsDisplay = true
+        return true
+    }
+
     /// The middle of the first event in sight, in window coordinates, where
     /// the bench starts its drag.
     var firstEventPoint: CGPoint? {
@@ -1103,13 +1316,14 @@ nonisolated final class EventElement: NSAccessibilityElement {
     private let open: @MainActor @Sendable () -> Void
     private let place: @MainActor @Sendable () -> CGRect
 
-    init(label: String, identifier: String, place: @escaping @MainActor @Sendable () -> CGRect, open: @escaping @MainActor @Sendable () -> Void) {
+    init(label: String, identifier: String, value: String? = nil, place: @escaping @MainActor @Sendable () -> CGRect, open: @escaping @MainActor @Sendable () -> Void) {
         self.open = open
         self.place = place
         super.init()
         setAccessibilityRole(.button)
         setAccessibilityLabel(label)
         setAccessibilityIdentifier(identifier)
+        if let value { setAccessibilityValue(value) }
     }
 
     override func accessibilityFrame() -> NSRect {

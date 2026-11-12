@@ -17,7 +17,8 @@ final class Journeys: XCTestCase {
             throw XCTSkip("No test data in \(folder); run the UI tests with scripts/ui-tests.sh")
         }
         let app = XCUIApplication()
-        app.launchArguments = ["-JoltaTestData", name] + arguments
+        // The hours open around now; the journeys click events of the working day at any hour.
+        app.launchArguments = ["-JoltaTestData", name, "-JoltaFirstHour", "7.5"] + arguments
         app.launch()
         addTeardownBlock { @MainActor in app.terminate() }
         // With another Jolta running (the one installed on this Mac) the test
@@ -969,7 +970,8 @@ final class Journeys: XCTestCase {
     /// edge makes it 30 minutes longer. Three ⌥↓ presses save once, so one Z
     /// takes all three back, and ⌥↑ moves it 15 minutes earlier. ⌥-drag
     /// copies an event without its meeting link. Dragging a meeting with
-    /// guests asks which events, then Send an update?, where Return sends.
+    /// guests asks which events, then Send an update?, where Esc puts the
+    /// meeting back without opening the editor and Return sends.
     func testGridDragAndKeys() throws {
         let app = try launch()
         app.typeKey("2", modifierFlags: .command)
@@ -1001,7 +1003,11 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(longer.waitForExistence(timeout: 5), "dragging its bottom edge makes it 30 minutes longer")
 
         longer.click()
-        for _ in 0..<3 { app.typeKey(.downArrow, modifierFlags: .option) }
+        // ⌥ held once, as a person holds it: a ⌥ tapped twice in a row is
+        // another app's shortcut on some Macs, and it takes the keys after it.
+        XCUIElement.perform(withKeyModifiers: .option) {
+            for _ in 0..<3 { app.typeKey(.downArrow, modifierFlags: []) }
+        }
         XCTAssertTrue(event("Grid check, 11:45 to 13:15").waitForExistence(timeout: 5), "three ⌥↓ move it 45 minutes")
         app.typeKey("z", modifierFlags: [])
         XCTAssertTrue(longer.waitForExistence(timeout: 5), "and were one save: one Z takes all three back")
@@ -1043,6 +1049,16 @@ final class Journeys: XCTestCase {
         app.typeKey("1", modifierFlags: [])
         let dialog = app.descendants(matching: .any).matching(identifier: "send-dialog").firstMatch
         XCTAssertTrue(dialog.waitForExistence(timeout: 5), "then Send an update?, never a toast alone")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Esc closes it")
+        XCTAssertFalse(app.textFields["editor-title"].waitForExistence(timeout: 2), "without opening the editor at the new time")
+        let atOne = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Team sync, 13:00 to 13:30"))
+        XCTAssertTrue(waitUntil { atOne.count == 7 }, "and the meeting is back at 13:00 like the week's other six")
+
+        held.click(forDuration: 0.1, thenDragTo: held.withOffset(CGVector(dx: 0, dy: 48)))
+        XCTAssertTrue(prompt.waitForExistence(timeout: 5))
+        app.typeKey("1", modifierFlags: [])
+        XCTAssertTrue(dialog.waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(dialog.waitForNonExistence(timeout: 5), "Return sends")
         XCTAssertTrue(text(app, "Update sent to 2 people").waitForExistence(timeout: 5), "the toast offers Undo while the update waits")
@@ -1070,6 +1086,156 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(prompt.waitForExistence(timeout: 5))
         app.typeKey("1", modifierFlags: [])
         XCTAssertTrue(waitUntil { line.frame.minX < day.minX - 50 }, "month view moves it a day earlier too")
+    }
+
+    /// More all-day events on a day than the row above the hours has lanes
+    /// for: the day says "+N" under its lanes. A click on it opens that day,
+    /// where every one shows. The arrow keys reach it too, and Return opens
+    /// the day from there.
+    func testAllDayOverflow() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        let names = (1...4).map { "Offsite \($0)" }
+        let field = app.textFields["editor-title"]
+        for name in names {
+            app.typeKey("c", modifierFlags: [])
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "C opens the editor")
+            field.typeText(name)
+            app.checkBoxes["All day"].click()
+            app.typeKey(.return, modifierFlags: .command)
+            XCTAssertTrue(field.waitForNonExistence(timeout: 5), "⌘↩ saves \(name)")
+        }
+        let week = title.label
+        let more = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "more-")).firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5), "the day says how many all-day events have no lane")
+        let shown = names.filter { event($0 + ", all day").exists }
+        XCTAssertLessThan(shown.count, names.count, "the week has no lane for at least one")
+
+        more.click()
+        XCTAssertTrue(waitUntil { title.label != week }, "a click on +N opens that day")
+        for name in names { XCTAssertTrue(event(name + ", all day").waitForExistence(timeout: 5), "the day view shows \(name)") }
+
+        app.typeKey("w", modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label == week }, "W is the week again")
+        event(try XCTUnwrap(shown.first, "one has a lane") + ", all day").click()
+        let selected = { (more.value as? String) == "selected" }
+        // The events without a lane come before or after the clicked one in the day's order.
+        for key in Array(repeating: XCUIKeyboardKey.downArrow, count: 6) + Array(repeating: .upArrow, count: 10) where !selected() {
+            app.typeKey(key, modifierFlags: [])
+            RunLoop.current.run(until: Date() + 0.3)
+        }
+        XCTAssertTrue(selected(), "the arrow keys reach +N")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label != week }, "Return on +N opens that day")
+    }
+
+    /// An event saved outside the hours on screen is selected, and the hours
+    /// scroll to it: 05:00 is above the first hour the journeys open on,
+    /// 23:00 below the window.
+    func testSelectionScrollsIntoView() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        // An event scrolled out of sight keeps a frame, above the day names
+        // or below the key hints: in sight is between the two.
+        let window = app.windows.firstMatch.frame
+        let inSight = { (e: XCUIElement) in e.frame.minY > window.minY + 120 && e.frame.maxY < window.maxY - 30 }
+        for (name, time) in [("Early call", "0500"), ("Late call", "2300")] {
+            app.typeKey("c", modifierFlags: [])
+            let title = app.textFields["editor-title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+            title.typeText(name)
+            let start = app.textFields["editor-start"]
+            start.click()
+            app.typeKey("a", modifierFlags: .command)
+            start.typeText(time)
+            app.typeKey(.return, modifierFlags: .command)
+            XCTAssertTrue(title.waitForNonExistence(timeout: 5), "⌘↩ saves \(name)")
+            let saved = event(name + ",")
+            XCTAssertTrue(saved.waitForExistence(timeout: 5))
+            XCTAssertTrue(waitUntil { inSight(saved) }, "the hours scroll to \(name), which is selected")
+        }
+        // Back to the early one with the keys: ↑ from the late call walks the day.
+        let early = event("Early call,")
+        XCTAssertFalse(inSight(early), "the early call is out of sight while the late one shows")
+        for _ in 0..<12 where !inSight(early) { app.typeKey(.upArrow, modifierFlags: []) }
+        XCTAssertTrue(waitUntil { inSight(early) }, "↑ to an event out of sight scrolls to it")
+    }
+
+    /// Delete on a selected event moves the selection to the event nearest
+    /// in time, so the next key acts on it: E opens it in the editor.
+    func testDeleteSelectsNeighbour() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Throwaway")
+        app.typeKey(.return, modifierFlags: .command)
+        let made = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Throwaway,")).firstMatch
+        XCTAssertTrue(made.waitForExistence(timeout: 5), "⌘↩ saves it, selected")
+        app.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(made.waitForNonExistence(timeout: 5), "⌫ deletes it")
+        app.typeKey("e", modifierFlags: [])
+        let editor = app.descendants(matching: .any).matching(identifier: "event-editor").firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), "E opens the neighbour that took the selection")
+        let neighbour = app.descendants(matching: .any).matching(identifier: "editor-title").firstMatch
+        XCTAssertNotEqual(neighbour.value as? String, "Throwaway")
+    }
+
+    /// The editor without the mouse. ⇧⌘C puts the keyboard on the calendar,
+    /// where ↓ picks the next one, and Esc then asks before discarding a new
+    /// event whose calendar was changed. ⇧⌘A switches All day on and off.
+    /// After the repeat popover closes, typing goes on in the field it left.
+    func testEditorWithoutTheMouse() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        let calendar = app.descendants(matching: .any).matching(identifier: "editor-calendar").firstMatch
+        let first = calendar.title
+        app.typeKey("c", modifierFlags: [.command, .shift])
+        app.typeKey(.downArrow, modifierFlags: [])
+        if calendar.title == first { app.typeKey(.upArrow, modifierFlags: []) }
+        XCTAssertTrue(waitUntil { calendar.title != first }, "⇧⌘C and an arrow key pick another calendar: \(calendar.title)")
+        app.typeKey(.escape, modifierFlags: [])
+        let discard = app.buttons["Discard"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 5), "Esc asks before dropping a new event whose calendar was changed")
+        discard.click()
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+
+        app.typeKey("c", modifierFlags: [])
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let allDay = app.checkBoxes["All day"]
+        let start = app.textFields["editor-start"]
+        XCTAssertTrue(start.exists, "a new event has a start time")
+        app.typeKey("a", modifierFlags: [.command, .shift])
+        XCTAssertTrue(start.waitForNonExistence(timeout: 5), "⇧⌘A makes it all day")
+        XCTAssertEqual(allDay.value as? Int, 1)
+        app.typeKey("a", modifierFlags: [.command, .shift])
+        XCTAssertTrue(start.waitForExistence(timeout: 5), "and timed again")
+
+        title.click()
+        title.typeText("Plan")
+        app.typeKey("r", modifierFlags: .command)
+        let popover = app.descendants(matching: .any).matching(identifier: "repeat-popover").firstMatch
+        XCTAssertTrue(popover.waitForExistence(timeout: 5), "⌘R opens the repeat popover")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Esc closes it")
+        app.typeText("ning")
+        XCTAssertTrue(waitUntil { (title.value as? String) == "Planning" }, "typing goes on in the title: \(title.value as? String ?? "")")
+        app.typeKey(.escape, modifierFlags: [])
+        if discard.waitForExistence(timeout: 3) { discard.click() }
     }
 
     /// A meeting in a calendar on this Mac, whose invitations Jolta mails

@@ -127,7 +127,7 @@ struct RoomPicker: View {
         if let asking {
             message(asking, nil, action: nil)
         } else if let failure {
-            message("Couldn't read the rooms", failure, action: nil)
+            message("Couldn't read the rooms", failure, action: ("Try Again", { self.failure = nil; Task { await load() } }))
         } else if let outcome {
             switch outcome.access {
             case .refused(let reason):
