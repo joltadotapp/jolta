@@ -3,12 +3,14 @@ import SwiftUI
 /// Settings › Appearance: a theme for each macOS appearance, or one theme
 /// always. The page answers the arrow keys on its own, so it works from the
 /// keyboard without macOS's keyboard navigation: ↑↓ move between the rows,
-/// ←→ change the one marked.
+/// ←→ change the one marked. The settings window gives it the keyboard.
 struct AppearanceSettings: View {
+    let focus: FocusState<SettingsFocus?>.Binding
     private let store = ThemeStore.shared
     @Environment(\.colorScheme) private var scheme
-    @FocusState private var focused: Bool
     @State private var marked = Row.follow
+
+    private var focused: Bool { focus.wrappedValue == .page }
 
     private enum Row: Hashable { case follow, light, dark, always }
 
@@ -39,7 +41,7 @@ struct AppearanceSettings: View {
                                        icon: "paintpalette", selected: choice.fixed != nil) { follow(false) }
                         }
                     }
-                    .modifier(Marked(on: focused && current == .follow))
+                    .modifier(MarkedSettingsRow(on: focused && current == .follow))
                     if let fixed = choice.fixed {
                         themeRow(.always, title: "Theme", detail: "Every theme, light and dark.", selected: fixed)
                     } else {
@@ -57,7 +59,7 @@ struct AppearanceSettings: View {
                 .opacity(focused ? 1 : 0)
             }
             .focusable()
-            .focused($focused)
+            .focused(focus, equals: .page)
             .focusEffectDisabled()
             .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow]) { press in
                 switch press.key {
@@ -68,7 +70,6 @@ struct AppearanceSettings: View {
                 }
                 return .handled
             }
-            .onAppear { focused = true }
         }
     }
 
@@ -90,7 +91,7 @@ struct AppearanceSettings: View {
             }
             .settingsMenu()
         }
-        .modifier(Marked(on: focused && current == row))
+        .modifier(MarkedSettingsRow(on: focused && current == row))
     }
 
     private func choose(_ theme: ThemePalette, in row: Row) {
@@ -135,7 +136,7 @@ struct AppearanceSettings: View {
 }
 
 /// The row the arrow keys change: filled, with the accent marker the palette uses.
-private struct Marked: ViewModifier {
+struct MarkedSettingsRow: ViewModifier {
     let on: Bool
 
     func body(content: Content) -> some View {

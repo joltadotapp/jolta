@@ -393,6 +393,8 @@ struct NavRow: View {
     let title: String
     let count: Int
     let selected: Bool
+    /// The keyboard is on the selected row, which then shows the caret.
+    var marked = false
     var indent: CGFloat = 0
     let action: () -> Void
     @State private var hovering = false
@@ -421,8 +423,8 @@ struct NavRow: View {
             .padding(.trailing, 10)
             .frame(height: 28)
             .contentShape(Rectangle())
-            // The sidebar's selection is not where the keyboard is, so no caret.
-            .selectedRow(selected, marked: false, hovering: hovering)
+            // The mail sidebar's selection is not where the keyboard is, so no caret.
+            .selectedRow(selected, marked: marked, hovering: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

@@ -5,11 +5,12 @@ import SwiftUI
 /// Mac (downloaded here), or the user's own OpenAI or Anthropic account.
 struct AISettings: View {
     let model: AppModel
+    let focus: FocusState<SettingsFocus?>.Binding
 
     var body: some View {
         SettingsScroll {
             SettingsSection("Model", footer: footer) {
-                SettingsBlock { ProviderPicker(model: model) }
+                ProviderPicker(model: model, focus: focus)
             }
             switch model.ai.provider {
             case .local: LocalModels(model: model)
@@ -45,9 +46,12 @@ struct AISettings: View {
     }
 }
 
-/// Off, this Mac, OpenAI or Anthropic, as four tiles.
+/// Off, this Mac, OpenAI or Anthropic, as four tiles. The row has the
+/// keyboard when the page opens, and ← and → move the choice, as on the
+/// Appearance page.
 private struct ProviderPicker: View {
     let model: AppModel
+    let focus: FocusState<SettingsFocus?>.Binding
 
     private struct Choice: Identifiable {
         let provider: AiProvider?
@@ -65,13 +69,29 @@ private struct ProviderPicker: View {
     ]
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(choices) { choice in
-                ChoiceCard(title: choice.title, detail: choice.detail, icon: choice.icon, selected: model.ai.provider == choice.provider) {
-                    model.saveAI { $0.provider = choice.provider; $0.sortMail = nil }
+        SettingsBlock {
+            HStack(spacing: 8) {
+                ForEach(choices) { choice in
+                    ChoiceCard(title: choice.title, detail: choice.detail, icon: choice.icon, selected: model.ai.provider == choice.provider) {
+                        choose(choice)
+                    }
                 }
             }
         }
+        .modifier(MarkedSettingsRow(on: focus.wrappedValue == .page))
+        .focusable()
+        .focused(focus, equals: .page)
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
+            let i = choices.firstIndex { $0.provider == model.ai.provider } ?? 0
+            let next = min(max(i + (press.key == .leftArrow ? -1 : 1), 0), choices.count - 1)
+            if next != i { choose(choices[next]) }
+            return .handled
+        }
+    }
+
+    private func choose(_ choice: Choice) {
+        model.saveAI { $0.provider = choice.provider; $0.sortMail = nil }
     }
 }
 

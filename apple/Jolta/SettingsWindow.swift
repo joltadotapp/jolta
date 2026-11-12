@@ -7,13 +7,21 @@ enum SettingsPage: Hashable {
     case general, appearance, account(Int64), calendar, sections, vips, snippets, ai, agents, activity, about
 }
 
+/// Where the keyboard is in the settings window: the search field, the
+/// list of pages, or the open page's own arrow-key rows (Appearance, AI).
+enum SettingsFocus: Hashable { case search, pages, page }
+
 /// The settings window: pages in a searchable sidebar on the left, the
-/// open page on the right as titled sections of rows.
+/// open page on the right as titled sections of rows. ↑ and ↓ walk through
+/// the pages, or through a search's matches, where Return opens the one
+/// marked.
 struct SettingsView: View {
     let model: AppModel?
     @State private var page = SettingsPage.general
     @State private var search = ""
-    @FocusState private var searching: Bool
+    @FocusState private var focus: SettingsFocus?
+    /// The search match Return opens.
+    @State private var marked = 0
     @State private var addingIMAP = false
     @State private var signingIn = false
     @State private var status: String?
@@ -96,15 +104,15 @@ struct SettingsView: View {
         .font(.system(size: 13))
         .ignoresSafeArea()
         .frame(minWidth: 860, minHeight: 560)
-        .background { Button("") { searching = true }.keyboardShortcut("f").hidden() }
-        .onAppear(perform: takeRequest)
+        .background { Button("") { focus = .search }.keyboardShortcut("f").hidden() }
+        .onAppear { show(model?.settingsRequest ?? page) }
         .onChange(of: model?.settingsRequest) { takeRequest() }
         .sheet(isPresented: $addingIMAP) {
             AddIMAPAccount(model: model) { added in
                 addingIMAP = false
                 if let added {
                     status = "Added \(added.address). Jolta is syncing it now."
-                    page = .account(added.id)
+                    show(.account(added.id))
                 }
             }
         }
@@ -112,19 +120,45 @@ struct SettingsView: View {
 
     /// Shows the page another window asked for.
     private func takeRequest() {
-        guard let request = model?.settingsRequest else { return }
-        page = request
+        if let request = model?.settingsRequest { show(request) }
+    }
+
+    /// Opens a page and gives the sidebar the keyboard, so ↑ and ↓ move on
+    /// from it. Appearance and AI answer the arrow keys themselves and get
+    /// the keyboard as they open, unless the arrow keys are walking past.
+    /// Return in the search field (`searching`) otherwise leaves the keyboard there.
+    private func show(_ next: SettingsPage, walking: Bool = false, searching: Bool = false) {
+        page = next
         model?.settingsRequest = nil
+        let target: SettingsFocus? = walking ? .pages : [.appearance, .ai].contains(next) ? .page : searching ? nil : .pages
+        // On the next turn, when the page is in the window.
+        if let target { DispatchQueue.main.async { focus = target } }
+    }
+
+    /// ↑ and ↓: the next page, or the next match while a search shows.
+    private func step(_ delta: Int) {
+        if search.isEmpty {
+            let pages = groups.flatMap(\.items).map(\.page)
+            guard let i = pages.firstIndex(of: page) else { return }
+            show(pages[min(max(i + delta, 0), pages.count - 1)], walking: true)
+        } else {
+            marked = min(max(marked + delta, 0), max(filtered.count - 1, 0))
+        }
+    }
+
+    private func openMarked(walking: Bool = false) {
+        let matches = filtered
+        if matches.indices.contains(marked) { show(matches[marked].page, walking: walking, searching: true) }
     }
 
     @ViewBuilder private var content: some View {
         if let model {
             switch page {
             case .general: GeneralSettings(model: model)
-            case .appearance: AppearanceSettings()
+            case .appearance: AppearanceSettings(focus: $focus)
             case .account(let id):
                 if let section = model.accounts.first(where: { $0.id == id }) {
-                    AccountPage(model: model, section: section) { page = .general }.id(id)
+                    AccountPage(model: model, section: section) { show(.general) }.id(id)
                 } else {
                     SettingsScroll { Text("This account was removed.").foregroundStyle(Color(Theme.text3)) }
                 }
@@ -132,7 +166,7 @@ struct SettingsView: View {
             case .sections: SectionsSettings(model: model)
             case .vips: VIPSettings(model: model)
             case .snippets: SnippetsSettings(model: model)
-            case .ai: AISettings(model: model)
+            case .ai: AISettings(model: model, focus: $focus)
             case .agents: AgentsSettings(model: model)
             case .activity: ActivitySettings(model: model)
             case .about: AboutSettings(model: model)
@@ -150,12 +184,15 @@ struct SettingsView: View {
                 Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 TextField("Search", text: $search)
                     .textFieldStyle(.plain)
-                    .focused($searching)
-                    .onSubmit { if let first = filtered.first { page = first.page } }
-                    .onExitCommand { search = ""; searching = false }
-                if !searching && search.isEmpty { KeyCap(key: "⌘F") }
+                    .focused($focus, equals: .search)
+                    .onSubmit { openMarked() }
+                    .onExitCommand { search = ""; focus = .pages }
+                    .onKeyPress(.downArrow) { step(1); return .handled }
+                    .onKeyPress(.upArrow) { step(-1); return .handled }
+                    .onChange(of: search) { marked = 0 }
+                if focus != .search && search.isEmpty { KeyCap(key: "⌘F") }
             }
-            .fieldBox(focused: searching)
+            .fieldBox(focused: focus == .search)
             .padding(.horizontal, 12)
             .padding(.bottom, 6)
             ScrollView {
@@ -168,7 +205,12 @@ struct SettingsView: View {
                         }
                     } else {
                         Spacer().frame(height: 8)
-                        ForEach(filtered, id: \.page) { row($0) }
+                        ForEach(Array(filtered.enumerated()), id: \.element.page) { i, item in
+                            NavRow(icon: item.icon, title: item.title, count: 0, selected: i == marked, marked: true) {
+                                marked = i
+                                show(item.page)
+                            }
+                        }
                         if filtered.isEmpty {
                             Text("No settings match “\(search)”")
                                 .font(.system(size: 12))
@@ -181,6 +223,14 @@ struct SettingsView: View {
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.never)
+            .focusable()
+            .focused($focus, equals: .pages)
+            .focusEffectDisabled()
+            .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                step(press.key == .upArrow ? -1 : 1)
+                if !search.isEmpty { openMarked(walking: true) }
+                return .handled
+            }
             if let status {
                 Text(status)
                     .font(.system(size: 11))
@@ -196,8 +246,9 @@ struct SettingsView: View {
         return groups.flatMap(\.items).filter { "\($0.title) \($0.keywords)".lowercased().contains(needle) }
     }
 
+    /// The open page's row carries the caret while the arrow keys move it.
     private func row(_ item: Item) -> some View {
-        NavRow(icon: item.icon, title: item.title, count: 0, selected: page == item.page) { page = item.page }
+        NavRow(icon: item.icon, title: item.title, count: 0, selected: page == item.page, marked: focus == .pages) { show(item.page) }
     }
 
     private var addAccount: some View {
@@ -231,7 +282,7 @@ struct SettingsView: View {
                 let account = try await session.finish()
                 status = "Signed in as \(account.address)."
                 model?.reloadAccounts()
-                page = .account(account.id)
+                show(.account(account.id))
             } catch {
                 status = "Sign-in failed: \(error)"
             }
