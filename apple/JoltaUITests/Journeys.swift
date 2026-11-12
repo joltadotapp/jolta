@@ -1005,6 +1005,64 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil { title.label != week }, "Return on +N opens that day")
     }
 
+    /// An event saved outside the hours on screen is selected, and the hours
+    /// scroll to it: 05:00 lies above the first hour the week opens on in the
+    /// daytime, and below the window at night.
+    func testSelectionScrollsIntoView() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        // An event scrolled out of sight keeps a frame, above the day names
+        // or below the key hints: in sight is between the two.
+        let window = app.windows.firstMatch.frame
+        let inSight = { (e: XCUIElement) in e.frame.minY > window.minY + 120 && e.frame.maxY < window.maxY - 30 }
+        for (name, time) in [("Early call", "0500"), ("Late call", "2300")] {
+            app.typeKey("c", modifierFlags: [])
+            let title = app.textFields["editor-title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+            title.typeText(name)
+            let start = app.textFields["editor-start"]
+            start.click()
+            app.typeKey("a", modifierFlags: .command)
+            start.typeText(time)
+            app.typeKey(.return, modifierFlags: .command)
+            XCTAssertTrue(title.waitForNonExistence(timeout: 5), "⌘↩ saves \(name)")
+            let saved = event(name + ",")
+            XCTAssertTrue(saved.waitForExistence(timeout: 5))
+            XCTAssertTrue(waitUntil { inSight(saved) }, "the hours scroll to \(name), which is selected")
+        }
+        // Back to the early one with the keys: ↑ from the late call walks the day.
+        let early = event("Early call,")
+        XCTAssertFalse(inSight(early), "the early call is out of sight while the late one shows")
+        for _ in 0..<8 where !inSight(early) { app.typeKey(.upArrow, modifierFlags: []) }
+        XCTAssertTrue(waitUntil { inSight(early) }, "↑ to an event out of sight scrolls to it")
+    }
+
+    /// Delete on a selected event moves the selection to the event nearest
+    /// in time, so the next key acts on it: E opens it in the editor.
+    func testDeleteSelectsNeighbour() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        title.typeText("Throwaway")
+        app.typeKey(.return, modifierFlags: .command)
+        let made = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Throwaway,")).firstMatch
+        XCTAssertTrue(made.waitForExistence(timeout: 5), "⌘↩ saves it, selected")
+        app.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(made.waitForNonExistence(timeout: 5), "⌫ deletes it")
+        app.typeKey("e", modifierFlags: [])
+        let editor = app.descendants(matching: .any).matching(identifier: "event-editor").firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), "E opens the neighbour that took the selection")
+        let neighbour = app.descendants(matching: .any).matching(identifier: "editor-title").firstMatch
+        XCTAssertNotEqual(neighbour.value as? String, "Throwaway")
+    }
+
     /// A meeting in a calendar on this Mac, whose invitations Jolta mails
     /// itself: the first save asks once which account sends them, Return
     /// takes the first, and Send invitations? names it and has a message
