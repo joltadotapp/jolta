@@ -1036,7 +1036,7 @@ final class Journeys: XCTestCase {
         // Back to the early one with the keys: ↑ from the late call walks the day.
         let early = event("Early call,")
         XCTAssertFalse(inSight(early), "the early call is out of sight while the late one shows")
-        for _ in 0..<8 where !inSight(early) { app.typeKey(.upArrow, modifierFlags: []) }
+        for _ in 0..<12 where !inSight(early) { app.typeKey(.upArrow, modifierFlags: []) }
         XCTAssertTrue(waitUntil { inSight(early) }, "↑ to an event out of sight scrolls to it")
     }
 

@@ -467,6 +467,12 @@ final class CalendarModel {
         for grid in grids.allObjects { grid.update() }
     }
 
+    /// After the keys or a save moved the selection: the hours scroll to it.
+    /// A click doesn't, as its event is under the pointer already.
+    private func showSelection() {
+        for grid in grids.allObjects { grid.revealSelection() }
+    }
+
     /// After calendars or their events changed: the period, the mini
     /// month's dots, today, the next meeting and the reminders.
     func refresh() {
@@ -603,6 +609,7 @@ final class CalendarModel {
     /// the next period. Without a selection, the first event at or after now
     /// (or the period's first) is selected.
     func moveSelection(_ key: SelectionMove) {
+        defer { showSelection() }
         guard let current = selected, let dayIndex = days.firstIndex(where: { dayEvents($0).contains(current) }) else {
             if key == .left || key == .right, selectedID == nil { return shift(key == .right ? 1 : -1) }
             selectFirst()
@@ -655,6 +662,7 @@ final class CalendarModel {
     func openSelected() {
         if selected == nil { selectFirst() }
         guard let event = selected else { return }
+        defer { showSelection() }
         // Behind a day's "+N": Return opens that day, where every lane shows.
         if behindMore.contains(event.id), let day = days.first(where: { dayEvents($0).contains(event) }) {
             return openDay(day, keeping: event.id)
@@ -711,6 +719,7 @@ final class CalendarModel {
         let match = events.first { $0.record.eventId == eventID && (time == nil || $0.record.time == time) }
             ?? events.first { $0.record.eventId == eventID }
         if let match { openDetail(match) }
+        showSelection()
     }
 
     /// Styles for the description document in the detail.
@@ -961,6 +970,7 @@ final class CalendarModel {
             refresh()
             let mine = events.filter { $0.record.uid == saved.uid && $0.record.calendarId == (draft.moveTo ?? draft.calendarId) }
             if let event = mine.first(where: { $0.record.time == draft.time }) ?? mine.first { selectedID = event.id }
+            showSelection()
             toast?(saved.message, saved.token)
         } catch {
             failed("\(error)")

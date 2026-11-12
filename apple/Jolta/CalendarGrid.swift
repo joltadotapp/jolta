@@ -358,6 +358,15 @@ final class CalendarWeekView: NSView {
         hours.frame = CGRect(x: 0, y: h, width: bounds.width, height: max(0, bounds.height - h))
     }
 
+    /// Scrolls the hours to the selected event when it is a timed one out of sight.
+    func revealSelection() {
+        guard source == .period else { return }
+        let content = hours.canvas.content
+        let parts = content.placed.filter { $0.event.id == content.selectedID }
+        guard let top = parts.map(\.top).min(), let bottom = parts.map(\.bottom).max() else { return }
+        hours.reveal(from: top / 60 * CalendarLayout.hourHeight, to: bottom / 60 * CalendarLayout.hourHeight)
+    }
+
     private func reportSelection() {
         let frame = stripFrame.map { convert($0, from: strip) } ?? gridFrame.map { convert($0, from: hours.canvas) }
         guard reported != .some(frame) else { return }
@@ -744,6 +753,26 @@ final class HourScrollView: NSScrollView {
     }
 
     @objc private func scrolled() { follow() }
+
+    private func scroll(to y: CGFloat) {
+        let top = max(0, min(y, document.frame.height - contentView.bounds.height))
+        guard abs(top - contentView.bounds.minY) > 0.5 else { return }
+        contentView.scroll(to: NSPoint(x: 0, y: top))
+        reflectScrolledClipView(contentView)
+    }
+
+    /// Scrolls as little as it takes to show the day from `top` to `bottom`
+    /// (points from midnight) with some room around it; something taller
+    /// than the view shows its start.
+    func reveal(from top: CGFloat, to bottom: CGFloat) {
+        let visible = contentView.bounds, room: CGFloat = 24
+        guard visible.height > 0 else { return }
+        if top - room < visible.minY {
+            scroll(to: top - room)
+        } else if bottom + room > visible.maxY {
+            scroll(to: min(top - room, bottom + room - visible.height))
+        }
+    }
 
     /// Keeps the canvas over the visible part of the day.
     private func follow() {
