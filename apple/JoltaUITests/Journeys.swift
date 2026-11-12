@@ -885,7 +885,11 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(longer.waitForExistence(timeout: 5), "dragging its bottom edge makes it 30 minutes longer")
 
         longer.click()
-        for _ in 0..<3 { app.typeKey(.downArrow, modifierFlags: .option) }
+        // ⌥ held once, as a person holds it: a ⌥ tapped twice in a row is
+        // another app's shortcut on some Macs, and it takes the keys after it.
+        XCUIElement.perform(withKeyModifiers: .option) {
+            for _ in 0..<3 { app.typeKey(.downArrow, modifierFlags: []) }
+        }
         XCTAssertTrue(event("Grid check, 11:45 to 13:15").waitForExistence(timeout: 5), "three ⌥↓ move it 45 minutes")
         app.typeKey("z", modifierFlags: [])
         XCTAssertTrue(longer.waitForExistence(timeout: 5), "and were one save: one Z takes all three back")
