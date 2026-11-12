@@ -7,6 +7,7 @@ extension AppModel {
         calendar.onChange = { [weak self] in self?.scheduleReminders() }
         calendar.toast = { [weak self] text, token in self?.notify(text, calendarUndo: token) }
         calendar.openCompose = { [weak self] compose in self?.openCompose(compose) }
+        calendar.answer = { [weak self] event, answer in self?.answer(event, with: answer) }
         notifier.onOpenEvent = { [weak self] id, fireAt in
             guard let self else { return }
             showMainWindow()
@@ -29,6 +30,7 @@ extension AppModel {
         }
         // Launch arguments for checking the calendar from scripts:
         // `-JoltaMode calendar -JoltaSpan month -JoltaOpenEvent "Design review" -JoltaDayPanel YES`.
+        // `-JoltaFirstHour 7.5` is read by `WeekView`.
         let defaults = UserDefaults.standard
         if let span = defaults.string(forKey: "JoltaSpan").flatMap(CalendarSpan.init(rawValue:)) { calendar.span = span }
         if defaults.string(forKey: "JoltaDayPanel") != nil { showsDayPanel = defaults.bool(forKey: "JoltaDayPanel") }
@@ -171,8 +173,12 @@ extension AppModel {
     /// Y, N and ⇧M: answers the selected event when it is an invitation,
     /// with the detail's default choices.
     private func answerSelectedEvent(_ answer: InvitationAnswer) {
-        guard let event = calendar.selected ?? calendar.detailEvent,
-              let detail = event == calendar.detailEvent ? calendar.detail : try? core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: ""),
+        if let event = calendar.selected ?? calendar.detailEvent { self.answer(event, with: answer) }
+    }
+
+    /// The same for one event, from its right-click menu.
+    private func answer(_ event: CalEvent, with answer: InvitationAnswer) {
+        guard let detail = event == calendar.detailEvent ? calendar.detail : try? core.calendarEvent(eventId: event.record.eventId, time: event.record.time, appCss: ""),
               detail.canAnswer else { return }
         Task { _ = await answerEvent(event.record.eventId, time: event.record.time, answer: answer, choices: AnswerChoices()) }
     }
@@ -192,6 +198,8 @@ extension AppModel {
             return true
         }
         let cal = calendar
+        // Esc during a drag ends the drag; it doesn't also close or deselect.
+        if event.keyCode == 53, cal.cancelDrag() { return true }
         // The repeat popover moves with ↑ and ↓; Return is Done, Esc Cancel.
         if let editor = cal.editor, let picker = editor.repeatPicker, cal.discard == nil {
             switch event.keyCode {
@@ -203,8 +211,10 @@ extension AppModel {
             }
             return true
         }
-        // The editor's fields and buttons take the keys; Esc closes it.
+        // The editor's fields and buttons take the keys, and its stop the
+        // ones a text field isn't there to take; Esc closes it.
         if cal.editor != nil || cal.discard != nil {
+            if cal.discard == nil, cal.editorStopKey(event) { return true }
             guard event.keyCode == 53, cal.discard == nil else { return false }
             cal.closeEditor()
             return true

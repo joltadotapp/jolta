@@ -288,10 +288,7 @@ struct RsvpNotePanel: View {
             TextField("Running ten minutes late", text: $model.answerChoices.note)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .padding(.horizontal, 8)
-                .frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                .fieldBox(focused: focused, fill: Theme.bg)
                 .focused($focused)
                 .onSubmit { model.answerInvitation(standard, message: invitation.messageId) }
                 .onExitCommand { model.rsvpPanel = nil }
@@ -305,28 +302,16 @@ struct RsvpNotePanel: View {
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
                 ForEach(InvitationAnswer.all, id: \.self) { a in
-                    Button { model.answerInvitation(a, message: invitation.messageId) } label: {
-                        HStack(spacing: 5) {
-                            Text(a.title)
-                            if a == standard { Text("↩").foregroundStyle(Color(Theme.text3)) }
-                        }
-                        .font(.system(size: 12, weight: a == standard ? .semibold : .medium))
-                        .padding(.horizontal, 10)
-                        .frame(height: 24)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(a == standard ? Color(Theme.fill) : .clear))
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                        .contentShape(Rectangle())
+                    // Return sends the note with the standard answer.
+                    KitButton(title: a.title, key: a == standard ? "↩" : nil, kind: a == standard ? .primary : .secondary, size: .small) {
+                        model.answerInvitation(a, message: invitation.messageId)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color(Theme.text))
                 }
             }
         }
         .padding(12)
         .frame(width: 300)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
         .onAppear { focused = true }
     }
 }
@@ -388,28 +373,24 @@ struct RsvpProposePanel: View {
             }
             .labelsHidden()
             .datePickerStyle(.field)
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
             HStack {
                 Text(summary)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(valid ? Theme.text3 : Theme.accent))
+                    .foregroundStyle(Color(valid ? Theme.text3 : Theme.accentText))
                 Spacer(minLength: 0)
-                Button("Find a time…") {
+                KitButton(title: "Find a Time…", kind: .quiet, size: .small) {
                     model.findTime(for: .propose(message: invitation.messageId, organizer: invitation.organizer),
                                    minutes: Int64(end.timeIntervalSince(start) / 60))
                 }
-                .buttonStyle(.link)
-                .font(.system(size: 11))
+                .padding(.trailing, -7)
                 .help("See when \(organizer) and the guests are busy")
                 .accessibilityIdentifier("propose-find-time")
             }
             TextField("Note to \(organizer) (optional)", text: $note)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
-                .padding(.horizontal, 8)
-                .frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                .fieldBox(focused: focus == .note, fill: Theme.bg)
                 .focused($focus, equals: .note)
                 .onSubmit { send(.maybe) }
                 .accessibilityIdentifier("propose-note")
@@ -426,9 +407,7 @@ struct RsvpProposePanel: View {
         }
         .padding(12)
         .frame(width: 330)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
         .onExitCommand { model.rsvpPanel = nil }
         .onAppear { if model.findTime == nil { focus = .start } }
         .onDisappear { model.proposedSlot = nil }
@@ -447,23 +426,9 @@ struct RsvpProposePanel: View {
     }
 
     private func answer(_ a: InvitationAnswer, hint: String) -> some View {
-        let main = a == .maybe
-        return Button { send(a) } label: {
-            HStack(spacing: 5) {
-                Text(a.title)
-                Text(hint).foregroundStyle(Color(Theme.text3))
-            }
-            .font(.system(size: 12, weight: main ? .semibold : .medium))
-            .padding(.horizontal, 10)
-            .frame(height: 24)
-            .background(RoundedRectangle(cornerRadius: 6).fill(main ? Color(Theme.fill) : .clear))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Color(Theme.text))
-        .disabled(!valid)
-        .accessibilityIdentifier("propose-\(a.name)")
+        KitButton(title: a.title, key: hint, kind: a == .maybe ? .primary : .secondary, size: .small) { send(a) }
+            .disabled(!valid)
+            .accessibilityIdentifier("propose-\(a.name)")
     }
 
     private func send(_ a: InvitationAnswer) {
@@ -485,9 +450,7 @@ struct RsvpScopePanel: View {
         }
         .padding(4)
         .frame(width: 190)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
     }
 
     private func row(_ title: String, only: Bool) -> some View {
@@ -498,12 +461,13 @@ struct RsvpScopePanel: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).opacity(on ? 1 : 0)
-                Text(title).font(.system(size: 12.5))
+                Text(title).font(.system(size: Theme.body))
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
-            .frame(height: 26)
-            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
+            .frame(height: Theme.control)
+            // The checkmark already marks the row.
+            .selectedRow(on, marked: false, radius: Theme.radiusControl)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -520,6 +484,7 @@ struct EventAnswerRow: View {
     @State private var choices = AnswerChoices()
     @State private var sending: InvitationAnswer?
     @State private var showsNote = false
+    @FocusState private var noteFocused: Bool
 
     private var given: InvitationAnswer? { sending ?? detail.myResponse?.invitationAnswer }
 
@@ -533,9 +498,9 @@ struct EventAnswerRow: View {
                             if on { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
                             Text(on ? a.done : a.title)
                         }
-                        .font(.system(size: 11.5, weight: on ? .semibold : .medium))
+                        .font(.system(size: Theme.small, weight: on ? .semibold : .medium))
                         .padding(.horizontal, 9)
-                        .frame(height: 22)
+                        .frame(height: Theme.controlSmall)
                         .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
                         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(on ? Theme.text3 : Theme.line), lineWidth: 1))
                         .opacity(sending == a ? 0.6 : 1)
@@ -559,9 +524,8 @@ struct EventAnswerRow: View {
                 TextField("Note to \(detail.organizer.map { $0.name.isEmpty ? $0.address : $0.name } ?? "the organizer")", text: $choices.note)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .padding(.horizontal, 7)
-                    .frame(height: 24)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                    .fieldBox(focused: noteFocused, height: Theme.controlSmall)
+                    .focused($noteFocused)
                     .onSubmit { send(given ?? .accept) }
             }
         }

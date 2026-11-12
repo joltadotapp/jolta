@@ -18,7 +18,7 @@ struct JoltaApp: App {
                     ProgressView()
                 }
             }
-            .frame(minWidth: 1140, minHeight: 600)
+            .frame(minWidth: 640, minHeight: 600)
             .background(WindowFrameMemory(name: "Jolta main window"))
             .onOpenURL { url in model?.subscribe(link: url) }
             .task {
@@ -35,8 +35,46 @@ struct JoltaApp: App {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandGroup(replacing: .appSettings) { SettingsMenuButton() }
             CommandGroup(replacing: .newItem) { NewMessageButton(model: model) }
+            CommandGroup(before: .sidebar) {
+                // Folded away for lack of room, it has nothing to show or hide.
+                Button(model?.sidebarCollapsed == false && model?.sidebarFits == true ? "Hide Sidebar" : "Show Sidebar") {
+                    withAnimation(Theme.settle) { model?.sidebarCollapsed.toggle() }
+                }
+                .keyboardShortcut("s", modifiers: [.control, .command])
+                .disabled(model?.sidebarFits != true)
+                Divider()
+                // While a text editor has the keyboard, ⌘+ and ⌘- are Format › Size's Bigger and Smaller.
+                Button("Zoom In") { model?.zoomReader(1) }
+                    .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("+"))
+                    .disabled(model?.readsConversation != true)
+                Button("Zoom Out") { model?.zoomReader(-1) }
+                    .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("-"))
+                    .disabled(model?.readsConversation != true)
+                Button("Actual Size") { model?.zoomReader(nil) }
+                    .keyboardShortcut("0")
+                    .disabled(model?.readsConversation != true || model?.readerZoom == 1)
+                Divider()
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { model?.undoFromMenu() }
+                    .keyboardShortcut("z")
+                Button("Redo") { model?.redoFromMenu() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
             CommandMenu("Format") { FormatMenu() }
+            CommandMenu("Message") {
+                ForEach(Array(Command.menu.enumerated()), id: \.offset) { i, group in
+                    if i > 0 { Divider() }
+                    ForEach(group) { command in
+                        Button(command.menuTitle) { model?.run(command) }
+                            .disabled(model?.offers(command) != true)
+                    }
+                }
+            }
             CommandMenu("Conversation") {
+                Button(Command.find.title) { model?.findInConversation() }
+                    .keyboardShortcut("f")
+                    .disabled(model?.readsConversation != true)
                 // While a text editor has the keyboard, ⌘U underlines.
                 Button("Unsubscribe") { model?.run(.unsubscribe) }
                     .keyboardShortcut(FormatState.shared.editing ? nil : KeyboardShortcut("u"))

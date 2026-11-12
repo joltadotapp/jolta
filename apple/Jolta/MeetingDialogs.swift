@@ -7,6 +7,8 @@ struct SendPrompt: Identifiable {
     let dialog: UpdateDialogInfo
     /// Keep editing or Esc: nothing is saved.
     var back: () -> Void = {}
+    /// What the back button says where there is no editor to go back to.
+    var backTitle: String?
     /// The chosen button's notify, the message where the dialog has a
     /// field, and whether Email guests opens once it is saved.
     let perform: (NotifyChoice, String?, Bool) -> Void
@@ -21,6 +23,7 @@ struct SenderPrompt: Identifiable {
     let senders: [SenderInfo]
     /// Keep editing or Esc: nothing is saved.
     var cancel: () -> Void = {}
+    var backTitle = "Keep editing"
     let perform: (SenderInfo) -> Void
 
     var id: String { calendar }
@@ -54,9 +57,6 @@ extension View {
     }
 }
 
-/// White text on it reads at about 7.7:1, as in `Confirmation`.
-private let danger = Color(NSColor(hex: 0xC9302C))
-
 private struct DialogText: View {
     let title: String
     let text: String
@@ -82,10 +82,11 @@ private struct EmailGuestsBox: View {
 
     var body: some View {
         Toggle(isOn: $on) {
-            HStack(spacing: 6) { Text(label); KeyHint(key: "⌘E") }
+            HStack(spacing: 6) { Text(label); KeyCap(key: "⌘E", style: .inherit) }
         }
         .toggleStyle(.checkbox)
-        .font(.system(size: 12.5))
+        .tint(Color(Theme.accent))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text2))
         .keyboardShortcut("e", modifiers: .command)
         .padding(.top, 12)
@@ -93,31 +94,11 @@ private struct EmailGuestsBox: View {
     }
 }
 
-/// A red button with white text and its key.
-private struct DangerButton: View {
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) { Text(title); KeyHint(key: "⌘⌫") }
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.leading, 12)
-                .padding(.trailing, 10)
-                .frame(height: 28)
-                .background(RoundedRectangle(cornerRadius: 7).fill(danger))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .keyboardShortcut(.delete, modifiers: .command)
-    }
-}
-
 private struct SendPromptView: View {
     let prompt: SendPrompt
     let dismiss: () -> Void
     @State private var message = ""
+    @FocusState private var writing: Bool
     @State private var emailGuests = false
 
     private func choice(_ style: ChoiceStyle) -> SendChoice? { prompt.dialog.choices.first { $0.style == style } }
@@ -130,7 +111,8 @@ private struct SendPromptView: View {
                     .textFieldStyle(.plain)
                     .lineLimit(2...5)
                     .padding(.vertical, 6)
-                    .fieldBox(height: nil)
+                    .fieldBox(focused: writing, height: nil)
+                    .focused($writing)
                     .padding(.top, 12)
                     .accessibilityIdentifier("send-message")
             } else if let label = prompt.dialog.emailGuests {
@@ -138,18 +120,18 @@ private struct SendPromptView: View {
             }
             HStack(spacing: 8) {
                 if let apart = choice(.apart) {
-                    EditorButton(title: apart.label, key: "⌘D") { pick(apart) }
+                    KitButton(title: apart.label, key: "⌘D") { pick(apart) }
                         .keyboardShortcut("d", modifiers: .command)
                         .accessibilityIdentifier("send-hold")
                 }
                 Spacer()
                 if let back = choice(.back) {
-                    EditorButton(title: back.label, key: "Esc", action: goBack)
+                    KitButton(title: prompt.backTitle ?? back.label, key: "esc", action: goBack)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("send-back")
                 }
                 if let primary = choice(.primary) {
-                    EditorButton(title: primary.label, key: "↩", primary: true) { pick(primary) }
+                    KitButton(title: primary.label, key: "↩", kind: .primary) { pick(primary) }
                         .keyboardShortcut(.defaultAction)
                         .accessibilityIdentifier("send-primary")
                 }
@@ -158,10 +140,7 @@ private struct SendPromptView: View {
             if let link = choice(.link) {
                 HStack {
                     Spacer()
-                    Button(link.label) { pick(link) }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(Theme.accent))
+                    KitButton(title: link.label, kind: .quiet, size: .small) { pick(link) }
                         .accessibilityIdentifier("send-link")
                 }
                 .padding(.top, 10)
@@ -203,16 +182,17 @@ private struct SenderPromptView: View {
                 }
             }
             .pickerStyle(.radioGroup)
+            .tint(Color(Theme.accent))
             .labelsHidden()
             .font(.system(size: 13))
             .padding(.top, 14)
             .accessibilityIdentifier("sender-list")
             HStack(spacing: 8) {
                 Spacer()
-                EditorButton(title: "Keep editing", key: "Esc", action: goBack)
+                KitButton(title: prompt.backTitle, key: "esc", action: goBack)
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("sender-back")
-                EditorButton(title: "Continue", key: "↩", primary: true) {
+                KitButton(title: "Continue", key: "↩", kind: .primary) {
                     let id = picked ?? prompt.senders.first?.accountId
                     dismiss()
                     if let sender = prompt.senders.first(where: { $0.accountId == id }) { prompt.perform(sender) }
@@ -240,6 +220,7 @@ private struct CancelPromptView: View {
     let prompt: CancelPrompt
     let dismiss: () -> Void
     @State private var message = ""
+    @FocusState private var writing: Bool
     @State private var emailGuests = false
 
     var body: some View {
@@ -250,7 +231,8 @@ private struct CancelPromptView: View {
                     .textFieldStyle(.plain)
                     .lineLimit(2...5)
                     .padding(.vertical, 6)
-                    .fieldBox(height: nil)
+                    .fieldBox(focused: writing, height: nil)
+                    .focused($writing)
                     .padding(.top, 12)
                     .accessibilityIdentifier("cancel-message")
             } else if let label = prompt.dialog.emailGuests {
@@ -260,13 +242,14 @@ private struct CancelPromptView: View {
                 Spacer()
                 // Return and Esc keep the meeting, as Jolta's other
                 // confirmations keep what a destructive button would take.
-                EditorButton(title: "Keep meeting", key: "↩", action: dismiss)
+                KitButton(title: "Keep meeting", key: "↩", action: dismiss)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("cancel-keep")
-                DangerButton(title: "Cancel meeting") {
+                KitButton(title: "Cancel meeting", key: "⌘⌫", kind: .danger) {
                     dismiss()
                     prompt.perform(message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : message, emailGuests)
                 }
+                .keyboardShortcut(.delete, modifiers: .command)
                 .accessibilityIdentifier("cancel-meeting")
             }
             .padding(.top, 16)
@@ -290,18 +273,20 @@ private struct DeclinePromptView: View {
             DialogText(title: prompt.info.title, text: prompt.info.body, note: nil)
             Toggle("Tell \(prompt.info.organizer)", isOn: $tell)
                 .toggleStyle(.checkbox)
+                .tint(Color(Theme.accent))
                 .font(.system(size: 13))
                 .foregroundStyle(Color(Theme.text))
                 .padding(.top, 12)
                 .accessibilityIdentifier("decline-tell")
             HStack(spacing: 8) {
                 Spacer()
-                EditorButton(title: "Keep", key: "↩", action: dismiss)
+                KitButton(title: "Keep", key: "↩", action: dismiss)
                     .keyboardShortcut(.defaultAction)
-                DangerButton(title: "Decline and remove") {
+                KitButton(title: "Decline and remove", key: "⌘⌫", kind: .danger) {
                     dismiss()
                     prompt.perform(tell)
                 }
+                .keyboardShortcut(.delete, modifiers: .command)
                 .accessibilityIdentifier("decline-remove")
             }
             .padding(.top, 16)

@@ -57,9 +57,7 @@ struct RecipientField: View {
         }
         .padding(5)
         .frame(width: 380)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
-        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .menuPanel()
     }
 
     private func refresh() {
@@ -122,16 +120,22 @@ struct SuggestionRow: View {
             if hovering || on {
                 Button(action: forget) {
                     Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Color(Theme.text3))
+                // The glyph stays where it was, 10 points from the row's edge.
+                .padding(.trailing, -7)
                 .help("Don't suggest \(person.address) until you write to it again")
+                .accessibilityLabel("Forget \(person.address)")
             }
         }
         .font(.system(size: 13))
-        .padding(.horizontal, 9)
-        .frame(height: 30)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color(on ? Theme.fill : hovering ? Theme.hover : .clear)))
+        // Room for the caret of the selected row.
+        .padding(.leading, 14)
+        .padding(.trailing, 10)
+        .frame(height: Theme.control)
+        .selectedRow(on, hovering: hovering)
         .contentShape(Rectangle())
         .onTapGesture(perform: choose)
         .onHover { hovering = $0 }

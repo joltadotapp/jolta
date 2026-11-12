@@ -36,32 +36,27 @@ struct AwaySheet: View {
     @State private var loaded = false
     @State private var working = false
     @State private var failure: String?
+    @FocusState private var replyFocused: Bool
+    @FocusState private var fromFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Out of office").font(.system(size: 17, weight: .semibold))
+            Text("Out of office").font(.system(size: Theme.title, weight: .semibold))
             fields
             accounts
             if let failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
                 if let problem {
                     Text(problem).font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 }
                 Spacer()
-                Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                Button(action: turnOn) {
-                    HStack(spacing: 6) {
-                        Text("Turn on")
-                        Text("⌘↩").foregroundStyle(.secondary)
-                    }
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .tint(Color(Theme.accent))
-                .buttonStyle(.borderedProminent)
-                .disabled(!canTurnOn)
-                .accessibilityIdentifier("away-turn-on")
+                KitButton(title: "Cancel", key: "esc", action: close).keyboardShortcut(.cancelAction)
+                KitButton(title: "Turn On", key: "⌘↩", kind: .primary, action: turnOn)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canTurnOn)
+                    .accessibilityIdentifier("away-turn-on")
             }
         }
         .padding(22)
@@ -70,6 +65,7 @@ struct AwaySheet: View {
         .foregroundStyle(Color(Theme.text))
         .accessibilityIdentifier("away-sheet")
         .onAppear(perform: load)
+        .onAppear { fromFocused = true }
         .onChange(of: allDay) { replan() }
         .onChange(of: from) {
             if until < from { until = from.addingTimeInterval(allDay ? 0 : 3600) }
@@ -90,6 +86,7 @@ struct AwaySheet: View {
                 DatePicker("From", selection: $from, displayedComponents: allDay ? [.date] : [.date, .hourAndMinute])
                     .labelsHidden()
                     .datePickerStyle(.field)
+                    .focused($fromFocused)
                 Toggle("All day", isOn: $allDay).toggleStyle(.checkbox)
                 Spacer()
             }
@@ -105,10 +102,10 @@ struct AwaySheet: View {
                 TextEditor(text: $message)
                     .font(.system(size: 13))
                     .scrollContentBackground(.hidden)
-                    .padding(6)
-                    .frame(height: 84)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.raise)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, -2)
+                    .fieldBox(focused: replyFocused, height: 84)
+                    .focused($replyFocused)
             }
             if tickedRows.contains(where: \.setsReplies) {
                 field("Outside") {
@@ -149,7 +146,7 @@ struct AwaySheet: View {
 
     private func label(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
             .foregroundStyle(Color(Theme.text2))
             .frame(width: 56, alignment: .leading)
             .padding(.top, title == "Reply" ? 6 : 0)
@@ -160,12 +157,12 @@ struct AwaySheet: View {
             ForEach(rows, id: \.accountId) { row in
                 accountRow(row)
                 if row.accountId != rows.last?.accountId {
-                    Rectangle().fill(Color(Theme.line2)).frame(height: 1)
+                    Rectangle().fill(Color(Theme.line)).frame(height: 1)
                 }
             }
             if loaded && rows.isEmpty {
                 Text("No account has a calendar Jolta can write to.")
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .foregroundStyle(Color(Theme.text3))
                     .padding(12)
             }
@@ -192,26 +189,23 @@ struct AwaySheet: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Color(row.enabled ? Theme.text2 : Theme.text3))
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 12) {
+                HStack(spacing: 4) {
                     if let title = row.linkTitle, let link = row.linkUrl, let url = URL(string: link) {
-                        Button("\(title) ↗") { NSWorkspace.shared.open(url) }
-                            .buttonStyle(.link)
-                            .font(.system(size: 12))
+                        KitButton(title: "\(title) ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(url) }
                     }
                     if row.calendarOff {
-                        Button("Turn on calendar") {
+                        KitButton(title: "Turn On Calendar", kind: .quiet, size: .small) {
                             close()
                             model.openSettings(.calendar)
                         }
-                        .buttonStyle(.link)
-                        .font(.system(size: 12))
                     }
                 }
+                // The first button's words line up with the row's text.
+                .padding(.leading, -7)
                 if let current = row.current {
                     HStack(spacing: 8) {
-                        Text(current).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.accent))
-                        Button("Turn off") { turnOff(row) }
-                            .controlSize(.small)
+                        Text(current).font(.system(size: 12, weight: .medium)).foregroundStyle(Color(Theme.accentText))
+                        KitButton(title: "Turn Off", size: .small) { turnOff(row) }
                             .disabled(working)
                             .accessibilityIdentifier("away-turn-off-\(row.accountId)")
                     }

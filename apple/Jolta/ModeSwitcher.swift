@@ -11,6 +11,10 @@ struct ModeSwitcher: View {
     /// From the window's left edge, so it doesn't move between the mail
     /// sidebar and the wider calendar one: right-aligned in the mail sidebar.
     static let leading = Theme.sidebarWidth - 10 - 54
+    /// Its place beside the window buttons while the sidebar is folded away.
+    static let besideWindowButtons: CGFloat = 78
+    /// The window buttons, the switcher and a gap: where a header starts then.
+    static let headerInset = besideWindowButtons + 54 + 14
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
@@ -37,9 +41,9 @@ struct ModeSwitcher: View {
             }
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(Color(on ? Theme.accent : Theme.text3))
-                .frame(width: 26, height: 22)
+                .font(.system(size: Theme.body, weight: .medium))
+                .foregroundStyle(Color(on ? Theme.text : Theme.text3))
+                .frame(width: 26, height: Theme.controlSmall)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color(on ? Theme.fill : .clear)))
                 .overlay(alignment: .topTrailing) {
                     if dot {

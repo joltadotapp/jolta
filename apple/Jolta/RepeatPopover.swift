@@ -116,7 +116,7 @@ struct RepeatPopover: View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Repeat")
                 .font(.system(size: 13, weight: .semibold))
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
                 .padding(.top, 2)
                 .padding(.bottom, 8)
             list
@@ -124,34 +124,30 @@ struct RepeatPopover: View {
             summary
             HStack(spacing: 8) {
                 Spacer()
-                EditorButton(title: "Cancel", key: "Esc", action: cancel)
+                KitButton(title: "Cancel", key: "esc", action: cancel)
                     .keyboardShortcut(.cancelAction)
-                EditorButton(title: "Done", key: "↩", primary: true, action: done)
+                KitButton(title: "Done", key: "↩", kind: .primary, action: done)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!picker.canFinish)
                     .accessibilityIdentifier("repeat-done")
             }
             .padding(.top, 14)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .padding(.top, 12)
         .padding(.bottom, 14)
         .frame(width: 340)
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
-        .background(alignment: .topTrailing) {
-            // The mockup's arrow: a square turned 45° half out of the right edge.
+        .panel()
+        .overlay(alignment: .topTrailing) {
+            // The arrow: a square turned 45° half out of the right edge, over the panel's border there.
             RoundedRectangle(cornerRadius: 2)
                 .fill(Color(Theme.raise))
                 .frame(width: 12, height: 12)
                 .rotationEffect(.degrees(45))
                 .offset(x: 6, y: max(arrowY - 6, 14))
-        }
-        .background {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(Theme.raise))
-                .shadow(color: .black.opacity(0.3), radius: 28, y: 16)
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+                .allowsHitTesting(false)
         }
         .onAppear {
             // Off the editor's text fields, so ↑, ↓, Return and Esc reach
@@ -193,7 +189,7 @@ struct RepeatPopover: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .frame(width: 76, alignment: .leading)
-                .fieldBox(chevrons: true)
+                .fieldBox(height: Theme.controlSmall, chevrons: true)
                 .accessibilityIdentifier("repeat-unit")
             }
             if picker.custom.unit == .week {
@@ -221,7 +217,7 @@ struct RepeatPopover: View {
                     SmallRadio(on: picker.custom.ends == .never) { picker.custom.ends = .never } label: { Text("Never") }
                     SmallRadio(on: endCount != nil) { picker.custom.ends = .after(count: endCount ?? 10) } label: {
                         Text("After")
-                        NumberField(value: Binding(get: { endCount ?? 10 }, set: { picker.custom.ends = .after(count: $0) }), id: "repeat-count", height: 24)
+                        NumberField(value: Binding(get: { endCount ?? 10 }, set: { picker.custom.ends = .after(count: $0) }), id: "repeat-count")
                         Text("times")
                     }
                 }
@@ -230,8 +226,8 @@ struct RepeatPopover: View {
                 ProblemLine(problem: DraftProblem(field: .repeat, text: failure, blocking: true))
             }
         }
-        .padding(.leading, 31)
-        .padding(.trailing, 8)
+        .padding(.leading, 33)
+        .padding(.trailing, 10)
         .padding(.top, 10)
         .padding(.bottom, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -261,14 +257,14 @@ struct RepeatPopover: View {
                 .accessibilityIdentifier("repeat-summary")
             if !picker.summary.next.isEmpty {
                 Text("Next: " + picker.summary.next.joined(separator: ", "))
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
             if let refusal = picker.summary.refusal {
                 ProblemLine(problem: DraftProblem(field: .repeat, text: refusal, blocking: true)).padding(.top, 4)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.top, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -298,13 +294,12 @@ private struct RadioRow: View {
                 }
             }
             .foregroundStyle(Color(reason == nil ? Theme.text : Theme.text3))
-            .padding(.horizontal, 8)
+            // Room for the caret of the selected row.
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
             .padding(.vertical, reason == nil ? 0 : 3)
             .frame(minHeight: 24)
-            .background { if focused { RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)) } }
-            .overlay(alignment: .leading) {
-                if focused { Caret().padding(.leading, -11) }
-            }
+            .selectedRow(focused, radius: Theme.radiusControl)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -312,20 +307,6 @@ private struct RadioRow: View {
         .accessibilityLabel(reason.map { "\(title), \($0)" } ?? title)
         .accessibilityAddTraits(on ? .isSelected : [])
         .accessibilityIdentifier("repeat-row")
-    }
-}
-
-/// The accent triangle beside the row the keyboard is on.
-private struct Caret: View {
-    var body: some View {
-        Path { p in
-            p.move(to: .zero)
-            p.addLine(to: CGPoint(x: 7, y: 6))
-            p.addLine(to: CGPoint(x: 0, y: 12))
-            p.closeSubpath()
-        }
-        .fill(Color(Theme.accent))
-        .frame(width: 7, height: 12)
     }
 }
 
@@ -371,9 +352,9 @@ private struct WeekdayToggle: View {
     var body: some View {
         Button(action: toggle) {
             Text(letter)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(.system(size: Theme.small, weight: .semibold))
                 .foregroundStyle(Color(on ? Theme.raise : Theme.text2))
-                .frame(width: 26, height: 26)
+                .frame(width: Theme.controlSmall, height: Theme.controlSmall)
                 .background {
                     Circle().fill(Color(on ? Theme.text : Theme.raise))
                     if !on { Circle().strokeBorder(Color(Theme.line), lineWidth: 1) }
@@ -390,7 +371,6 @@ private struct WeekdayToggle: View {
 private struct NumberField: View {
     @Binding var value: UInt32
     let id: String
-    var height: CGFloat = 26
     @State private var text = ""
     @FocusState private var focused: Bool
 
@@ -400,7 +380,7 @@ private struct NumberField: View {
             .font(.system(size: 12, weight: .medium, design: .monospaced))
             .multilineTextAlignment(.center)
             .frame(width: 22)
-            .fieldBox(focused: focused, height: height)
+            .fieldBox(focused: focused, height: Theme.controlSmall)
             .focused($focused)
             .onAppear { text = "\(value)" }
             .onChange(of: value) { if UInt32(text) != value { text = "\(value)" } }
@@ -420,7 +400,7 @@ private struct EndDayChip: View {
 
     var body: some View {
         Button { open.toggle() } label: {
-            Text(Self.format.string(from: day)).font(.system(size: 12)).fieldBox(focused: open, height: 24)
+            Text(Self.format.string(from: day)).font(.system(size: 12)).fieldBox(focused: open, height: Theme.controlSmall)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("repeat-until")

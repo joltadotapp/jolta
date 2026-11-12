@@ -1,3 +1,4 @@
+import AppKit
 @preconcurrency import JoltaFFI
 import SwiftUI
 
@@ -26,6 +27,9 @@ final class EventEditorModel {
     var repeatPicker: RepeatPicker?
     /// The stored occurrence being edited, hidden in the grid while the draft shows.
     let event: CalEvent?
+    /// The draft as the editor opened on it, to tell what the user changed
+    /// from what a new event starts with.
+    let opened: EventDraft
     @ObservationIgnored var onChange: (() -> Void)?
     /// What the draft's calendar can do: which organizer options it has.
     private(set) var caps: CapabilitiesInfo?
@@ -83,11 +87,20 @@ final class EventEditorModel {
     var focusTime = false
     /// The room picker under the Room field, while it is open.
     var roomsOpen = false
+    /// The stop that has the keyboard: the day, the calendar or one of Your
+    /// settings. These are no text fields, and macOS gives another view the
+    /// focus only with Keyboard navigation on, so the editor keeps its own.
+    var stop: EventEditorPanel.Focus?
+    /// The text field ⇥ went on to from a stop; the panel puts the keyboard there.
+    var wantsField: EventEditorPanel.Focus?
+    /// The day's month is open.
+    var dayOpen = false
 
     init(core: Core, draft: EventDraft, event: CalEvent?) {
         self.core = core
         self.draft = draft
         self.event = event
+        opened = draft
         repeatText = draft.repeat
         if draft.base != nil {
             moveChoices = Dictionary(((try? core.moveChoices(draft: draft)) ?? []).map { ($0.calendarId, $0) }) { a, _ in a }
@@ -97,6 +110,49 @@ final class EventEditorModel {
     }
 
     var editing: String? { event?.id }
+
+    // MARK: Stops
+
+    /// What ⇥ passes, in order, with the locked fields left out.
+    private var tabOrder: [EventEditorPanel.Focus] {
+        var order: [EventEditorPanel.Focus] = []
+        if !locked(.title) { order.append(.title) }
+        if !locked(.time) { order += interval == nil ? [.day] : [.day, .start, .end] }
+        if !locked(.people), caps?.invite == true || !draft.unresolved.isEmpty { order.append(.people) }
+        if !locked(.room) { order.append(.room) }
+        if !locked(.location) { order.append(.location) }
+        if !locked(.description) { order.append(.description) }
+        if canPickCalendar { order.append(.calendar) }
+        if !locked(.showAs) { order.append(.showAs) }
+        if !locked(.reminder) { order.append(.reminder) }
+        if !locked(.visibility) { order.append(.visibility) }
+        return order
+    }
+
+    /// The calendar is a menu: a new event's, or a stored one's that can move.
+    var canPickCalendar: Bool { (isNew || !moveChoices.isEmpty) && !locked(.calendar) }
+
+    /// Puts the keyboard on `stop`, out of the text field that had it.
+    func take(_ stop: EventEditorPanel.Focus) {
+        self.stop = stop
+        KeyRouter.shared.window?.makeFirstResponder(nil)
+    }
+
+    /// ⇥ or ⇧⇥ from `place`. False between two text fields, which macOS moves between itself.
+    func tab(from place: EventEditorPanel.Focus, back: Bool) -> Bool {
+        let order = tabOrder
+        guard let at = order.firstIndex(of: place) else { return false }
+        let next = order[(at + (back ? order.count - 1 : 1)) % order.count]
+        if next.isStop {
+            take(next)
+        } else if stop != nil {
+            stop = nil
+            wantsField = next
+        } else {
+            return false
+        }
+        return true
+    }
     var isNew: Bool { draft.base == nil }
     var isReadOnly: Bool { draft.locks.contains(.title) && draft.locks.contains(.showAs) }
 
@@ -308,8 +364,35 @@ struct EventEditorPanel: View {
     let editor: EventEditorModel
     @FocusState private var focus: Focus?
     @State private var showsZone = false
+    /// Where the keyboard was before a popover or Find a time took it.
+    @State private var lastFocus: Focus?
+    /// The room picker was just closed: the Room field keeps the keyboard without opening it again.
+    @State private var roomClosed = false
+    /// The keyboard is on its way back to the field a popover took it from.
+    @State private var returning = false
 
-    enum Focus: Hashable { case title, start, end, people, room, location, description }
+    /// Gives the keyboard back to the field it was in, unless a stop has it.
+    private func giveBack() {
+        guard editor.stop == nil else { return }
+        returning = focus == nil
+        focus = lastFocus ?? firstFocus
+    }
+
+    /// SwiftUI selects a field's whole text as it gives it the keyboard, so
+    /// the next letter would replace what was typed there. The caret goes
+    /// to the end, where the typing stopped.
+    private static func caretToEnd() {
+        guard let field = KeyRouter.shared.window?.firstResponder as? NSTextView, field.isFieldEditor else { return }
+        let all = NSRange(location: 0, length: field.string.utf16.count)
+        if all.length > 0, field.selectedRange() == all { field.setSelectedRange(NSRange(location: all.length, length: 0)) }
+    }
+
+    enum Focus: Hashable {
+        case title, day, start, end, people, room, location, description, calendar, showAs, reminder, visibility
+
+        /// A stop the editor moves the keyboard to itself; the others are text fields.
+        var isStop: Bool { [.day, .calendar, .showAs, .reminder, .visibility].contains(self) }
+    }
 
     private var cal: CalendarModel { model.calendar }
 
@@ -370,7 +453,7 @@ struct EventEditorPanel: View {
         .frame(maxHeight: .infinity)
         .background(Color(Theme.side))
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .defaultFocus($focus, firstFocus)
         .onAppear {
@@ -382,11 +465,41 @@ struct EventEditorPanel: View {
         }
         .onChange(of: focus) { old, new in
             if old == .start || old == .end { editor.commit() }
-            if new == .room, roomAccount != nil, !editor.locked(.room) { editor.roomsOpen = true }
+            if let new {
+                lastFocus = new
+                editor.stop = nil
+            }
+            if returning, new != nil {
+                returning = false
+                DispatchQueue.main.async { Self.caretToEnd() }
+            }
+            if old == .room { roomClosed = false }
+            // Arriving at Room opens its picker, except back from Location with
+            // ⇧⇥ or after closing it, so ⇧⇥ and ⇥ pass the field in both directions.
+            if new == .room, old != .location, !roomClosed, roomAccount != nil, !editor.locked(.room) { editor.roomsOpen = true }
         }
         .onChange(of: editor.roomsOpen) { _, open in
-            // The picker had the keys; the field after the room takes them back.
-            if !open { focus = editor.locked(.location) ? nil : .location }
+            // The picker had the keys; its field takes them back.
+            if !open {
+                roomClosed = true
+                focus = .room
+            }
+        }
+        .onChange(of: editor.wantsField) { _, field in
+            guard let field else { return }
+            focus = field
+            editor.wantsField = nil
+        }
+        // The repeat popover and Find a time take the keyboard; it goes back where it was.
+        .onChange(of: editor.repeatPicker != nil) { _, open in
+            if !open { giveBack() }
+        }
+        .onChange(of: model.findTime != nil) { _, open in
+            if !open { DispatchQueue.main.async { giveBack() } }
+        }
+        // The shortcut sheet's filter took it too.
+        .onChange(of: model.showsHelp) { _, open in
+            if !open { DispatchQueue.main.async { giveBack() } }
         }
         // Find a time over the editor takes Esc, Return and ⌘Return.
         .disabled(model.findTime != nil)
@@ -404,7 +517,7 @@ struct EventEditorPanel: View {
                 .foregroundStyle(Color(Theme.text3))
             if editor.readByAI {
                 Label("Read by AI", systemImage: "sparkles")
-                    .font(.system(size: 10.5))
+                    .font(.system(size: Theme.caption))
                     .foregroundStyle(Color(Theme.text2))
                     .padding(.horizontal, 6)
                     .frame(height: 18)
@@ -413,18 +526,8 @@ struct EventEditorPanel: View {
                     .accessibilityIdentifier("editor-read-by-ai")
             }
             Spacer()
-            Button { cal.closeEditor() } label: {
-                HStack(spacing: 6) {
-                    KeyHint(key: "Esc")
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
-                }
-                .foregroundStyle(Color(Theme.text3))
-                .padding(.horizontal, 6)
-                .frame(height: 24)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Close (Esc)")
+            KitButton(title: "Close", key: "esc", icon: "xmark", kind: .quiet, size: .small, showsTitle: false) { cal.closeEditor() }
+                .help("Close (Esc)")
         }
         .padding(.leading, 20)
         .padding(.trailing, 10)
@@ -436,8 +539,8 @@ struct EventEditorPanel: View {
             if !editor.isNew && !editor.isReadOnly {
                 Button { cal.deleteFromEditor() } label: {
                     // A guest removes someone else's meeting, after declining it.
-                    HStack(spacing: 7) { Text(editor.locked(.title) ? "Remove from calendar…" : "Delete"); KeyHint(key: "⌘⌫") }
-                        .foregroundStyle(Color(NSColor(hex: 0xC9302C)))
+                    HStack(spacing: 7) { Text(editor.locked(.title) ? "Remove from calendar…" : "Delete"); KeyCap(key: "⌘⌫", style: .inherit) }
+                        .foregroundStyle(Color(Theme.dangerText))
                         .padding(.horizontal, 6)
                         .frame(height: 28)
                         .contentShape(Rectangle())
@@ -448,14 +551,14 @@ struct EventEditorPanel: View {
             }
             Spacer()
             if editor.isReadOnly {
-                EditorButton(title: "Done", key: "⌘↩", primary: true) { cal.closeEditor() }
+                KitButton(title: "Done", key: "⌘↩", kind: .primary) { cal.closeEditor() }
                     .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityIdentifier("editor-done")
             } else {
                 // The repeat popover takes Esc and Return while it is open.
-                EditorButton(title: "Cancel", key: "Esc") { cal.closeEditor() }
+                KitButton(title: "Cancel", key: "esc") { cal.closeEditor() }
                     .keyboardShortcut(editor.repeatPicker == nil ? .cancelAction : nil)
-                EditorButton(title: editor.willSend ? "Save and send…" : "Save", key: "⌘↩", primary: true) {
+                KitButton(title: editor.willSend ? "Save and send…" : "Save", key: "⌘↩", kind: .primary) {
                     commitTimes()
                     cal.saveEditor()
                 }
@@ -490,10 +593,11 @@ struct EventEditorPanel: View {
                 TextField("Title", text: binding(\.title))
                     .textFieldStyle(.plain)
                     .focused($focus, equals: .title)
+                    .tabStops(editor, from: .title)
                     .accessibilityIdentifier("editor-title")
             }
         }
-        .font(.system(size: 20, weight: .semibold))
+        .font(.system(size: Theme.display, weight: .semibold))
         .tracking(-0.3)
         .padding(.vertical, 5)
         .padding(.leading, 30)
@@ -515,7 +619,7 @@ struct EventEditorPanel: View {
                     }
                 } else {
                     HStack(spacing: 6) {
-                        DayChip(day: editor.day) { editor.setDay($0) }
+                        DayChip(day: editor.day, focused: editor.stop == .day, open: Binding(get: { editor.dayOpen }, set: { editor.dayOpen = $0 })) { editor.setDay($0) }
                         if editor.interval != nil {
                             timeField(timeText(start: true), focus: .start, id: "editor-start", start: true)
                             Text("to").foregroundStyle(Color(Theme.text3))
@@ -539,9 +643,14 @@ struct EventEditorPanel: View {
             EditorRow(icon: nil) {
                 HStack(spacing: 14) {
                     if !editor.locked(.time) {
-                        Toggle("All day", isOn: Binding(get: { editor.isAllDay }, set: { editor.setAllDay($0, defaultMinutes: cal.defaultLength) }))
-                            .toggleStyle(.checkbox)
-                            .foregroundStyle(Color(Theme.text2))
+                        Toggle(isOn: Binding(get: { editor.isAllDay }, set: { editor.setAllDay($0, defaultMinutes: cal.defaultLength) })) {
+                            HStack(spacing: 6) { Text("All day"); KeyCap(key: "⇧⌘A") }
+                        }
+                        .toggleStyle(.checkbox)
+                        .tint(Color(Theme.accent))
+                        .foregroundStyle(Color(Theme.text2))
+                        .keyboardShortcut("a", modifiers: [.command, .shift])
+                        .accessibilityLabel("All day")
                     }
                     Button { showsZone.toggle() } label: {
                         HStack(spacing: 5) {
@@ -586,7 +695,7 @@ struct EventEditorPanel: View {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Color(Theme.text3))
                 }
                 .padding(.horizontal, 6)
-                .frame(height: 26)
+                .frame(height: Theme.control)
                 .background { if editor.repeatPicker != nil { RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)) } }
                 .contentShape(Rectangle())
             }
@@ -625,6 +734,7 @@ struct EventEditorPanel: View {
                 editor.nudge(start: start, by: press.key == .upArrow ? 15 : -15)
                 return .handled
             }
+            .tabStops(editor, from: field)
             .accessibilityIdentifier(id)
             .help("Type 9, 930, 14:30 or 2pm. ⌥↑ and ⌥↓ move it by 15 minutes.")
     }
@@ -653,21 +763,13 @@ struct EventEditorPanel: View {
                         Text(editor.draft.responses).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).accessibilityIdentifier("editor-responses")
                         Spacer(minLength: 0)
                         if canFindTime {
-                            Button { findTime() } label: {
-                                HStack(spacing: 5) { Text("Find a time"); KeyHint(key: "⇧⌘F") }
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color(Theme.accent))
-                            .keyboardShortcut("f", modifiers: [.command, .shift])
-                            .help("See when everyone is free and pick a time (⇧⌘F)")
-                            .accessibilityIdentifier("editor-find-time")
+                            KitButton(title: "Find a Time", key: "⇧⌘F", kind: .quiet, size: .small) { findTime() }
+                                .keyboardShortcut("f", modifiers: [.command, .shift])
+                                .help("See when everyone is free and pick a time (⇧⌘F)")
+                                .accessibilityIdentifier("editor-find-time")
                         }
                         if let event = emailable {
-                            Button("Email guests") { cal.emailGuests(event) }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color(Theme.accent))
+                            KitButton(title: "Email Guests", kind: .quiet, size: .small) { cal.emailGuests(event) }
                                 .help("Write to the people on this event, for what isn't a calendar update")
                                 .accessibilityIdentifier("editor-email-guests")
                         }
@@ -761,7 +863,7 @@ struct EventEditorPanel: View {
                     HStack {
                         Text("\(editor.videoLabel(video)) · link made on save").foregroundStyle(Color(Theme.text2))
                         Spacer()
-                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        Button { editor.draft.video = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color(Theme.text3))
                             .help("Remove the video call")
@@ -776,7 +878,7 @@ struct EventEditorPanel: View {
                         Text(Self.shortLink(link)).foregroundStyle(Color(Theme.text2)).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         if !editor.locked(.video) {
-                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            Button { editor.draft.zoom = nil } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color(Theme.text3))
                                 .help("Remove the Zoom link")
@@ -828,6 +930,7 @@ struct EventEditorPanel: View {
                 TextField("Add a room", text: Binding(get: { editor.draft.room }, set: { editor.setRoom(address: $0, name: "") }))
                     .textFieldStyle(.plain)
                     .focused($focus, equals: .room)
+                    .tabStops(editor, from: .room)
                     .frame(maxWidth: .infinity)
                     .fieldBox(focused: focus == .room)
                     .accessibilityIdentifier("editor-room")
@@ -837,10 +940,17 @@ struct EventEditorPanel: View {
                 TextField("Add a room", text: .constant(editor.draft.roomName.isEmpty ? editor.draft.room : editor.draft.roomName))
                     .textFieldStyle(.plain)
                     .focused($focus, equals: .room)
-                    .help(editor.draft.room)
+                    // The picker closed with the keyboard still here: these open it again.
+                    .onKeyPress(keys: [.downArrow, .return, .space]) { press in
+                        guard press.modifiers.isDisjoint(with: [.command, .option, .control, .shift]) else { return .ignored }
+                        editor.roomsOpen = true
+                        return .handled
+                    }
+                    .tabStops(editor, from: .room)
+                    .help(editor.draft.room.isEmpty ? "↓ lists the rooms" : editor.draft.room)
                     .accessibilityIdentifier("editor-room")
                 if !editor.draft.room.isEmpty {
-                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill") }
+                    Button { editor.setRoom(address: "", name: "") } label: { Image(systemName: "xmark.circle.fill").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
                         .help("Remove the room")
@@ -872,13 +982,14 @@ struct EventEditorPanel: View {
                             .padding(.vertical, 6)
                             .fieldBox(focused: focus == .description, height: nil)
                             .focused($focus, equals: .description)
+                            .tabStops(editor, from: .description)
                             .accessibilityIdentifier("editor-description")
                     }
                     if let note = editor.draft.descriptionNote {
-                        Text(note).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                        Text(note).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                     }
                     if editor.draft.meeting != nil && !editor.locked(.description) {
-                        Text("The meeting's join details stay below your text.").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                        Text("The meeting's join details stay below your text.").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                     }
                 }
             }
@@ -890,7 +1001,7 @@ struct EventEditorPanel: View {
             EditorRow(icon: "calendar") {
                 let current = cal.calendarInfo(editor.shownCalendar)
                 HStack(spacing: 6) {
-                    if (editor.isNew || !editor.moveChoices.isEmpty) && !editor.locked(.calendar) {
+                    if editor.canPickCalendar {
                         Menu {
                             ForEach(cal.groups) { group in
                                 Section(group.title) {
@@ -909,11 +1020,18 @@ struct EventEditorPanel: View {
                         }
                         .menuStyle(.borderlessButton)
                         .menuIndicator(.hidden)
-                        .frame(width: 170, alignment: .leading)
+                        .frame(width: 150, alignment: .leading)
                         .padding(.leading, 20)
-                        .fieldBox(chevrons: true)
+                        .fieldBox(focused: editor.stop == .calendar, chevrons: true)
                         .overlay(alignment: .leading) { CalendarDot(color: current?.color).padding(.leading, 8).allowsHitTesting(false) }
                         .accessibilityIdentifier("editor-calendar")
+                        .help("The calendar. ⇧⌘C puts the keyboard here; ↑ and ↓ pick another.")
+                        // The cap is the button that carries the shortcut: one on a
+                        // hidden or empty view never fires.
+                        Button { editor.take(.calendar) } label: { KeyCap(key: "⇧⌘C", focused: editor.stop == .calendar) }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut("c", modifiers: [.command, .shift])
+                            .accessibilityLabel("Go to the calendar")
                     } else {
                         CalendarDot(color: current?.color)
                         Text(current?.name ?? "")
@@ -924,7 +1042,6 @@ struct EventEditorPanel: View {
                             .foregroundStyle(Color(Theme.text3))
                             .font(.system(size: 12))
                             .lineLimit(1)
-                            .fixedSize()
                     }
                 }
             }
@@ -936,25 +1053,25 @@ struct EventEditorPanel: View {
         EditorSection {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Your settings").font(.system(size: 11, weight: .semibold)).tracking(0.2).foregroundStyle(Color(Theme.text3))
-                Text("Only you see these. Never emailed.").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                Text("Only you see these. Never emailed.").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             }
             .padding(.top, 2)
             .padding(.bottom, 3)
-            SettingLine(label: "Show as", locked: editor.locked(.showAs), value: editor.draft.showAs.word) {
+            SettingLine(label: "Show as", locked: editor.locked(.showAs), value: editor.draft.showAs.word, focused: editor.stop == .showAs) {
                 ForEach(cal.showAsChoices(editor.draft.calendarId), id: \.self) { choice in
                     Button(choice.word) { editor.draft.showAs = choice }
                 }
             }
             if let note = editor.draft.showAsNote {
-                Text(note).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).padding(.leading, 104)
+                Text(note).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).padding(.leading, 104)
             }
-            SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word) {
+            SettingLine(label: "Reminder", locked: editor.locked(.reminder), value: editor.draft.reminder.word, focused: editor.stop == .reminder) {
                 ForEach(DraftReminder.menu(isNew: editor.isNew), id: \.self) { choice in
                     Button(choice.word) { editor.draft.reminder = choice }
                 }
             }
-            SettingLine(label: "Visibility", locked: editor.locked(.visibility), value: editor.draft.visibility.word) {
-                ForEach([EventVisibility.default, .private], id: \.self) { choice in
+            SettingLine(label: "Visibility", locked: editor.locked(.visibility), value: editor.draft.visibility.word, focused: editor.stop == .visibility) {
+                ForEach(EventVisibility.editorChoices, id: \.self) { choice in
                     Button(choice.word) { editor.draft.visibility = choice }
                 }
             }
@@ -976,6 +1093,7 @@ struct EventEditorPanel: View {
             TextField(prompt, text: binding(text))
                 .textFieldStyle(.plain)
                 .focused($focus, equals: value)
+                .tabStops(editor, from: value)
                 .frame(maxWidth: .infinity)
                 .fieldBox(focused: focus == value)
                 .accessibilityIdentifier(id)
@@ -1010,33 +1128,20 @@ struct RepeatRowAnchor: PreferenceKey {
     static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) { value = value ?? nextValue() }
 }
 
-extension View {
-    /// The mockup's `.f`: a raised box with a hairline, 26 points tall.
-    func fieldBox(focused: Bool = false, height: CGFloat? = 26, chevrons: Bool = false) -> some View {
-        padding(.horizontal, 8)
-            .padding(.trailing, chevrons ? 14 : 0)
-            .frame(height: height)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.raise)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(focused ? Theme.accent : Theme.line), lineWidth: 1))
-            .overlay(alignment: .trailing) {
-                if chevrons {
-                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Color(Theme.text3)).padding(.trailing, 7).allowsHitTesting(false)
-                }
-            }
-    }
-}
-
-/// "Tue 24 Nov", which opens a month to pick another day.
+/// "Tue 24 Nov", which opens a month to pick another day. With the
+/// keyboard on it, ← and → move a day, ↑ and ↓ a week, and Space opens the month.
 private struct DayChip: View {
     let day: Date
+    let focused: Bool
+    @Binding var open: Bool
     let pick: (Date) -> Void
-    @State private var open = false
 
     var body: some View {
         Button { open.toggle() } label: {
-            Text(EventEditorPanel.dayText(day)).foregroundStyle(Color(Theme.text)).fieldBox(focused: open)
+            Text(EventEditorPanel.dayText(day)).foregroundStyle(Color(Theme.text)).fieldBox(focused: open || focused)
         }
         .buttonStyle(.plain)
+        .help("The day. ← and → move it a day, ↑ and ↓ a week.")
         .accessibilityIdentifier("editor-day")
         .popover(isPresented: $open, arrowEdge: .bottom) {
             DatePicker("Day", selection: Binding(get: { day }, set: { pick($0); open = false }), displayedComponents: .date)
@@ -1080,10 +1185,66 @@ private struct EditorRow<Content: View>: View {
     }
 }
 
+extension View {
+    /// ⇥ and ⇧⇥ out of a text field onto a stop next to it. ⇧⇥ arrives as
+    /// the backtab character, not as Tab with Shift.
+    func tabStops(_ editor: EventEditorModel, from field: EventEditorPanel.Focus) -> some View {
+        onKeyPress(phases: .down) { press in
+            let backtab = press.key == KeyEquivalent("\u{19}")
+            guard press.key == .tab || backtab, press.modifiers.isDisjoint(with: [.command, .option, .control]) else { return .ignored }
+            return editor.tab(from: field, back: backtab || press.modifiers.contains(.shift)) ? .handled : .ignored
+        }
+    }
+}
+
+extension CalendarModel {
+    /// A key while one of the editor's stops has the keyboard: ⇥ and ⇧⇥
+    /// move on, the arrow keys change the value, Space opens the day's
+    /// month. False leaves the key to the caller, as when no stop has it.
+    func editorStopKey(_ event: NSEvent) -> Bool {
+        guard let editor, let stop = editor.stop, event.modifierFlags.intersection([.option, .control]).isEmpty else { return false }
+        switch event.keyCode {
+        case 48: _ = editor.tab(from: stop, back: event.modifierFlags.contains(.shift))
+        case 126: step(stop, by: -1, in: editor)
+        case 125: step(stop, by: 1, in: editor)
+        case 123, 124:
+            if stop == .day { moveDay(event.keyCode == 123 ? -1 : 1, in: editor) }
+        case 49:
+            guard stop == .day else { return false }
+            editor.dayOpen.toggle()
+        default: return false
+        }
+        return true
+    }
+
+    private func moveDay(_ days: Int, in editor: EventEditorModel) {
+        if let moved = Calendar.current.date(byAdding: .day, value: days, to: editor.day) { editor.setDay(moved) }
+    }
+
+    /// ↑ and ↓ on a stop: a week for the day, else the choice before or after the current one.
+    private func step(_ stop: EventEditorPanel.Focus, by step: Int, in editor: EventEditorModel) {
+        func pick<Choice: Equatable>(_ choices: [Choice], from current: Choice, _ set: (Choice) -> Void) {
+            guard let at = choices.firstIndex(of: current), choices.indices.contains(at + step) else { return }
+            set(choices[at + step])
+        }
+        switch stop {
+        case .day: moveDay(step * 7, in: editor)
+        case .calendar:
+            let open = groups.flatMap(\.calendars).map(\.info).filter { editor.refusal($0) == nil }.map(\.id)
+            pick(open, from: editor.shownCalendar) { editor.pick(calendar: $0) }
+        case .showAs: pick(showAsChoices(editor.draft.calendarId), from: editor.draft.showAs) { editor.draft.showAs = $0 }
+        case .reminder: pick(DraftReminder.menu(isNew: editor.isNew), from: editor.draft.reminder) { editor.draft.reminder = $0 }
+        case .visibility: pick(EventVisibility.editorChoices, from: editor.draft.visibility) { editor.draft.visibility = $0 }
+        default: break
+        }
+    }
+}
+
 private struct SettingLine<Choices: View>: View {
     let label: String
     let locked: Bool
     let value: String
+    let focused: Bool
     @ViewBuilder let choices: Choices
 
     var body: some View {
@@ -1098,8 +1259,9 @@ private struct SettingLine<Choices: View>: View {
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .frame(width: 134, alignment: .leading)
-                    .fieldBox(chevrons: true)
+                    .fieldBox(focused: focused, chevrons: true)
                     .accessibilityIdentifier("editor-\(label.lowercased().replacingOccurrences(of: " ", with: "-"))")
+                    .help("↑ and ↓ pick another")
                 Spacer()
             }
         }
@@ -1114,7 +1276,7 @@ private struct PersonLine: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(name).lineLimit(1)
-            Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            Text(detail).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             Spacer(minLength: 4)
             LockGlyph()
         }
@@ -1127,8 +1289,8 @@ struct ProblemLine: View {
 
     var body: some View {
         Label(problem.text, systemImage: problem.blocking ? "exclamationmark.circle" : "info.circle")
-            .font(.system(size: 11.5))
-            .foregroundStyle(problem.blocking ? Color(NSColor(hex: 0xC9302C)) : Color(Theme.text3))
+            .font(.system(size: Theme.small))
+            .foregroundStyle(problem.blocking ? Color(Theme.dangerText) : Color(Theme.text3))
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("editor-problem")
     }
@@ -1148,50 +1310,6 @@ private struct CalendarDot: View {
     }
 }
 
-/// A key shown inside a button, outlined in the button's text color.
-struct KeyHint: View {
-    let key: String
-
-    var body: some View {
-        Text(key)
-            .font(.system(size: 10, weight: .medium))
-            .padding(.horizontal, 4)
-            .frame(minWidth: 16, minHeight: 16)
-            .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.foreground.opacity(0.5), lineWidth: 1))
-            .opacity(0.8)
-    }
-}
-
-struct EditorButton: View {
-    let title: String
-    let key: String
-    var primary = false
-    let action: () -> Void
-    @Environment(\.isEnabled) private var enabled
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Text(title)
-                KeyHint(key: key)
-            }
-            .font(.system(size: 12.5, weight: primary ? .semibold : .medium))
-            .foregroundStyle(primary ? Color(Theme.raise) : Color(Theme.text))
-            .padding(.leading, 12)
-            .padding(.trailing, 10)
-            .frame(height: 28)
-            .background {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(primary ? Color(Theme.accent) : Color(Theme.kbd))
-                    .strokeBorder(primary ? .clear : Color(Theme.line), lineWidth: 1)
-            }
-            .opacity(enabled ? 1 : 0.5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 extension ShowAs {
     var word: String {
         switch self {
@@ -1205,6 +1323,9 @@ extension ShowAs {
 }
 
 extension EventVisibility {
+    /// The two the editor offers.
+    static let editorChoices: [EventVisibility] = [.default, .private]
+
     var word: String {
         switch self {
         case .default: "Default"

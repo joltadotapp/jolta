@@ -78,7 +78,7 @@ struct AddCalendarPanel: View {
             Text("Add to")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color(Theme.text3))
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 10)
                 .padding(.top, 4)
                 .padding(.bottom, 2)
             ForEach(model.addChoices, id: \.calendarId) { choice in
@@ -87,9 +87,7 @@ struct AddCalendarPanel: View {
         }
         .padding(4)
         .frame(width: Self.width)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        .menuPanel()
         .accessibilityIdentifier("add-to-calendar")
     }
 
@@ -103,14 +101,16 @@ struct AddCalendarPanel: View {
                     .fill(Color(CalendarColor.color(choice.color, .bar)))
                     .frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(choice.name).font(.system(size: 12.5)).lineLimit(1)
+                    Text(choice.name).font(.system(size: Theme.body)).lineLimit(1)
                     Text(choice.account).font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
+            // Room for the caret of the selected row.
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
             .frame(height: 36)
-            .background(RoundedRectangle(cornerRadius: 6).fill(on ? Color(Theme.fill) : .clear))
+            .selectedRow(on)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

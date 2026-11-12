@@ -18,14 +18,21 @@ struct ComposeView: View {
         // A field that commits as the view closes must not reopen a discarded or sent message.
         Binding(get: { model.compose ?? ComposeData.blank }, set: {
             guard model.compose != nil else { return }
+            if model.compose != $0 { model.composeError = nil }
             model.compose = $0
             scheduleSave()
         })
     }
 
+    private var hasRecipient: Bool {
+        let d = draft.wrappedValue
+        return [d.to, d.cc, d.bcc].contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
     /// Each account that can send, with its aliases.
     @State private var senders: [MailSender] = []
     @AppStorage(AppModel.key("showsFormatBar")) private var showsFormatBar = true
+    @Environment(\.headerInset) private var headerInset
 
     private func actions(showsKeys: Bool) -> some View {
         HStack(spacing: 4) {
@@ -41,9 +48,12 @@ struct ComposeView: View {
                 .keyboardShortcut("l", modifiers: [.command, .shift])
             ActionButton(icon: "trash", title: "Discard", key: "⌘⌫", showsTitle: false, showsKey: showsKeys) { model.discardCompose() }
                 .keyboardShortcut(.delete, modifiers: .command)
-            SendButton { model.sendCompose() }
+            KitButton(title: "Send", key: "⌘↩", kind: .primary) { model.sendCompose() }
                 // ⌘Return is Find a time's Invite while its panel is up.
                 .keyboardShortcut(model.findTime == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
+                .disabled(!hasRecipient)
+                .help(hasRecipient ? "Send (⌘↩)" : "Add a recipient to send")
+                .padding(.leading, 6)
         }
         .fixedSize()
     }
@@ -62,7 +72,7 @@ struct ComposeView: View {
                     actions(showsKeys: false)
                 }
             }
-            .padding(.leading, 28)
+            .padding(.leading, max(Theme.gutter, headerInset))
             .padding(.trailing, 16)
             .frame(height: Theme.headerHeight)
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -82,10 +92,13 @@ struct ComposeView: View {
                 FieldRow(label: "To") {
                     recipientField(draft.to, .to)
                     if !showCc {
-                        Button("Cc Bcc") { showCc = true; focus = .cc }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color(Theme.text3))
+                        Button { showCc = true; focus = .cc } label: {
+                            Text("Cc Bcc").frame(height: Theme.controlSmall).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(Theme.text3))
+                        .accessibilityLabel("Add Cc and Bcc")
                     }
                 }
                 .zIndex(focus == .to ? 1 : 0)
@@ -106,7 +119,9 @@ struct ComposeView: View {
                             return .handled
                         }
                     if !showsFormatBar {
-                        Button("Aa") { showsFormatBar = true }
+                        Button { showsFormatBar = true } label: {
+                            Text("Aa").frame(minWidth: Theme.controlSmall, minHeight: Theme.controlSmall).contentShape(Rectangle())
+                        }
                             .buttonStyle(.plain)
                             .font(.system(size: 12))
                             .foregroundStyle(Color(Theme.text3))
@@ -121,13 +136,16 @@ struct ComposeView: View {
                         Text("Scheduled for \(schedule.label). Esc keeps it scheduled.").foregroundStyle(Color(Theme.text2))
                         Button { model.composeSchedule = nil } label: {
                             Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                                .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
+                        .padding(.leading, -7)
                         .help("Don't send it then; keep it as a draft")
+                        .accessibilityLabel("Don't send it then")
                         Spacer()
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .frame(height: 34)
                     .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
                 }
@@ -137,19 +155,22 @@ struct ComposeView: View {
                         Text("Back in your inbox on \(reminder.label) if nobody replies").foregroundStyle(Color(Theme.text2))
                         Button { model.composeReminder = nil } label: {
                             Image(systemName: "xmark").font(.system(size: 9.5, weight: .semibold))
+                                .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Color(Theme.text3))
+                        .padding(.leading, -7)
                         .help("No reminder")
+                        .accessibilityLabel("Remove the reminder")
                         Spacer()
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .frame(height: 34)
                     .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
                 }
                 ImageSizeBar(model: model, changed: scheduleSave)
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, Theme.gutter)
             .textFieldStyle(.plain)
             // Suggestions hang over the subject and the body.
             .zIndex(1)
@@ -166,6 +187,18 @@ struct ComposeView: View {
                 FormatBar()
             }
 
+            if let error = model.composeError {
+                Text(error)
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(Color(Theme.dangerText))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.gutter)
+                    .padding(.top, 12)
+                    .accessibilityIdentifier("compose-error")
+            }
+
             // The cursor starts where the user types next: To until it names
             // someone, then the end of what they wrote, above the signature
             // and any quote.
@@ -173,7 +206,7 @@ struct ComposeView: View {
                 guard let c = model.compose, !c.to.isEmpty else { focus = .to; return }
                 body.focus(after: model.core.written(body: c.body, accountId: c.accountId), core: model.core)
             }
-                .padding(.horizontal, 28)
+                .padding(.horizontal, Theme.gutter)
                 .padding(.top, 14)
                 .environment(\.pasteTarget, PasteTarget(core: model.core, attach: attach, failed: model.notify))
 
@@ -186,17 +219,22 @@ struct ComposeView: View {
                                 Text(file.name).lineLimit(1)
                                 Button { model.compose?.attachments.remove(at: i); scheduleSave() } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color(Theme.text3))
+                                // The glyph stays where it was in the chip.
+                                .padding(.horizontal, -7)
+                                .help("Remove \(file.name)")
+                                .accessibilityLabel("Remove \(file.name)")
                             }
-                            .font(.system(size: 12.5))
+                            .font(.system(size: Theme.body))
                             .padding(.horizontal, 12)
                             .frame(height: 34)
                             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(Theme.line), lineWidth: 1))
                         }
                     }
-                    .padding(.horizontal, 28)
+                    .padding(.horizontal, Theme.gutter)
                 }
                 .scrollIndicators(.never)
                 .padding(.bottom, 16)
@@ -210,8 +248,11 @@ struct ComposeView: View {
             showCc = !(model.compose?.cc.isEmpty ?? true) || !(model.compose?.bcc.isEmpty ?? true)
         }
         .onExitCommand {
-            // Esc closes an open panel, then stops, undoes or closes AI
-            // writing, and only then closes the message.
+            // Esc closes the shortcut sheet or Find a time, then the palette,
+            // then stops, undoes or closes AI writing, and only then closes
+            // the message.
+            if model.showsHelp { model.showsHelp = false; return }
+            if model.findTime != nil { model.findTime = nil; return }
             if model.palette != nil { model.palette = nil; return }
             guard let writer else { return model.closeCompose() }
             switch writer.state {
@@ -301,35 +342,15 @@ private struct FieldRow<Content: View>: View {
     var body: some View {
         HStack(spacing: 12) {
             Text(label)
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text3))
                 .frame(width: 52, alignment: .leading)
             content
         }
-        .font(.system(size: 13.5))
+        .font(.system(size: Theme.body))
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 40)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
-    }
-}
-
-private struct SendButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Text("Send").fontWeight(.medium)
-                Text("⌘↩").font(.system(size: 11)).opacity(0.75)
-            }
-            .font(.system(size: 12.5))
-            .foregroundStyle(Color(Theme.bg))
-            .padding(.horizontal, 12)
-            .frame(height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(Theme.text)))
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 6)
     }
 }
 
@@ -414,15 +435,14 @@ private struct ImageSizeBar: View {
                     if !chosen.fits {
                         let fitting = sizes.last(where: \.fits)
                         Text(fitting == nil ? "Over Microsoft 365's usual 35 MB limit, even at Small" : "Over Microsoft 365's usual 35 MB limit")
-                            .foregroundStyle(Color(Theme.accent))
+                            .foregroundStyle(Color(Theme.accentText))
                         if let fitting {
-                            Button("Use \(Self.name(fitting.size))") { choose(fitting.size) }
-                                .buttonStyle(.link)
+                            KitButton(title: "Use \(Self.name(fitting.size))", size: .small) { choose(fitting.size) }
                         }
                     }
                     Spacer()
                 }
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .frame(height: 34)
                 .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
             }

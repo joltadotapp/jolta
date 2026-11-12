@@ -151,6 +151,7 @@ impl Core {
             provider: jolta_core::oauth::Provider::Microsoft,
             purpose: SignInFor::Rooms(account),
             pending: Mutex::new(Some(pending)),
+            waiting: Mutex::new(None),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
             engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),

@@ -63,16 +63,54 @@ final class AppModel {
     var showsDayPanel = UserDefaults.standard.bool(forKey: AppModel.key("DayPanel")) {
         didSet { UserDefaults.standard.set(showsDayPanel, forKey: Self.key("DayPanel")) }
     }
+    /// The sidebar is folded away (⌃⌘S), in mail and in the calendar.
+    var sidebarCollapsed = UserDefaults.standard.bool(forKey: AppModel.key("SidebarCollapsed")) {
+        didSet { UserDefaults.standard.set(sidebarCollapsed, forKey: Self.key("SidebarCollapsed")) }
+    }
+    /// The window has room for the sidebar. Without it the sidebar is folded
+    /// away whatever `sidebarCollapsed` says.
+    var sidebarFits = true
+    /// The window is one column wide: the list, with the conversation or the
+    /// message being written over it.
+    var singleColumn = false {
+        didSet {
+            guard singleColumn != oldValue else { return }
+            readerUp = false
+            // The reader beside the list shows what the cursor was on.
+            if !singleColumn, let open = selectedThreadID { markReadSoon(open) }
+        }
+    }
+    /// In one column, the conversation is over the list. Moving the cursor
+    /// in the list alone opens nothing to read, so it marks nothing read.
+    private(set) var readerUp = false
     /// The first open of calendar mode with no calendar on asks which to show.
     var showsCalendarIntro = false
     @ObservationIgnored var reminderTask: Task<Void, Never>?
     private(set) var accounts: [AccountSection] = []
+    /// The accounts were read once, so none means none, not "not yet".
+    private(set) var accountsLoaded = false
+    /// No account yet: the main window shows the welcome screen.
+    var needsAccount: Bool { accountsLoaded && accounts.isEmpty }
+    /// The browser sign-in for a new account: waiting for the browser, or
+    /// why the last one failed, until the next attempt.
+    var signIn: SignInProgress?
+    /// The sign-in `signIn` waits on, for Cancel. Each attempt has a number,
+    /// so one that was cancelled or replaced reports nothing when it ends.
+    @ObservationIgnored var signInSession: SignIn?
+    @ObservationIgnored var signInAttempt = 0
+    /// The iCloud or IMAP sheet over the main window.
+    var addingIMAP = false
+
+    enum SignInProgress: Equatable {
+        case waiting
+        case failed(String)
+    }
     /// Accounts whose automatic replies are on now, for the strip over the list.
     private(set) var away: [AwayInfo] = []
     private(set) var turningOffAway: Set<Int64> = []
     /// Counts `AwayChanged`, so Settings reloads states that aren't on now too.
     private(set) var awayRevision = 0
-    var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged(); focusSync() } }
+    var source: ListSource = .unifiedInbox { didSet { section = nil; readerUp = false; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
     var section: SectionInfo? { didSet { listChanged() } }
     private(set) var sections: [SectionInfo] = []
@@ -81,6 +119,9 @@ final class AppModel {
     private(set) var scheduled: [ScheduledInfo] = []
     /// A reminder chosen for the message being written.
     var composeReminder: Reminder?
+    /// Why the message being written couldn't be sent, shown above its
+    /// body until it changes or goes.
+    var composeError: String?
     /// When the message being written was scheduled to go, while it is open
     /// again from the sidebar. Closing it keeps it scheduled.
     var composeSchedule: Reminder?
@@ -98,7 +139,10 @@ final class AppModel {
     /// Bumped when agents act, so the audit view reloads.
     private(set) var agentRevision = 0
     private(set) var mcpStatus = "MCP server not started"
-    var showsHelp = false
+    var showsHelp = false {
+        // The sheet's filter had the keyboard; the list or the message being written gets it back.
+        didSet { if oldValue, !showsHelp, palette == nil, findTime == nil { returnKeyboard() } }
+    }
     var search = "" { didSet { listChanged() } }
     /// Bumped whenever the list's contents may have changed; views reload on it.
     private(set) var listRevision = 0
@@ -108,6 +152,14 @@ final class AppModel {
     /// Each account's last sync failure, until that account syncs again.
     private(set) var syncErrors: [Int64: String] = [:]
     var openThread: ThreadView?
+    /// The conversation that couldn't be opened and why, shown in the
+    /// reader with Retry until another one opens.
+    private(set) var openFailure: OpenFailure?
+
+    struct OpenFailure: Equatable {
+        let threadID: Int64
+        let message: String
+    }
     /// The open conversation's holds line (C4 U10), and a count that
     /// changes whenever holds change, so the reader reads it again.
     var holdLine: HoldLine?
@@ -156,6 +208,8 @@ final class AppModel {
     var listCount = -1
     /// Asks the message list to take keyboard focus (after search, for example).
     private(set) var focusListRequest = 0
+    /// X from the palette: the message list picks or drops the row under its caret.
+    @ObservationIgnored var togglePicked: () -> Void = {}
     /// The last action, shown briefly with its undo key.
     private(set) var toast: Toast?
     /// Each message opened in compose gets its own number, so the editor
@@ -187,9 +241,10 @@ final class AppModel {
     /// The user archived, moved or undid something, so the list's next
     /// change may move the cursor on to the next conversation.
     @ObservationIgnored var userChangedList = false
-    /// The query of the list last shown, nil before the first. The list view
-    /// is made again when the palette or calendar mode gives way, so a list
-    /// switched to meanwhile is told apart from the same list shown again.
+    /// The `listQuery` of the list last shown, nil before the first. The list
+    /// view is made again when the palette or calendar mode gives way, so a
+    /// list switched to meanwhile is told apart from the same list shown
+    /// again. A search typed over the list is not another list.
     @ObservationIgnored var shownListQuery: String?
     let notifier = Notifier()
     /// The Dock badge's number, which the menu bar item shows too.
@@ -243,10 +298,16 @@ final class AppModel {
         }
     }
 
-    var query: String {
+    /// The list without the search typed over it: the folder and its section.
+    var listQuery: String {
         var parts = [source.query]
-        if showsSections, let section { parts.append(section.query) }
-        return searchWithin(list: parts.filter { !$0.isEmpty }.joined(separator: " "), search: search.trimmingCharacters(in: .whitespaces))
+        if source == .unifiedInbox, let section { parts.append(section.query) }
+        return parts.filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// A search runs over the whole folder, not the section it was typed in.
+    var query: String {
+        searchWithin(list: showsSections ? listQuery : source.query, search: search.trimmingCharacters(in: .whitespaces))
     }
 
     init() throws {
@@ -286,7 +347,10 @@ final class AppModel {
         notifier.onOpen = { [weak self] threadID in
             self?.mode = .mail
             self?.source = .unifiedInbox
-            if let threadID { self?.open(threadID: threadID) }
+            if let threadID {
+                self?.open(threadID: threadID)
+                self?.showReader()
+            }
         }
         notifier.onReply = { [weak self] threadID in
             self?.mode = .mail
@@ -295,9 +359,6 @@ final class AppModel {
             self?.reply(.reply, threadID: threadID)
         }
         notifier.onAction = { [weak self] id, action in self?.noticeAction(id: id, action: action) }
-        if accounts.contains(where: { $0.account.provider != "Synthetic" }) {
-            notifier.requestPermission()
-        }
         startCalendar()
         // Launch arguments for checking the app from scripts:
         // `-JoltaSearch "subject:x" -JoltaOpenFirst YES`.
@@ -439,8 +500,19 @@ final class AppModel {
         }
     }
 
+    /// Jolta asked macOS for notifications in this run; macOS itself asks the user once.
+    @ObservationIgnored private var askedToNotify = false
+
     private func apply(accounts: [AccountSection], sections: [SectionInfo], snoozed: [SnoozeInfo]) {
         self.accounts = accounts
+        accountsLoaded = true
+        // The accounts load after launch, and the first one may be added
+        // later: ask to notify once there is mail to notify about, and
+        // never on a launch without an account.
+        if !askedToNotify, accounts.contains(where: { $0.account.provider != "Synthetic" }) {
+            askedToNotify = true
+            notifier.requestPermission()
+        }
         self.sections = sections
         self.snoozed = snoozed
         if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }
@@ -475,6 +547,14 @@ final class AppModel {
         pendingAgent = nil
         agentRevision += 1
         show(Toast(text: approve ? "\(agent.name) can use Jolta" : "\(agent.name) was turned away", undo: nil))
+    }
+
+    /// Closes the question without an answer. The agent stays waiting in
+    /// Settings › Agents, where it can be allowed or revoked.
+    func postponeAgent() {
+        guard let agent = pendingAgent else { return }
+        pendingAgent = nil
+        show(Toast(text: "\(agent.name) is waiting in Settings › Agents", undo: nil))
     }
 
     func reviewDraft(_ id: Int64) {
@@ -589,11 +669,62 @@ final class AppModel {
         focusListRequest += 1
     }
 
+    /// Gives the keyboard back when a panel over the window closes: to the
+    /// message being written, else to the list, where a typed letter is a
+    /// command.
+    func returnKeyboard() {
+        if compose != nil, let body = RichTextView.messageBody {
+            body.window?.makeFirstResponder(body)
+        } else {
+            requestListFocus()
+        }
+    }
+
     /// Asks the search field to take keyboard focus.
     private(set) var focusSearchRequest = 0
 
     func requestSearchFocus() {
+        readerUp = false
         focusSearchRequest += 1
+    }
+
+    /// The reader's zoom (⌘+, ⌘-, ⌘0), until Jolta quits.
+    private(set) var readerZoom = 1.0
+
+    /// One step in or out, between half and three times the size; nil goes back to the actual size.
+    func zoomReader(_ step: Int?) {
+        readerZoom = step.map { min(max(((readerZoom + Double($0) * 0.1) * 10).rounded() / 10, 0.5), 3) } ?? 1
+    }
+
+    /// Space and ⇧Space in the list: the reader scrolls the open
+    /// conversation by `pages`. The count tells one press from the next.
+    private(set) var readerScroll = (count: 0, pages: 0)
+    /// ⌘F: counts up to ask the reader for its find bar.
+    private(set) var findRequest = 0
+
+    /// A conversation is open in a reader that is in sight.
+    var readsConversation: Bool { mode == .mail && openThread != nil && compose == nil && (!singleColumn || readerUp) }
+
+    func scrollReader(pages: Int) {
+        if readsConversation { readerScroll = (readerScroll.count + 1, pages) }
+    }
+
+    func findInConversation() {
+        if readsConversation { findRequest += 1 }
+    }
+
+    /// Return or a click on a row, in one column: the conversation comes over the list.
+    func showReader() {
+        guard singleColumn, !readerUp else { return }
+        readerUp = true
+        if let open = selectedThreadID { markReadSoon(open) }
+    }
+
+    /// Esc in one column: back from the conversation to the list. False when the list already shows.
+    func backToList() -> Bool {
+        guard singleColumn, readerUp, compose == nil else { return false }
+        readerUp = false
+        return true
     }
 
     private func listChanged() {
@@ -694,6 +825,7 @@ final class AppModel {
         markReadTask?.cancel()
         selectedThreadID = nil
         openThread = nil
+        openFailure = nil
     }
 
     /// Acts on a thread, or on the selection when none is named, and offers undo.
@@ -734,7 +866,9 @@ final class AppModel {
     func act(_ action: ThreadAction, label: String, threadID: Int64? = nil) {
         let threads = threadID.map { [$0] } ?? (isMultiSelection ? selectedThreads : selectedThreadID.map { [$0] } ?? [])
         guard !threads.isEmpty else { return }
-        userChangedList = true
+        // A change to a conversation outside the selection, from its
+        // right-click menu, leaves the cursor where it is.
+        if threads.contains(where: selectedThreads.contains) { userChangedList = true }
         do {
             let tokens = try core.perform(action: action, threadIds: threads, context: source.actionContext)
             let text = threads.count > 1 ? "\(label): \(threads.count) conversations" : label
@@ -795,8 +929,17 @@ final class AppModel {
         }
     }
 
+    /// What Z takes back: the last action that offered Undo. Kept apart from
+    /// the toast, so the action can be undone after its message has left or
+    /// another message has replaced it.
+    private var lastUndo: Toast.Undo?
+    /// The message Discard closed, for Undo to open again.
+    private var discarded: ComposeData?
+
     func undo() {
-        switch toast?.undo {
+        let undo = lastUndo
+        lastUndo = nil
+        switch undo {
         case .action(let tokens):
             userChangedList = true
             try? core.undo(tokens: tokens)
@@ -820,8 +963,14 @@ final class AppModel {
             } else {
                 show(Toast(text: "Already sent", undo: nil))
             }
+        case .discard:
+            guard var draft = discarded else { return }
+            discarded = nil
+            // The stored draft is gone; the next save stores it again.
+            draft.draftId = nil
+            openCompose(draft)
         case nil:
-            break
+            show(Toast(text: "Nothing to undo", undo: nil))
         }
     }
 
@@ -832,6 +981,7 @@ final class AppModel {
     func openCompose(_ message: ComposeData) {
         composeReminder = nil
         composeSchedule = nil
+        composeError = nil
         compose = message
         composeSession += 1
     }
@@ -875,15 +1025,17 @@ final class AppModel {
         guard let draft = compose else { return }
         do {
             let token = try core.send(compose: draft, sendAt: at, remindAt: composeReminder?.at)
-            var text = label.map { "Scheduled for \($0)" } ?? "Sending in 10 seconds"
+            var text = label.map { "Scheduled for \($0)" } ?? "Sending in \(Toast.countdownMark)"
             if let reminder = composeReminder { text += ", reminder \(reminder.label)" }
             compose = nil
             composeReminder = nil
             composeSchedule = nil
+            composeError = nil
             requestListFocus()
-            show(Toast(text: text, undo: .send(token)))
+            show(Toast(text: text, undo: .send(token), until: label == nil ? Date.now + Toast.undoWindow : nil))
         } catch {
-            show(Toast(text: "\(error)", undo: nil))
+            // The message stays open, so the reason shows with it.
+            composeError = "\(error)"
         }
     }
 
@@ -994,6 +1146,10 @@ final class AppModel {
     func discardCompose() {
         composeSchedule = nil
         if let id = compose?.draftId { try? core.discardDraft(draftId: id) }
+        if let draft = compose, !draft.isEmpty {
+            discarded = draft
+            show(Toast(text: "Message discarded", undo: .discard))
+        }
         compose = nil
         requestListFocus()
     }
@@ -1072,9 +1228,12 @@ final class AppModel {
 
     private func show(_ toast: Toast) {
         self.toast = toast
+        // VoiceOver doesn't look at the foot of the list by itself.
+        AccessibilityNotification.Announcement(toast.text(at: .now)).post()
+        if let undo = toast.undo { lastUndo = undo }
         let id = toast.id
         Task {
-            try? await Task.sleep(for: .seconds(toast.review != nil ? 12 : toast.undo == nil && toast.release == nil ? 3 : 6))
+            try? await Task.sleep(for: .seconds(toast.seconds))
             if self.toast?.id == id { self.toast = nil }
         }
     }
@@ -1122,9 +1281,21 @@ final class AppModel {
         selectedThreadID = nil
         selectedThreads = []
         openThread = nil
+        openFailure = nil
+        readerUp = false
         showSummary(for: nil)
         cursorRow = nil
         cursor = (0, 0)
+    }
+
+    /// Marks the conversation read once it has been open for a second.
+    private func markReadSoon(_ threadID: Int64) {
+        markReadTask?.cancel()
+        markReadTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
+        }
     }
 
     func open(threadID: Int64) {
@@ -1136,14 +1307,11 @@ final class AppModel {
         }
         selectedThreadID = threadID
         selectedThreads = [threadID]
+        openFailure = nil
         showSummary(for: threadID)
         let opening = ContinuousClock.now
         markReadTask?.cancel()
-        markReadTask = Task {
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled, selectedThreadID == threadID else { return }
-            _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
-        }
+        if !singleColumn || readerUp { markReadSoon(threadID) }
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
             do {
@@ -1155,8 +1323,14 @@ final class AppModel {
                                        Double(ms.seconds) * 1000 + Double(ms.attoseconds) / 1e15, view.messageCount))
                 }
             } catch {
-                lastError = "\(error)"
                 Self.timing("open thread \(threadID) failed: \(error)")
+                // The conversation open before is not the one selected now, and
+                // one that didn't open wasn't read.
+                guard selectedThreadID == threadID else { return }
+                markReadTask?.cancel()
+                openThread = nil
+                showSummary(for: nil)
+                openFailure = OpenFailure(threadID: threadID, message: "\(error)")
             }
         }
     }
@@ -1172,7 +1346,15 @@ struct Toast: Equatable {
         case vips([String], Bool)
         /// Bring back the holds of a set that these calendar ops release.
         case holds(String, [Int64])
+        /// Open the message Discard closed.
+        case discard
     }
+
+    /// How long a send or a calendar change waits before it goes out, as
+    /// the core's `UNDO_SEND_SECONDS`.
+    static let undoWindow: TimeInterval = 10
+    /// Where `text` shows the seconds left until `until`.
+    static let countdownMark = "{seconds}"
 
     let id = UUID()
     let text: String
@@ -1181,6 +1363,31 @@ struct Toast: Equatable {
     var review: Int64?
     /// A hold set the toast's Release releases.
     var release: String?
+    /// When the action goes out for good; the toast stays and counts down until then.
+    var until: Date?
+
+    /// How long the toast shows. One that offers Undo for something the core
+    /// holds back stays for as long as the core does.
+    var seconds: TimeInterval {
+        if review != nil { return 12 }
+        if let until { return max(1, until.timeIntervalSinceNow) }
+        switch undo {
+        case .calendar: return Self.undoWindow
+        case .some: return 6
+        case nil: return release == nil && !isLong ? 3 : 6
+        }
+    }
+
+    /// A message without an action that runs past one line, as an error's
+    /// reason does: it shows on two lines and stays long enough to read.
+    var isLong: Bool { undo == nil && review == nil && release == nil && until == nil && text.count > 56 }
+
+    /// `text` with the seconds left filled in.
+    func text(at now: Date) -> String {
+        guard let until else { return text }
+        let left = max(1, Int(until.timeIntervalSince(now).rounded(.up)))
+        return text.replacingOccurrences(of: Self.countdownMark, with: left == 1 ? "1 second" : "\(left) seconds")
+    }
 }
 
 /// Receives core events on the core's threads and hands them to the main actor.

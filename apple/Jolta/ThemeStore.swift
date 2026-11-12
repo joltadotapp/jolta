@@ -23,6 +23,10 @@ final class ThemeStore {
     static let shared = ThemeStore()
 
     private(set) var choice: ThemeChoice
+    /// Settings › Appearance › Text size, saved beside the theme.
+    var textSize: ReadingSize {
+        didSet { UserDefaults.standard.set(textSize.rawValue, forKey: keyPrefix + "TextSize") }
+    }
     private(set) var preview: ThemePalette?
     /// What every theme color resolves to right now.
     private(set) var active: ThemePair
@@ -30,7 +34,7 @@ final class ThemeStore {
     /// AppKit asks dynamic colors for their value whenever it draws, on any
     /// thread, so the colors read the pair here instead of capturing one.
     private nonisolated static let live = Mutex(ThemePair(dark: ThemePalette.graphiteDark.tokens, light: ThemePalette.graphiteLight.tokens))
-    @ObservationIgnored private var colors: [KeyPath<ThemeTokens, UInt32>: NSColor] = [:]
+    @ObservationIgnored private var colors: [[AnyKeyPath]: NSColor] = [:]
     @ObservationIgnored private let keyPrefix: String
 
     private init() {
@@ -38,13 +42,31 @@ final class ThemeStore {
         let test = AppModel.isTestData ? defaults.string(forKey: "JoltaTestData") ?? "" : ""
         let prefix = test.isEmpty ? "" : test + "."
         // UI tests save under their own keys and start from Graphite each launch.
-        if !test.isEmpty { ThemeChoice.forget(defaults, prefix: prefix) }
+        if !test.isEmpty {
+            ThemeChoice.forget(defaults, prefix: prefix)
+            defaults.removeObject(forKey: prefix + "TextSize")
+        }
         keyPrefix = prefix
+        textSize = defaults.string(forKey: prefix + "TextSize").flatMap(ReadingSize.init(rawValue:)) ?? .standard
         let choice = ThemeChoice.load(defaults, prefix: prefix)
         self.choice = choice
-        active = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
+        active = Self.pair(choice, preview: nil)
         Self.live.withLock { $0 = active }
         force(choice.always)
+        // Increase Contrast switched on or off in System Settings.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { ThemeStore.shared.apply() }
+        }
+    }
+
+    /// The tokens on screen: the chosen themes, a preview in place of the
+    /// theme of its mode, and both pushed further (`ThemeTokens.contrasted`)
+    /// while macOS's Increase Contrast is on.
+    private static func pair(_ choice: ThemeChoice, preview: ThemePalette?) -> ThemePair {
+        var pair = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
+        if let preview { pair[preview.mode] = preview.tokens }
+        guard NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast else { return pair }
+        return ThemePair(dark: pair.dark.contrasted, light: pair.light.contrasted)
     }
 
     /// The tokens on screen for one appearance, for colors mixed from them
@@ -95,8 +117,7 @@ final class ThemeStore {
 
     private func apply() {
         force(preview?.mode ?? choice.always)
-        var pair = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
-        if let preview { pair[preview.mode] = preview.tokens }
+        let pair = Self.pair(choice, preview: preview)
         guard pair != active else { return }
         Self.live.withLock { $0 = pair }
         active = pair
@@ -128,18 +149,22 @@ final class ThemeStore {
     /// draw again when the theme changes. AppKit keeps some of these colors
     /// (in attributed strings, as tints), so each one resolves from the live
     /// pair each time it draws rather than from the pair when it was made.
-    func color(_ token: KeyPath<ThemeTokens, UInt32> & Sendable) -> NSColor {
+    func color(_ token: KeyPath<ThemeTokens, UInt32> & Sendable, alpha: (KeyPath<ThemeTokens, Double> & Sendable)? = nil) -> NSColor {
         _ = active
-        if let color = colors[token] { return color }
-        let color = Self.dynamicColor(token)
-        colors[token] = color
+        let key: [AnyKeyPath] = [token] + (alpha.map { [$0] } ?? [])
+        if let color = colors[key] { return color }
+        let color = Self.dynamicColor(token, alpha: alpha)
+        colors[key] = color
         return color
     }
 
-    private nonisolated static func dynamicColor(_ token: KeyPath<ThemeTokens, UInt32> & Sendable) -> NSColor {
+    private nonisolated static func dynamicColor(_ token: KeyPath<ThemeTokens, UInt32> & Sendable, alpha: (KeyPath<ThemeTokens, Double> & Sendable)?) -> NSColor {
         NSColor(name: nil) { appearance in
             let mode: ThemeMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
-            return NSColor(hex: live.withLock { $0[mode][keyPath: token] })
+            return live.withLock {
+                let tokens = $0[mode]
+                return NSColor(hex: tokens[keyPath: token], alpha: alpha.map { tokens[keyPath: $0] } ?? 1)
+            }
         }
     }
 }

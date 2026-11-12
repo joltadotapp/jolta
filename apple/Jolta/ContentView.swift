@@ -7,12 +7,35 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Group {
-            if model.mode == .calendar {
-                CalendarModeView(model: model)
-            } else {
-                mail
+        GeometryReader { geo in
+            let columns = MailColumns(width: geo.size.width, sidebar: !model.sidebarCollapsed, panel: model.showsDayPanel, listWidth: listWidth)
+            let calendarFits = CalendarModeView.sidebarFits(model, width: geo.size.width)
+            let fits = model.mode == .calendar ? calendarFits : columns.sidebarFits
+            let sidebar = model.mode == .calendar ? calendarFits && !model.sidebarCollapsed : columns.sidebar
+            ZStack(alignment: .topLeading) {
+                if model.mode == .calendar {
+                    CalendarModeView(model: model, showsSidebar: sidebar)
+                } else {
+                    mail(columns)
+                }
+                // Over the list and reader; the list stays underneath for the keys.
+                if model.isInboxZero, model.mode == .mail {
+                    let side: CGFloat = columns.sidebar ? Theme.sidebarWidth : 0
+                    InboxZero(compose: model.startCompose)
+                        // The scene covers the list, and with it the list's toast.
+                        .overlay(alignment: .bottom) { ToastLayer(model: model) }
+                        .frame(width: geo.size.width - side - (columns.panel ? MailColumns.panel : 0), height: geo.size.height)
+                        .padding(.leading, side)
+                        .transition(.opacity)
+                }
+                // The sidebar holds the mode switcher; without it, it sits beside the window buttons.
+                if !sidebar {
+                    ModeSwitcher(model: model).padding(.top, 5).padding(.leading, ModeSwitcher.besideWindowButtons)
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .onChange(of: columns.single, initial: true) { _, single in model.singleColumn = single }
+            .onChange(of: fits, initial: true) { _, fits in model.sidebarFits = fits }
         }
         .sheet(isPresented: Binding(get: { model.showsCalendarIntro }, set: { if !$0 { model.finishCalendarIntro() } })) {
             CalendarIntroSheet(model: model)
@@ -20,23 +43,22 @@ struct ContentView: View {
         .sheet(item: Binding(get: { model.awaySheet }, set: { model.awaySheet = $0 })) { request in
             AwaySheet(model: model, request: request) { model.awaySheet = nil }
         }
+        // A sheet, so no key reaches the mail behind it while it asks.
+        .sheet(isPresented: Binding(get: { model.pendingAgent != nil }, set: { if !$0 { model.postponeAgent() } })) {
+            if let agent = model.pendingAgent {
+                AgentApproval(name: agent.name, later: model.postponeAgent) { approve, grants in model.decideAgent(approve: approve, grants: grants) }
+            }
+        }
         .sheet(item: Binding(get: { model.focusSheet }, set: { model.focusSheet = $0 })) { _ in
             FocusSheet(model: model) { model.focusSheet = nil }
         }
-        .overlay(alignment: .trailing) {
-            // Over the list and reader; the list stays underneath for the keys.
-            if model.isInboxZero, model.mode == .mail {
-                GeometryReader { geo in
-                    let panel: CGFloat = model.showsDayPanel ? 300 : 0
-                    InboxZero(compose: model.startCompose)
-                        .frame(width: geo.size.width - Theme.sidebarWidth - panel)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.trailing, panel)
-                }
-                .transition(.opacity)
+        .sheet(isPresented: Binding(get: { model.addingIMAP }, set: { model.addingIMAP = $0 })) {
+            AddIMAPAccount(model: model) { added in
+                model.addingIMAP = false
+                if let added { model.notify("Added \(added.address). Jolta is syncing it now.") }
             }
         }
-        .animation(.easeInOut(duration: 0.4), value: model.isInboxZero)
+        .animation(Theme.motion(.easeInOut(duration: 0.4)), value: model.isInboxZero)
         .onChange(of: model.settingsRequest, initial: true) { _, page in
             // The settings window takes the request and switches to the page.
             if page != nil { openWindow(id: "settings") }
@@ -47,40 +69,97 @@ struct ContentView: View {
         .foregroundStyle(Color(Theme.text))
         .font(.system(size: 13))
         .ignoresSafeArea()
+        // Each overlay animates inside its own stack, so what a command
+        // changes in the window behind doesn't move with the panel.
         .overlay {
-            if model.palette != nil || model.showsHelp || model.findTime != nil {
-                // Light while picking a theme, so the preview behind the palette shows.
-                Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
-                    .ignoresSafeArea()
-                    .onTapGesture { model.palette = nil; model.showsHelp = false; model.findTime = nil }
-            }
-        }
-        .overlay {
-            if let request = model.findTime {
-                FindTimePanel(model: model, request: request).id(request)
-            }
-        }
-        .overlay {
-            if let agent = model.pendingAgent {
-                ZStack {
-                    Color.black.opacity(0.35).ignoresSafeArea()
-                    AgentApproval(name: agent.name) { approve, grants in model.decideAgent(approve: approve, grants: grants) }
+            let dimmed = model.palette != nil || model.showsHelp || model.findTime != nil
+            ZStack {
+                if dimmed {
+                    // Light while picking a theme, so the preview behind the palette shows.
+                    Color.black.opacity(model.palette == .themes ? 0.08 : 0.35)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            model.palette = nil
+                            model.showsHelp = false
+                            model.findTime = nil
+                            model.returnKeyboard()
+                        }
+                        .transition(.opacity)
                 }
             }
+            .animation(Theme.quick, value: dimmed)
+        }
+        .overlay {
+            ZStack {
+                if let request = model.findTime {
+                    FindTimePanel(model: model, request: request).id(request).transition(.panel())
+                }
+            }
+            .animation(Theme.quick, value: model.findTime)
         }
         .overlay(alignment: .top) {
-            if let mode = model.palette, mode == .quickEvent || mode == .goToDate {
-                QuickCreateView(model: model, mode: mode)
-                    .id(mode)
-                    .padding(.top, 110)
-            } else if let mode = model.palette {
-                PaletteView(model: model, mode: mode)
-                    .id(mode)
-                    .padding(.top, 110)
-            } else if model.showsHelp {
-                HelpView(model: model).padding(.top, 110)
+            ZStack(alignment: .top) {
+                if let mode = model.palette, mode == .quickEvent || mode == .goToDate {
+                    QuickCreateView(model: model, mode: mode)
+                        .id(mode)
+                        .padding(.top, 110)
+                        .transition(.panel())
+                } else if let mode = model.palette {
+                    PaletteView(model: model, mode: mode)
+                        .id(mode)
+                        .padding(.top, 110)
+                        .transition(.panel())
+                } else if model.showsHelp {
+                    GeometryReader { geo in
+                        HelpView(model: model, window: geo.size)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, HelpView.top(in: geo.size))
+                    }
+                    .transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: model.palette)
+            .animation(Theme.quick, value: model.showsHelp)
         }
+    }
+}
+
+/// Which of mail's columns a window shows, and how wide. A window too
+/// narrow for all of them loses the Today panel first, then the sidebar, and
+/// under `singleBelow` shows one column: the list, or the reader over it.
+struct MailColumns: Equatable {
+    static let listMin: CGFloat = 380
+    static let readerMin: CGFloat = 480
+    static let readerMinBesidePanel: CGFloat = 360
+    static let panel: CGFloat = 300
+    /// The list's least beside the reader once the sidebar is gone too.
+    static let tightListMin: CGFloat = 340
+    static let singleBelow: CGFloat = 760
+
+    let sidebar: Bool
+    /// The sidebar would show if it weren't folded away by hand.
+    let sidebarFits: Bool
+    let panel: Bool
+    let single: Bool
+    let list: CGFloat
+    let reader: CGFloat
+
+    init(width: CGFloat, sidebar wantsSidebar: Bool, panel wantsPanel: Bool, listWidth: Double) {
+        sidebarFits = width >= Theme.sidebarWidth + Self.listMin + Self.readerMin
+        guard width >= Self.singleBelow else {
+            (sidebar, panel, single, list, reader) = (false, false, true, width, width)
+            return
+        }
+        let side = wantsSidebar && sidebarFits ? Theme.sidebarWidth : 0
+        let panel = wantsPanel && width >= side + Self.listMin + Self.readerMinBesidePanel + Self.panel
+        let rest = width - side - (panel ? Self.panel : 0)
+        // The reader keeps its least, down to what the tightest list leaves it.
+        let reader = panel ? Self.readerMinBesidePanel : min(Self.readerMin, rest - Self.tightListMin)
+        list = min(max(CGFloat(listWidth), Self.listMin), rest - reader)
+        self.reader = rest - list
+        self.panel = panel
+        sidebar = side > 0
+        single = false
     }
 }
 
@@ -89,18 +168,23 @@ struct ContentView: View {
 /// clicks ahead of the message list's table underneath.
 struct ColumnResizer: NSViewRepresentable {
     @Binding var width: Double
+    /// The list's width on screen, which a narrow window makes less than
+    /// the one stored: a drag starts from what the user sees.
+    let shown: Double
 
     func makeNSView(context: Context) -> Handle { Handle() }
 
     func updateNSView(_ handle: Handle, context: Context) {
-        handle.width = width
+        handle.width = shown
         handle.onChange = { width = $0 }
     }
 
     final class Handle: NSView {
         var width = 0.0
         var onChange: (Double) -> Void = { _ in }
-        private var start: (x: CGFloat, width: Double)?
+        private var start: (x: CGFloat, width: Double)? { didSet { needsDisplay = true } }
+        private var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
+        private var hoverArea: NSTrackingArea?
 
         override var mouseDownCanMoveWindow: Bool { false }
 
@@ -108,9 +192,22 @@ struct ColumnResizer: NSViewRepresentable {
             addCursorRect(bounds, cursor: .columnResize)
         }
 
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let hoverArea { removeTrackingArea(hoverArea) }
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+            addTrackingArea(area)
+            hoverArea = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { hovering = true }
+        override func mouseExited(with event: NSEvent) { hovering = false }
+
         override func draw(_ dirtyRect: NSRect) {
-            Theme.line2.setFill()
-            NSRect(x: bounds.midX - 0.5, y: 0, width: 1, height: bounds.height).fill()
+            let held = hovering || start != nil
+            (held ? Theme.text3 : Theme.line2).setFill()
+            let line: CGFloat = held ? 3 : 1
+            NSRect(x: bounds.midX - line / 2, y: 0, width: line, height: bounds.height).fill()
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -123,7 +220,7 @@ struct ColumnResizer: NSViewRepresentable {
 
         override func mouseDragged(with event: NSEvent) {
             guard let start else { return }
-            onChange(min(max(start.width + event.locationInWindow.x - start.x, 380), 900))
+            onChange(min(max(start.width + event.locationInWindow.x - start.x, MailColumns.listMin), 900))
         }
 
         override func mouseUp(with event: NSEvent) {
@@ -133,29 +230,54 @@ struct ColumnResizer: NSViewRepresentable {
 }
 
 extension ContentView {
-    private var mail: some View {
-        HStack(spacing: 0) {
-            Sidebar(model: model)
-                .frame(width: Theme.sidebarWidth)
-                .background(Color(Theme.side))
-                .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
-            // The chosen width, sized before the reader (which keeps its 480 pt
-            // minimum): a narrow window takes width from the list first.
-            ListColumn(model: model)
-                .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
-                .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
-                .layoutPriority(1)
-                .zIndex(1)
-            ReaderColumn(model: model)
-                .frame(minWidth: model.showsDayPanel ? 360 : 480, maxWidth: .infinity)
-                .background(Color(Theme.reader))
-            if model.showsDayPanel {
-                DayPanel(model: model)
-                    .frame(width: 300)
-                    .transition(.move(edge: .trailing))
+    private func mail(_ columns: MailColumns) -> some View {
+        let inset: CGFloat = columns.sidebar ? 0 : ModeSwitcher.headerInset
+        // In one column the list and the reader lie side by side, each as
+        // wide as the window, and the pair slides: the list stays in the
+        // window for the keys while the reader is over it.
+        let readerOver = columns.single && (model.readerUp || model.compose != nil)
+        return HStack(spacing: 0) {
+            if columns.sidebar {
+                Sidebar(model: model)
+                    .frame(width: Theme.sidebarWidth)
+                    .background(Color(Theme.side))
+                    .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+                    .transition(.move(edge: .leading))
+            }
+            if model.needsAccount {
+                Welcome(model: model)
+            } else {
+                HStack(spacing: 0) {
+                    ListColumn(model: model, width: columns.list)
+                        .frame(width: columns.list)
+                        .overlay(alignment: .trailing) {
+                            if !columns.single { ColumnResizer(width: $listWidth, shown: columns.list).frame(width: 9).offset(x: 4) }
+                        }
+                        .zIndex(1)
+                        .environment(\.headerInset, inset)
+                        .allowsHitTesting(!readerOver)
+                        .accessibilityHidden(readerOver)
+                    ReaderColumn(model: model)
+                        .frame(width: columns.reader)
+                        .background(Color(Theme.reader))
+                        // The list's toast is out of the window with the list.
+                        .overlay(alignment: .bottom) { if readerOver { ToastLayer(model: model) } }
+                        .environment(\.headerInset, columns.single ? inset : 0)
+                        .allowsHitTesting(!columns.single || readerOver)
+                        .accessibilityHidden(columns.single && !readerOver)
+                }
+                .offset(x: readerOver ? -columns.list : 0)
+                .frame(width: columns.single ? columns.list : columns.list + columns.reader, alignment: .leading)
+                .clipped()
+                .animation(Theme.settle, value: readerOver)
+                if columns.panel {
+                    DayPanel(model: model)
+                        .frame(width: MailColumns.panel)
+                        .transition(.move(edge: .trailing))
+                }
             }
         }
-        .animation(.snappy(duration: 0.2), value: model.showsDayPanel)
+        .animation(Theme.settle, value: model.showsDayPanel)
     }
 
     private func emptyTrash(_ list: ListSource) -> Confirmation {
@@ -197,40 +319,20 @@ struct Sidebar: View {
                     if !model.scheduled.isEmpty {
                         GroupLabel("Scheduled")
                         ForEach(model.scheduled, id: \.token) { s in
-                            Button { model.editScheduled(s) } label: {
-                                HStack(spacing: 10) {
-                                    Text(Self.wake(s.sendAt))
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(Color(Theme.text3))
-                                        .frame(width: 74, alignment: .leading)
-                                    Text(s.subject.isEmpty ? "(no subject)" : s.subject).lineLimit(1).foregroundStyle(Color(Theme.text2))
-                                }
-                                .font(.system(size: 12))
-                                .padding(.horizontal, 10)
-                                .frame(height: 24)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .help("Jolta sends it then if it's running, otherwise as soon as it opens. Click to edit it.")
+                            NavRow(icon: nil, title: s.subject.isEmpty ? "(no subject)" : s.subject, count: 0, selected: false,
+                                   time: Self.wake(s.sendAt)) { model.editScheduled(s) }
+                                .help("Jolta sends it then if it's running, otherwise as soon as it opens. Click to edit it.")
                         }
                     }
                     if !model.snoozed.isEmpty {
                         GroupLabel("Next to wake")
                         ForEach(model.snoozed.prefix(5), id: \.threadId) { s in
-                            Button { model.source = .role("snoozed"); model.open(threadID: s.threadId) } label: {
-                                HStack(spacing: 10) {
-                                    Text(Self.wake(s.wakeAt))
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(Color(Theme.text3))
-                                        .frame(width: 74, alignment: .leading)
-                                    Text(s.subject).lineLimit(1).foregroundStyle(Color(Theme.text2))
-                                }
-                                .font(.system(size: 12))
-                                .padding(.horizontal, 10)
-                                .frame(height: 24)
-                                .contentShape(Rectangle())
+                            NavRow(icon: nil, title: s.subject, count: 0,
+                                   selected: model.source == .role("snoozed") && model.selectedThreadID == s.threadId,
+                                   time: Self.wake(s.wakeAt)) {
+                                model.source = .role("snoozed")
+                                model.open(threadID: s.threadId)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     if !model.accounts.isEmpty {
@@ -331,7 +433,7 @@ struct GroupLabel: View {
 
     var body: some View {
         if let collapsed {
-            Button { withAnimation(.easeOut(duration: 0.15)) { collapsed.wrappedValue.toggle() } } label: {
+            Button { withAnimation(Theme.quick) { collapsed.wrappedValue.toggle() } } label: {
                 HStack(spacing: 5) {
                     label
                     // Shown on hover, as in Finder, and always while folded so the hidden rows are findable.
@@ -372,23 +474,37 @@ struct NavRow: View {
     let title: String
     let count: Int
     let selected: Bool
+    /// The keyboard is on the selected row, which then shows the caret.
+    var marked = false
     var indent: CGFloat = 0
+    /// When a scheduled or snoozed row is due, in place of an icon.
+    var time: String?
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
+                if let time {
+                    Text(time)
+                        .font(.system(size: Theme.caption, design: .monospaced))
+                        .foregroundStyle(Color(Theme.text3))
+                        .frame(width: 74, alignment: .leading)
+                }
                 if let icon {
                     Image(systemName: icon)
                         .font(.system(size: 13))
                         .frame(width: 16)
-                        .foregroundStyle(Color(selected ? Theme.accent : Theme.text3))
+                        .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
                 }
-                Text(title)
-                    .fontWeight(selected ? .medium : .regular)
-                    .foregroundStyle(Color(selected ? Theme.text : Theme.text2))
-                    .lineLimit(1)
+                // A name cut short shows in full under the pointer. A scheduled
+                // or snoozed row keeps its own tooltip.
+                ViewThatFits(in: .horizontal) {
+                    Text(title).fixedSize()
+                    if time == nil { Text(title).lineLimit(1).help(title) } else { Text(title).lineLimit(1) }
+                }
+                .fontWeight(selected ? .medium : .regular)
+                .foregroundStyle(Color(selected ? Theme.text : Theme.text2))
                 Spacer(minLength: 4)
                 if count > 0 {
                     Text("\(count)")
@@ -400,7 +516,8 @@ struct NavRow: View {
             .padding(.trailing, 10)
             .frame(height: 28)
             .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(selected ? Theme.fill : hovering ? Theme.hover : .clear)))
+            // The mail sidebar's selection is not where the keyboard is, so no caret.
+            .selectedRow(selected, marked: marked, hovering: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -443,23 +560,49 @@ struct SyncFooter: View {
     let model: AppModel
 
     private var status: String {
-        if let (id, error) = model.syncErrors.min(by: { $0.key < $1.key }) {
-            let name = model.accounts.first { $0.account.id == id }?.account.address ?? "An account"
-            let more = model.syncErrors.count > 1 ? " (and \(model.syncErrors.count - 1) more)" : ""
-            return "\(name): \(error)\(more)"
-        }
-        if let error = model.lastError { return error }
         if !model.syncing.isEmpty { return "Syncing…" }
         if let date = model.lastSynced { return "All accounts synced, \(date.formatted(date: .omitted, time: .shortened))" }
         return model.accounts.isEmpty ? "No accounts yet" : "Up to date"
     }
 
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(Color(model.lastError == nil && model.syncErrors.isEmpty ? Theme.text2 : Theme.accent)).frame(width: 6, height: 6)
-            Text(status).lineLimit(2)
+    /// What went wrong: a line that names it, the reason, and everything in
+    /// full for the tooltip.
+    private var problem: (title: String, reason: String, full: String, color: NSColor)? {
+        let name = { (id: Int64) in model.accounts.first { $0.account.id == id }?.account.address ?? "An account" }
+        let failures = model.syncErrors.sorted { $0.key < $1.key }
+        if let first = failures.first {
+            let more = failures.count > 1 ? " (and \(failures.count - 1) more)" : ""
+            return ("\(name(first.key)) can't sync", first.value + more,
+                    failures.map { "\(name($0.key)): \($0.value)" }.joined(separator: "\n"), Theme.warningText)
         }
-        .font(.system(size: 11.5))
+        if let error = model.lastError { return ("Jolta couldn't read its data", error, error, Theme.dangerText) }
+        return nil
+    }
+
+    var body: some View {
+        Group {
+            if let problem {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Circle().fill(Color(problem.color)).frame(width: 6, height: 6)
+                        Text(problem.title).foregroundStyle(Color(Theme.text2)).lineLimit(1).truncationMode(.middle)
+                    }
+                    HStack(spacing: 8) {
+                        Text(problem.reason).lineLimit(1).padding(.leading, 14)
+                        Spacer(minLength: 0)
+                        KitButton(title: "Sync Now", size: .small) { model.core.syncNow() }
+                            .disabled(!model.syncing.isEmpty)
+                    }
+                }
+                .help(problem.full)
+            } else {
+                HStack(spacing: 8) {
+                    Circle().fill(Color(Theme.text2)).frame(width: 6, height: 6)
+                    Text(status).lineLimit(2)
+                }
+            }
+        }
+        .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -485,6 +628,8 @@ struct ListActions: View {
 
 struct ListColumn: View {
     @Bindable var model: AppModel
+    let width: CGFloat
+    @Environment(\.headerInset) private var headerInset
 
     var body: some View {
         VStack(spacing: 0) {
@@ -505,10 +650,11 @@ struct ListColumn: View {
                     }
                     Spacer(minLength: 0)
                 }
-                SortMenu(model: model)
+                // Beside the window buttons a narrow list has no room for it.
+                if width - max(Theme.gutter, headerInset) >= 300 { SortMenu(model: model) }
                 SearchField(model: model)
             }
-            .padding(.leading, 22)
+            .padding(.leading, max(Theme.gutter, headerInset))
             .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
             .background(TitleBarArea())
@@ -520,14 +666,7 @@ struct ListColumn: View {
                 .overlay {
                     if model.listCount == 0 { EmptyList(model: model) }
                 }
-                .overlay(alignment: .bottom) {
-                    if let toast = model.toast {
-                        ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) }, release: { model.releaseHolds($0) })
-                            .padding(.bottom, 14)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
-                .animation(.snappy(duration: 0.22), value: model.toast)
+                .overlay(alignment: .bottom) { ToastLayer(model: model) }
             KeyFooter()
         }
     }
@@ -548,7 +687,7 @@ struct SectionBar: View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 5) {
                     KeyCap(key: "⇥")
-                    Text("next").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                    Text("next").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                 }
                 .fixedSize()
                 .padding(.leading, 8)
@@ -557,36 +696,57 @@ struct SectionBar: View {
             .padding(.bottom, 8)
             .padding(.trailing, 9)
         }
-        .font(.system(size: 12.5))
-        .padding(.horizontal, 17)
+        .font(.system(size: Theme.body))
+        // A tab's words sit 9 points inside it.
+        .padding(.leading, Theme.gutter - 9)
+        .padding(.trailing, 11)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
 
     private func tabs(_ tabs: [SectionInfo?]) -> some View {
-            ForEach(tabs, id: \.?.id) { c in
-                let selected = model.section?.id == c?.id
-                Button { model.section = c } label: {
-                    HStack(spacing: 5) {
-                        Text(c?.name ?? "Everything")
-                            .lineLimit(1)
-                            .fontWeight(selected ? .medium : .regular)
-                            .foregroundStyle(Color(selected ? Theme.text : Theme.text3))
-                        let n = model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " "))
-                        if n > 0 {
-                            Text("\(n)").font(.system(size: 11.5).monospacedDigit()).foregroundStyle(Color(Theme.text3))
-                        }
-                    }
-                    .padding(.top, 6)
-                    .padding(.bottom, 8)
-                    .overlay(alignment: .bottom) {
-                        Rectangle().fill(Color(selected ? Theme.text2 : .clear)).frame(height: 1.5)
-                    }
-                    // The whole tab is the target, not just the letters.
-                    .padding(.horizontal, 9)
-                    .contentShape(Rectangle())
+        ForEach(tabs, id: \.?.id) { c in
+            SectionTab(name: c?.name ?? "Everything", unread: model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " ")),
+                       selected: model.section?.id == c?.id) { model.section = c }
+        }
+    }
+}
+
+private struct SectionTab: View {
+    let name: String
+    let unread: Int
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(name)
+                    .lineLimit(1)
+                    .fontWeight(selected ? .medium : .regular)
+                    .foregroundStyle(Color(selected ? Theme.text : hovering ? Theme.text2 : Theme.text3))
+                if unread > 0 {
+                    Text("\(unread)").font(.system(size: Theme.small).monospacedDigit()).foregroundStyle(Color(Theme.text3))
                 }
-                .buttonStyle(.plain)
             }
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Color(selected ? Theme.text2 : .clear)).frame(height: 1.5)
+            }
+            // The whole tab is the target, not just the letters.
+            .padding(.horizontal, 9)
+            .background {
+                // Clear of the line that marks the selected tab.
+                RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Color(hovering && !selected ? Theme.hover : .clear))
+                    .padding(.horizontal, 2)
+                    .padding(.top, 2)
+                    .padding(.bottom, 5)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -609,7 +769,7 @@ struct EmptyList: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 260)
             } else {
-                Text(model.search.isEmpty ? "No conversations" : "Nothing matches “\(model.search)”")
+                Text(model.search.isEmpty ? "No conversations" : "No matches for “\(model.search)”")
                     .foregroundStyle(Color(Theme.text3))
                 if model.searchLooksLikeRequest {
                     Text("Press ⌘J in the search field to search with AI.")
@@ -626,6 +786,7 @@ struct EmptyList: View {
 /// Date, sender or subject; choosing the current key again flips its direction.
 struct SortMenu: View {
     @Bindable var model: AppModel
+    @State private var hovering = false
 
     var body: some View {
         let sort = model.sort
@@ -654,6 +815,12 @@ struct SortMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
+        // The tint reaches 6 points past the words without moving them.
+        .padding(.horizontal, 6)
+        .frame(height: Theme.controlSmall)
+        .background(RoundedRectangle(cornerRadius: Theme.radiusControl).fill(Color(hovering ? Theme.hover : .clear)))
+        .onHover { hovering = $0 }
+        .padding(.horizontal, -6)
         .help("Sort conversations")
     }
 
@@ -672,7 +839,7 @@ struct SearchField: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+            Image(systemName: "magnifyingglass").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             TextField("Search", text: $model.search)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
@@ -689,14 +856,37 @@ struct SearchField: View {
             } else if !focused {
                 KeyCap(key: "/")
             }
+            if !model.search.isEmpty {
+                Button { model.search = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, -5)
+                .help("Clear the search")
+                .accessibilityLabel("Clear the search")
+            }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 5)
-        .frame(minWidth: 130, idealWidth: 196, maxWidth: 196)
-        .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
+        .frame(minWidth: 114, idealWidth: 180, maxWidth: 180)
+        .fieldBox(focused: focused)
         .onChange(of: model.focusSearchRequest) { focused = true }
         .onChange(of: focused) { _, now in model.searchFocused = now }
+    }
+}
+
+/// The toast at the foot of whatever it is laid over, with its actions.
+struct ToastLayer: View {
+    let model: AppModel
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if let toast = model.toast {
+                ToastView(toast: toast, undo: { model.undo() }, review: { model.reviewDraft($0) }, release: { model.releaseHolds($0) })
+                    .padding(.bottom, 14)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(Theme.settle, value: model.toast)
     }
 }
 
@@ -708,50 +898,73 @@ struct ToastView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(toast.text).lineLimit(1)
+            TimelineView(.periodic(from: .now, by: toast.until == nil ? 3600 : 0.5)) { context in
+                Text(toast.text(at: context.date))
+                    .lineLimit(toast.isLong ? 2 : 1)
+                    .truncationMode(toast.isLong ? .tail : .middle)
+                    .multilineTextAlignment(.leading)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: 420)
+            .help(toast.text(at: .now))
             if toast.undo != nil {
                 Button(action: undo) {
-                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z", focused: true) }
+                    HStack(spacing: 6) { Text("Undo"); KeyCap(key: "Z") }.frame(height: Theme.controlSmall).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Undo")
             }
             if let draft = toast.review {
-                Button("Review") { review(draft) }.buttonStyle(.plain).fontWeight(.medium)
-            }
-            if let set = toast.release {
-                Button("Release") { release(set) }
+                Button { review(draft) } label: { Text("Review").frame(height: Theme.controlSmall).contentShape(Rectangle()) }
                     .buttonStyle(.plain)
                     .fontWeight(.medium)
+                    .accessibilityLabel("Review the draft")
+            }
+            if let set = toast.release {
+                Button { release(set) } label: { Text("Release").frame(height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+                    .fontWeight(.medium)
+                    .accessibilityLabel("Release these holds")
                     .help("Release these holds now")
                     .accessibilityIdentifier("toast-release")
             }
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .fixedSize()
         .padding(.horizontal, 14)
-        .frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+        .padding(.vertical, toast.isLong ? 8 : 0)
+        .frame(minHeight: 36)
+        .menuPanel()
     }
 }
 
 struct KeyFooter: View {
     var body: some View {
+        // A narrow list keeps the first hints and the palette's.
+        ViewThatFits(in: .horizontal) {
+            row(all: true)
+            row(all: false)
+        }
+        .font(.system(size: Theme.small))
+        .foregroundStyle(Color(Theme.text3))
+        .padding(.leading, Theme.gutter)
+        .padding(.trailing, 20)
+        .frame(height: 34)
+        .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+
+    private func row(all: Bool) -> some View {
         HStack(spacing: 14) {
             hint(["J", "K"], "move")
             hint(["E"], "archive")
-            hint(["R"], "reply")
-            hint(["Z"], "undo")
-            Spacer()
-            HStack(spacing: 5) { KeyCap(key: "⌘K", focused: true); Text("commands") }.fixedSize()
+            if all {
+                hint(["R"], "reply")
+                hint(["Z"], "undo")
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 5) { KeyCap(key: "⌘K"); Text("commands") }.fixedSize()
         }
-        .font(.system(size: 11.5))
-        .foregroundStyle(Color(Theme.text3))
-        .padding(.horizontal, 20)
-        .frame(height: 34)
-        .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
 
     private func hint(_ keys: [String], _ label: String) -> some View {
@@ -765,6 +978,7 @@ struct KeyFooter: View {
 
 // MARK: - Reader column
 
+/// A toolbar's action: an icon, its name and its key.
 struct ActionButton: View {
     let icon: String
     let title: String
@@ -773,38 +987,18 @@ struct ActionButton: View {
     var showsKey = true
     var iconTint: Color?
     let action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: icon).font(.system(size: 12.5)).foregroundStyle(iconTint ?? Color(Theme.text2))
-                if showsTitle { Text(title) }
-                if showsKey {
-                    Text(key)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(Color(Theme.text3))
-                        .frame(minWidth: 16, minHeight: 16)
-                        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color(Theme.line), lineWidth: 1))
-                }
-            }
-            .font(.system(size: 12.5))
-            .foregroundStyle(Color(Theme.text2))
-            .padding(.horizontal, 7)
-            .frame(height: 28)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(hovering ? Theme.hover : .clear)))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(showsKey ? title : "\(title) (\(key))")
-        // Its key names it for UI tests, also when the hint is hidden.
-        .accessibilityIdentifier(key)
+        KitButton(title: title, key: key, icon: icon, kind: .quiet, showsTitle: showsTitle, showsKey: showsKey, iconTint: iconTint, action: action)
+            .help(showsKey ? title : "\(title) (\(key))")
+            // Its key names it for UI tests, also when the hint is hidden.
+            .accessibilityIdentifier(key)
     }
 }
 
 struct ReaderColumn: View {
     let model: AppModel
+    @Environment(\.headerInset) private var headerInset
 
     /// `titles` names the triage buttons, `replyTitles` the reply ones, which
     /// lose their words first when the reader narrows.
@@ -812,7 +1006,11 @@ struct ReaderColumn: View {
         HStack(spacing: 4) {
             ActionButton(icon: "archivebox", title: "Archive", key: "E", showsTitle: titles) { model.act(.archive, label: "Archived") }
             ActionButton(icon: "trash", title: "Trash", key: "#", showsTitle: titles) { model.act(.trash, label: "Moved to Trash") }
-            ActionButton(icon: "envelope.badge", title: "Unread", key: "U", showsTitle: titles) { model.act(.markUnread, label: "Marked unread") }
+            // As U: what it does follows the conversation under the cursor.
+            let unread = (model.cursorRow?.unreadCount ?? 0) > 0
+            ActionButton(icon: unread ? "envelope.open" : "envelope.badge", title: unread ? "Read" : "Unread", key: "U", showsTitle: titles) {
+                model.run(.toggleRead)
+            }
             let starred = model.cursorRow?.flagged == true
             ActionButton(icon: starred ? "star.fill" : "star", title: starred ? "Unstar" : "Star", key: "S", showsTitle: titles,
                          iconTint: starred ? Color(Theme.star) : nil) { model.run(.star) }
@@ -827,6 +1025,9 @@ struct ReaderColumn: View {
 
     private func bar(titles: Bool, replyTitles: Bool, position: Bool, jk: Bool) -> some View {
         HStack(spacing: 4) {
+            if model.singleColumn {
+                ActionButton(icon: "chevron.left", title: "Back to the List", key: "esc", showsTitle: false, showsKey: false) { _ = model.backToList() }
+            }
             if model.openThread != nil || model.isMultiSelection {
                 actions(titles: titles, replyTitles: replyTitles)
             }
@@ -838,7 +1039,8 @@ struct ReaderColumn: View {
                     .fixedSize()
                     .padding(.trailing, 6)
             }
-            if jk { HStack(spacing: 3) { KeyCap(key: "K"); KeyCap(key: "J") } }
+            // With nothing open, the reader's own hint says what J does.
+            if jk, model.openThread != nil { HStack(spacing: 3) { KeyCap(key: "K"); KeyCap(key: "J") } }
         }
     }
 
@@ -855,7 +1057,9 @@ struct ReaderColumn: View {
                 bar(titles: false, replyTitles: false, position: true, jk: true)
                 bar(titles: false, replyTitles: false, position: false, jk: false)
             }
-            .padding(.horizontal, 20)
+            // A toolbar button's icon sits 7 points inside it.
+            .padding(.leading, max(Theme.gutter - 7, headerInset))
+            .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
             .background(TitleBarArea())
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -863,6 +1067,7 @@ struct ReaderColumn: View {
             if model.compose != nil {
                 ComposeView(model: model)
                     .id(model.composeSession)
+                    .transition(.opacity)
             } else if model.isMultiSelection {
                 VStack(spacing: 6) {
                     Text("\(model.selectedThreads.count) conversations selected")
@@ -873,18 +1078,44 @@ struct ReaderColumn: View {
                         .foregroundStyle(Color(Theme.text3))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let failure = model.openFailure {
+                VStack(spacing: 8) {
+                    Text("Jolta couldn't open this conversation").font(.system(size: Theme.title, weight: .medium)).foregroundStyle(Color(Theme.text2))
+                    Text(failure.message)
+                        .font(.system(size: Theme.small))
+                        .foregroundStyle(Color(Theme.dangerText))
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: 420)
+                    KitButton(title: "Retry") { model.open(threadID: failure.threadID) }
+                        .padding(.top, 6)
+                        .accessibilityIdentifier("reader-retry")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let thread = model.openThread {
                 if let summary = model.summary, summary.threadID == thread.threadId {
                     SummaryCard(summary: summary, label: model.ai.label) { model.openSettings(.ai) }
-                        .animation(.easeInOut(duration: 0.2), value: summary.state)
+                        .animation(Theme.quick, value: summary.state)
                 }
                 ReaderView(thread: thread, model: model, onAttachment: model.openAttachment,
                            onSaveAll: { model.saveAttachments(message: $0) }, onUnsubscribe: model.unsubscribe)
             } else {
-                Text(model.listCount == 0 ? "Nothing here" : "")
-                    .foregroundStyle(Color(Theme.text3))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Rows but none open: at launch, or after the open one left by
+                // itself. Nothing while one loads or the list is empty, which
+                // says so itself.
+                VStack(spacing: 10) {
+                    if model.listCount > 0, model.selectedThreadID == nil {
+                        Text("No conversation open").foregroundStyle(Color(Theme.text3))
+                        HStack(spacing: 5) {
+                            KeyCap(key: "J")
+                            KeyCap(key: "↩")
+                            Text("open the first one").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .animation(Theme.quick, value: model.compose != nil)
     }
 }

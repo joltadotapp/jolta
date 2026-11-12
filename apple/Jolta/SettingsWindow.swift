@@ -7,53 +7,81 @@ enum SettingsPage: Hashable {
     case general, appearance, account(Int64), calendar, sections, vips, snippets, ai, agents, activity, about
 }
 
+/// Where the keyboard is in the settings window: the search field, the
+/// list of pages, or the open page's own arrow-key rows (Appearance, AI).
+enum SettingsFocus: Hashable { case search, pages, page }
+
 /// The settings window: pages in a searchable sidebar on the left, the
-/// open page on the right as titled sections of rows.
+/// open page on the right as titled sections of rows. ↑ and ↓ walk through
+/// the pages, or through a search's matches, where Return opens the one
+/// marked.
 struct SettingsView: View {
     let model: AppModel?
     @State private var page = SettingsPage.general
     @State private var search = ""
-    @FocusState private var searching: Bool
+    @FocusState private var focus: SettingsFocus?
+    /// The search match Return opens.
+    @State private var marked = 0
     @State private var addingIMAP = false
-    @State private var signingIn = false
     @State private var status: String?
 
     private struct Item {
         let page: SettingsPage
         let title: String
         let icon: String
-        /// Words on the page, so search finds the page that holds a setting.
+        /// The page's section and row titles as it shows them, so a search
+        /// for a setting's name finds its page. Add a new row's title here.
+        var rows: [String] = []
+        /// Other words for what the page holds.
         let keywords: String
+
+        func matches(_ needle: String) -> Bool {
+            ([title] + rows + [keywords]).joined(separator: " ").lowercased().contains(needle)
+        }
     }
 
     private var groups: [(title: String?, items: [Item])] {
         let all = model?.accounts ?? []
         let accounts = all.map { a in
             Item(page: .account(a.id), title: a.title, icon: Self.icon(a.account.provider),
-                 keywords: "\(a.account.address) \(a.account.provider) account signature server imap smtp password folders sign in remove send mail as alias aliases from default sender new messages")
+                 rows: ["Account", "Provider", "Name", "Email address", "Send mail as", "Signature", "Incoming mail (IMAP)", "Outgoing mail (SMTP)",
+                        "Server", "Port", "Security", "Username", "Password", "Sign in with", "Verify server certificates", "Sign-in",
+                        "Folders in the sidebar", "Remove this account"],
+                 keywords: "\(a.account.address) \(a.account.provider) imap smtp folders sign in again alias aliases from sender")
         }
         return [
             (nil, [
                 Item(page: .general, title: "General", icon: "gearshape",
-                     keywords: "notifications banners new mail vip contacts address suggestions autocomplete"),
+                     rows: ["Notifications", "Notify me about", "Play a sound", "Dock badge", "Writing", "New messages from", "Suggest people from Contacts"],
+                     keywords: "banners new mail vip important unread menu bar time sensitive focus address suggestions autocomplete default sender"),
                 Item(page: .appearance, title: "Appearance", icon: "paintpalette",
-                     keywords: "theme themes dark light mode macos graphite omarchy colors always match"),
+                     rows: ["Theme", "Match macOS", "Always use one theme", "Light", "Dark"],
+                     keywords: "themes mode graphite omarchy colors"),
             ]),
             ("Accounts", accounts),
             ("Calendar", [Item(page: .calendar, title: "Calendar", icon: "calendar",
-                               keywords: "calendars google microsoft caldav icloud subscription webcal feed holidays color busy reminders notifications invitations responses replies file archive")]),
+                               rows: ["Accounts", "On this Mac only", "New calendar on this Mac", "New events", "Default calendar", "Default length",
+                                      "Zoom", "Zoom personal link", "Invitations", "File responses automatically", "Out of office", "Set out of office",
+                                      "Working hours", "Subscribe", "Add a calendar subscription", "Open webcal:// links in Jolta"],
+                               keywords: "calendars google microsoft caldav icloud feed holidays color busy reminders notifications replies archive automatic replies video call meeting availability find a time")]),
             ("Inbox", [
-                Item(page: .sections, title: "Sections", icon: "rectangle.split.3x1", keywords: "split inbox tabs query newsletters notifications"),
-                Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people"),
+                Item(page: .sections, title: "Sections", icon: "rectangle.split.3x1", rows: ["Inbox sections"],
+                     keywords: "split inbox tabs query newsletters notifications"),
+                Item(page: .vips, title: "VIPs", icon: "checkmark.seal", keywords: "vip important senders people seal"),
             ]),
-            ("Writing", [Item(page: .snippets, title: "Snippets", icon: "text.badge.plus", keywords: "templates canned replies text")]),
+            ("Writing", [Item(page: .snippets, title: "Snippets", icon: "text.badge.plus", rows: ["Edit snippet", "Name"],
+                              keywords: "templates canned replies text")]),
             ("Intelligence", [Item(page: .ai, title: "AI", icon: "sparkles",
-                                   keywords: "summary summaries write draft model gemma local openai anthropic claude gpt api key download")]),
+                                   rows: ["Model", "Model on this Mac", "OpenAI account", "Anthropic account", "API key", "API address", "Features",
+                                          "Sort new mail", "Needs reply section", "Summarize long conversations as they open", "Write with AI"],
+                                   keywords: "summary summaries draft gemma local claude gpt download ollama lm studio advanced categories")]),
             ("Agents", [
-                Item(page: .agents, title: "Agents", icon: "cpu", keywords: "mcp claude pause grants revoke connect"),
-                Item(page: .activity, title: "Activity", icon: "list.bullet.rectangle", keywords: "audit log history"),
+                Item(page: .agents, title: "Agents", icon: "cpu", rows: ["Pause all agents", "Connect an agent", "Connected agents"],
+                     keywords: "mcp claude grants revoke allow path"),
+                Item(page: .activity, title: "Activity", icon: "list.bullet.rectangle", rows: ["Recent activity"], keywords: "audit log history requests"),
             ]),
-            (nil, [Item(page: .about, title: "About", icon: "info.circle", keywords: "version updates sparkle data folder")]),
+            (nil, [Item(page: .about, title: "About", icon: "info.circle", rows: ["Jolta", "Version", "Updates", "Data folder"],
+                        keywords: "sparkle check for updates show in finder")]),
         ]
     }
 
@@ -83,7 +111,7 @@ struct SettingsView: View {
                     Text(title).foregroundStyle(Color(Theme.text)).lineLimit(1)
                     Spacer()
                 }
-                .font(.system(size: 14))
+                .font(.system(size: Theme.title))
                 .padding(.horizontal, 28)
                 .frame(height: Theme.headerHeight)
                 .background(TitleBarArea())
@@ -96,15 +124,15 @@ struct SettingsView: View {
         .font(.system(size: 13))
         .ignoresSafeArea()
         .frame(minWidth: 860, minHeight: 560)
-        .background { Button("") { searching = true }.keyboardShortcut("f").hidden() }
-        .onAppear(perform: takeRequest)
+        .background { Button("") { focus = .search }.keyboardShortcut("f").hidden() }
+        .onAppear { show(model?.settingsRequest ?? page) }
         .onChange(of: model?.settingsRequest) { takeRequest() }
         .sheet(isPresented: $addingIMAP) {
             AddIMAPAccount(model: model) { added in
                 addingIMAP = false
                 if let added {
                     status = "Added \(added.address). Jolta is syncing it now."
-                    page = .account(added.id)
+                    show(.account(added.id))
                 }
             }
         }
@@ -112,19 +140,45 @@ struct SettingsView: View {
 
     /// Shows the page another window asked for.
     private func takeRequest() {
-        guard let request = model?.settingsRequest else { return }
-        page = request
+        if let request = model?.settingsRequest { show(request) }
+    }
+
+    /// Opens a page and gives the sidebar the keyboard, so ↑ and ↓ move on
+    /// from it. Appearance and AI answer the arrow keys themselves and get
+    /// the keyboard as they open, unless the arrow keys are walking past.
+    /// Return in the search field (`searching`) otherwise leaves the keyboard there.
+    private func show(_ next: SettingsPage, walking: Bool = false, searching: Bool = false) {
+        page = next
         model?.settingsRequest = nil
+        let target: SettingsFocus? = walking ? .pages : [.appearance, .ai].contains(next) ? .page : searching ? nil : .pages
+        // On the next turn, when the page is in the window.
+        if let target { DispatchQueue.main.async { focus = target } }
+    }
+
+    /// ↑ and ↓: the next page, or the next match while a search shows.
+    private func step(_ delta: Int) {
+        if search.isEmpty {
+            let pages = groups.flatMap(\.items).map(\.page)
+            guard let i = pages.firstIndex(of: page) else { return }
+            show(pages[min(max(i + delta, 0), pages.count - 1)], walking: true)
+        } else {
+            marked = min(max(marked + delta, 0), max(filtered.count - 1, 0))
+        }
+    }
+
+    private func openMarked(walking: Bool = false) {
+        let matches = filtered
+        if matches.indices.contains(marked) { show(matches[marked].page, walking: walking, searching: true) }
     }
 
     @ViewBuilder private var content: some View {
         if let model {
             switch page {
             case .general: GeneralSettings(model: model)
-            case .appearance: AppearanceSettings()
+            case .appearance: AppearanceSettings(focus: $focus)
             case .account(let id):
                 if let section = model.accounts.first(where: { $0.id == id }) {
-                    AccountPage(model: model, section: section) { page = .general }.id(id)
+                    AccountPage(model: model, section: section) { show(.general) }.id(id)
                 } else {
                     SettingsScroll { Text("This account was removed.").foregroundStyle(Color(Theme.text3)) }
                 }
@@ -132,7 +186,7 @@ struct SettingsView: View {
             case .sections: SectionsSettings(model: model)
             case .vips: VIPSettings(model: model)
             case .snippets: SnippetsSettings(model: model)
-            case .ai: AISettings(model: model)
+            case .ai: AISettings(model: model, focus: $focus)
             case .agents: AgentsSettings(model: model)
             case .activity: ActivitySettings(model: model)
             case .about: AboutSettings(model: model)
@@ -150,14 +204,15 @@ struct SettingsView: View {
                 Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 TextField("Search", text: $search)
                     .textFieldStyle(.plain)
-                    .focused($searching)
-                    .onSubmit { if let first = filtered.first { page = first.page } }
-                    .onExitCommand { search = ""; searching = false }
-                if !searching && search.isEmpty { KeyCap(key: "⌘F") }
+                    .focused($focus, equals: .search)
+                    .onSubmit { openMarked() }
+                    .onExitCommand { search = ""; focus = .pages }
+                    .onKeyPress(.downArrow) { step(1); return .handled }
+                    .onKeyPress(.upArrow) { step(-1); return .handled }
+                    .onChange(of: search) { marked = 0 }
+                if focus != .search && search.isEmpty { KeyCap(key: "⌘F") }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(Theme.fill)))
+            .fieldBox(focused: focus == .search)
             .padding(.horizontal, 12)
             .padding(.bottom, 6)
             ScrollView {
@@ -166,11 +221,21 @@ struct SettingsView: View {
                         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                             if let title = group.title { GroupLabel(title) } else { Spacer().frame(height: 10) }
                             ForEach(group.items, id: \.page) { row($0) }
-                            if group.title == "Accounts" { addAccount }
+                            if group.title == "Accounts" {
+                                addAccount
+                                if let model, model.signIn != nil {
+                                    SignInStatusRow(model: model).padding(.horizontal, 10).padding(.vertical, 4)
+                                }
+                            }
                         }
                     } else {
                         Spacer().frame(height: 8)
-                        ForEach(filtered, id: \.page) { row($0) }
+                        ForEach(Array(filtered.enumerated()), id: \.element.page) { i, item in
+                            NavRow(icon: item.icon, title: item.title, count: 0, selected: i == marked, marked: true) {
+                                marked = i
+                                show(item.page)
+                            }
+                        }
                         if filtered.isEmpty {
                             Text("No settings match “\(search)”")
                                 .font(.system(size: 12))
@@ -183,6 +248,14 @@ struct SettingsView: View {
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.never)
+            .focusable()
+            .focused($focus, equals: .pages)
+            .focusEffectDisabled()
+            .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                step(press.key == .upArrow ? -1 : 1)
+                if !search.isEmpty { openMarked(walking: true) }
+                return .handled
+            }
             if let status {
                 Text(status)
                     .font(.system(size: 11))
@@ -195,18 +268,20 @@ struct SettingsView: View {
 
     private var filtered: [Item] {
         let needle = search.lowercased().trimmingCharacters(in: .whitespaces)
-        return groups.flatMap(\.items).filter { "\($0.title) \($0.keywords)".lowercased().contains(needle) }
+        return groups.flatMap(\.items).filter { $0.matches(needle) }
     }
 
+    /// The open page's row carries the caret while the arrow keys move it.
     private func row(_ item: Item) -> some View {
-        NavRow(icon: item.icon, title: item.title, count: 0, selected: page == item.page) { page = item.page }
+        NavRow(icon: item.icon, title: item.title, count: 0, selected: page == item.page, marked: focus == .pages) { show(item.page) }
     }
 
     private var addAccount: some View {
-        Menu {
-            Button("Google Account…") { signIn(.google) }
-            Button("Microsoft 365 Account…") { signIn(.microsoft) }
-            Button("iCloud or IMAP Account…") { addingIMAP = true }
+        let signingIn = model?.signIn == .waiting
+        return Menu {
+            ForEach(NewAccount.allCases) { kind in
+                Button("\(kind.name) Account…") { add(kind) }
+            }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: signingIn ? "hourglass" : "plus").font(.system(size: 13)).frame(width: 16)
@@ -222,22 +297,14 @@ struct SettingsView: View {
         .frame(height: 28)
     }
 
-    private func signIn(_ provider: OAuthProvider) {
-        guard let core = model?.core else { return }
-        signingIn = true
-        status = "Continue in your browser…"
-        Task {
-            do {
-                let session = try await core.beginSignIn(provider: provider)
-                if let url = URL(string: session.url()) { NSWorkspace.shared.open(url) }
-                let account = try await session.finish()
-                status = "Signed in as \(account.address)."
-                model?.reloadAccounts()
-                page = .account(account.id)
-            } catch {
-                status = "Sign-in failed: \(error)"
-            }
-            signingIn = false
+    /// The same sign-in as the welcome screen's; here the new account's
+    /// page opens, and the IMAP sheet lies over this window.
+    private func add(_ kind: NewAccount) {
+        status = nil
+        switch kind {
+        case .google: model?.signIn(.google) { show(.account($0.id)) }
+        case .microsoft: model?.signIn(.microsoft) { show(.account($0.id)) }
+        case .imap: addingIMAP = true
         }
     }
 }
@@ -278,7 +345,7 @@ struct SettingsSection<Content: View, Accessory: View>: View {
             SettingsCard { content }
             if let footer {
                 Text(footer)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 4)
@@ -311,8 +378,8 @@ struct ChoiceCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 6) {
                 Image(systemName: icon).font(.system(size: 14))
-                Text(title).font(.system(size: 12.5, weight: .semibold))
-                Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                Text(title).font(.system(size: Theme.body, weight: .semibold))
+                Text(detail).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
@@ -335,14 +402,13 @@ struct SettingsCard<Content: View>: View {
             Group(subviews: content) { rows in
                 ForEach(rows) { row in
                     if row.id != rows.first?.id {
-                        Rectangle().fill(Color(Theme.line2)).frame(height: 1)
+                        Rectangle().fill(Color(Theme.line)).frame(height: 1)
                     }
                     row
                 }
             }
         }
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
+        .card()
     }
 }
 
@@ -404,25 +470,14 @@ struct SettingsBlock<Content: View>: View {
 }
 
 extension View {
-    /// A text field drawn the Graphite way, for the right side of a row.
+    /// A text field for the right side of a row.
     func settingsField(width: CGFloat? = 260, mono: Bool = false) -> some View {
-        self
-            .textFieldStyle(.plain)
-            .font(.system(size: 12.5, design: mono ? .monospaced : .default))
-            .padding(.horizontal, 8)
-            .frame(width: width, height: 26)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+        modifier(SettingsField(width: width, mono: mono))
     }
 
-    /// The frame of a multi-line editor inside a card.
+    /// The frame of a rich text editor inside a card.
     func settingsEditor(height: CGFloat) -> some View {
-        self
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(height: height)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
+        SettingsEditor(height: height) { self }
     }
 
     /// A switch in the accent colour, label hidden (the row names it).
@@ -436,6 +491,35 @@ extension View {
     }
 }
 
+private struct SettingsField: ViewModifier {
+    let width: CGFloat?
+    let mono: Bool
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .textFieldStyle(.plain)
+            .font(.system(size: Theme.body, design: mono ? .monospaced : .default))
+            .focused($focused)
+            .fieldBox(focused: focused, width: width, fill: Theme.bg)
+    }
+}
+
+private struct SettingsEditor<Content: View>: View {
+    let height: CGFloat
+    @ViewBuilder let content: Content
+    @Environment(\.controlActiveState) private var window
+
+    var body: some View {
+        // The editor is an AppKit view, outside SwiftUI's focus. A settings
+        // page shows one at most, so the key window's editor is this one.
+        content
+            .padding(.horizontal, 2)
+            .padding(.vertical, 8)
+            .fieldBox(focused: window == .key && FormatState.shared.editing, height: height, fill: Theme.bg)
+    }
+}
+
 // MARK: - General and About
 
 struct GeneralSettings: View {
@@ -444,6 +528,8 @@ struct GeneralSettings: View {
     @State private var contactsRefused = false
     /// Whether macOS offers Time Sensitive for Jolta: only builds signed with its entitlement.
     @State private var timeSensitive = false
+    /// Notifications are turned off for Jolta in System Settings, so none of the choices below shows anything.
+    @State private var notificationsOff = false
 
     private var notificationsFooter: String {
         let about = "Important mail is mail from your VIPs, replies in conversations you wrote in, mail sent to you by people you've written to, and invitations. With AI sorting on, it also includes mail that asks you for a reply. Several messages at once arrive as one notification."
@@ -453,6 +539,19 @@ struct GeneralSettings: View {
     var body: some View {
         SettingsScroll {
             SettingsSection("Notifications", footer: notificationsFooter) {
+                if notificationsOff {
+                    SettingsRow(title: "Notifications are off for Jolta",
+                                detail: "macOS shows none of Jolta's notifications until you allow them in System Settings › Notifications.",
+                                detailColor: Color(Theme.warningText)) {
+                        KitButton(title: "Open System Settings") {
+                            let id = Bundle.main.bundleIdentifier ?? ""
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .accessibilityIdentifier("notifications-open-settings")
+                    }
+                }
                 SettingsRow(title: "Notify me about", detail: "Which new inbox mail gets a notification while Jolta runs.") {
                     Picker("Notify me about", selection: Binding(get: { model.notifySettings.scope }, set: { model.notifySettings.scope = $0 })) {
                         Text("Important mail").tag(NotifyScope.important)
@@ -484,14 +583,24 @@ struct GeneralSettings: View {
                             detail: contactsRefused
                                 ? "Jolta can't read Contacts. Allow it in System Settings › Privacy & Security › Contacts."
                                 : "Adds your Mac's contacts to the suggestions. They stay on this Mac.",
-                            detailColor: contactsRefused ? .red : Color(Theme.text3)) {
+                            detailColor: contactsRefused ? Color(Theme.dangerText) : Color(Theme.text3)) {
                     Toggle("Suggest people from Contacts", isOn: $contacts)
                         .settingsSwitch()
                         .onChange(of: contacts) { _, on in toggleContacts(on) }
                 }
             }
         }
-        .task { timeSensitive = await UNUserNotificationCenter.current().notificationSettings().timeSensitiveSetting != .notSupported }
+        .task { await readSystemSettings() }
+        // Back from System Settings, the row follows what was changed there.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await readSystemSettings() }
+        }
+    }
+
+    private func readSystemSettings() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        timeSensitive = settings.timeSensitiveSetting != .notSupported
+        notificationsOff = settings.authorizationStatus == .denied
     }
 
     private func toggleContacts(_ on: Bool) {

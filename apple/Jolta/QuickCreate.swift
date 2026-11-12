@@ -55,16 +55,15 @@ struct QuickCreateView: View {
                 Spacer()
                 if creating { Text("English, Nederlands, Français") }
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(Theme.text3))
             .padding(.horizontal, 18)
             .frame(height: 36)
             .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
         }
         .frame(width: 560)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .panel()
         .onAppear {
             focused = true
             DispatchQueue.main.async { focused = true }
@@ -97,7 +96,7 @@ struct QuickCreateView: View {
             .accessibilityIdentifier("quick-create-preview")
             if p.asksAi {
                 Label("The AI reads the rest when you press Return.", systemImage: "sparkles")
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
         } else {
@@ -126,7 +125,7 @@ struct QuickCreateView: View {
                     Text(found.name.isEmpty ? found.address : found.name).foregroundStyle(Color(Theme.text2))
                 } else {
                     Text("\(p.typed)?")
-                        .foregroundStyle(Color(NSColor(hex: 0xC9302C)))
+                        .foregroundStyle(Color(Theme.dangerText))
                         .help("You'll choose who \(p.typed) is in the editor; nobody is invited by a guess.")
                 }
             }

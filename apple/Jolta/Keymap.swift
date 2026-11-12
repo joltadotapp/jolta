@@ -6,7 +6,8 @@ import AppKit
 @MainActor
 enum Command: String, CaseIterable, Identifiable {
     case next, previous, open, search
-    case archive, trash, toggleRead, star, snooze, move, label, undo
+    case scrollDown, scrollUp, find
+    case select, archive, trash, toggleRead, star, snooze, move, label, undo
     case compose, reply, replyAll, forward
     case toggleVIP, unsubscribe, summarize, saveAttachments, nextSection, help
     case accept, maybe, decline, propose, book
@@ -21,6 +22,10 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "k"
         case .open: "↩"
         case .search: "/"
+        case .scrollDown: "space"
+        case .scrollUp: "⇧space"
+        case .find: "⌘F"
+        case .select: "x"
         case .archive: "e"
         case .trash: "#"
         case .toggleRead: "u"
@@ -55,33 +60,37 @@ enum Command: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .next: "Next conversation"
-        case .previous: "Previous conversation"
-        case .open: "Open conversation"
+        case .next: "Next Conversation"
+        case .previous: "Previous Conversation"
+        case .open: "Open Conversation"
         case .search: "Search"
+        case .scrollDown: "Scroll Conversation Down"
+        case .scrollUp: "Scroll Conversation Up"
+        case .find: "Find in Conversation…"
+        case .select: "Select or Deselect Conversation"
         case .archive: "Archive"
         case .trash: "Move to Trash"
-        case .toggleRead: "Mark read or unread"
-        case .star: "Star or unstar"
+        case .toggleRead: "Mark Read or Unread"
+        case .star: "Star or Unstar"
         case .snooze: "Snooze…"
         case .move: "Move to…"
         case .label: "Label…"
         case .undo: "Undo"
-        case .compose: "New message"
+        case .compose: "New Message"
         case .reply: "Reply"
-        case .replyAll: "Reply all"
+        case .replyAll: "Reply All"
         case .forward: "Forward"
-        case .toggleVIP: "Mark sender as VIP or not"
-        case .unsubscribe: "Unsubscribe and archive"
-        case .summarize: "Summarize conversation"
-        case .saveAttachments: "Save attachments…"
-        case .nextSection: "Next inbox section"
-        case .help: "Keyboard shortcuts"
-        case .accept: "Accept invitation"
-        case .maybe: "Answer invitation maybe"
-        case .decline: "Decline invitation"
-        case .propose: "Propose new time…"
-        case .book: "Book a held time…"
+        case .toggleVIP: "Mark Sender as VIP or Not"
+        case .unsubscribe: "Unsubscribe and Archive"
+        case .summarize: "Summarize Conversation"
+        case .saveAttachments: "Save Attachments…"
+        case .nextSection: "Next Inbox Section"
+        case .help: "Keyboard Shortcuts"
+        case .accept: "Accept Invitation"
+        case .maybe: "Answer Invitation Maybe"
+        case .decline: "Decline Invitation"
+        case .propose: "Propose New Time…"
+        case .book: "Book a Held Time…"
         case .goInbox: "Go to Inbox"
         case .goStarred: "Go to Starred"
         case .goSnoozed: "Go to Snoozed"
@@ -97,6 +106,10 @@ enum Command: String, CaseIterable, Identifiable {
         case .previous: "arrow.up"
         case .open: "envelope.open"
         case .search: "magnifyingglass"
+        case .scrollDown: "arrow.down.to.line"
+        case .scrollUp: "arrow.up.to.line"
+        case .find: "text.magnifyingglass"
+        case .select: "checkmark.square"
         case .archive: "archivebox"
         case .trash: "trash"
         case .toggleRead: "envelope.badge"
@@ -132,8 +145,9 @@ enum Command: String, CaseIterable, Identifiable {
     /// Whether the command acts on the conversation under the cursor.
     var needsThread: Bool {
         switch self {
-        case .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
+        case .select, .archive, .trash, .toggleRead, .star, .snooze, .move, .label, .reply, .replyAll, .forward, .toggleVIP, .unsubscribe, .summarize, .saveAttachments, .open: true
         case .accept, .maybe, .decline, .propose, .book: true
+        case .scrollDown, .scrollUp, .find: true
         default: false
         }
     }
@@ -148,6 +162,21 @@ enum Command: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The Message menu, a divider between the groups.
+    static let menu: [[Command]] = [
+        [.archive, .trash, .toggleRead, .star, .toggleVIP],
+        [.snooze, .move, .label],
+        [.reply, .replyAll, .forward],
+        [.accept, .maybe, .decline, .propose, .book],
+        [.select, .saveAttachments],
+        [.undo],
+    ]
+
+    /// Its menu item's title. The key is part of the title and not the
+    /// item's key equivalent: one without ⌘ can fire while a text field has
+    /// the keyboard, and the key router already runs these keys.
+    var menuTitle: String { "\(title)  (\(KeyCap.shown(keys)))" }
+
     static func forKey(_ typed: String, after prefix: String?) -> Command? {
         let sequence = prefix.map { "\($0) \(typed)" } ?? typed
         return allCases.first { $0.keys == sequence }
@@ -155,12 +184,39 @@ enum Command: String, CaseIterable, Identifiable {
 }
 
 extension AppModel {
+    /// Whether the Message menu offers the command now: in mail, with a
+    /// conversation under the cursor when it acts on one, and not while a
+    /// message is being written. Undo also takes a calendar change back.
+    func offers(_ command: Command) -> Bool {
+        if command == .undo { return compose == nil }
+        return mode == .mail && compose == nil && (!command.needsThread || cursorRow != nil)
+    }
+
+    /// Edit › Undo: the typing in the text field that has the keyboard,
+    /// else the last mail or calendar action.
+    func undoFromMenu() {
+        guard let window = NSApp.keyWindow else { return }
+        if let text = window.firstResponder as? NSTextView, text.isEditable, let typing = text.undoManager, typing.canUndo {
+            typing.undo()
+        } else if window === KeyRouter.shared.window {
+            undo()
+        }
+    }
+
+    func redoFromMenu() {
+        if let text = NSApp.keyWindow?.firstResponder as? NSTextView, let typing = text.undoManager, typing.canRedo { typing.redo() }
+    }
+
     func run(_ command: Command) {
         let row = cursorRow
         switch command {
         case .next, .previous, .open, .nextSection:
             break
         case .search: requestSearchFocus()
+        case .scrollDown: scrollReader(pages: 1)
+        case .scrollUp: scrollReader(pages: -1)
+        case .find: findInConversation()
+        case .select: togglePicked()
         case .archive: act(.archive, label: "Archived")
         case .trash: act(.trash, label: "Moved to Trash")
         case .toggleRead:
@@ -241,33 +297,33 @@ enum CalendarCommand: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .today: "Today"
-        case .next: "Next period"
-        case .previous: "Previous period"
+        case .next: "Next Period"
+        case .previous: "Previous Period"
         case .day: "Day"
-        case .workWeek: "Work week"
+        case .workWeek: "Work Week"
         case .week: "Week"
         case .month: "Month"
         case .agenda: "Agenda"
-        case .toggleCalendar: "Show or hide calendar 1 to 9"
-        case .move: "Move between events"
-        case .open: "Open event"
-        case .close: "Close event"
-        case .newEvent: "New event"
-        case .quickCreate: "Quick create: type the event"
-        case .goToDate: "Go to date"
-        case .edit: "Edit event"
-        case .duplicate: "Duplicate event"
-        case .delete: "Delete event"
-        case .nudge: "Move event 15 minutes"
-        case .resize: "Shorten or lengthen by 15 minutes"
-        case .accept: "Accept invitation"
+        case .toggleCalendar: "Show or Hide Calendar 1 to 9"
+        case .move: "Move Between Events"
+        case .open: "Open Event"
+        case .close: "Close Event"
+        case .newEvent: "New Event"
+        case .quickCreate: "Quick Create: Type the Event"
+        case .goToDate: "Go to Date"
+        case .edit: "Edit Event"
+        case .duplicate: "Duplicate Event"
+        case .delete: "Delete Event"
+        case .nudge: "Move Event 15 Minutes"
+        case .resize: "Shorten or Lengthen by 15 Minutes"
+        case .accept: "Accept Invitation"
         case .maybe: "Maybe"
-        case .decline: "Decline invitation"
+        case .decline: "Decline Invitation"
         case .undo: "Undo"
-        case .dayPanel: "Today beside mail"
+        case .dayPanel: "Today Beside Mail"
         case .mail: "Mail"
         case .calendar: "Calendar"
-        case .joinNext: "Join next meeting"
+        case .joinNext: "Join Next Meeting"
         }
     }
 

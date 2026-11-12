@@ -15,6 +15,8 @@ enum PaletteMode: Equatable {
     case label
     /// A theme to show, previewed as the selection moves.
     case themes
+    /// The kind of account to add.
+    case accounts
     /// Q and New event: a line read into an event (`QuickCreateView`).
     case quickEvent
     /// G: a typed day to show in the calendar (`QuickCreateView`).
@@ -60,6 +62,7 @@ struct PaletteView: View {
         case .move: "Move to folder"
         case .label: "Add or remove a label"
         case .themes: "Choose a theme"
+        case .accounts: "Add an account"
         case .quickEvent, .goToDate: ""
         }
     }
@@ -72,6 +75,7 @@ struct PaletteView: View {
         case .snippets: "text.badge.plus"
         case .themes: "paintpalette"
         case .label: "tag"
+        case .accounts: "person.crop.circle.badge.plus"
         case .commands, .move, .quickEvent, .goToDate: "magnifyingglass"
         }
     }
@@ -85,6 +89,7 @@ struct PaletteView: View {
         case .label: all = labelItems
         case .snippets: all = snippetItems
         case .themes: all = themeItems
+        case .accounts: all = accountItems
         case .quickEvent, .goToDate: return []
         }
         // "frappe" finds Catppuccin Frappé, "geneve" a folder called Genève.
@@ -141,40 +146,44 @@ struct PaletteView: View {
             })
         }
         if model.compose != nil {
-            out.append(PaletteItem(id: "insert-availability", title: "Insert my availability", detail: "Free times in the next working days",
+            out.append(PaletteItem(id: "insert-availability", title: "Insert My Availability", detail: "Free times in the next working days",
                                    icon: "calendar.badge.clock") { [model] in model.insertMyAvailability() })
         } else if model.selectedThreadID != nil {
-            out.append(PaletteItem(id: "find-time", title: "Find a time", detail: "With the people on this conversation",
+            out.append(PaletteItem(id: "find-time", title: "Find a Time", detail: "With the people on this conversation",
                                    icon: "calendar.badge.clock") { [model] in model.findTimeForConversation() })
         }
-        out.append(PaletteItem(id: "new-event", title: "New event", detail: "Type it: Lunch with Jan fri 12:30 at Mok", icon: "calendar.badge.plus",
+        out.append(PaletteItem(id: "new-event", title: "New Event", detail: "Type it: Lunch with Jan fri 12:30 at Mok", icon: "calendar.badge.plus",
                                keys: model.mode == .calendar ? CalendarCommand.quickCreate.keys : nil, keepsOpen: true) { [model] in
             model.palette = .quickEvent
         })
         if model.mode == .calendar {
-            out.append(PaletteItem(id: "go-to-date", title: "Go to date", detail: "fri, 14 dec, morgen", icon: "calendar",
+            out.append(PaletteItem(id: "go-to-date", title: "Go to Date", detail: "fri, 14 dec, morgen", icon: "calendar",
                                    keys: CalendarCommand.goToDate.keys, keepsOpen: true) { [model] in model.palette = .goToDate })
         }
-        out.append(PaletteItem(id: "join-next", title: "Join next meeting", detail: model.calendar.nextMeeting?.title ?? "",
+        out.append(PaletteItem(id: "join-next", title: "Join Next Meeting", detail: model.calendar.nextMeeting?.title ?? "",
                                icon: "video", keys: CalendarCommand.joinNext.keys) { [model] in model.joinNextMeeting() })
         let emailing = model.mode == .calendar ? model.calendar.selected?.title : nil
-        out.append(PaletteItem(id: "email-guests", title: "Email guests", detail: emailing ?? "The meeting now or next, with other people",
+        out.append(PaletteItem(id: "email-guests", title: "Email Guests", detail: emailing ?? "The meeting now or next, with other people",
                                icon: "envelope") { [model] in model.emailGuestsOfNextMeeting() })
         if model.mode == .mail {
             out.append(PaletteItem(id: "calendar", title: "Go to Calendar", icon: "calendar", keys: CalendarCommand.calendar.keys) { [model] in
                 model.mode = .calendar
             })
-            out.append(PaletteItem(id: "day-panel", title: model.showsDayPanel ? "Hide today beside mail" : "Show today beside mail",
+            out.append(PaletteItem(id: "day-panel", title: model.showsDayPanel ? "Hide Today Beside Mail" : "Show Today Beside Mail",
                                    icon: "sidebar.right", keys: CalendarCommand.dayPanel.keys) { [model] in model.showsDayPanel.toggle() })
         } else {
             out.append(PaletteItem(id: "mail", title: "Go to Mail", icon: "tray", keys: CalendarCommand.mail.keys) { [model] in model.mode = .mail })
         }
-        out.append(PaletteItem(id: "out-of-office", title: "Out of office…", detail: "Automatic replies and an out-of-office event",
+        out.append(PaletteItem(id: "out-of-office", title: "Out of Office…", detail: "Automatic replies and an out-of-office event",
                                icon: "airplane") { [model] in model.openAwaySheet() })
-        out.append(PaletteItem(id: "focus-time", title: "Focus time…", detail: "Block time to work, from the next free 2 hours",
+        out.append(PaletteItem(id: "focus-time", title: "Focus Time…", detail: "Block time to work, from the next free 2 hours",
                                icon: "moon") { [model] in model.openFocusSheet() })
+        out.append(PaletteItem(id: "add-account", title: "Add Account…", icon: "person.crop.circle.badge.plus", keepsOpen: true) { [model] in
+            model.palette = .accounts
+        })
+        out.append(PaletteItem(id: "settings", title: "Settings…", icon: "gearshape", keys: "⌘,") { [model] in model.openSettings(.general) })
         out.append(PaletteItem(id: "calendar-settings", title: "Calendar Settings…", icon: "gearshape") { [model] in model.openSettings(.calendar) })
-        out.append(PaletteItem(id: "sync", title: "Sync now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
+        out.append(PaletteItem(id: "sync", title: "Sync Now", icon: "arrow.triangle.2.circlepath") { [model] in model.core.syncNow() })
         out.append(PaletteItem(id: "help", title: Command.help.title, icon: Command.help.icon, keys: Command.help.keys) { [model] in
             model.showsHelp = true
         })
@@ -196,6 +205,20 @@ struct PaletteView: View {
             store.update { $0.matchMacOS() }
             model.notify("Matching macOS again, with \(store.choice.light.name) in light mode and \(store.choice.dark.name) in dark mode.")
         }
+    }
+
+    /// Google, Microsoft 365, or iCloud and IMAP: the welcome screen's choices.
+    private var accountItems: [PaletteItem] {
+        var out: [PaletteItem] = []
+        if text.isEmpty {
+            out.append(PaletteItem(id: "back", title: "Back to Commands", icon: "chevron.left", keepsOpen: true) { [model] in
+                model.palette = .commands
+            })
+        }
+        for kind in NewAccount.allCases {
+            out.append(PaletteItem(id: "account-\(kind)", title: "\(kind.name) Account…", icon: kind.icon) { [model] in model.addAccount(kind) })
+        }
+        return out
     }
 
     /// Graphite, then Omarchy's themes by name. Choosing one shows it at
@@ -324,13 +347,13 @@ struct PaletteView: View {
                     .onKeyPress(.upArrow) { selected = max(selected - 1, 0); return .handled }
                     // The Mac's ⌫ sends U+007F, which `.delete` (U+0008) doesn't match.
                     .onKeyPress(keys: [.delete, KeyEquivalent("\u{7F}")]) { _ in
-                        guard mode == .themes, text.isEmpty else { return .ignored }
+                        guard mode == .themes || mode == .accounts, text.isEmpty else { return .ignored }
                         model.palette = .commands
                         return .handled
                     }
                     .onChange(of: text) { selected = 0 }
                 if let row = model.cursorRow, [.snooze, .move, .label].contains(mode) {
-                    Text(row.subject).lineLimit(1).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
+                    Text(row.subject).lineLimit(1).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).frame(maxWidth: 180)
                 }
             }
             .padding(.horizontal, 18)
@@ -355,7 +378,7 @@ struct PaletteView: View {
                         if list.isEmpty {
                             Text([.snooze, .sendLater, .remind].contains(mode) ? "Try “tomorrow”, “mon 9am” or “in 3 days”"
                                  : mode == .snippets && text.isEmpty ? "No snippets yet. Add them in Settings › Snippets."
-                                 : mode == .label && text.isEmpty ? "This account has no labels yet. Make them in Gmail." : "Nothing matches")
+                                 : mode == .label && text.isEmpty ? "This account has no labels yet. Make them in Gmail." : "No matches")
                                 .foregroundStyle(Color(Theme.text3))
                                 .padding(20)
                         }
@@ -374,7 +397,7 @@ struct PaletteView: View {
                 HStack(spacing: 5) { KeyCap(key: "↩"); Text("run") }
                 HStack(spacing: 5) { KeyCap(key: "esc"); Text("close") }
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(Theme.text3))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18)
@@ -382,9 +405,8 @@ struct PaletteView: View {
             .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
         }
         .frame(width: 560)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .panel()
         // The editor of a message being written takes the keyboard back on
         // the next turn of the run loop; take it again after that.
         .onAppear {
@@ -418,23 +440,20 @@ struct PaletteView: View {
             Spacer()
             if let theme = item.theme, let use = ThemeStore.shared.choice.use(of: theme) {
                 HStack(spacing: 4) { Image(systemName: "checkmark"); Text(use.label) }
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
             if item.checked {
                 Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(Theme.text2))
             }
             if let keys = item.keys {
-                HStack(spacing: 3) { ForEach(keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: $0.uppercased(), focused: on) } }
+                HStack(spacing: 3) { ForEach(keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: KeyCap.shown($0), focused: on) } }
             }
         }
         .font(.system(size: 13))
         .padding(.horizontal, 10)
         .frame(height: 36)
-        .background(RoundedRectangle(cornerRadius: 8).fill(on ? Color(Theme.fill) : .clear))
-        .overlay(alignment: .leading) {
-            if on { Image(systemName: "arrowtriangle.right.fill").font(.system(size: 8)).foregroundStyle(Color(Theme.accent)).offset(x: -9) }
-        }
+        .selectedRow(on)
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
     }
@@ -448,51 +467,103 @@ struct PaletteView: View {
 
     private func close() {
         model.palette = nil
-        model.requestListFocus()
+        model.returnKeyboard()
     }
 }
 
-/// Every shortcut, from the keymap.
+/// Every shortcut, from the keymap. It stays inside the window and
+/// scrolls, and its filter has the keyboard: typing narrows the list.
 struct HelpView: View {
     let model: AppModel
+    /// The window's size.
+    let window: CGSize
+    @State private var filter = ""
+    @FocusState private var focused: Bool
+
+    /// From the window's top, less in a short window.
+    static func top(in window: CGSize) -> CGFloat { window.height >= 820 ? 110 : 48 }
+
+    private struct Entry: Identifiable {
+        let id: String
+        let keys: [String]
+        let title: String
+    }
+
+    private func shown(_ entries: [Entry]) -> [Entry] {
+        let typed = filter.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return entries }
+        return entries.filter { $0.title.localizedCaseInsensitiveContains(typed) || $0.keys.joined(separator: " ").localizedCaseInsensitiveContains(typed) }
+    }
+
+    private var mail: [Entry] {
+        shown(Command.allCases.map { c in
+            Entry(id: c.rawValue, keys: c.keys.split(separator: " ").map { KeyCap.shown(String($0)) }, title: c.title)
+        } + [Entry(id: "palette", keys: ["⌘K"], title: "Command Palette"), Entry(id: "new", keys: ["⌘N"], title: "New Message")])
+    }
+
+    private var calendar: [Entry] {
+        shown(CalendarCommand.allCases.map { Entry(id: "calendar-" + $0.rawValue, keys: [KeyCap.shown($0.keys)], title: $0.title) })
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Keyboard shortcuts").font(.system(size: 15, weight: .semibold))
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
-                ForEach(Command.allCases) { c in
-                    HStack(spacing: 10) {
-                        HStack(spacing: 3) { ForEach(c.keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: $0.uppercased()) } }
-                            .frame(width: 52, alignment: .leading)
-                        Text(c.title).foregroundStyle(Color(Theme.text2))
+        let wide = window.width >= 928
+        let mail = mail, calendar = calendar
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Text("Keyboard shortcuts").font(.system(size: Theme.title, weight: .semibold))
+                Spacer()
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                    TextField("Filter", text: $filter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: Theme.small))
+                        .focused($focused)
+                        .accessibilityIdentifier("help-filter")
+                }
+                .fieldBox(focused: focused, width: 200)
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 56)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !mail.isEmpty { grid(mail, columns: wide ? 3 : 2) }
+                    if !calendar.isEmpty {
+                        Text("Calendar").font(.system(size: Theme.body, weight: .semibold)).padding(.top, mail.isEmpty ? 0 : 4)
+                        grid(calendar, columns: wide ? 3 : 2)
+                    }
+                    if mail.isEmpty && calendar.isEmpty {
+                        Text("No shortcut matches “\(filter)”").foregroundStyle(Color(Theme.text3))
                     }
                 }
-                HStack(spacing: 10) {
-                    KeyCap(key: "⌘K").frame(width: 52, alignment: .leading)
-                    Text("Command palette").foregroundStyle(Color(Theme.text2))
-                }
-                HStack(spacing: 10) {
-                    KeyCap(key: "⌘N").frame(width: 52, alignment: .leading)
-                    Text("New message").foregroundStyle(Color(Theme.text2))
-                }
+                .font(.system(size: Theme.body))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
             }
-            .font(.system(size: 12.5))
-            Text("Calendar").font(.system(size: 13, weight: .semibold)).padding(.top, 4)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
-                ForEach(CalendarCommand.allCases) { c in
-                    HStack(spacing: 10) {
-                        KeyCap(key: c.keys.uppercased()).frame(width: 52, alignment: .leading)
-                        Text(c.title).foregroundStyle(Color(Theme.text2))
-                    }
-                }
-            }
-            .font(.system(size: 12.5))
+            .frame(maxHeight: max(160, window.height - Self.top(in: window) - 56 - 32))
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(24)
-        .frame(width: 600)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(Theme.raise)))
-        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+        .frame(width: min(wide ? 880 : 600, window.width - 48))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
+        .panel()
+        // The editor of a message being written takes the keyboard back on
+        // the next turn of the run loop; take it again after that.
+        .onAppear {
+            focused = true
+            DispatchQueue.main.async { focused = true }
+        }
         .onExitCommand { model.showsHelp = false }
-        .onTapGesture { model.showsHelp = false }
+    }
+
+    private func grid(_ entries: [Entry], columns: Int) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28, alignment: .leading), count: columns), alignment: .leading, spacing: 8) {
+            ForEach(entries) { entry in
+                HStack(spacing: 10) {
+                    HStack(spacing: 3) { ForEach(entry.keys, id: \.self) { KeyCap(key: $0) } }
+                        .frame(width: 52, alignment: .leading)
+                    Text(entry.title).foregroundStyle(Color(Theme.text2)).lineLimit(1)
+                }
+            }
+        }
     }
 }

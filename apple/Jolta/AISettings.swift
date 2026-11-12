@@ -5,11 +5,12 @@ import SwiftUI
 /// Mac (downloaded here), or the user's own OpenAI or Anthropic account.
 struct AISettings: View {
     let model: AppModel
+    let focus: FocusState<SettingsFocus?>.Binding
 
     var body: some View {
         SettingsScroll {
             SettingsSection("Model", footer: footer) {
-                SettingsBlock { ProviderPicker(model: model) }
+                ProviderPicker(model: model, focus: focus)
             }
             switch model.ai.provider {
             case .local: LocalModels(model: model)
@@ -45,9 +46,12 @@ struct AISettings: View {
     }
 }
 
-/// Off, this Mac, OpenAI or Anthropic, as four tiles.
+/// Off, this Mac, OpenAI or Anthropic, as four tiles. The row has the
+/// keyboard when the page opens, and ← and → move the choice, as on the
+/// Appearance page.
 private struct ProviderPicker: View {
     let model: AppModel
+    let focus: FocusState<SettingsFocus?>.Binding
 
     private struct Choice: Identifiable {
         let provider: AiProvider?
@@ -65,13 +69,29 @@ private struct ProviderPicker: View {
     ]
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(choices) { choice in
-                ChoiceCard(title: choice.title, detail: choice.detail, icon: choice.icon, selected: model.ai.provider == choice.provider) {
-                    model.saveAI { $0.provider = choice.provider; $0.sortMail = nil }
+        SettingsBlock {
+            HStack(spacing: 8) {
+                ForEach(choices) { choice in
+                    ChoiceCard(title: choice.title, detail: choice.detail, icon: choice.icon, selected: model.ai.provider == choice.provider) {
+                        choose(choice)
+                    }
                 }
             }
         }
+        .modifier(MarkedSettingsRow(on: focus.wrappedValue == .page))
+        .focusable()
+        .focused(focus, equals: .page)
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
+            let i = choices.firstIndex { $0.provider == model.ai.provider } ?? 0
+            let next = min(max(i + (press.key == .leftArrow ? -1 : 1), 0), choices.count - 1)
+            if next != i { choose(choices[next]) }
+            return .handled
+        }
+    }
+
+    private func choose(_ choice: Choice) {
+        model.saveAI { $0.provider = choice.provider; $0.sortMail = nil }
     }
 }
 
@@ -125,6 +145,7 @@ private struct SortMailRow: View {
 private struct LocalModels: View {
     let model: AppModel
     @State private var lowSpace: String?
+    @State private var removal: Confirmation?
 
     private var appleSilicon: Bool {
         var info = utsname()
@@ -147,6 +168,7 @@ private struct LocalModels: View {
         } message: {
             Text(lowSpace ?? "")
         }
+        .confirmation($removal)
     }
 
     private func row(_ m: LocalModelInfo) -> some View {
@@ -171,7 +193,7 @@ private struct LocalModels: View {
                     }
                 }
                 Text(m.detail).font(.system(size: 12)).foregroundStyle(Color(Theme.text2))
-                Text(stateLine(m)).font(.system(size: 11.5).monospacedDigit()).foregroundStyle(stateColor(m))
+                Text(stateLine(m)).font(.system(size: Theme.small).monospacedDigit()).foregroundStyle(stateColor(m))
                     .fixedSize(horizontal: false, vertical: true)
                 if case .downloading(let done, _) = m.state {
                     ProgressView(value: Double(done), total: Double(m.size)).progressViewStyle(.linear).tint(Color(Theme.text2))
@@ -203,7 +225,7 @@ private struct LocalModels: View {
     }
 
     private func stateColor(_ m: LocalModelInfo) -> Color {
-        if case .failed = m.state { return .red }
+        if case .failed = m.state { return Color(Theme.dangerText) }
         return Color(Theme.text3)
     }
 
@@ -250,13 +272,10 @@ private struct LocalModels: View {
     }
 
     private func remove(_ m: LocalModelInfo) {
-        let alert = NSAlert()
-        alert.messageText = "Remove \(m.name)?"
-        alert.informativeText = "This frees \(Self.bytes(m.size)). Summaries already made stay. You can download it again any time."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        try? model.core.removeModel(id: m.id)
+        removal = Confirmation(
+            title: "Remove \(m.name)?",
+            message: "This frees \(Self.bytes(m.size)). Summaries already made stay. You can download it again any time.",
+            action: "Remove") { [model] in try? model.core.removeModel(id: m.id) }
     }
 
     static func bytes(_ n: UInt64) -> String {
@@ -285,6 +304,7 @@ private struct RemoteAccount: View {
     @State private var address = ""
     @State private var addressProblem: String?
     @State private var advanced = false
+    @State private var removal: Confirmation?
 
     private var name: String { provider == .openAi ? "OpenAI" : "Anthropic" }
     private var saved: Bool { provider == .openAi ? model.ai.openaiKeySaved : model.ai.anthropicKeySaved }
@@ -296,18 +316,17 @@ private struct RemoteAccount: View {
 
     var body: some View {
         SettingsSection("\(name) account") {
-            SettingsRow(title: "API key", detail: keyDetail, detailColor: problem == nil ? Color(Theme.text3) : .red) {
+            SettingsRow(title: "API key", detail: keyDetail, detailColor: problem == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
                 keyControl
             }
             SettingsRow(title: "Model", detail: modelDetail) { modelControl }
         } accessory: {
-            Link(destination: keysPage) {
-                HStack(spacing: 3) { Text("Get a key"); Image(systemName: "arrow.up.right").font(.system(size: 9.5, weight: .semibold)) }
-            }
-            .font(.system(size: 12))
+            KitButton(title: "Get a Key ↗", kind: .quiet, size: .small) { NSWorkspace.shared.open(keysPage) }
+                .padding(.trailing, -7)
         }
+        .confirmation($removal)
         VStack(alignment: .leading, spacing: 10) {
-            Button { withAnimation(.easeInOut(duration: 0.15)) { advanced.toggle() } } label: {
+            Button { withAnimation(Theme.quick) { advanced.toggle() } } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).rotationEffect(.degrees(advanced ? 90 : 0))
                     Text("Advanced").font(.system(size: 13, weight: .semibold))
@@ -320,7 +339,7 @@ private struct RemoteAccount: View {
                 SettingsCard {
                     SettingsRow(title: "API address",
                                 detail: addressProblem ?? "For a compatible server, such as Ollama, LM Studio or a company proxy. A server on your own network may not need a key.",
-                                detailColor: addressProblem == nil ? Color(Theme.text3) : .red) {
+                                detailColor: addressProblem == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
                         HStack(spacing: 6) {
                             TextField(model.core.aiDefaultUrl(provider: provider), text: $address)
                                 .settingsField(width: 220, mono: true)
@@ -351,12 +370,13 @@ private struct RemoteAccount: View {
     @ViewBuilder private var keyControl: some View {
         if saved && !replacing {
             HStack(spacing: 6) {
-                Text("••••••••••••").font(.system(size: 12.5, design: .monospaced)).foregroundStyle(Color(Theme.text2))
+                Text("••••••••••••").font(.system(size: Theme.body, design: .monospaced)).foregroundStyle(Color(Theme.text2))
                 Button("Replace…") { replacing = true; key = "" }
-                Button("Remove") {
-                    try? model.core.setAiKey(provider: provider, key: "")
-                    models = []
-                    model.reloadAI()
+                Button("Remove…") {
+                    removal = Confirmation(
+                        title: "Remove the \(name) API key?",
+                        message: "Jolta deletes the key from your Mac's Keychain. Summaries, drafts and sorting with \(name) stop until you save a key again.",
+                        action: "Remove Key", perform: removeKey)
                 }
             }
         } else {
@@ -389,6 +409,17 @@ private struct RemoteAccount: View {
             }
             .settingsMenu()
         }
+    }
+
+    private func removeKey() {
+        do {
+            try model.core.setAiKey(provider: provider, key: "")
+            problem = nil
+            models = []
+        } catch {
+            problem = "Jolta couldn't remove the key: \(error)"
+        }
+        model.reloadAI()
     }
 
     private func setModel(_ id: String) {

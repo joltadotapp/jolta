@@ -56,6 +56,10 @@ struct AccountPage: View {
     @State private var message: (text: String, failed: Bool)?
     @State private var removal: Confirmation?
     @State private var signingIn = false
+    /// Why the account's settings couldn't be read.
+    @State private var loadFailure: String?
+    /// Why Remove Account didn't remove it.
+    @State private var removeFailure: String?
 
     private var isIMAP: Bool { section.account.kind == "imap" }
     private var changed: Bool { draft != saved || !password.isEmpty || !smtpPassword.isEmpty }
@@ -66,6 +70,18 @@ struct AccountPage: View {
     var body: some View {
         if draft != nil {
             page
+        } else if let loadFailure {
+            VStack(spacing: 8) {
+                Text("Jolta couldn't read this account's settings").font(.system(size: Theme.body, weight: .medium))
+                Text(loadFailure)
+                    .font(.system(size: Theme.small))
+                    .foregroundStyle(Color(Theme.dangerText))
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 420)
+                KitButton(title: "Retry", action: load).padding(.top, 6)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity).onAppear(perform: load)
         }
@@ -122,7 +138,7 @@ struct AccountPage: View {
                                 detail: draft?.verifyCerts == false
                                     ? "Jolta accepts any certificate from these servers, so someone between you and them could read your mail and password. Only turn this off for a server you run yourself with a self-signed certificate."
                                     : "Jolta only connects to servers with a valid certificate.",
-                                detailColor: draft?.verifyCerts == false ? .orange : Color(Theme.text3)) {
+                                detailColor: draft?.verifyCerts == false ? Color(Theme.warningText) : Color(Theme.text3)) {
                         Toggle("Verify server certificates", isOn: binding(\.verifyCerts)).settingsSwitch()
                     }
                 }
@@ -132,7 +148,7 @@ struct AccountPage: View {
                     SettingsRow(title: "Signed in with \(section.account.provider)",
                                 detail: failure.map { "This account can't sync: \($0). Sign in again to fix it." }
                                     ?? "Sign in again when Jolta reports that the account's access ran out or was revoked. \(section.account.provider) manages the servers and their security.",
-                                detailColor: failure == nil ? Color(Theme.text3) : .orange) {
+                                detailColor: failure == nil ? Color(Theme.text3) : Color(Theme.warningText)) {
                         Button("Sign In Again…", action: signInAgain).disabled(signingIn)
                     }
                 }
@@ -159,14 +175,21 @@ struct AccountPage: View {
                 .disabled(folders.isEmpty)
             }
             SettingsSection("Remove") {
-                SettingsRow(title: "Remove this account", detail: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.") {
+                SettingsRow(title: "Remove this account",
+                            detail: removeFailure ?? "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries.",
+                            detailColor: Color(removeFailure == nil ? Theme.text3 : Theme.dangerText)) {
                     Button("Remove…", role: .destructive) {
                         removal = Confirmation(
                             title: "Remove \(section.account.address)?",
                             message: "Mail stays on the server. Jolta deletes its local copy and the account's Keychain entries."
                                 + (section.account.kind == "gmail" ? " This also signs the account out of Jolta on your other Macs." : ""),
                             action: "Remove Account") {
-                                try? model.core.removeAccount(accountId: section.id)
+                                do {
+                                    try model.core.removeAccount(accountId: section.id)
+                                } catch {
+                                    removeFailure = "Jolta couldn't remove this account: \(error)"
+                                    return model.reloadAccounts()
+                                }
                                 model.reloadAccounts()
                                 removed()
                             }
@@ -217,8 +240,9 @@ struct AccountPage: View {
             let settings = try model.core.accountSettings(accountId: section.id)
             saved = settings
             draft = settings
+            loadFailure = nil
         } catch {
-            message = ("\(error)", true)
+            loadFailure = "\(error)"
         }
     }
 
@@ -294,7 +318,7 @@ private struct SendAsSection: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(alias.address)
                             Text(alias.fromProvider ? "From \(account.provider)" : "Added by you")
-                                .font(.system(size: 11.5))
+                                .font(.system(size: Theme.small))
                                 .foregroundStyle(Color(Theme.text3))
                         }
                         Spacer()
@@ -320,7 +344,7 @@ private struct SendAsSection: View {
                 }
             }
             if let error {
-                SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
+                SettingsBlock { Text(error).foregroundStyle(Color(Theme.dangerText)).font(.system(size: 12)) }
             }
             if let fetchError {
                 SettingsBlock {

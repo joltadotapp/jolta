@@ -134,25 +134,27 @@ struct FindTimePanel: View {
             footer
         }
         .frame(width: 820)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 24, y: 10)
+        .panel()
         .background(keyField)
         .overlay(alignment: .topTrailing) {
-            if pickingRoom, case .ready(let info) = phase {
-                RoomPicker(
-                    core: model.core,
-                    accountId: info.accountId,
-                    slot: slots.indices.contains(selected) ? slots[selected] : nil,
-                    fallbackStart: info.days.first?.start ?? Int64(Date().timeIntervalSince1970),
-                    people: info.people.count,
-                    taken: Set(rooms.map { $0.address.lowercased() }),
-                    add: { room in addRoom(room.address, info: info) },
-                    close: closeRoomPicker
-                )
-                .padding(.top, 40)
-                .padding(.trailing, 12)
+            ZStack {
+                if pickingRoom, case .ready(let info) = phase {
+                    RoomPicker(
+                        core: model.core,
+                        accountId: info.accountId,
+                        slot: slots.indices.contains(selected) ? slots[selected] : nil,
+                        fallbackStart: info.days.first?.start ?? Int64(Date().timeIntervalSince1970),
+                        people: info.people.count,
+                        taken: Set(rooms.map { $0.address.lowercased() }),
+                        add: { room in addRoom(room.address, info: info) },
+                        close: closeRoomPicker
+                    )
+                    .padding(.top, 40)
+                    .padding(.trailing, 12)
+                    .transition(.panel())
+                }
             }
+            .animation(Theme.quick, value: pickingRoom)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("find-time")
@@ -265,7 +267,7 @@ struct FindTimePanel: View {
             }
             .font(.system(size: 12))
             .padding(.horizontal, 8)
-            .frame(height: 22)
+            .frame(height: Theme.controlSmall)
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
             .contentShape(Rectangle())
         }
@@ -304,7 +306,7 @@ struct FindTimePanel: View {
         if let zone = theirZone, zone.source != .mine {
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(zone.zone.city).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
+                    Text(zone.zone.city).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
                     Text("Their \(Self.minutesClock(zone.hours.start)) to \(Self.minutesClock(zone.hours.end))")
                         .font(.system(size: 10)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                 }
@@ -334,28 +336,15 @@ struct FindTimePanel: View {
                 zoneMenu(zone)
             }
             if canAddRoom {
-                Button { pickingRoom = true } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
-                        Text("Room")
-                        KeyCap(key: "R")
-                    }
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color(Theme.text2))
-                    .padding(.leading, 8)
-                    .padding(.trailing, 4)
-                    .frame(height: 22)
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Add a room as a row (R)")
-                .accessibilityIdentifier("find-time-add-room")
+                KitButton(title: "Room", key: "R", icon: "plus", size: .small) { pickingRoom = true }
+                    .help("Add a room as a row (R)")
+                    .accessibilityIdentifier("find-time-add-room")
             }
             if showsHoursToggle {
                 HStack(spacing: 6) {
                     Toggle("Their working hours", isOn: $theirHours)
                         .toggleStyle(.switch)
+                        .tint(Color(Theme.accent))
                         .controlSize(.mini)
                         .labelsHidden()
                         .accessibilityIdentifier("find-time-their-hours")
@@ -366,11 +355,15 @@ struct FindTimePanel: View {
                 .padding(.trailing, 4)
             }
             HStack(spacing: 2) {
-                Button { length(-1) } label: { Image(systemName: "minus").frame(width: 22, height: 20) }
+                Button { length(-1) } label: { Image(systemName: "minus").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .help("Shorter (−)")
+                    .accessibilityLabel("Shorter")
                 Text(lengthText(minutes))
                     .font(.system(size: 12, weight: .medium).monospacedDigit())
                     .frame(minWidth: 64)
-                Button { length(1) } label: { Image(systemName: "plus").frame(width: 22, height: 20) }
+                Button { length(1) } label: { Image(systemName: "plus").frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle()) }
+                    .help("Longer (+)")
+                    .accessibilityLabel("Longer")
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color(Theme.text2))
@@ -391,9 +384,15 @@ struct FindTimePanel: View {
             }
             .frame(maxWidth: .infinity, minHeight: 120)
         case .failed(let message):
-            Text(message)
-                .foregroundStyle(Color(Theme.text2))
-                .frame(maxWidth: .infinity, minHeight: 120)
+            VStack(spacing: 10) {
+                Text(message)
+                    .foregroundStyle(Color(Theme.text2))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                KitButton(title: "Try Again", size: .small) { Task { await load() } }
+                    .accessibilityIdentifier("find-time-retry")
+            }
+            .frame(maxWidth: .infinity, minHeight: 120)
         case .calendarOff(let accountId, let address, let needsConsent):
             VStack(spacing: 10) {
                 Text("Calendar is off for \(address)")
@@ -402,7 +401,7 @@ struct FindTimePanel: View {
                     .foregroundStyle(Color(Theme.text2))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(turningOn ? (needsConsent ? "Continue in your browser…" : "Turning on…") : "Turn On Calendar") {
+                KitButton(title: turningOn ? (needsConsent ? "Continue in your browser…" : "Turning on…") : "Turn On Calendar", kind: .primary) {
                     turnOn(accountId)
                 }
                 .disabled(turningOn)
@@ -423,7 +422,7 @@ struct FindTimePanel: View {
                     let width = geo.size.width / CGFloat(max(info.days.count, 1))
                     ForEach(Array(info.days.enumerated()), id: \.offset) { i, day in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(day.title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Color(Theme.text2))
+                            Text(day.title).font(.system(size: Theme.small, weight: .semibold)).foregroundStyle(Color(Theme.text2))
                             HStack {
                                 Text(Self.clock(day.start))
                                 Spacer()
@@ -444,14 +443,17 @@ struct FindTimePanel: View {
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 3) {
-                            Text(person.name).font(.system(size: 12.5, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
+                            Text(person.name).font(.system(size: Theme.body, weight: person.isMe ? .semibold : .regular)).lineLimit(1)
                             if person.isRoom {
                                 Spacer(minLength: 0)
                                 Button { rooms.removeAll { $0.address == person.address } } label: {
                                     Image(systemName: "xmark").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Color(Theme.text3))
+                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall)
+                                        .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .help("Remove this room")
+                                .accessibilityLabel("Remove \(person.name)")
                                 .accessibilityIdentifier("find-time-remove-room")
                             }
                         }
@@ -492,7 +494,7 @@ struct FindTimePanel: View {
                         .foregroundStyle(Color(Theme.text2))
                 } else if slots.indices.contains(selected) {
                     let slot = slots[selected]
-                    Text(Self.span(slot)).font(.system(size: 12.5, weight: .medium))
+                    Text(Self.span(slot)).font(.system(size: Theme.body, weight: .medium))
                     if !slot.missing.isEmpty {
                         Text("Not known: \(slot.missing.joined(separator: ", "))")
                             .foregroundStyle(Color(Theme.text3))
@@ -504,42 +506,19 @@ struct FindTimePanel: View {
             }
             if forAvailability { holdToggle }
             Spacer(minLength: 8)
-            hint("↑↓", listsStretches ? nil : "Move")
-            hint("Space", holding ? "Pick" : nil)
-            hint("− +", "Length")
-            Button { pick() } label: {
-                HStack(spacing: 5) {
-                    Text(pickVerb)
-                    Text("↩").foregroundStyle(Color(Theme.text3))
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 10)
-                .frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone || (holding && picked.isEmpty))
-            .accessibilityIdentifier("find-time-pick")
+            hint("↑↓", listsStretches ? nil : "move")
+            hint("space", holding ? "pick" : nil)
+            hint("− +", "length")
+            // Invite is the panel's main action where it is offered.
+            KitButton(title: pickVerb, key: "↩", kind: invites ? .secondary : .primary, size: .small) { pick() }
+                .disabled(slots.isEmpty || pendingRooms > 0 || lookingUpZone || (holding && picked.isEmpty))
+                .accessibilityIdentifier("find-time-pick")
             if invites {
-                Button { invite() } label: {
-                    HStack(spacing: 5) {
-                        Text("Invite")
-                        Text("⌘↩").opacity(0.75)
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(Theme.raise))
-                    .padding(.horizontal, 10)
-                    .frame(height: 24)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.accent)))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(slots.isEmpty || pendingRooms > 0)
-                .help("Open the event editor with this time, everyone here and the room (⌘↩)")
-                .accessibilityIdentifier("find-time-invite")
+                KitButton(title: "Invite", key: "⌘↩", kind: .primary, size: .small) { invite() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(slots.isEmpty || pendingRooms > 0)
+                    .help("Open the event editor with this time, everyone here and the room (⌘↩)")
+                    .accessibilityIdentifier("find-time-invite")
             }
         }
         .font(.system(size: 12))
@@ -553,6 +532,7 @@ struct FindTimePanel: View {
         return HStack(spacing: 6) {
             Toggle("Hold these times", isOn: Binding(get: { holding }, set: { _ in toggleHolding() }))
                 .toggleStyle(.switch)
+                .tint(Color(Theme.accent))
                 .controlSize(.mini)
                 .labelsHidden()
                 .disabled(holdChoice == nil || reason != nil)
@@ -763,7 +743,7 @@ struct FindTimeRow: View {
             let width = size.width / CGFloat(max(days.count, 1))
             for (i, day) in days.enumerated() {
                 let column = FindTimeSlots.column(i, of: days.count, in: size)
-                context.fill(Path(roundedRect: column, cornerRadius: 5), with: .color(Color(Theme.bg)))
+                context.fill(Path(roundedRect: column, cornerRadius: Theme.radiusControl), with: .color(Color(Theme.bg)))
                 if person.unknown != nil {
                     hatch(column, in: &context)
                 }
@@ -773,7 +753,7 @@ struct FindTimeRow: View {
                 for b in person.busy {
                     if let r = FindTimeSlots.span(b.start, b.end, day: day, column: column) { block(r, kind: b.kind, in: &context) }
                 }
-                context.stroke(Path(roundedRect: column.insetBy(dx: 0.25, dy: 0.25), cornerRadius: 5), with: .color(Color(Theme.line2)), lineWidth: 0.5)
+                context.stroke(Path(roundedRect: column.insetBy(dx: 0.25, dy: 0.25), cornerRadius: Theme.radiusControl), with: .color(Color(Theme.line2)), lineWidth: 0.5)
             }
         }
     }
@@ -799,7 +779,7 @@ struct FindTimeRow: View {
     /// the unknown hatch, so the two never read alike.
     private func shade(_ r: CGRect, column: CGRect, in context: inout GraphicsContext) {
         var clipped = context
-        clipped.clip(to: Path(roundedRect: column, cornerRadius: 5))
+        clipped.clip(to: Path(roundedRect: column, cornerRadius: Theme.radiusControl))
         clipped.fill(Path(r), with: .color(Color(Theme.fill)))
         var path = Path()
         var x = r.minX - r.height
@@ -814,7 +794,7 @@ struct FindTimeRow: View {
 
     private func hatch(_ r: CGRect, in context: inout GraphicsContext) {
         var clipped = context
-        clipped.clip(to: Path(roundedRect: r, cornerRadius: 5))
+        clipped.clip(to: Path(roundedRect: r, cornerRadius: Theme.radiusControl))
         stripes(r, color: Color(Theme.line), width: 1, in: &clipped)
     }
 

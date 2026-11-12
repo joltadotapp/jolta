@@ -53,7 +53,7 @@ struct CalendarAccountRows: View {
             let message = switches.messages[id]
             SettingsRow(title: a.account.address,
                         detail: switches.working[id] ?? message?.text ?? Self.detail(a),
-                        detailColor: message?.failed == true ? .red : Color(Theme.text3)) {
+                        detailColor: message?.failed == true ? Color(Theme.dangerText) : Color(Theme.text3)) {
                 HStack(spacing: 8) {
                     if switches.working[id] != nil { ProgressView().controlSize(.small) }
                     Toggle("Calendar", isOn: Binding(get: { a.calendarOn }, set: { switches.set(a, on: $0) }))
@@ -89,7 +89,7 @@ struct SubscribeField: View {
     var body: some View {
         SettingsRow(title: "Add a calendar subscription",
                     detail: message?.text ?? "A feed address such as webcal://… from a holiday or sports calendar. Jolta checks it for changes every few hours.",
-                    detailColor: message?.failed == true ? .red : Color(Theme.text3)) {
+                    detailColor: message?.failed == true ? Color(Theme.dangerText) : Color(Theme.text3)) {
             HStack(spacing: 8) {
                 TextField("", text: $url, prompt: Text("webcal://"))
                     .settingsField(width: 190)
@@ -132,7 +132,7 @@ struct NewLocalCalendarField: View {
     var body: some View {
         SettingsRow(title: "New calendar on this Mac",
                     detail: message?.text ?? "For private plans, or when you have no calendar account.",
-                    detailColor: message?.failed == true ? .red : Color(Theme.text3)) {
+                    detailColor: message?.failed == true ? Color(Theme.dangerText) : Color(Theme.text3)) {
             HStack(spacing: 8) {
                 Menu {
                     ForEach(CalendarSettingsRow.swatches, id: \.self) { hex in
@@ -213,7 +213,7 @@ struct CalendarSettings: View {
                 OutOfOfficeRows(model: model, switches: switches)
             }
             SettingsSection("Working hours", footer: "Find a time and Insert my availability suggest times inside these hours. Until you set them, Jolta uses your Outlook working hours on Microsoft 365, else Monday to Friday, 9:00 to 17:00.") {
-                WorkingHoursRow(core: model.core)
+                WorkingHoursRow(core: model.core) { model.calendar.refresh() }
             }
             SettingsSection("Subscribe") {
                 SubscribeField(model: model)
@@ -243,7 +243,7 @@ struct ZoomLinkRow: View {
     var body: some View {
         SettingsRow(title: "Zoom personal link",
                     detail: failure ?? "Add video call offers it as Zoom in every calendar.",
-                    detailColor: failure == nil ? Color(Theme.text3) : .red) {
+                    detailColor: failure == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
             HStack(spacing: 8) {
                 TextField("", text: $link, prompt: Text(verbatim: "https://zoom.us/j/…"))
                     .settingsField(width: 230)
@@ -276,6 +276,8 @@ struct ZoomLinkRow: View {
 /// The days and hours Find a time suggests times in, on this Mac's clock.
 struct WorkingHoursRow: View {
     let core: Core
+    /// The calendar shades the hours outside these, so it follows a change.
+    var changed: () -> Void = {}
     @State private var hours: WorkingHoursInfo?
     @State private var custom = false
     @State private var failure: String?
@@ -308,7 +310,7 @@ struct WorkingHoursRow: View {
                 HStack {
                     Text(failure ?? (custom ? "Set here, in \(hours.zone)." : "Not set; these are the defaults, in \(hours.zone)."))
                         .font(.system(size: 12))
-                        .foregroundStyle(failure == nil ? Color(Theme.text3) : .red)
+                        .foregroundStyle(failure == nil ? Color(Theme.text3) : Color(Theme.dangerText))
                     Spacer()
                     if custom { Button("Use Defaults") { reset() } }
                 }
@@ -330,6 +332,7 @@ struct WorkingHoursRow: View {
             hours = new
             custom = true
             failure = nil
+            changed()
         } catch {
             failure = "\(error)"
         }
@@ -357,6 +360,7 @@ struct WorkingHoursRow: View {
     private func reset() {
         try? core.setWorkingHours(hours: nil)
         load()
+        changed()
     }
 }
 
@@ -369,7 +373,7 @@ struct FileResponsesRow: View {
     var body: some View {
         SettingsRow(title: "File responses automatically",
                     detail: failure ?? "Replies to your meetings that only say yes, no or maybe go to the archive. Replies with a note stay in the inbox.",
-                    detailColor: failure == nil ? Color(Theme.text3) : .red) {
+                    detailColor: failure == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
             Toggle("File responses automatically", isOn: Binding(get: { on }, set: set))
                 .settingsSwitch()
         }
@@ -417,7 +421,7 @@ struct CalendarSettingsRow: View {
             .help("Color")
             VStack(alignment: .leading, spacing: 2) {
                 Text(info.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                Text(summary).font(.system(size: 12)).foregroundStyle(Color(info.syncError == nil ? Theme.text3 : .systemRed)).lineLimit(2)
+                Text(summary).font(.system(size: 12)).foregroundStyle(Color(info.syncError == nil ? Theme.text3 : Theme.dangerText)).lineLimit(2)
             }
             Spacer(minLength: 8)
             if info.kind == .local {
@@ -498,9 +502,9 @@ struct CalendarIntroSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Which calendars should Jolta show?").font(.system(size: 17, weight: .semibold))
+            Text("Which calendars should Jolta show?").font(.system(size: Theme.title, weight: .semibold))
             Text("Calendar is off for every account until you turn it on here. You can change this later in Settings › Calendar.")
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text2))
                 .fixedSize(horizontal: false, vertical: true)
             SettingsCard {
@@ -509,7 +513,7 @@ struct CalendarIntroSheet: View {
             }
             HStack {
                 Spacer()
-                Button("Done") { model.finishCalendarIntro() }.keyboardShortcut(.defaultAction).tint(Color(Theme.accent))
+                KitButton(title: "Done", key: "↩", kind: .primary) { model.finishCalendarIntro() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
@@ -532,7 +536,7 @@ struct NewEventDefaults: View {
     var body: some View {
         let writable = model.calendar.groups.flatMap(\.calendars).map(\.info).filter(\.writable)
         SettingsRow(title: "Default calendar", detail: failure ?? "C and double-click make events here.",
-                    detailColor: failure == nil ? Color(Theme.text3) : .red) {
+                    detailColor: failure == nil ? Color(Theme.text3) : Color(Theme.dangerText)) {
             Picker("Default calendar", selection: Binding(get: { calendar ?? -1 }, set: setCalendar)) {
                 if calendar == nil { Text("None").tag(Int64(-1)) }
                 ForEach(writable, id: \.id) { c in Text(c.name).tag(c.id) }

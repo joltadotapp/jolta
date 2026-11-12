@@ -770,6 +770,8 @@ pub struct SignIn {
     provider: jolta_core::oauth::Provider,
     purpose: SignInFor,
     pending: Mutex<Option<jolta_core::oauth::Pending>>,
+    /// The task `finish()` waits on, for `cancel()` to stop.
+    waiting: Mutex<Option<tokio::task::AbortHandle>>,
     jolta: Jolta,
     runtime: tokio::runtime::Handle,
     engine: Option<Arc<Engine>>,
@@ -794,42 +796,52 @@ impl SignIn {
             .ok_or_else(|| CoreError::Failed { message: "this sign-in already finished".into() })?;
         let (jolta, provider, engine) = (self.jolta.clone(), self.provider, self.engine.clone());
         let purpose = self.purpose.clone();
-        self.runtime
-            .spawn(async move {
-                let explain = |e: jolta_core::Error| jolta_core::Error::Auth(jolta_core::graph::explain_sign_in_error(&e.to_string()));
-                if let SignInFor::Rooms(account) = purpose {
-                    let consent = pending.finish_consent(std::future::pending()).await.map_err(explain)?;
-                    let rooms = jolta_core::calendar::rooms::finish_consent(&jolta, &account, consent).await?;
-                    if let jolta_core::calendar::rooms::Access::Refused(reason) = rooms.access {
-                        return Err(jolta_core::Error::Auth(reason));
-                    }
-                    let account = jolta.store.read(|c| store::account(c, account.id))?;
-                    return Ok(AccountInfo::from(account));
+        let task = self.runtime.spawn(async move {
+            let explain = |e: jolta_core::Error| jolta_core::Error::Auth(jolta_core::graph::explain_sign_in_error(&e.to_string()));
+            if let SignInFor::Rooms(account) = purpose {
+                let consent = pending.finish_consent(std::future::pending()).await.map_err(explain)?;
+                let rooms = jolta_core::calendar::rooms::finish_consent(&jolta, &account, consent).await?;
+                if let jolta_core::calendar::rooms::Access::Refused(reason) = rooms.access {
+                    return Err(jolta_core::Error::Auth(reason));
                 }
-                let signed = pending.finish().await.map_err(explain)?;
-                if let SignInFor::Calendar(account) = purpose {
-                    jolta_core::oauth::save_grant(&account, &signed)?;
-                    let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
-                    if let Some(engine) = engine {
-                        list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
-                        engine.calendars().check_away();
-                    }
-                    let account = jolta.store.read(|c| store::account(c, account.id))?;
-                    return Ok(AccountInfo::from(account));
-                }
-                let again = match purpose {
-                    SignInFor::Account(again) => again,
-                    _ => None,
-                };
-                let account = jolta_core::oauth::save_account(&jolta, provider, &signed, again)?;
+                let account = jolta.store.read(|c| store::account(c, account.id))?;
+                return Ok(AccountInfo::from(account));
+            }
+            let signed = pending.finish().await.map_err(explain)?;
+            if let SignInFor::Calendar(account) = purpose {
+                jolta_core::oauth::save_grant(&account, &signed)?;
+                let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
                 if let Some(engine) = engine {
-                    engine.add_account(account.clone());
+                    list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
+                    engine.calendars().check_away();
                 }
-                Ok::<_, jolta_core::Error>(AccountInfo::from(account))
-            })
-            .await
-            .map_err(|e| CoreError::Failed { message: e.to_string() })?
+                let account = jolta.store.read(|c| store::account(c, account.id))?;
+                return Ok(AccountInfo::from(account));
+            }
+            let again = match purpose {
+                SignInFor::Account(again) => again,
+                _ => None,
+            };
+            let account = jolta_core::oauth::save_account(&jolta, provider, &signed, again)?;
+            if let Some(engine) = engine {
+                engine.add_account(account.clone());
+            }
+            Ok::<_, jolta_core::Error>(AccountInfo::from(account))
+        });
+        *self.waiting.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
+        task.await
+            .map_err(|e| CoreError::Failed { message: if e.is_cancelled() { "Sign-in cancelled.".into() } else { e.to_string() } })?
             .map_err(Into::into)
+    }
+
+    /// Stops waiting for the browser. `finish()` fails with "Sign-in
+    /// cancelled.", the local listener closes, and a sign-in completed in
+    /// the browser afterwards adds nothing.
+    pub fn cancel(&self) {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(task) = self.waiting.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            task.abort();
+        }
     }
 }
 
@@ -1806,6 +1818,7 @@ impl Core {
             provider,
             purpose: SignInFor::Account(again),
             pending: Mutex::new(Some(pending)),
+            waiting: Mutex::new(None),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
             engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
@@ -1833,6 +1846,7 @@ impl Core {
             provider,
             purpose: SignInFor::Calendar(account),
             pending: Mutex::new(Some(pending)),
+            waiting: Mutex::new(None),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
             engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),

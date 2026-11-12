@@ -10,7 +10,7 @@ struct AwayStrip: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 2).fill(Color(Theme.accent)).frame(width: 8, height: 8)
+            RoundedRectangle(cornerRadius: 2).fill(Color(Theme.text2)).frame(width: 8, height: 8)
             // A narrow list drops the end before the account, then shortens.
             ViewThatFits(in: .horizontal) {
                 sentence(until: true).fixedSize()
@@ -21,19 +21,18 @@ struct AwayStrip: View {
             .help("Automatic replies are on for \(info.address)" + (info.untilText.map { " until \($0)" } ?? ""))
             Spacer(minLength: 6)
             if info.editable {
-                StripButton(title: "Edit") { model.openAwaySheet(account: info.accountId) }
-                StripButton(title: "Turn off") { model.turnOffAway(info) }
+                KitButton(title: "Edit", size: .small) { model.openAwaySheet(account: info.accountId) }
+                KitButton(title: "Turn Off", size: .small) { model.turnOffAway(info) }
                     .disabled(model.turningOffAway.contains(info.accountId))
             } else {
-                StripButton(title: info.settingsTitle) { model.openAwaySettings(info) }
+                KitButton(title: info.settingsTitle, size: .small) { model.openAwaySettings(info) }
             }
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .foregroundStyle(Color(Theme.text))
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
+        .card()
         .padding(.horizontal, 14)
         .padding(.top, 8)
         .accessibilityElement(children: .contain)
@@ -44,25 +43,6 @@ struct AwayStrip: View {
         Text("Automatic replies are on").fontWeight(.semibold)
             + Text(" for \(info.address)")
             + Text(until ? info.untilText.map { " until \($0)" } ?? "" : "")
-    }
-}
-
-private struct StripButton: View {
-    let title: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 10)
-                .frame(height: 24)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
     }
 }
 
@@ -88,12 +68,12 @@ struct OutOfOfficeRows: View {
                 switch row.state {
                 case .calendarOff:
                     if let switches, let account = model.calendar.list.accounts.first(where: { $0.account.id == row.accountId }) {
-                        Button("Turn on calendar") { switches.set(account, on: true) }
+                        Button("Turn On Calendar") { switches.set(account, on: true) }
                     }
                 case _ where !row.editable:
                     Button(row.settingsTitle) { model.openAwaySettings(row) }
                 case .on:
-                    Button("Turn off") { model.turnOffAway(row) }
+                    Button("Turn Off") { model.turnOffAway(row) }
                         .disabled(model.turningOffAway.contains(row.accountId))
                 default:
                     Button("Edit…") { sheet = AwaySheetRequest(accountId: row.accountId) }

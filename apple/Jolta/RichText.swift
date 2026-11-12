@@ -42,6 +42,8 @@ struct RichTextEditor: NSViewRepresentable {
             view.setAccessibilityIdentifier("compose-body")
         }
         view.typingAttributes = view.base
+        view.insertionPointColor = Theme.accent
+        view.selectedTextAttributes = [.backgroundColor: Theme.selection]
         view.delegate = context.coordinator
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -55,8 +57,12 @@ struct RichTextEditor: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        (scroll.documentView as? RichTextView)?.pasteTarget = context.environment.pasteTarget
-        guard let view = scroll.documentView as? RichTextView, text != context.coordinator.lastText else { return }
+        guard let view = scroll.documentView as? RichTextView else { return }
+        view.pasteTarget = context.environment.pasteTarget
+        // The caret keeps the color it was given, so a theme change hands it the new one.
+        _ = ThemeStore.shared.active
+        view.insertionPointColor = Theme.accent
+        guard text != context.coordinator.lastText else { return }
         // Changed from outside (a signature swap, a snippet): reload, keeping the cursor.
         let cursor = view.selectedRange()
         context.coordinator.load(text, into: view)

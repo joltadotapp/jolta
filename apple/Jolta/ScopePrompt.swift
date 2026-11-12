@@ -53,7 +53,7 @@ private struct ScopePromptView: View {
             .padding(.top, 12)
             HStack {
                 Spacer()
-                EditorButton(title: "Cancel", key: "Esc", action: cancel)
+                KitButton(title: "Cancel", key: "esc", action: cancel)
                     .keyboardShortcut(.cancelAction)
             }
             .background {
@@ -86,21 +86,17 @@ private struct ScopePromptView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(choice.label).font(.system(size: 13, weight: .medium)).foregroundStyle(Color(Theme.text))
                     if let detail = choice.detail {
-                        Text(detail).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).fixedSize(horizontal: false, vertical: true)
+                        Text(detail).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Spacer(minLength: 0)
                 if first { KeyCap(key: "↩", focused: true) }
             }
-            .padding(.horizontal, 10)
+            // Room for the caret of the selected row.
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
             .padding(.vertical, 8)
-            .background {
-                if first {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(Theme.fill))
-                        .strokeBorder(Color(Theme.accent), lineWidth: 2)
-                }
-            }
+            .selectedRow(first)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

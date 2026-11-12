@@ -14,13 +14,26 @@ enum Theme {
     static var text: NSColor { ThemeStore.shared.color(\.text) }
     static var text2: NSColor { ThemeStore.shared.color(\.text2) }
     static var text3: NSColor { ThemeStore.shared.color(\.text3) }
-    static var fill: NSColor { ThemeStore.shared.color(\.fill) }
-    static var hover: NSColor { ThemeStore.shared.color(\.hover) }
+    /// A selected row's fill and a hovered row's: the text color at the
+    /// theme's strength, so they show the same on every surface.
+    static var fill: NSColor { ThemeStore.shared.color(\.text, alpha: \ThemeTokens.fillAlpha) }
+    static var hover: NSColor { ThemeStore.shared.color(\.text, alpha: \ThemeTokens.hoverAlpha) }
     static var accent: NSColor { ThemeStore.shared.color(\.accent) }
+    /// Behind selected text in an editor: the accent at 30%, read from the
+    /// theme each time it draws.
+    static let selection = NSColor(name: nil) { appearance in
+        let mode: ThemeMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        return NSColor(hex: ThemeStore.tokens(mode).accent, alpha: 0.3)
+    }
     static var star: NSColor { ThemeStore.shared.color(\.star) }
     static var accentText: NSColor { ThemeStore.shared.color(\.accentText) }
     static var kbd: NSColor { ThemeStore.shared.color(\.kbd) }
     static var kbdText: NSColor { ThemeStore.shared.color(\.kbdText) }
+    static var onAccent: NSColor { ThemeStore.shared.color(\.onAccent) }
+    /// A destructive button's fill; its text is white.
+    static var danger: NSColor { ThemeStore.shared.color(\.danger) }
+    static var dangerText: NSColor { ThemeStore.shared.color(\.dangerText) }
+    static var warningText: NSColor { ThemeStore.shared.color(\.warningText) }
 
     static let rowHeight: CGFloat = 40
     static let senderWidth: CGFloat = 136
@@ -32,7 +45,7 @@ enum Theme {
         .systemFont(ofSize: size, weight: weight)
     }
 
-    /// Digits line up; letters stay proportional so `26/10/24` fits the 52 pt date column.
+    /// Digits line up; letters stay proportional so `26/10/24` fits the list's date column.
     static let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
 
     private static let time: DateFormatter = {
@@ -81,25 +94,6 @@ extension NSColor {
 
 extension Color {
     init(_ token: NSColor) { self.init(nsColor: token) }
-}
-
-/// A key hint such as `E` or `⌘K`. Accent outline when it belongs to the focused thing.
-struct KeyCap: View {
-    let key: String
-    var focused = false
-
-    var body: some View {
-        Text(key)
-            .font(.system(size: 10.5, weight: .medium))
-            .foregroundStyle(Color(focused ? Theme.accentText : Theme.kbdText))
-            .padding(.horizontal, 4)
-            .frame(minWidth: 17, minHeight: 17)
-            .background {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(focused ? Color.clear : Color(Theme.kbd))
-                    .strokeBorder(focused ? Color(Theme.accent).opacity(0.55) : .clear, lineWidth: 1)
-            }
-    }
 }
 
 /// A theme's background, text and accent as three overlapping dots.

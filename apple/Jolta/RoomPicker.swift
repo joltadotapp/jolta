@@ -54,9 +54,7 @@ struct RoomPicker: View {
             footer
         }
         .frame(width: 440)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(Theme.line), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.35), radius: 28, y: 12)
+        .panel()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("room-picker")
         .task { await load() }
@@ -98,7 +96,7 @@ struct RoomPicker: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .accessibilityIdentifier("room-picker-size")
             Spacer()
             if outcome == nil || asking != nil { ProgressView().controlSize(.small) }
@@ -113,10 +111,10 @@ struct RoomPicker: View {
                 Text(text)
                 if on { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(on ? Theme.text : Theme.text2))
             .padding(.horizontal, 8)
-            .frame(height: 22)
+            .frame(height: Theme.controlSmall)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(on ? Theme.fill : .clear)))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
             .contentShape(Rectangle())
@@ -129,16 +127,16 @@ struct RoomPicker: View {
         if let asking {
             message(asking, nil, action: nil)
         } else if let failure {
-            message("Couldn't read the rooms", failure, action: nil)
+            message("Couldn't read the rooms", failure, action: ("Try Again", { self.failure = nil; Task { await load() } }))
         } else if let outcome {
             switch outcome.access {
             case .refused(let reason):
                 message("Room lists need your admin's OK",
                         "Your organization lets only an admin allow Jolta to read its rooms (permission \"Read all company places\"). Microsoft said: \(reason.hasSuffix(".") ? reason : reason + ".")",
-                        action: ("Ask for access", { Task { await ask() } }))
+                        action: ("Ask for Access", { Task { await ask() } }))
             case .notAsked:
                 message("Room lists need your OK", "Jolta asks Microsoft to read your organization's rooms, with their size and building.",
-                        action: ("Ask for access", { Task { await ask() } }))
+                        action: ("Ask for Access", { Task { await ask() } }))
             case .granted where outcome.noneListed:
                 message("Your organization hasn't set up room lists", "Rooms from your meetings and a typed address still work.", action: nil)
             case .granted, .notOffered:
@@ -149,14 +147,13 @@ struct RoomPicker: View {
 
     private func message(_ title: String, _ text: String?, action: (String, () -> Void)?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Color(Theme.text))
+            Text(title).font(.system(size: Theme.body, weight: .semibold)).foregroundStyle(Color(Theme.text))
             if let text {
                 Text(text).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).fixedSize(horizontal: false, vertical: true)
             }
             if let action {
-                Button(action.0, action: action.1)
-                    .buttonStyle(.link)
-                    .font(.system(size: 12))
+                KitButton(title: action.0, size: .small, action: action.1)
+                    .padding(.top, 3)
                     .accessibilityIdentifier("room-picker-ask")
             }
         }
@@ -258,7 +255,7 @@ struct RoomPicker: View {
         return Button { add(r) } label: {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(r.name).font(.system(size: 12.5)).lineLimit(1)
+                    Text(r.name).font(.system(size: Theme.body)).lineLimit(1)
                     Text(detail).font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                 }
                 Spacer(minLength: 6)
@@ -273,7 +270,7 @@ struct RoomPicker: View {
             .foregroundStyle(Color(taken ? Theme.text3 : Theme.text))
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
-            .background(Rectangle().fill(current ? Color(Theme.fill) : .clear))
+            .selectedRow(current, radius: 0)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -283,12 +280,12 @@ struct RoomPicker: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            HStack(spacing: 4) { KeyCap(key: "↑↓"); Text("Move") }
-            HStack(spacing: 4) { KeyCap(key: "↩"); Text("Add room") }
+            HStack(spacing: 4) { KeyCap(key: "↑↓"); Text("move") }
+            HStack(spacing: 4) { KeyCap(key: "↩"); Text("add room") }
             Spacer()
             Text("Bars show \(FindTimePanel.clock(bar.start)) to \(FindTimePanel.clock(bar.end))")
         }
-        .font(.system(size: 11.5))
+        .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
         .padding(.horizontal, 12)
         .frame(height: 32)

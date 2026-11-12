@@ -48,6 +48,7 @@ struct FocusSheet: View {
     @State private var loaded = false
     @State private var working = false
     @State private var failure: String?
+    @FocusState private var startFocused: Bool
 
     private var calendars: [CalendarInfo] {
         let list = model.calendar.list
@@ -56,12 +57,13 @@ struct FocusSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Focus time").font(.system(size: 17, weight: .semibold))
+            Text("Focus time").font(.system(size: Theme.title, weight: .semibold))
             VStack(alignment: .leading, spacing: 8) {
                 field("Starts") {
                     DatePicker("Starts", selection: $start, displayedComponents: [.date, .hourAndMinute])
                         .labelsHidden()
                         .datePickerStyle(.field)
+                        .focused($startFocused)
                     Spacer()
                 }
                 field("For") {
@@ -103,7 +105,7 @@ struct FocusSheet: View {
             }
             if let line = plan?.line {
                 Text(line)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .foregroundStyle(Color(Theme.text2))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(12)
@@ -113,25 +115,18 @@ struct FocusSheet: View {
                     .accessibilityIdentifier("focus-line")
             }
             if let failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
                 if let problem = plan?.problem {
                     Text(problem).font(.system(size: 12)).foregroundStyle(Color(Theme.text3))
                 }
                 Spacer()
-                Button("Cancel", action: close).keyboardShortcut(.cancelAction)
-                Button(action: add) {
-                    HStack(spacing: 6) {
-                        Text("Add")
-                        Text("⌘↩").foregroundStyle(.secondary)
-                    }
-                }
-                .keyboardShortcut(.return, modifiers: .command)
-                .tint(Color(Theme.accent))
-                .buttonStyle(.borderedProminent)
-                .disabled(!canAdd)
-                .accessibilityIdentifier("focus-add")
+                KitButton(title: "Cancel", key: "esc", action: close).keyboardShortcut(.cancelAction)
+                KitButton(title: "Add", key: "⌘↩", kind: .primary, action: add)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canAdd)
+                    .accessibilityIdentifier("focus-add")
             }
         }
         .padding(22)
@@ -140,6 +135,7 @@ struct FocusSheet: View {
         .foregroundStyle(Color(Theme.text))
         .accessibilityIdentifier("focus-sheet")
         .onAppear(perform: load)
+        .onAppear { startFocused = true }
         .onChange(of: start) { replan() }
         .onChange(of: minutes) { replan() }
         .onChange(of: calendarId) { replan() }
@@ -162,7 +158,7 @@ struct FocusSheet: View {
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 12) {
             Text(title)
-                .font(.system(size: 12.5))
+                .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text2))
                 .frame(width: 64, alignment: .leading)
             content()

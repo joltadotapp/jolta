@@ -33,7 +33,7 @@ final class ReaderPage {
         set { links.onToggle = newValue }
     }
     /// The context menu's items after Copy, for the page on screen.
-    var menuExtras: () -> [ReaderMenuItem] = { [] }
+    var menuExtras: () -> [MenuEntry] = { [] }
     private let links = LinkActions()
     private let navigator: Navigator
     /// The last page shown, loaded again if its web content process ends.
@@ -207,6 +207,22 @@ final class ReaderPage {
         Task { _ = await call(script, arguments: arguments) }
     }
 
+    /// Scrolls by a page less two lines, which stay in sight to read on from.
+    func scroll(pages: Int) {
+        let smooth = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        run("scrollBy({ top: pages * (innerHeight - 44), behavior: smooth ? 'smooth' : 'instant' })", arguments: ["pages": pages, "smooth": smooth])
+    }
+
+    /// Selects the next or previous place the text occurs and scrolls to
+    /// it, around the ends. False when it occurs nowhere.
+    func find(_ text: String, backwards: Bool) async -> Bool {
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.caseSensitive = false
+        configuration.wraps = true
+        return (try? await webView.find(text, configuration: configuration))?.matchFound ?? false
+    }
+
     /// Expands or collapses messages by id, as the user left them before
     /// the page loaded again.
     func expand(_ states: [Int64: Bool]) {
@@ -235,7 +251,7 @@ final class ReaderPage {
     /// Open Link… and Copy Link on a link the reader would open, then Copy
     /// and the view's own items.
     private func menuItems(link: URL?) -> [NSMenuItem] {
-        var items: [ReaderMenuItem] = []
+        var items: [MenuEntry] = []
         if let link, Navigator.opens(link) {
             items += [
                 .button("Open Link…") { Navigator.confirmOpen(link) },
@@ -251,12 +267,13 @@ final class ReaderPage {
     }
 }
 
-/// One entry of the reader's context menu.
-enum ReaderMenuItem {
+/// One entry of a right-click menu built in AppKit: the reader's, a list
+/// row's, an event's in the week.
+enum MenuEntry {
     case button(String, @MainActor () -> Void)
     case divider
 
-    @MainActor fileprivate var menuItem: NSMenuItem {
+    @MainActor var menuItem: NSMenuItem {
         switch self {
         case .divider:
             return .separator()
@@ -268,6 +285,27 @@ enum ReaderMenuItem {
             item.representedObject = target
             return item
         }
+    }
+}
+
+/// `MenuEntry`s as the items of a SwiftUI context menu.
+struct MenuEntries: View {
+    let entries: () -> [MenuEntry]
+
+    var body: some View {
+        ForEach(Array(entries().enumerated()), id: \.offset) { _, entry in
+            switch entry {
+            case .divider: Divider()
+            case .button(let title, let action): Button(title, action: action)
+            }
+        }
+    }
+}
+
+extension NSMenu {
+    convenience init(entries: [MenuEntry]) {
+        self.init()
+        for entry in entries { addItem(entry.menuItem) }
     }
 }
 
@@ -309,7 +347,7 @@ final class ReaderWebView: WKWebView {
 /// SwiftUI's host for a `ReaderPage`'s one web view.
 struct ReaderPageView: NSViewRepresentable {
     let page: ReaderPage
-    var menu: () -> [ReaderMenuItem] = { [] }
+    var menu: () -> [MenuEntry] = { [] }
 
     func makeNSView(context: Context) -> ReaderWebView { page.webView }
 
@@ -571,18 +609,28 @@ struct ReaderView: View {
     /// Set when the user trusts or stops trusting the sender in this view.
     @State private var trustOverride: Bool?
     @State private var shownThread: Int64?
+    /// Another conversation is loading: it fades in once its page is in.
+    @State private var arriving = false
+    /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
+    @State private var finding = false
+    @State private var findText = ""
+    @State private var findMissed = false
+    @FocusState private var findFocused: Bool
 
     private var trusted: Bool { trustOverride ?? thread.imagesTrusted }
     private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
 
     private func render() {
         if shownThread != thread.threadId {
+            // Not the first one, which comes with the reader itself, and not under Reduce Motion.
+            arriving = shownThread != nil && Theme.quick != nil
             shownThread = thread.threadId
             imagesLoaded = false
             trustOverride = nil
         }
         reader.images.allowsRemote = imagesLoaded || trusted
         reader.show(html: thread.html) {
+            if arriving { withAnimation(Theme.quick) { arriving = false } }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
             let expanded = model.expandedMessages
@@ -638,6 +686,61 @@ struct ReaderView: View {
         }
     }
 
+    private func find(backwards: Bool) {
+        let text = findText
+        guard !text.isEmpty else { return findMissed = false }
+        Task {
+            let found = await reader.find(text, backwards: backwards)
+            if text == findText { findMissed = !found }
+        }
+    }
+
+    private func closeFind() {
+        finding = false
+        model.requestListFocus()
+    }
+
+    /// Return finds the next place, ⇧Return the one before, Esc closes.
+    private var findBar: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                TextField("Find in conversation", text: $findText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: Theme.small))
+                    .focused($findFocused)
+                    .onKeyPress(.return, phases: .down) { press in
+                        find(backwards: press.modifiers.contains(.shift))
+                        return .handled
+                    }
+                    .onChange(of: findText) { find(backwards: false) }
+                    .accessibilityIdentifier("reader-find")
+                if findMissed {
+                    Text("No matches").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).fixedSize()
+                }
+            }
+            .fieldBox(focused: findFocused, width: 240)
+            KitButton(title: "Previous Match", key: "⇧↩", icon: "chevron.up", kind: .quiet, size: .small, showsTitle: false, showsKey: false) { find(backwards: true) }
+                .help("Previous match (⇧↩)")
+            KitButton(title: "Next Match", key: "↩", icon: "chevron.down", kind: .quiet, size: .small, showsTitle: false, showsKey: false) { find(backwards: false) }
+                .help("Next match (↩)")
+            KitButton(title: "Done", key: "esc", kind: .quiet, size: .small, action: closeFind)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 40)
+        .menuPanel()
+        .padding(.top, 8)
+        .padding(.trailing, 16)
+        .onExitCommand(perform: closeFind)
+        // The palette that ran Find gives the keyboard to the list on the
+        // next turn of the run loop; take it again after that.
+        .onAppear {
+            findFocused = true
+            DispatchQueue.main.async { findFocused = true }
+        }
+        .transition(.panel(anchor: .topTrailing))
+    }
+
     @ViewBuilder private var rsvpPanel: some View {
         if let panel = model.rsvpPanel, let invitation = model.activeInvitation {
             let anchor = panel.anchor
@@ -654,14 +757,14 @@ struct ReaderView: View {
             // Hidden, not closed, behind Find a time, so Escape brings it back as it was.
             .opacity(model.findTime == nil ? 1 : 0)
             .accessibilityHidden(model.findTime != nil)
-            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .topLeading)))
+            .transition(.panel(anchor: .topLeading))
         }
     }
 
     /// The context menu's image items, after Copy.
-    private func imageMenu() -> [ReaderMenuItem] {
+    private func imageMenu() -> [MenuEntry] {
         if imagesBlocked {
-            var items: [ReaderMenuItem] = [.button("Load Images", loadImages)]
+            var items: [MenuEntry] = [.button("Load Images", loadImages)]
             if !thread.imageSender.isEmpty {
                 items.append(.button("Always Load Images from \(thread.imageSender)") { trustSender(true) })
             }
@@ -704,7 +807,7 @@ struct ReaderView: View {
                             Button(action: onUnsubscribe) {
                                 HStack(spacing: 6) {
                                     Text("Unsubscribe")
-                                    Text("⌘U").font(.system(size: 11)).foregroundStyle(Color(Theme.text3))
+                                    KeyCap(key: "⌘U")
                                 }
                             }
                             .buttonStyle(.plain)
@@ -712,7 +815,7 @@ struct ReaderView: View {
                             .help("Leave this mailing list and archive the conversation")
                         }
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                 }
                 if imagesBlocked {
                     HStack(spacing: 10) {
@@ -721,10 +824,7 @@ struct ReaderView: View {
                             .foregroundStyle(Color(Theme.text2))
                             .fixedSize()
                             .help("Jolta blocks remote images so senders can't see when you read their mail.")
-                        Button("Load Images", action: loadImages)
-                            .buttonStyle(.plain)
-                            .fontWeight(.medium)
-                            .foregroundStyle(Color(Theme.accent))
+                        KitButton(title: "Load Images", size: .small, action: loadImages)
                         if !thread.imageSender.isEmpty {
                             Button("Always from \(thread.imageSender)") { trustSender(true) }
                                 .buttonStyle(.plain)
@@ -734,22 +834,31 @@ struct ReaderView: View {
                                 .help("Load remote images from this sender without asking")
                         }
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: Theme.body))
                     .padding(.top, 8)
                 }
             }
-            .padding(.horizontal, 56)
+            .padding(.horizontal, Theme.gutter)
             .padding(.top, 30)
             .padding(.bottom, 16)
             if let line = model.holdLine {
                 HoldsLineView(line: line, model: model)
-                    .padding(.horizontal, 56)
+                    .padding(.horizontal, Theme.gutter)
                     .padding(.bottom, 12)
             }
             ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
+                .overlay(alignment: .topTrailing) { if finding { findBar } }
         }
-        .animation(.snappy(duration: 0.16), value: model.rsvpPanel)
+        .opacity(arriving ? 0 : 1)
+        .animation(Theme.quick, value: model.rsvpPanel)
+        .animation(Theme.quick, value: finding)
+        .onChange(of: model.readerScroll.count) { reader.scroll(pages: model.readerScroll.pages) }
+        .onChange(of: model.findRequest) {
+            finding = true
+            findFocused = true
+            DispatchQueue.main.async { findFocused = true }
+        }
         .onChange(of: model.answerChoices) { reflect() }
         .onChange(of: model.pendingAnswer) { reflect() }
         .onChange(of: model.pendingRemoval) { old, new in
@@ -782,6 +891,8 @@ struct ReaderView: View {
             model.holdLine = line
         }
         .onChange(of: ThemeStore.shared.active) { reader.applyTheme() }
+        .onChange(of: ThemeStore.shared.textSize) { reader.applyTheme() }
+        .onChange(of: model.readerZoom, initial: true) { reader.webView.pageZoom = model.readerZoom }
     }
 }
 
@@ -789,13 +900,23 @@ enum ReaderStyle {
     /// The variables `css` uses, from the light and the dark theme on screen.
     static var themeCSS: String {
         let pair = ThemeStore.shared.active
-        return ":root { \(variables(pair.light)) } @media (prefers-color-scheme: dark) { :root { \(variables(pair.dark)) } }"
+        return ":root { \(variables(pair.light)) } @media (prefers-color-scheme: dark) { :root { \(variables(pair.dark)) } } \(textCSS)"
+    }
+
+    /// The body text at the chosen text size. It comes after `css` in the
+    /// page, so it replaces the size there. Mail that sets its own sizes
+    /// keeps them; ⌘+ zooms those.
+    private static var textCSS: String {
+        "html, body { font-size: \(Int(Theme.scaled(Theme.readerBody)))px; line-height: \(Int(Theme.scaled(Theme.readerLine)))px; }"
     }
 
     private static func variables(_ t: ThemeTokens) -> String {
-        [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("fill", t.fill), ("acc", t.accent)]
+        let colors = [("bg", t.reader), ("tx", t.text), ("tx2", t.text2), ("tx3", t.text3), ("line2", t.line2), ("acc", t.accent),
+                      ("acctx", t.accentText), ("onacc", t.onAccent)]
             .map { "--\($0.0):#\(String(format: "%06x", $0.1));" }
-            .joined(separator: " ")
+        // A hovered control's fill: the text color at the theme's strength, as `Theme.fill`.
+        let fill = "--fill:color-mix(in srgb, var(--tx) \(t.fillAlpha * 100)%, transparent);"
+        return (colors + [fill]).joined(separator: " ")
     }
 
     /// Styles for the page around each message. Message HTML keeps its own
@@ -803,8 +924,8 @@ enum ReaderStyle {
     static let css = """
     :root { color-scheme: light dark; }
     html, body { margin: 0; padding: 0; background: var(--bg); color: var(--tx);
-      font: 14px/22px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
-    body { padding: 0 clamp(16px, 5vw, 56px) 40px; }
+      font: \(Int(Theme.readerBody))px/\(Int(Theme.readerLine))px -apple-system, system-ui; -webkit-font-smoothing: antialiased; }
+    body { padding: 0 \(Int(Theme.gutter))px 40px; }
     ::selection { background: color-mix(in oklab, var(--acc) 30%, transparent); }
     .jolta-message { border-top: 1px solid var(--line2); }
     .jolta-message > summary { list-style: none; cursor: default; display: flex; gap: 14px; align-items: center;
@@ -817,7 +938,7 @@ enum ReaderStyle {
       border-radius: 4px; box-shadow: inset 0 0 0 1px var(--tx3); color: var(--tx2); font-size: 9.5px; font-weight: 600;
       letter-spacing: .05em; line-height: 15px; }
     .jolta-sig.jolta-muted { color: var(--tx3); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx3) 55%, transparent); }
-    .jolta-sig.jolta-warn { color: var(--acc); box-shadow: inset 0 0 0 1px var(--acc); }
+    .jolta-sig.jolta-warn { color: var(--acctx); box-shadow: inset 0 0 0 1px var(--acc); }
     .jolta-snippet { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--tx3); }
     .jolta-date { color: var(--tx3); font: 11.5px ui-monospace, SFMono-Regular, monospace; }
     .jolta-to { display: none; }
@@ -829,7 +950,7 @@ enum ReaderStyle {
     .jolta-sigline { display: none; }
     .jolta-message[open] .jolta-sigline { display: block; flex-basis: 100%; color: var(--tx3); font-size: 12.5px;
       line-height: 18px; white-space: normal; }
-    .jolta-message[open] .jolta-sigline.jolta-warn { color: var(--acc); }
+    .jolta-message[open] .jolta-sigline.jolta-warn { color: var(--acctx); }
     .jolta-notice { margin: 0 0 18px; color: var(--tx2); }
     .jolta-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
     .jolta-body img { max-width: 100%; height: auto; }
@@ -849,7 +970,7 @@ enum ReaderStyle {
     .jolta-file span { display: flex; flex-direction: column; min-width: 0; }
     .jolta-file b { font-weight: 500; font-size: 12.5px; line-height: 16px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .jolta-file small { color: var(--tx3); font-size: 11.5px; line-height: 15px; }
-    .jolta-save-all { margin-left: 4px; padding: 4px 8px; border-radius: 7px; font-size: 12.5px; color: var(--tx2);
+    .jolta-save-all { margin-left: 4px; padding: 4px 8px; border-radius: 6px; font-size: 12.5px; color: var(--tx2);
       text-decoration: none; cursor: default; }
     .jolta-save-all:hover, .jolta-file:hover { background: var(--fill); }
     .jolta-clip { display: inline-flex; align-items: center; gap: 3px; color: var(--tx3); font-size: 11.5px; margin-right: 10px; }
@@ -875,7 +996,7 @@ enum ReaderStyle {
     .jolta-invite-people b { color: var(--tx); font-weight: 500; }
     .jolta-invite-note, .jolta-invite-free { margin-top: 10px; }
     .jolta-invite-note + .jolta-invite-note, .jolta-invite-note + .jolta-invite-free { margin-top: 2px; }
-    .jolta-invite .jolta-warn { color: var(--acc); }
+    .jolta-invite .jolta-warn { color: var(--acctx); }
     .jolta-invite del { color: var(--tx3); text-decoration: line-through; text-decoration-color: var(--tx3); }
     .jolta-invite ins { padding: 0 3px; margin: 0 -1px; border-radius: 4px; text-decoration: none; color: var(--tx);
       background: color-mix(in oklab, var(--acc) 15%, transparent); -webkit-box-decoration-break: clone; }
@@ -892,35 +1013,31 @@ enum ReaderStyle {
       box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 35%, transparent); }
     .jolta-strip .jolta-strip-beside { width: max-content; background: var(--bg); box-shadow: none; padding: 0 4px 0 5px; border-radius: 0; }
     .jolta-invite-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
-    .jolta-join { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
+    .jolta-join { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 6px;
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-rsvp + .jolta-join, .jolta-remove + .jolta-join { margin-left: auto; }
-    .jolta-remove { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 7px;
-      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default;
-      transition: background-color .16s ease; }
+    .jolta-remove { display: inline-flex; align-items: center; height: 26px; box-sizing: border-box; padding: 0 10px; border-radius: 6px;
+      box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-remove:hover { background: var(--fill); }
-    .jolta-sending .jolta-remove { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-add, .jolta-update { display: inline-flex; align-items: center; gap: 5px; height: 22px; box-sizing: border-box; padding: 0 8px;
       margin: -3px -4px -3px 0; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-size: 11.5px;
-      font-weight: 500; text-decoration: none; cursor: default; transition: background-color .16s ease; }
+      font-weight: 500; text-decoration: none; cursor: default; }
     .jolta-add:hover, .jolta-update:hover { background: var(--fill); }
-    .jolta-sending .jolta-add, .jolta-sending .jolta-update { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-decline-proposal, .jolta-accept-proposal { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box;
-      padding: 0 5px 0 10px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
-      text-decoration: none; cursor: default; transition: background-color .16s ease; }
+      padding: 0 5px 0 10px; border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500;
+      text-decoration: none; cursor: default; }
     .jolta-decline-proposal:hover, .jolta-accept-proposal:hover { background: var(--fill); }
     .jolta-accept-proposal { margin-right: 6px; box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 55%, var(--line2)); }
     .jolta-decline-proposal kbd, .jolta-accept-proposal kbd, .jolta-rsvp-propose kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px;
       border-radius: 4px; text-align: center; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3);
       font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
     .jolta-rsvp-propose kbd { min-width: 14px; height: 14px; padding: 0 3px; font-size: 9.5px; line-height: 14px; }
-    .jolta-sending .jolta-decline-proposal { animation: jolta-sending .7s ease-in-out infinite alternate; }
     .jolta-invite-hint { color: var(--tx3); font-size: 12px; }
     .jolta-rsvp-fixed { color: var(--tx3); }
     .jolta-rsvp { display: inline-flex; gap: 6px; }
     .jolta-rsvp a { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 5px 0 10px;
-      border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
-      cursor: default; transition: background-color .16s ease, box-shadow .16s ease; }
+      border-radius: 6px; box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx); font-weight: 500; text-decoration: none;
+      cursor: default; }
     .jolta-rsvp a:hover { background: var(--fill); }
     .jolta-rsvp kbd { min-width: 16px; height: 16px; box-sizing: border-box; padding: 0 4px; border-radius: 4px; text-align: center;
       box-shadow: inset 0 0 0 1px var(--line2); color: var(--tx3); font: 10.5px/16px ui-monospace, SFMono-Regular, monospace; }
@@ -928,8 +1045,17 @@ enum ReaderStyle {
     .jolta-rsvp a.jolta-chosen { padding-left: 8px; font-weight: 600; background: color-mix(in oklab, var(--tx) 11%, var(--bg));
       box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tx) 40%, transparent); }
     .jolta-rsvp a.jolta-chosen svg { display: block; color: var(--tx); }
-    .jolta-sending .jolta-rsvp a.jolta-chosen { animation: jolta-sending .7s ease-in-out infinite alternate; }
     @keyframes jolta-sending { to { opacity: .45; } }
+    @media (prefers-reduced-motion: no-preference) {
+      .jolta-remove, .jolta-add, .jolta-update, .jolta-decline-proposal, .jolta-accept-proposal { transition: background-color .16s ease; }
+      .jolta-rsvp a { transition: background-color .16s ease, box-shadow .16s ease; }
+      .jolta-sending .jolta-remove, .jolta-sending .jolta-add, .jolta-sending .jolta-update, .jolta-sending .jolta-decline-proposal,
+      .jolta-sending .jolta-rsvp a.jolta-chosen { animation: jolta-sending .7s ease-in-out infinite alternate; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .jolta-sending .jolta-remove, .jolta-sending .jolta-add, .jolta-sending .jolta-update, .jolta-sending .jolta-decline-proposal,
+      .jolta-sending .jolta-rsvp a.jolta-chosen { opacity: .6; }
+    }
     .jolta-rsvp-options { display: flex; flex-wrap: wrap; gap: 2px 16px; margin-top: 8px; font-size: 12px; }
     .jolta-rsvp-options a { display: inline-flex; align-items: center; gap: 5px; max-width: 240px; overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; color: var(--tx3); text-decoration: none; cursor: default; }
@@ -937,11 +1063,11 @@ enum ReaderStyle {
     .jolta-rsvp-options a.jolta-on { color: var(--tx); }
     .jolta-rsvp-options .jolta-rsvp-note { display: block; }
     .jolta-invite a:focus { outline: none; }
-    .jolta-invite a:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; border-radius: 7px; }
+    .jolta-invite a:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; border-radius: 6px; }
     .jolta-rsvp-quiet .jolta-tick { opacity: 0; }
     .jolta-rsvp-quiet.jolta-on .jolta-tick { opacity: 1; }
     .jolta-join:hover { background: var(--fill); }
-    .jolta-join.jolta-live { background: var(--acc); color: #fff; box-shadow: none; }
+    .jolta-join.jolta-live { background: var(--acc); color: var(--onacc); box-shadow: none; }
     .jolta-invite-reply { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 10px 14px; }
     .jolta-invite-reply b { color: var(--tx); font-weight: 600; }
     .jolta-invite-about { margin-left: auto; color: var(--tx3); }
@@ -967,28 +1093,14 @@ struct HoldsLineView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 RoundedRectangle(cornerRadius: 2).fill(Color(CalendarColor.color(Self.hue, .bar))).frame(width: 8, height: 8)
-                Text(line.title).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                Text(line.title).font(.system(size: Theme.body, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 8)
                 if let slot = cursor {
-                    Button { model.bookHold(slot) } label: {
-                        HStack(spacing: 5) {
-                            Text("Book \(Self.short(slot))")
-                            KeyCap(key: "B")
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .frame(height: 24)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.line), lineWidth: 1))
-                    .help("Open the event editor at this time with the people you wrote to")
-                    .accessibilityIdentifier("holds-book")
+                    KitButton(title: "Book \(Self.short(slot))", key: "B", size: .small) { model.bookHold(slot) }
+                        .help("Open the event editor at this time with the people you wrote to")
+                        .accessibilityIdentifier("holds-book")
                 }
-                Button("Release all") { model.releaseHolds(line.setId) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color(Theme.text2))
+                KitButton(title: "Release All", kind: .quiet, size: .small) { model.releaseHolds(line.setId) }
                     .help("Delete every hold of this message from your calendar")
                     .accessibilityIdentifier("holds-release")
             }
@@ -1004,8 +1116,7 @@ struct HoldsLineView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: 720, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+        .card()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("holds-line")
     }
@@ -1020,10 +1131,10 @@ struct HoldsLineView: View {
                 if slot.state == .booked { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)) }
                 Text(slot.label).strikethrough(slot.state == .taken)
             }
-            .font(.system(size: 11.5, weight: .medium))
+            .font(.system(size: Theme.small, weight: .medium))
             .foregroundStyle(Color(current || slot.state == .booked ? Theme.text : Theme.text2))
             .padding(.horizontal, 8)
-            .frame(height: 22)
+            .frame(height: Theme.controlSmall)
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color(current ? Theme.accent : Theme.line), lineWidth: current ? 1.5 : 1))
             .opacity(slot.state == .taken ? 0.5 : 1)
             .contentShape(Rectangle())

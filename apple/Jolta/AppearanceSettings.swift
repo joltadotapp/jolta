@@ -3,18 +3,20 @@ import SwiftUI
 /// Settings › Appearance: a theme for each macOS appearance, or one theme
 /// always. The page answers the arrow keys on its own, so it works from the
 /// keyboard without macOS's keyboard navigation: ↑↓ move between the rows,
-/// ←→ change the one marked.
+/// ←→ change the one marked. The settings window gives it the keyboard.
 struct AppearanceSettings: View {
+    let focus: FocusState<SettingsFocus?>.Binding
     private let store = ThemeStore.shared
     @Environment(\.colorScheme) private var scheme
-    @FocusState private var focused: Bool
     @State private var marked = Row.follow
 
-    private enum Row: Hashable { case follow, light, dark, always }
+    private var focused: Bool { focus.wrappedValue == .page }
+
+    private enum Row: Hashable { case follow, light, dark, always, textSize }
 
     private var choice: ThemeChoice { store.choice }
 
-    private var rows: [Row] { choice.fixed == nil ? [.follow, .light, .dark] : [.follow, .always] }
+    private var rows: [Row] { (choice.fixed == nil ? [.follow, .light, .dark] : [.follow, .always]) + [.textSize] }
 
     private var current: Row { rows.contains(marked) ? marked : .follow }
 
@@ -39,7 +41,7 @@ struct AppearanceSettings: View {
                                        icon: "paintpalette", selected: choice.fixed != nil) { follow(false) }
                         }
                     }
-                    .modifier(Marked(on: focused && current == .follow))
+                    .modifier(MarkedSettingsRow(on: focused && current == .follow))
                     if let fixed = choice.fixed {
                         themeRow(.always, title: "Theme", detail: "Every theme, light and dark.", selected: fixed)
                     } else {
@@ -47,17 +49,27 @@ struct AppearanceSettings: View {
                         themeRow(.dark, title: "Dark", detail: "While macOS is in dark mode.", selected: choice.dark)
                     }
                 }
+                SettingsSection("Text") {
+                    SettingsRow(title: "Text size", detail: "The conversations in the list and the mail you read. ⌘+ and ⌘- zoom the open conversation until you quit.") {
+                        Picker("Text size", selection: Binding(get: { store.textSize }, set: { store.textSize = $0 })) {
+                            ForEach(ReadingSize.allCases) { Text($0.name).tag($0) }
+                        }
+                        .settingsMenu()
+                        .accessibilityIdentifier("text-size")
+                    }
+                    .modifier(MarkedSettingsRow(on: focused && current == .textSize))
+                }
                 HStack(spacing: 16) {
                     HStack(spacing: 5) { KeyCap(key: "↑"); KeyCap(key: "↓"); Text("choose a row") }
                     HStack(spacing: 5) { KeyCap(key: "←"); KeyCap(key: "→"); Text("change it") }
                 }
-                .font(.system(size: 11.5))
+                .font(.system(size: Theme.small))
                 .foregroundStyle(Color(Theme.text3))
                 .padding(.horizontal, 4)
                 .opacity(focused ? 1 : 0)
             }
             .focusable()
-            .focused($focused)
+            .focused(focus, equals: .page)
             .focusEffectDisabled()
             .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow]) { press in
                 switch press.key {
@@ -68,7 +80,6 @@ struct AppearanceSettings: View {
                 }
                 return .handled
             }
-            .onAppear { focused = true }
         }
     }
 
@@ -76,7 +87,7 @@ struct AppearanceSettings: View {
         switch row {
         case .light: ThemePalette.all.filter { $0.mode == .light }
         case .dark: ThemePalette.all.filter { $0.mode == .dark }
-        case .always, .follow: ThemePalette.all
+        case .always, .follow, .textSize: ThemePalette.all
         }
     }
 
@@ -90,7 +101,7 @@ struct AppearanceSettings: View {
             }
             .settingsMenu()
         }
-        .modifier(Marked(on: focused && current == row))
+        .modifier(MarkedSettingsRow(on: focused && current == row))
     }
 
     private func choose(_ theme: ThemePalette, in row: Row) {
@@ -110,6 +121,12 @@ struct AppearanceSettings: View {
 
     private func change(_ step: Int) {
         if current == .follow { return follow(step < 0) }
+        if current == .textSize {
+            let sizes = ReadingSize.allCases
+            let i = (sizes.firstIndex(of: store.textSize) ?? 1) + step
+            if sizes.indices.contains(i) { store.textSize = sizes[i] }
+            return
+        }
         let selected = current == .always ? choice.fixed : current == .dark ? choice.dark : choice.light
         let list = themes(current)
         guard let i = list.firstIndex(where: { $0 == selected }) else { return }
@@ -135,16 +152,11 @@ struct AppearanceSettings: View {
 }
 
 /// The row the arrow keys change: filled, with the accent marker the palette uses.
-private struct Marked: ViewModifier {
+struct MarkedSettingsRow: ViewModifier {
     let on: Bool
 
     func body(content: Content) -> some View {
-        content
-            .background { if on { RoundedRectangle(cornerRadius: 7).fill(Color(Theme.fill)).padding(3) } }
-            .overlay(alignment: .leading) {
-                if on {
-                    Image(systemName: "arrowtriangle.right.fill").font(.system(size: 7)).foregroundStyle(Color(Theme.accent)).padding(.leading, 5)
-                }
-            }
+        // Inset, so the fill stays clear of the card's edge and its dividers.
+        content.background { Color.clear.selectedRow(on, radius: Theme.radiusControl).padding(3) }
     }
 }

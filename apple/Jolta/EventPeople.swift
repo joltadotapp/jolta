@@ -45,7 +45,7 @@ struct PeopleField: View {
             .zIndex(1)
             if !guests.isEmpty {
                 Text(selected == nil ? "⇥ on a person switches Required and Optional" : "⇥ switches Required and Optional, ⌫ removes")
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
             }
         }
@@ -65,6 +65,7 @@ struct PeopleField: View {
             .onKeyPress(keys: [.tab, .delete, .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .escape], phases: .down) { press in
                 key(press)
             }
+            .tabStops(editor, from: .people)
             .onSubmit { addTyped() }
             .accessibilityIdentifier("editor-people")
     }
@@ -82,9 +83,7 @@ struct PeopleField: View {
         }
         .padding(5)
         .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
-        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .menuPanel()
     }
 
     private func key(_ press: KeyPress) -> KeyPress.Result {
@@ -171,7 +170,7 @@ private struct UnresolvedChip: View {
     let pick: (PersonRecord) -> Void
     let remove: () -> Void
 
-    private static let warning = Color(NSColor(hex: 0xC9302C))
+    private static var warning: Color { Color(Theme.dangerText) }
 
     var body: some View {
         Menu {
@@ -226,14 +225,14 @@ private struct PersonChip: View {
                 .background(Circle().fill(Color(Theme.fill)))
             Text(name).lineLimit(1)
             if person.role == .optional {
-                Text("Optional").font(.system(size: 10.5)).foregroundStyle(Color(Theme.text3))
+                Text("Optional").font(.system(size: Theme.caption)).foregroundStyle(Color(selected ? Theme.onAccent : Theme.text3)).opacity(selected ? 0.8 : 1)
             }
             if saved, let glyph = answerGlyph {
-                Image(systemName: glyph.0).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(glyph.1)
+                Image(systemName: glyph.0).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(selected ? Color(Theme.onAccent) : glyph.1)
             }
         }
         .font(.system(size: 12))
-        .foregroundStyle(Color(selected ? Theme.raise : Theme.text))
+        .foregroundStyle(Color(selected ? Theme.onAccent : Theme.text))
         .padding(.leading, 3)
         .padding(.trailing, 7)
         .frame(height: 21)
@@ -252,7 +251,7 @@ private struct PersonChip: View {
         switch person.response {
         case .accepted: ("checkmark", Color(Theme.text2))
         case .tentative: ("questionmark", Color(Theme.text2))
-        case .declined: ("xmark", Color(NSColor(hex: 0xC9302C)))
+        case .declined: ("xmark", Color(Theme.dangerText))
         case .needsAction, .delegated: nil
         }
     }
@@ -287,7 +286,7 @@ struct OrganizerOptions: View {
             Text(label).foregroundStyle(Color(has ? Theme.text : Theme.text3))
             if !has {
                 Text(google && tag == "Not here" ? "Not on Google" : tag)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: Theme.caption))
                     .foregroundStyle(Color(Theme.text3))
                     .padding(.horizontal, 5)
                     .background(Capsule().strokeBorder(Color(Theme.line), lineWidth: 1))
@@ -295,6 +294,7 @@ struct OrganizerOptions: View {
             Spacer()
             Toggle("", isOn: Binding(get: { editor.draft.options[keyPath: key] }, set: { editor.draft.options[keyPath: key] = $0 }))
                 .toggleStyle(.switch)
+                .tint(Color(Theme.accent))
                 .controlSize(.mini)
                 .labelsHidden()
                 .disabled(!has)

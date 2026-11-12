@@ -13,7 +13,7 @@ struct MessageList: NSViewRepresentable {
         let table = KeyTableView()
         table.headerView = nil
         table.style = .plain
-        table.rowHeight = Theme.rowHeight
+        table.rowHeight = Theme.scaled(Theme.rowHeight)
         table.intercellSpacing = .zero
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .regular
@@ -32,7 +32,11 @@ struct MessageList: NSViewRepresentable {
         table.target = context.coordinator
         table.action = #selector(Coordinator.clicked)
         table.doubleAction = #selector(Coordinator.openSelected)
+        let menu = NSMenu()
+        menu.delegate = context.coordinator
+        table.menu = menu
         KeyRouter.shared.handler = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
+        model.togglePicked = { [weak coordinator = context.coordinator] in coordinator?.togglePick() }
         context.coordinator.table = table
 
         let scroll = NSScrollView()
@@ -51,10 +55,16 @@ struct MessageList: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let c = context.coordinator
         _ = model.listRevision
+        // Another text size: the rows take their new height and type.
+        let height = Theme.scaled(Theme.rowHeight)
+        if let table = c.table, table.rowHeight != height {
+            table.rowHeight = height
+            c.lastRevision = -1
+        }
         if c.lastQuery != model.query {
             c.reload(full: true)
         } else if c.lastRevision != model.listRevision {
-            c.reload(full: false, resorted: c.lastSort != model.sort)
+            c.reload(full: false, resorted: c.lastSort != model.sort || c.lastRevision == -1)
         }
         c.lastRevision = model.listRevision
         if let table = c.table, c.focusRequest != model.focusListRequest {
@@ -64,7 +74,7 @@ struct MessageList: NSViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         let model: AppModel
         weak var table: KeyTableView?
         var lastQuery = ""
@@ -72,6 +82,11 @@ struct MessageList: NSViewRepresentable {
         var lastRevision = -1
         var focusRequest = 0
         private var reportedLaunch = false
+        /// The conversation under the caret while X picks (`KeyTableView.pickCursor`),
+        /// to find its row again when the list changes.
+        private var pickThread: Int64?
+        /// X is changing the selection, so picking goes on.
+        private var changingPick = false
         private var count = 0
         private var pages: [Int: [ThreadRow]] = [:]
         private let pageSize = 100
@@ -97,14 +112,16 @@ struct MessageList: NSViewRepresentable {
             let rows = count
             DispatchQueue.main.async { [model] in if model.listCount != rows { model.listCount = rows } }
             if full {
+                setPick(nil)
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
                 // notification while calendar mode showed, keeps its row. A
-                // list the user switched to opens at its top; at launch, or
-                // the same list shown again, nothing else opens, as opening
-                // marks it read.
-                let switched = model.shownListQuery.map { $0 != model.query } ?? false
-                model.shownListQuery = model.query
+                // list the user switched to opens at its top; at launch, the
+                // same list shown again or a search typed, nothing else opens,
+                // as opening marks it read. A result opens when the user
+                // moves to it.
+                let switched = (model.shownListQuery.map { $0 != model.listQuery } ?? false) && model.search.isEmpty
+                model.shownListQuery = model.listQuery
                 let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
                 let row = opened ?? 0
                 table.scrollRowToVisible(row)
@@ -128,13 +145,16 @@ struct MessageList: NSViewRepresentable {
                     table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<min(count, visible.location + visible.length)),
                                      columnIndexes: [0])
                 }
-                // Reloading cells leaves row views alone, and they draw the unread dot.
+                // Reloading cells leaves row views alone, and they draw the unread dot and the VIP seal.
                 table.enumerateAvailableRowViews { view, row in
+                    (view as? ThreadRowView)?.lead = self.lead(at: row)
                     (view as? ThreadRowView)?.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
                 }
             }
-            guard count > 0 else { return }
+            guard count > 0 else { return setPick(nil) }
             var kept = model.rows(of: model.selectedThreads)
+            // The caret follows its conversation while the picked ones are still there.
+            var caret = pickThread.flatMap { model.rows(of: [$0]).first }
             if kept.isEmpty {
                 guard userChanged else {
                     table.deselectAll(nil)
@@ -142,10 +162,14 @@ struct MessageList: NSViewRepresentable {
                     return
                 }
                 kept = [min(anchor, count - 1)]
+                caret = nil
             }
             if kept != table.selectedRowIndexes {
+                changingPick = true
                 table.selectRowIndexes(kept, byExtendingSelection: false)
+                changingPick = false
             }
+            setPick(caret)
             if resorted || previous != count, let first = kept.first { table.scrollRowToVisible(first) }
             // The same row can come back changed, say starred, without a selection change.
             if table.selectedRow >= 0, let r = row(at: table.selectedRow), r != model.cursorRow { model.cursorRow = r }
@@ -161,24 +185,33 @@ struct MessageList: NSViewRepresentable {
             return i < rows.count ? rows[i] : nil
         }
 
+        private func lead(at index: Int) -> ThreadRowView.Lead {
+            guard let r = row(at: index) else { return .none }
+            return r.vip ? .vip : r.unreadCount > 0 ? .unread : .none
+        }
+
         func numberOfRows(in tableView: NSTableView) -> Int { count }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             let cell = (tableView.makeView(withIdentifier: ThreadCell.id, owner: nil) as? ThreadCell) ?? ThreadCell()
             if let r = self.row(at: row) { cell.show(r) }
-            cell.mark = tableView.isRowSelected(row) ? (tableView.numberOfSelectedRows > 1 ? .selected : .cursor) : .none
+            cell.mark = (tableView as? KeyTableView)?.mark(row: row) ?? .none
             return cell
         }
 
         func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
             let view = (tableView.makeView(withIdentifier: ThreadRowView.id, owner: nil) as? ThreadRowView) ?? ThreadRowView()
+            view.lead = lead(at: row)
             view.unread = (self.row(at: row)?.unreadCount ?? 0) > 0
+            view.hovering = row == (tableView as? KeyTableView)?.hoverRow
             return view
         }
 
         /// The reader follows the cursor, so j and k read through the list.
         /// Shift-click and Command-click select several threads instead.
         func tableViewSelectionDidChange(_ notification: Notification) {
+            // A click, an arrow key or anything else that selects ends picking.
+            if !changingPick { setPick(nil) }
             guard let table, table.selectedRow >= 0, let r = row(at: table.selectedRow) else { return }
             table.enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
             model.cursor = (table.selectedRow, count)
@@ -226,20 +259,109 @@ struct MessageList: NSViewRepresentable {
                 model.openDraft(threadID: r.threadId)
             } else {
                 model.open(threadID: r.threadId)
+                model.showReader()
             }
         }
 
-        /// In Drafts a click edits the draft; J and K still read through them.
+        /// In Drafts a click edits the draft; J and K still read through
+        /// them. In one column a click brings the conversation over the list.
         @objc func clicked() {
-            guard model.showsDrafts, let table, table.clickedRow >= 0, table.numberOfSelectedRows == 1 else { return }
-            openSelected()
+            guard let table, table.clickedRow >= 0, table.numberOfSelectedRows == 1 else { return }
+            if model.showsDrafts { openSelected() } else { model.showReader() }
+        }
+
+        /// A row's right-click menu. It acts on the clicked conversation, or
+        /// on the selection when the click is in it. Archive, Trash, read
+        /// and star don't open a conversation outside the selection; the
+        /// pickers work on the one under the cursor, so they move it there.
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            menu.removeAllItems()
+            guard let table, table.clickedRow >= 0, let r = row(at: table.clickedRow) else { return }
+            let clicked = table.clickedRow
+            let inSelection = table.selectedRowIndexes.contains(clicked)
+            let model = model
+            let act = { (action: ThreadAction, label: String) in
+                model.act(action, label: label, threadID: inSelection ? nil : r.threadId)
+            }
+            let pick = { (command: Command) in
+                if !inSelection { table.selectRowIndexes([clicked], byExtendingSelection: false) }
+                model.run(command)
+            }
+            let unread = r.unreadCount > 0
+            let entries: [MenuEntry] = [
+                .button(Command.archive.title) { act(.archive, "Archived") },
+                .button(Command.trash.title) { act(.trash, "Moved to Trash") },
+                .button(unread ? "Mark as Read" : "Mark as Unread") { act(unread ? .markRead : .markUnread, unread ? "Marked read" : "Marked unread") },
+                .button(r.flagged ? "Unstar" : "Star") { act(r.flagged ? .unflag : .flag, r.flagged ? "Unstarred" : "Starred") },
+                .divider,
+                .button(Command.snooze.title) { pick(.snooze) },
+                .button(Command.move.title) { pick(.move) },
+                .button(Command.label.title) { pick(.label) },
+                .divider,
+                .button(Command.reply.title) { model.reply(.reply, threadID: r.threadId) },
+            ]
+            entries.forEach { menu.addItem($0.menuItem) }
         }
 
         func move(_ delta: Int) {
             guard let table, count > 0 else { return }
+            if let caret = table.pickCursor {
+                let next = max(0, min(count - 1, caret + delta))
+                setPick(next)
+                return table.scrollRowToVisible(next)
+            }
             let next = max(0, min(count - 1, table.selectedRow + delta))
             table.selectRowIndexes([next], byExtendingSelection: false)
             table.scrollRowToVisible(next)
+        }
+
+        private func setPick(_ row: Int?) {
+            pickThread = row.flatMap { self.row(at: $0)?.threadId }
+            table?.pickCursor = row
+        }
+
+        /// X: adds the conversation under the caret to the selection, or
+        /// takes it off. From then on J and K move the caret and leave the
+        /// selection alone, until Esc or a key or click that selects.
+        func togglePick() {
+            guard let table else { return }
+            guard let caret = table.pickCursor else {
+                guard table.selectedRow >= 0 else { return }
+                setPick(table.selectedRow)
+                // The one selected row counts as picked. Among several, X takes the last one off.
+                if table.numberOfSelectedRows > 1 { togglePick() }
+                return
+            }
+            var rows = table.selectedRowIndexes
+            if rows.contains(caret) { rows.remove(caret) } else { rows.insert(caret) }
+            // With nothing picked any more, the caret's row is the cursor again.
+            guard !rows.isEmpty else { return setPick(nil) }
+            changingPick = true
+            table.selectRowIndexes(rows, byExtendingSelection: false)
+            changingPick = false
+        }
+
+        /// ⇧J and ⇧K: the table extends the selection itself, as it does for ⇧↓ and ⇧↑.
+        private func extend(_ delta: Int, like event: NSEvent) {
+            guard let table, count > 0 else { return }
+            takeKeyboard()
+            setPick(nil)
+            let arrow = String(UnicodeScalar(delta > 0 ? NSDownArrowFunctionKey : NSUpArrowFunctionKey).map(Character.init) ?? " ")
+            guard let key = NSEvent.keyEvent(with: .keyDown, location: event.locationInWindow, modifierFlags: [.shift, .numericPad, .function],
+                                             timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
+                                             characters: arrow, charactersIgnoringModifiers: arrow, isARepeat: event.isARepeat,
+                                             keyCode: delta > 0 ? 125 : 126) else { return }
+            table.keyDown(with: key)
+        }
+
+        /// Esc: a selection of several, or X's picking, goes back to the one
+        /// row under the caret. False when there was nothing to clear.
+        private func clearSelection() -> Bool {
+            guard let table, table.pickCursor != nil || table.numberOfSelectedRows > 1 else { return false }
+            let row = table.pickCursor ?? table.selectedRow
+            setPick(nil)
+            table.selectRowIndexes([row], byExtendingSelection: false)
+            return true
         }
 
         /// Keys typed in the main window, looked up in the keymap. `g` starts
@@ -248,6 +370,10 @@ struct MessageList: NSViewRepresentable {
         func handle(_ event: NSEvent) -> Bool {
             // ⌘ shortcuts belong to the menus (⌘U is Unsubscribe, not U).
             if event.modifierFlags.contains(.command) { return false }
+            // In calendar mode the list is out of sight. A key the calendar
+            // leaves alone (an arrow on one of the editor's stops) must not
+            // move or archive mail behind it.
+            if model.mode == .calendar { return false }
             // While a panel is up, keys that reach the list close it rather than act on mail.
             if model.findTime != nil {
                 if event.keyCode == 53 { model.findTime = nil }
@@ -280,15 +406,31 @@ struct MessageList: NSViewRepresentable {
             }
             switch event.keyCode {
             case 36, 76:
+                takeKeyboard()
                 // With nothing open yet, Return opens the top, as j does.
                 if (table?.selectedRow ?? 0) < 0 { move(1) } else { openSelected() }
                 return true
-            case 48: model.nextSection(backwards: event.modifierFlags.contains(.shift)); return true
+            case 48:
+                // Without sections Tab moves the keyboard on, as anywhere in macOS.
+                guard model.showsSections else { return false }
+                model.nextSection(backwards: event.modifierFlags.contains(.shift))
+                return true
+            case 49:
+                // Space reads on in the open conversation; ⇧Space goes back up.
+                guard model.readsConversation else { return false }
+                model.scrollReader(pages: event.modifierFlags.contains(.shift) ? -1 : 1)
+                return true
+            case 53: return clearSelection() || model.backToList()
             default: break
             }
             // `characters` keeps what Shift and Option produce, so `#` and `?`
             // work on layouts that type them with Option (Belgian AZERTY).
             guard let typed = event.characters?.lowercased(), !typed.isEmpty else { return false }
+            if event.modifierFlags.contains(.shift), typed == "j" || typed == "k" {
+                prefix = nil
+                extend(typed == "j" ? 1 : -1, like: event)
+                return true
+            }
             if let started = prefixTime, started.timeIntervalSinceNow < -1.5 { prefix = nil }
             if prefix == nil, typed == "g" {
                 prefix = "g"
@@ -298,13 +440,23 @@ struct MessageList: NSViewRepresentable {
             let after = prefix
             prefix = nil
             guard let command = Command.forKey(typed, after: after) else { return after != nil }
+            takeKeyboard()
             switch command {
             case .next: move(1)
             case .previous: move(-1)
             case .open: openSelected()
+            case .select: togglePick()
             default: model.run(command)
             }
             return true
+        }
+
+        /// A list key typed while something else has the keyboard, such as
+        /// the message after a click in it, gives the keyboard to the list:
+        /// the caret then shows where the key landed.
+        private func takeKeyboard() {
+            guard let table, let window = table.window, window.firstResponder !== table else { return }
+            window.makeFirstResponder(table)
         }
 
         private var prefix: String?
@@ -315,19 +467,146 @@ struct MessageList: NSViewRepresentable {
 final class KeyTableView: NSTableView {
     override var acceptsFirstResponder: Bool { true }
 
+    private var isFirstResponder = false
+    private var keyObservers: [NSObjectProtocol] = []
+
+    /// The list is where typed keys go: it is the first responder of the
+    /// key window. Only then does the cursor row show its caret and keys.
+    private(set) var hasKeyboard = false {
+        didSet { if hasKeyboard != oldValue { updateMarks() } }
+    }
+
+    /// The caret's row while X picks conversations one by one: J and K then
+    /// move the caret and leave the selection alone. Nil otherwise, when
+    /// the one selected row is the cursor.
+    var pickCursor: Int? {
+        didSet { if pickCursor != oldValue { updateMarks() } }
+    }
+
+    private func updateMarks() {
+        enumerateAvailableRowViews { view, _ in (view as? ThreadRowView)?.updateMark() }
+    }
+
+    /// The row under the pointer, -1 for none. Kept here, not by each row:
+    /// a row that scrolls from under a still pointer gets no mouse-exited.
+    private(set) var hoverRow = -1 {
+        didSet {
+            guard hoverRow != oldValue else { return }
+            for row in [oldValue, hoverRow] where row >= 0 {
+                (rowView(atRow: row, makeIfNecessary: false) as? ThreadRowView)?.hovering = row == hoverRow
+            }
+        }
+    }
+    private var hoverArea: NSTrackingArea?
+    private var scrollObserver: NSObjectProtocol?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        hover(at: event.locationInWindow)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        hover(at: event.locationInWindow)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        hoverRow = -1
+    }
+
+    /// A tracking area also reports the pointer over what lies on top of
+    /// the list (the palette, a toast), so the row must be what it hits.
+    private func hover(at point: NSPoint) {
+        let here = convert(point, from: nil)
+        let onList = visibleRect.contains(here) && window?.contentView?.hitTest(point)?.isDescendant(of: self) == true
+        hoverRow = onList ? row(at: here) : -1
+    }
+
+    /// Rows moved under the pointer: scrolling sends no mouse-moved.
+    private func hoverAfterScroll() {
+        guard let window, window.isKeyWindow else { return }
+        hover(at: window.mouseLocationOutsideOfEventStream)
+    }
+
+    /// One selected row is the keyboard cursor while the list has the
+    /// keyboard; several, one without the keyboard, or rows picked with X
+    /// are a selection.
+    func mark(row: Int) -> ThreadCell.Mark {
+        guard isRowSelected(row) else { return .none }
+        return pickCursor == nil && numberOfSelectedRows == 1 && hasKeyboard ? .cursor : .selected
+    }
+
     /// The list has the keyboard as soon as it is in the window, not at
     /// SwiftUI's next update, which may come after the user clicked Search.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        window?.makeFirstResponder(self)
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+        keyObservers = []
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        scrollObserver = nil
+        guard let window else { return hasKeyboard = false }
+        if let clip = enclosingScrollView?.contentView {
+            clip.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.hoverAfterScroll() }
+            }
+        }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.keyboardChanged() }
+            })
+        }
+        window.makeFirstResponder(self)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became {
+            isFirstResponder = true
+            keyboardChanged()
+        }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            isFirstResponder = false
+            keyboardChanged()
+        }
+        return resigned
+    }
+
+    private func keyboardChanged() {
+        hasKeyboard = isFirstResponder && window?.isKeyWindow == true
+        if window?.isKeyWindow != true { hoverRow = -1 }
     }
 }
 
 /// Graphite's cursor row: a soft fill and an accent caret. Unread rows get a
-/// neutral dot; the accent is reserved for keyboard focus.
+/// neutral dot; the accent is reserved for keyboard focus. The caret, the
+/// dot and a VIP's seal share one slot in front of the sender, so every
+/// sender starts at the same place.
 final class ThreadRowView: NSTableRowView {
     static let id = NSUserInterfaceItemIdentifier("ThreadRowView")
-    var unread = false { didSet { needsDisplay = true } }
+
+    /// What stands in front of the sender. A VIP's unread mail shows the
+    /// seal; its bold sender and subject say it is unread.
+    enum Lead { case none, unread, vip }
+
+    var lead = Lead.none { didSet { if lead != oldValue { needsDisplay = true } } }
+    /// VoiceOver hears "unread" on the row; the dot and the bold type only show it.
+    var unread = false { didSet { setAccessibilityValue(unread ? "unread" : nil) } }
+    var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
 
     init() {
         super.init(frame: .zero)
@@ -340,10 +619,18 @@ final class ThreadRowView: NSTableRowView {
         didSet { updateMark() }
     }
 
-    /// One selected row is the keyboard cursor; several are a selection.
+    private var table: KeyTableView? { superview as? KeyTableView }
+
+    /// The caret is on this row: the one selected row, or the row X acts on.
+    private var showsCaret: Bool {
+        guard let table, table.hasKeyboard else { return false }
+        if let caret = table.pickCursor { return table.row(for: self) == caret }
+        return isSelected && table.numberOfSelectedRows == 1
+    }
+
     func updateMark() {
-        let several = ((superview as? NSTableView)?.numberOfSelectedRows ?? 0) > 1
-        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = isSelected ? (several ? .selected : .cursor) : .none
+        subviews.lazy.compactMap { $0 as? ThreadCell }.first?.mark = !isSelected ? .none
+            : showsCaret && table?.pickCursor == nil ? .cursor : .selected
         needsDisplay = true
     }
 
@@ -353,15 +640,39 @@ final class ThreadRowView: NSTableRowView {
     }
 
     override func drawBackground(in dirtyRect: NSRect) {
-        guard unread, !isSelected else { return }
-        Theme.text.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 15, y: bounds.midY - 3, width: 6, height: 6)).fill()
+        guard !isSelected else { return }
+        if hovering {
+            Theme.hover.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: Theme.radiusRow, yRadius: Theme.radiusRow).fill()
+        }
+        // While X picks, the caret also stands on rows that aren't picked.
+        drawSlot()
     }
 
     override func drawSelection(in dirtyRect: NSRect) {
         Theme.fill.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: 8, yRadius: 8).fill()
-        guard ((superview as? NSTableView)?.numberOfSelectedRows ?? 0) <= 1 else { return }
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 0), xRadius: Theme.radiusRow, yRadius: Theme.radiusRow).fill()
+        drawSlot()
+    }
+
+    /// The caret where the keyboard is, else the seal or the dot.
+    private func drawSlot() {
+        if showsCaret { return drawCaret() }
+        let middle = NSPoint(x: ThreadCell.senderLeading - 9, y: bounds.midY)
+        switch lead {
+        case .none: break
+        case .unread:
+            Theme.text.setFill()
+            NSBezierPath(ovalIn: NSRect(x: middle.x - 3, y: middle.y - 3, width: 6, height: 6)).fill()
+        case .vip:
+            guard let seal = ThreadCell.vipSeal else { return }
+            let size = seal.size
+            seal.draw(in: NSRect(x: (middle.x - size.width / 2).rounded(), y: (middle.y - size.height / 2).rounded(), width: size.width, height: size.height),
+                      from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
+    }
+
+    private func drawCaret() {
         Theme.accent.setFill()
         let caret = NSBezierPath()
         let y = bounds.midY
@@ -373,7 +684,7 @@ final class ThreadRowView: NSTableRowView {
     }
 }
 
-final class ThreadCell: NSTableCellView {
+final class ThreadCell: NSTableCellView, NSViewToolTipOwner {
     static let id = NSUserInterfaceItemIdentifier("ThreadCell")
     private let sender = NSTextField(labelWithString: "")
     private let subject = NSTextField(labelWithString: "")
@@ -384,22 +695,25 @@ final class ThreadCell: NSTableCellView {
     /// The paperclip, the calendar mark and the answer, right of the subject.
     private let badges = NSStackView()
     private let keys = NSStackView()
-    private var badgesBesideDate: NSLayoutConstraint!
-    private var badgesBesideKeys: NSLayoutConstraint!
     private var row: ThreadRow?
+    private var senderWidth: NSLayoutConstraint?
+
+    /// Where every sender starts; the row view's slot lies in front of it.
+    static let senderLeading = Theme.gutter
+    /// The date and the cursor row's three key caps share this width and
+    /// the same right edge, so the badges beside them stay put as the cursor moves.
+    private static let trailingWidth: CGFloat = 3 * 17 + 2 * 4
 
     enum Mark { case none, selected, cursor }
 
     /// The cursor row trades its date for action key hints; rows in a
-    /// selection of several keep their dates.
+    /// selection, and the selected row while the list doesn't have the
+    /// keyboard, keep their dates.
     var mark = Mark.none {
         didSet {
             guard mark != oldValue else { return }
             keys.isHidden = mark != .cursor
             date.isHidden = mark == .cursor
-            // The paperclip and the invitation stay, left of the key hints on the cursor row.
-            badgesBesideDate.isActive = mark != .cursor
-            badgesBesideKeys.isActive = mark == .cursor
         }
     }
 
@@ -412,6 +726,8 @@ final class ThreadCell: NSTableCellView {
             f.translatesAutoresizingMaskIntoConstraints = false
             addSubview(f)
         }
+        // A sender cut short shows in full under the pointer.
+        sender.allowsExpansionToolTips = true
         clip.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Has attachments")
         invitation.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: "Invitation")
         for icon in [clip, invitation] {
@@ -435,38 +751,60 @@ final class ThreadCell: NSTableCellView {
         subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         date.alignment = .right
         NSLayoutConstraint.activate([
-            sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
-            sender.widthAnchor.constraint(equalToConstant: Theme.senderWidth),
+            sender.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.senderLeading),
             sender.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.leadingAnchor.constraint(equalTo: sender.trailingAnchor, constant: 12),
             subject.centerYAnchor.constraint(equalTo: centerYAnchor),
             subject.trailingAnchor.constraint(lessThanOrEqualTo: badges.leadingAnchor, constant: -8),
             badges.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badges.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10),
             date.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            date.widthAnchor.constraint(equalToConstant: 52),
+            date.widthAnchor.constraint(equalToConstant: Self.trailingWidth),
             date.centerYAnchor.constraint(equalTo: centerYAnchor),
-            keys.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            keys.trailingAnchor.constraint(equalTo: date.trailingAnchor),
             keys.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        badgesBesideDate = badges.trailingAnchor.constraint(equalTo: date.leadingAnchor, constant: -10)
-        badgesBesideKeys = badges.trailingAnchor.constraint(equalTo: keys.leadingAnchor, constant: -10)
-        badgesBesideDate.isActive = true
+        senderWidth = sender.widthAnchor.constraint(equalToConstant: Theme.scaled(Theme.senderWidth))
+        senderWidth?.isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// The seal in front of a VIP's name. It leads the name so truncation never hides it.
-    private static let vipMark = mark("checkmark.seal.fill", label: "VIP")
+    /// The subject's tooltip covers the label, wherever layout put it.
+    override func layout() {
+        super.layout()
+        removeAllToolTips()
+        addToolTip(subject.frame, owner: self, userData: nil)
+    }
+
+    /// A subject cut short shows in full under the pointer. The preview
+    /// after it is always cut, so it alone brings no tooltip.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
+        guard let row, !row.subject.isEmpty else { return "" }
+        let marks = CGFloat((row.flagged ? 1 : 0) + (row.needsReply ? 1 : 0)) * 18
+        let width = NSAttributedString(string: row.subject, attributes: [.font: Theme.font(Theme.scaled(Theme.body), weight: row.unreadCount > 0 ? .semibold : .regular)]).size().width
+        return marks + width > subject.frame.width ? row.subject : ""
+    }
+
+    /// A VIP's seal, which the row view draws in the slot in front of the sender.
+    static let vipSeal = symbol("checkmark.seal.fill", label: "VIP")
     /// In front of the subject when AI sorting says the conversation waits for a reply.
     private static let replyMark = mark("arrowshape.turn.up.left.fill", label: "Needs your reply")
     /// In front of the subject of a starred conversation.
     private static let starMark = mark("star.fill", label: "Starred", tint: Theme.star)
 
-    private static func mark(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSTextAttachment {
-        let mark = NSTextAttachment()
+    /// One line that ends in an ellipsis. A label shows an attributed string
+    /// by the string's own paragraph style; without one it clips mid-letter.
+    private static let oneLine: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        return style
+    }()
+
+    private static func symbol(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSImage? {
         let config = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold)
         guard let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: label)?
-            .withSymbolConfiguration(config) else { return mark }
+            .withSymbolConfiguration(config) else { return nil }
         // Tinted as it draws, so cut-outs stay cut out and the colour follows the appearance.
         let image = NSImage(size: symbol.size, flipped: false) { rect in
             symbol.draw(in: rect)
@@ -475,29 +813,37 @@ final class ThreadCell: NSTableCellView {
             return true
         }
         image.accessibilityDescription = label
+        return image
+    }
+
+    private static func mark(_ symbolName: String, label: String, tint: NSColor = Theme.text2) -> NSTextAttachment {
+        let mark = NSTextAttachment()
+        guard let image = symbol(symbolName, label: label, tint: tint) else { return mark }
         mark.image = image
-        mark.bounds = NSRect(x: 0, y: -1.5, width: symbol.size.width, height: symbol.size.height)
+        mark.bounds = NSRect(x: 0, y: -1.5, width: image.size.width, height: image.size.height)
         return mark
     }
 
     func show(_ r: ThreadRow) {
         row = r
         let unread = r.unreadCount > 0
+        // The row's type at the chosen text size; the sender's column follows it.
+        let size = Theme.scaled(Theme.body)
+        senderWidth?.constant = Theme.scaled(Theme.senderWidth)
         let name = NSMutableAttributedString()
-        if r.vip {
-            name.append(NSAttributedString(attachment: Self.vipMark))
-            name.append(NSAttributedString(string: " "))
-        }
         name.append(NSAttributedString(string: r.fromName.isEmpty ? r.fromAddr : r.fromName, attributes: [
-            .font: Theme.font(weight: unread ? .semibold : .regular),
+            .font: Theme.font(size, weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
         ]))
         if r.messageCount > 1 {
             name.append(NSAttributedString(string: "  \(r.messageCount)", attributes: [
-                .font: Theme.font(11.5), .foregroundColor: Theme.text3,
+                .font: Theme.font(size - 1.5), .foregroundColor: Theme.text3,
             ]))
         }
+        name.addAttribute(.paragraphStyle, value: Self.oneLine, range: NSRange(location: 0, length: name.length))
         sender.attributedStringValue = name
+        // The seal is drawn beside the name, so VoiceOver hears it here.
+        sender.setAccessibilityHelp(r.vip ? "VIP" : nil)
         let line = NSMutableAttributedString()
         if r.flagged {
             line.append(NSAttributedString(attachment: Self.starMark))
@@ -508,14 +854,15 @@ final class ThreadCell: NSTableCellView {
             line.append(NSAttributedString(string: " "))
         }
         line.append(NSAttributedString(string: r.subject.isEmpty ? "(no subject)" : r.subject, attributes: [
-            .font: Theme.font(weight: unread ? .semibold : .regular),
+            .font: Theme.font(size, weight: unread ? .semibold : .regular),
             .foregroundColor: unread ? Theme.text : Theme.text2,
         ]))
         if !r.snippet.isEmpty {
             line.append(NSAttributedString(string: "  " + r.snippet, attributes: [
-                .font: Theme.font(), .foregroundColor: Theme.text3,
+                .font: Theme.font(size), .foregroundColor: Theme.text3,
             ]))
         }
+        line.addAttribute(.paragraphStyle, value: Self.oneLine, range: NSRange(location: 0, length: line.length))
         subject.attributedStringValue = line
         date.attributedStringValue = NSAttributedString(string: Theme.shortDate(r.date), attributes: [
             .font: Theme.timeFont, .foregroundColor: Theme.text3,
@@ -575,7 +922,7 @@ final class ChipView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         Theme.line.setStroke()
-        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.radiusKey, yRadius: Theme.radiusKey)
         box.lineWidth = 1
         box.stroke()
         let label = label
@@ -584,28 +931,29 @@ final class ChipView: NSView {
     }
 }
 
-/// AppKit twin of `KeyCap`, outlined in the accent because it only shows on the cursor row.
+/// AppKit twin of `KeyCap`'s focused style: it only shows on the cursor row.
 final class KeyCapView: NSView {
     private let key: String
+    private static let font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
 
     init(key: String) {
         self.key = key
-        super.init(frame: NSRect(x: 0, y: 0, width: 17, height: 17))
+        // As `KeyCap`: 4 points beside the letter, 17 at least.
+        let width = max(17, ceil(NSAttributedString(string: key, attributes: [.font: Self.font]).size().width) + 8)
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 17))
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 17).isActive = true
+        widthAnchor.constraint(equalToConstant: width).isActive = true
         heightAnchor.constraint(equalToConstant: 17).isActive = true
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ dirtyRect: NSRect) {
-        Theme.accent.withAlphaComponent(0.55).setStroke()
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        Theme.accent.setStroke()
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.radiusKey, yRadius: Theme.radiusKey)
         path.lineWidth = 1
         path.stroke()
-        let text = NSAttributedString(string: key, attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .medium), .foregroundColor: Theme.accentText,
-        ])
+        let text = NSAttributedString(string: key, attributes: [.font: Self.font, .foregroundColor: Theme.accentText])
         let size = text.size()
         text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
     }

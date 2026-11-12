@@ -33,13 +33,13 @@ struct DayPanel: View {
                 cal.reveal(eventID: e.record.eventId, time: e.record.time)
             }
             let hour = Double(Calendar.current.component(.hour, from: cal.now))
-            WeekGrid(cal: cal, source: .today, gutter: 48, firstHour: min(max(hour - 1, 7.5), 14), select: show, open: show)
+            WeekGrid(cal: cal, source: .today, gutter: 48, firstHour: min(max(hour - 1, 7.5), 14), surface: .side, select: show, open: show)
             HStack(spacing: 12) {
                 HStack(spacing: 5) { KeyCap(key: "⇧C"); Text("panel") }
                 HStack(spacing: 5) { KeyCap(key: "⌘2"); Text("calendar") }
                 Spacer()
             }
-            .font(.system(size: 11.5))
+            .font(.system(size: Theme.small))
             .foregroundStyle(Color(Theme.text3))
             .padding(.horizontal, 16)
             .frame(height: 34)
@@ -98,14 +98,16 @@ struct UpNext: View {
             HStack {
                 Text(detail).font(.system(size: 12)).foregroundStyle(Color(Theme.text2)).lineLimit(1)
                 Spacer()
-                if let join { JoinButton(live: live, action: join) }
+                if let join {
+                    KitButton(title: "Join", kind: live ? .primary : .secondary, size: .small, action: join)
+                        .help("Join the online meeting")
+                }
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 0.5))
+        .card()
         .accessibilityElement(children: .combine)
     }
 }

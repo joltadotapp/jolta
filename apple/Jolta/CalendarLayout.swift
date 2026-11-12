@@ -9,6 +9,8 @@ struct PlacedEvent: Identifiable {
     let bottom: Double
     let column: Int
     let columns: Int
+    /// The columns it is wide: its own and the free ones to its right.
+    let span: Int
 
     var id: String { event.id + "#\(day)" }
 }
@@ -28,12 +30,27 @@ enum CalendarLayout {
     static let gutter: CGFloat = 64
     /// Events shorter than this draw at this height, so packing treats them as this long.
     static let shortestMinutes = 20.0
-    static let workStart = 9
-    static let workEnd = 18
+    /// Lanes of all-day events above several days; the rest are behind a day's "+N". A day view shows every lane.
+    static let maxLanes = 3
+
+    /// How many columns each event of a group of overlaps is wide: its own,
+    /// and the columns to its right that hold nothing during its time. An
+    /// equal share for every event left one beside a short neighbour narrow
+    /// for its whole length, with empty grid next to it.
+    static func spans(_ items: [(top: Double, bottom: Double, column: Int)], columns: Int) -> [Int] {
+        items.map { item in
+            var span = 1
+            while item.column + span < columns,
+                  !items.contains(where: { $0.column == item.column + span && $0.top < item.bottom && $0.bottom > item.top }) {
+                span += 1
+            }
+            return span
+        }
+    }
 
     /// Timed events of less than a day per day column, packed: overlapping
     /// events share the column's width, each taking the first free column
-    /// of its group of overlaps.
+    /// of its group of overlaps and widening into free columns on its right.
     static func timed(_ events: [CalEvent], days: [CalendarDay]) -> [PlacedEvent] {
         var out: [PlacedEvent] = []
         for (d, day) in days.enumerated() {
@@ -49,7 +66,8 @@ enum CalendarLayout {
             var columnEnds: [Double] = []
             var groupEnd = -1.0
             func close() {
-                out += group.map { PlacedEvent(event: $0.0, day: d, top: $0.1, bottom: $0.2, column: $0.3, columns: columnEnds.count) }
+                let spans = spans(group.map { ($0.1, $0.2, $0.3) }, columns: columnEnds.count)
+                out += zip(group, spans).map { PlacedEvent(event: $0.0, day: d, top: $0.1, bottom: $0.2, column: $0.3, columns: columnEnds.count, span: $1) }
                 group = []
                 columnEnds = []
             }
@@ -81,10 +99,15 @@ enum CalendarLayout {
         }
     }
 
-    /// `10:00–11:00`.
+    /// `10:00 to 11:00`, the one way the app writes a time range, as the
+    /// core's sentences do ("Fri 13 Nov, 12:30 to 13:00").
+    static func range(_ start: Date, _ end: Date) -> String {
+        "\(CalendarModel.clockTime(start)) to \(CalendarModel.clockTime(end))"
+    }
+
     static func range(_ e: CalEvent) -> String {
         guard let start = e.start, let end = e.end else { return "all day" }
-        return "\(CalendarModel.clockTime(start))–\(CalendarModel.clockTime(end))"
+        return range(start, end)
     }
 
     /// The line under the title: the meeting's provider, else the place.
@@ -94,34 +117,88 @@ enum CalendarLayout {
     }
 }
 
+/// The surface a calendar view lies on: the window's background in calendar
+/// mode, the sidebar's in the day panel beside mail. Fills, hollow boxes and
+/// the off-hours shading are mixed from it.
+enum CalendarSurface: Hashable, Sendable {
+    case bg, side
+
+    nonisolated var token: KeyPath<ThemeTokens, UInt32> & Sendable {
+        switch self {
+        case .bg: \.bg
+        case .side: \.side
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .bg: Theme.bg
+        case .side: Theme.side
+        }
+    }
+}
+
 /// A calendar's color as each theme draws it. The server's color is moved
-/// toward the theme's text until it reads against the background, so a dark
+/// toward the theme's text until it reads against the surface, so a dark
 /// blue stays visible on a dark theme; fills are that color mixed into the
-/// background. Everything else in the calendar uses the theme's own tokens.
+/// surface. Everything else in the calendar uses the theme's own tokens.
 enum CalendarColor {
     enum Use: Hashable { case bar, fill, allDay, text }
 
-    private static var cache: [String: NSColor] = [:]
-
-    /// Hours outside working hours and weekends: halfway from the background to the sidebar.
-    static let offHours = NSColor(name: nil) { appearance in
-        let t = ThemeStore.tokens(appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light)
-        return NSColor(hex: mix(t.bg, t.side, 0.5))
+    private struct Key: Hashable {
+        let hex: String?
+        let use: Use
+        let surface: CalendarSurface
     }
 
-    static func color(_ hex: String?, _ use: Use) -> NSColor {
-        let key = "\(hex ?? "-")/\(use)"
+    private static var cache: [Key: NSColor] = [:]
+    private static var shades: [CalendarSurface: NSColor] = [:]
+    private static var madeFor: ThemePair?
+
+    /// Drops the colors made for another theme. Each resolves from the
+    /// live theme when AppKit draws it, but SwiftUI compares a Color by its
+    /// NSColor object and would leave month pills, swatches and shaded
+    /// cells in the old theme; new objects make it draw again. Reading
+    /// `active` also makes the view body that asks run again on a change.
+    private static func followTheme() {
+        let theme = ThemeStore.shared.active
+        guard theme != madeFor else { return }
+        madeFor = theme
+        cache = [:]
+        shades = [:]
+    }
+
+    /// Hours outside working hours and days off: the surface moved toward
+    /// the text in 1% steps until the two differ by 1.06:1, which shows
+    /// without competing with the events. Halfway to the sidebar's color,
+    /// as it was, came to 1.02 to 1.04 and could not be seen.
+    static func offHours(on surface: CalendarSurface = .bg) -> NSColor {
+        followTheme()
+        if let c = shades[surface] { return c }
+        let color = NSColor(name: nil) { appearance in
+            let t = ThemeStore.tokens(appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light)
+            let under = t[keyPath: surface.token]
+            return NSColor(hex: readable(under, toward: t.text, on: under, contrast: 1.06))
+        }
+        shades[surface] = color
+        return color
+    }
+
+    static func color(_ hex: String?, _ use: Use, on surface: CalendarSurface = .bg) -> NSColor {
+        followTheme()
+        let key = Key(hex: hex, use: use, surface: surface)
         if let c = cache[key] { return c }
         let base = hex.flatMap { UInt32($0.trimmingCharacters(in: ["#"]), radix: 16) }
         let color = NSColor(name: nil) { appearance in
             let mode: ThemeMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             let t = ThemeStore.tokens(mode)
-            let bar = readable(base ?? t.text3, toward: t.text, on: t.bg, contrast: 3)
+            let under = t[keyPath: surface.token]
+            let bar = readable(base ?? t.text3, toward: t.text, on: under, contrast: 3)
             return switch use {
             case .bar: NSColor(hex: bar)
-            case .fill: NSColor(hex: mix(t.bg, bar, mode == .dark ? 0.2 : 0.16))
-            case .allDay: NSColor(hex: mix(t.bg, bar, mode == .dark ? 0.28 : 0.22))
-            case .text: NSColor(hex: readable(bar, toward: t.text, on: t.bg, contrast: 4.5))
+            case .fill: NSColor(hex: mix(under, bar, mode == .dark ? 0.2 : 0.16))
+            case .allDay: NSColor(hex: mix(under, bar, mode == .dark ? 0.28 : 0.22))
+            case .text: NSColor(hex: readable(bar, toward: t.text, on: under, contrast: 4.5))
             }
         }
         cache[key] = color

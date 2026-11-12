@@ -151,9 +151,8 @@ struct SummaryCard: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color(Theme.raise)))
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(Theme.line), lineWidth: 1))
-            .padding(.horizontal, 20)
+            .card()
+            .padding(.horizontal, Theme.gutter)
             .padding(.top, 14)
             .padding(.bottom, 2)
             .transition(.opacity)
@@ -166,20 +165,20 @@ struct SummaryCard: View {
             Text("Summary").font(.system(size: 12, weight: .semibold))
             if !summary.model.isEmpty && summary.state == .done {
                 Text(summary.outdated ? "\(summary.model) · new messages since" : summary.model)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: Theme.small))
                     .foregroundStyle(Color(Theme.text3))
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
             if case .working(let phase) = summary.state, !(phase == .writing && !summary.text.isEmpty) {
                 ProgressView().controlSize(.mini)
-                Text(phase.line(label)).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
+                Text(phase.line(label)).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
             }
             if summary.state == .done {
                 iconButton("arrow.clockwise", help: "Summarize again  ⌘J") { summary.start(automatic: false, fresh: true, label: label) }
             }
             iconButton(collapsed ? "chevron.down" : "chevron.up", help: collapsed ? "Show summary" : "Hide summary") {
-                withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
+                withAnimation(Theme.quick) { collapsed.toggle() }
             }
         }
         .foregroundStyle(Color(Theme.text2))
@@ -192,17 +191,17 @@ struct SummaryCard: View {
                 Text("Summaries need a model: one on this Mac, or your OpenAI or Anthropic account.")
                     .foregroundStyle(Color(Theme.text2))
                 Spacer(minLength: 8)
-                Button("Choose a Model…", action: openSettings)
+                KitButton(title: "Choose a Model…", size: .small, action: openSettings)
             }
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
         case .failed(let message):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(message).foregroundStyle(Color(Theme.text2)).textSelection(.enabled)
                 Spacer(minLength: 8)
-                Button("Try Again") { summary.start(automatic: false, fresh: true, label: label) }
-                if message.contains("Settings") { Button("AI Settings…", action: openSettings) }
+                KitButton(title: "Try Again", size: .small) { summary.start(automatic: false, fresh: true, label: label) }
+                if message.contains("Settings") { KitButton(title: "AI Settings…", size: .small, action: openSettings) }
             }
-            .font(.system(size: 12.5))
+            .font(.system(size: Theme.body))
         default:
             if !summary.text.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
@@ -344,9 +343,9 @@ struct WriteBar: View {
                 HStack(spacing: 6) {
                     if writer.isWorking { ProgressView().controlSize(.mini) }
                     Text(status).lineLimit(2).textSelection(.enabled)
-                    if writer.state == .notSetUp { Button("Choose a Model…") { model.openSettings(.ai) }.controlSize(.small) }
+                    if writer.state == .notSetUp { KitButton(title: "Choose a Model…", size: .small) { model.openSettings(.ai) } }
                 }
-                .font(.system(size: 11.5))
+                .font(.system(size: Theme.small))
                 .foregroundStyle(Color(Theme.text3))
                 .padding(.leading, 22)
             }
@@ -354,9 +353,8 @@ struct WriteBar: View {
         .font(.system(size: 13))
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 9).fill(Color(Theme.raise)))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line), lineWidth: 1))
-        .padding(.horizontal, 20)
+        .card()
+        .padding(.horizontal, Theme.gutter)
         .padding(.top, 12)
         .onAppear { focused.wrappedValue = .ai }
     }
@@ -365,13 +363,13 @@ struct WriteBar: View {
         HStack(spacing: 6) {
             switch writer.state {
             case .working:
-                hint("Stop", key: "esc") { writer.stop() }
+                KitButton(title: "Stop", key: "esc", size: .small) { writer.stop() }
             case .done:
-                hint("Keep", key: "↩", action: close)
-                hint("Try Again", key: "⌘J") { writer.write(model: model) }
-                hint("Undo", key: "esc") { writer.undo(model: model); close() }
+                KitButton(title: "Keep", key: "↩", size: .small, action: close)
+                KitButton(title: "Try Again", key: "⌘J", size: .small) { writer.write(model: model) }
+                KitButton(title: "Undo", key: "esc", size: .small) { writer.undo(model: model); close() }
             default:
-                hint("Write", key: "↩") { writer.write(model: model) }
+                KitButton(title: "Write", key: "↩", size: .small) { writer.write(model: model) }
             }
         }
     }
@@ -403,19 +401,5 @@ struct WriteBar: View {
         case .done: writer.undo(model: model); close()
         default: close()
         }
-    }
-
-    private func hint(_ title: String, key: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Text(title)
-                Text(key).font(.system(size: 10.5)).foregroundStyle(Color(Theme.text3))
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 22)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.fill)))
-        }
-        .buttonStyle(.plain)
-        .font(.system(size: 12))
     }
 }

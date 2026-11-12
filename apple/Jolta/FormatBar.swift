@@ -305,7 +305,8 @@ struct FormatMenu: View {
     /// editor has the keyboard.
     private func item(_ tool: FormatTool) -> some View {
         Button(tool.title) { RichTextView.focused.map(tool.perform) }
-            .keyboardShortcut(tool == .underline && !state.editing ? nil : tool.shortcut)
+            // Without an editor, ⌘U unsubscribes and ⌘+ and ⌘- zoom the reader.
+            .keyboardShortcut([.underline, .bigger, .smaller].contains(tool) && !state.editing ? nil : tool.shortcut)
             .disabled(!state.editing)
     }
 
@@ -335,7 +336,8 @@ struct FormatBar: View {
                 row(Self.layouts[i])
             }
         }
-        .padding(.horizontal, 22)
+        // The first control's glyph sits 6 points inside it.
+        .padding(.horizontal, Theme.gutter - 6)
         .frame(height: 36)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
@@ -557,7 +559,8 @@ private struct ColorButton: View {
         case .text: [("None", nil, { run { $0.setColor(nil) } })] + Format.colors.map { c in (Format.name(c), Format.nsColor(c), { run { $0.setColor(c) } }) }
         case .highlight: [("None", nil, { run { $0.setHighlight(nil) } })] + Format.highlights.map { h in (Format.name(h), Format.nsColor(h), { run { $0.setHighlight(h) } }) }
         }
-        return HStack(spacing: 6) {
+        // The swatches are 18 points and 6 apart; each takes clicks on 24.
+        return HStack(spacing: 0) {
             ForEach(names.indices, id: \.self) { i in
                 let (label, color, pick) = names[i]
                 let chosen = color.map { current == $0 } ?? (current == nil)
@@ -568,15 +571,16 @@ private struct ColorButton: View {
                         if color == nil { Image(systemName: "slash.circle").font(.system(size: 9)).foregroundStyle(Color(Theme.text3)) }
                     }
                     .frame(width: 18, height: 18)
-                    .contentShape(Circle())
+                    .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(label)
                 .accessibilityLabel("\(name) \(label)")
+                .accessibilityAddTraits(chosen ? .isSelected : [])
                 .accessibilityIdentifier("\(kind == .text ? "format-color" : "format-highlight")-\(label.lowercased())")
             }
         }
-        .padding(10)
+        .padding(7)
     }
 
     private func run(_ action: (RichTextView) -> Void) {

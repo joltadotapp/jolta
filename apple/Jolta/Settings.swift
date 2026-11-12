@@ -71,15 +71,15 @@ struct SaveBar: View {
                 ProgressView().controlSize(.small)
                 Text(workingText).foregroundStyle(Color(Theme.text3))
             } else if let message {
-                Text(message).foregroundStyle(failed ? Color.red : Color(Theme.text3)).lineLimit(2)
+                Text(message).foregroundStyle(failed ? Color(Theme.dangerText) : Color(Theme.text3)).lineLimit(2)
             } else {
                 Text("Unsaved changes").foregroundStyle(Color(Theme.text3))
             }
             Spacer()
-            Button("Revert", action: revert).disabled(working)
-            Button("Save", action: save).keyboardShortcut(.defaultAction).tint(Color(Theme.accent)).disabled(working)
+            KitButton(title: "Revert", action: revert).disabled(working)
+            KitButton(title: "Save", kind: .primary, action: save).keyboardShortcut(.defaultAction).disabled(working)
         }
-        .font(.system(size: 12.5))
+        .font(.system(size: Theme.body))
         .padding(.horizontal, 32)
         .frame(height: 52)
         .background(Color(Theme.bg))
@@ -96,7 +96,7 @@ struct VIPSettings: View {
 
     var body: some View {
         SettingsScroll {
-            SettingsSection("VIPs", footer: "Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender. General › New mail banners can limit banners to VIPs.") {
+            SettingsSection("VIPs", footer: "Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender. General › Notify me about can limit notifications to VIPs.") {
                 ForEach(vips, id: \.self) { vip in
                     SettingsBlock {
                         HStack(spacing: 10) {
@@ -114,7 +114,7 @@ struct VIPSettings: View {
                     }
                 }
                 if let error {
-                    SettingsBlock { Text(error).foregroundStyle(.red).font(.system(size: 12)) }
+                    SettingsBlock { Text(error).foregroundStyle(Color(Theme.dangerText)).font(.system(size: 12)) }
                 }
             }
         }
@@ -151,6 +151,9 @@ struct SnippetsSettings: View {
     @State private var name = ""
     @State private var text = ""
     @State private var saveTask: Task<Void, Never>?
+    @State private var removal: Confirmation?
+    /// Why the last save, new snippet or delete didn't happen.
+    @State private var failure: String?
 
     var body: some View {
         SettingsScroll {
@@ -162,16 +165,19 @@ struct SnippetsSettings: View {
                                 Text(s.name.isEmpty ? "Untitled" : s.name).fontWeight(.medium)
                                 Text(preview(s.body)).foregroundStyle(Color(Theme.text3)).lineLimit(1)
                                 Spacer()
-                                if s.id == selected { Image(systemName: "pencil").foregroundStyle(Color(Theme.accent)) }
+                                if s.id == selected { Image(systemName: "pencil").foregroundStyle(Color(Theme.text2)) }
                             }
                         }
-                        .background(s.id == selected ? Color(Theme.fill) : .clear)
+                        .selectedRow(s.id == selected, marked: false, radius: 0)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
                 if snippets.isEmpty {
                     SettingsRow("No snippets yet", detail: "Snippets are text you reuse while writing, like a thank-you or directions.")
+                }
+                if let failure, selected == nil {
+                    SettingsBlock { Text(failure).foregroundStyle(Color(Theme.dangerText)).font(.system(size: Theme.small)) }
                 }
             } accessory: {
                 Button("New Snippet", action: add)
@@ -186,11 +192,20 @@ struct SnippetsSettings: View {
                             .settingsEditor(height: 180)
                             .onChange(of: text) { scheduleSave() }
                     }
+                    if let failure {
+                        SettingsBlock { Text(failure).foregroundStyle(Color(Theme.dangerText)).font(.system(size: Theme.small)) }
+                    }
                 } accessory: {
-                    Button("Delete", role: .destructive, action: remove)
+                    Button("Delete…", role: .destructive) {
+                        removal = Confirmation(
+                            title: "Delete “\(name.isEmpty ? "Untitled" : name)”?",
+                            message: "The snippet is deleted for good. Messages you wrote with it keep its text.",
+                            action: "Delete Snippet", perform: remove)
+                    }
                 }
             }
         }
+        .confirmation($removal)
         .onAppear(perform: load)
         .onDisappear { if let selected { save(selected) } }
     }
@@ -214,16 +229,26 @@ struct SnippetsSettings: View {
     }
 
     private func add() {
-        guard let id = try? model.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: "")) else { return }
-        if let old = selected { save(old) }
-        snippets = (try? model.core.snippets()) ?? []
-        pick(id)
+        do {
+            let id = try model.core.saveSnippet(snippet: SnippetInfo(id: 0, name: "New snippet", body: ""))
+            if let old = selected { save(old) }
+            snippets = (try? model.core.snippets()) ?? []
+            pick(id)
+        } catch {
+            failure = "Jolta couldn't add a snippet: \(error)"
+        }
     }
 
     private func remove() {
         guard let id = selected else { return }
         saveTask?.cancel()
-        try? model.core.deleteSnippet(id: id)
+        do {
+            try model.core.deleteSnippet(id: id)
+        } catch {
+            failure = "Jolta couldn't delete this snippet: \(error)"
+            return
+        }
+        failure = nil
         snippets = (try? model.core.snippets()) ?? []
         selected = nil
         pick(snippets.first?.id)
@@ -243,8 +268,13 @@ struct SnippetsSettings: View {
         guard let index = snippets.firstIndex(where: { $0.id == id }),
               snippets[index].name != name || snippets[index].body != text else { return }
         let updated = SnippetInfo(id: id, name: name, body: text)
-        _ = try? model.core.saveSnippet(snippet: updated)
-        snippets[index] = updated
+        do {
+            _ = try model.core.saveSnippet(snippet: updated)
+            snippets[index] = updated
+            failure = nil
+        } catch {
+            failure = "Not saved: \(error)"
+        }
     }
 }
 
@@ -259,6 +289,7 @@ struct AddIMAPAccount: View {
     @State private var smtpHost = ""
     @State private var working = false
     @State private var failure: String?
+    @FocusState private var addressFocused: Bool
 
     private var knowsServers: Bool { model?.core.knowsServers(address: address) ?? false }
     private var needsServers: Bool { address.contains("@") && !knowsServers }
@@ -272,6 +303,7 @@ struct AddIMAPAccount: View {
             Form {
                 TextField("Email", text: $address, prompt: Text("you@icloud.com"))
                     .textContentType(.emailAddress)
+                    .focused($addressFocused)
                 SecureField("Password", text: $password, prompt: Text("App-specific password"))
                 if needsServers {
                     TextField("IMAP server", text: $imapHost, prompt: Text("imap.example.com"))
@@ -286,17 +318,20 @@ struct AddIMAPAccount: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let failure {
-                Text(failure).font(.system(size: 12)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 if working { ProgressView().controlSize(.small); Text("Signing in…").foregroundStyle(.secondary) }
                 Spacer()
-                Button("Cancel") { done(nil) }.keyboardShortcut(.cancelAction)
-                Button("Add Account") { add() }.keyboardShortcut(.defaultAction).disabled(!ready)
+                KitButton(title: "Cancel", key: "esc") { done(nil) }.keyboardShortcut(.cancelAction)
+                KitButton(title: "Add Account", key: "↩", kind: .primary) { add() }.keyboardShortcut(.defaultAction).disabled(!ready)
             }
         }
         .padding(20)
         .frame(width: 420)
+        .background(Color(Theme.bg))
+        .foregroundStyle(Color(Theme.text))
+        .onAppear { addressFocused = true }
     }
 
     private func add() {
