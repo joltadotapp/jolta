@@ -219,6 +219,16 @@ struct CalendarHeader: View {
         }
     }
 
+    /// What J and K move by, for the buttons' tooltips.
+    private var period: String {
+        switch cal.span {
+        case .day: "Day"
+        case .week, .workWeek: "Week"
+        case .month: "Month"
+        case .agenda: "\(CalendarSpan.agendaDays) Days"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -231,6 +241,17 @@ struct CalendarHeader: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel([title.0, title.1].filter { !$0.isEmpty }.joined(separator: ", "))
             .accessibilityIdentifier("calendar-title")
+            HStack(spacing: 0) {
+                KitButton(title: "Previous \(period)", icon: "chevron.left", kind: .quiet, size: .small, showsTitle: false) { cal.shift(-1) }
+                    .help("Previous \(period) (K)")
+                    .accessibilityIdentifier("calendar-previous")
+                KitButton(title: "Today", kind: .quiet, size: .small) { cal.goToday() }
+                    .help("Today (T)")
+                    .accessibilityIdentifier("calendar-today")
+                KitButton(title: "Next \(period)", icon: "chevron.right", kind: .quiet, size: .small, showsTitle: false) { cal.shift(1) }
+                    .help("Next \(period) (J)")
+                    .accessibilityIdentifier("calendar-next")
+            }
             if let next = cal.nextMeeting {
                 NextMeetingLine(next: next, now: cal.now)
             }
