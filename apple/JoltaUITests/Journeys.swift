@@ -97,6 +97,40 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil { (body.value as? String)?.hasPrefix("e") == true }, "the letter went into the message")
     }
 
+    /// A click beside the palette closes it and gives the keyboard back as
+    /// Esc does: to the message being written.
+    func testClickBesidePaletteGivesTheKeyboardBack() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        app.typeKey("c", modifierFlags: [])
+        let body = app.textViews["compose-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "c opens compose")
+        app.typeKey("k", modifierFlags: .command)
+        XCTAssertTrue(commandField(app).waitForExistence(timeout: 5), "⌘K opens the palette")
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).click()
+        XCTAssertTrue(commandField(app).waitForNonExistence(timeout: 5), "a click beside the palette closes it")
+        app.typeText("e")
+        XCTAssertTrue(visible(app, "Lunch on Friday"), "the letter didn't archive")
+        XCTAssertTrue(waitUntil { (body.value as? String)?.hasPrefix("e") == true }, "the letter went into the message")
+    }
+
+    /// While a message is being written, Esc closes the shortcut sheet
+    /// first and leaves the message open.
+    func testEscInComposeClosesTheShortcutSheetFirst() throws {
+        let app = try launch()
+        app.typeKey("c", modifierFlags: [])
+        let to = app.textFields["compose-to"]
+        XCTAssertTrue(to.waitForExistence(timeout: 5), "c opens compose")
+        app.typeKey("/", modifierFlags: .command)
+        let sheet = text(app, "Keyboard shortcuts")
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "⌘/ shows the shortcuts")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), "Esc closes them")
+        XCTAssertTrue(to.exists, "and the message stays open")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(to.waitForNonExistence(timeout: 5), "a second Esc closes the message")
+    }
+
     /// Discard takes the message away at once, and Z brings it back.
     func testDiscardCanBeUndone() throws {
         let app = try launch()
@@ -500,6 +534,45 @@ final class Journeys: XCTestCase {
         search.typeText("from:bob\n")
         XCTAssertTrue(text(app, "Weekly deals").waitForNonExistence(timeout: 5), "other senders leave the list")
         XCTAssertTrue(visible(app, "Lunch on Friday"))
+    }
+
+    /// Typing a search opens none of its results, as opening marks mail
+    /// read. J opens the first.
+    func testSearchOpensNothingUntilAsked() throws {
+        let app = try launch()
+        let search = app.searchFields.firstMatch.exists ? app.searchFields.firstMatch : app.textFields.firstMatch
+        search.click()
+        search.typeText("from:bob")
+        XCTAssertTrue(text(app, "Weekly deals").waitForNonExistence(timeout: 5), "other senders leave the list")
+        RunLoop.current.run(until: Date() + 2)
+        XCTAssertFalse(app.webViews.firstMatch.exists, "no result opens while typing")
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "j opens the first result")
+    }
+
+    /// Settings from the keyboard: ↓ and ↑ move through the pages. A search
+    /// marks its first match, ↓ moves the mark and Return opens that page.
+    func testSettingsArrowKeys() throws {
+        let app = try launch()
+        app.typeKey(",", modifierFlags: .command)
+        let general = app.popUpButtons["notify-scope"]
+        XCTAssertTrue(general.waitForExistence(timeout: 5), "Settings opens on General")
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(text(app, "Match macOS").waitForExistence(timeout: 5), "↓ shows Appearance")
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(text(app, "Signature").waitForExistence(timeout: 5), "↓ again shows the account, not a row of Appearance")
+        app.typeKey(.upArrow, modifierFlags: [])
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(general.waitForExistence(timeout: 5), "↑ twice is General again")
+
+        app.typeKey("f", modifierFlags: .command)
+        app.typeText("notifications")
+        XCTAssertTrue(general.exists, "typing a search leaves the page alone")
+        app.typeKey(.downArrow, modifierFlags: [])
+        app.typeKey(.downArrow, modifierFlags: [])
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Inbox sections").waitForExistence(timeout: 5), "Return opens the third match, Sections")
     }
 
     /// ⌘2 opens the calendar on this week; J and K move a week and back;
