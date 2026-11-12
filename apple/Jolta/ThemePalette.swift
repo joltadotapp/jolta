@@ -130,6 +130,26 @@ nonisolated extension ThemeTokens {
         t.onAccent = contrast(0xFFFFFF, t.accent) >= 4.5 || contrast(0xFFFFFF, t.accent) >= contrast(0x000000, t.accent) ? 0xFFFFFF : 0x000000
         return t
     }
+
+    /// What the two dimmer text colors reach while macOS's Increase
+    /// Contrast is on, and the hairlines.
+    static let contrastedText = 7.0
+    static let contrastedLine = 1.3
+
+    /// The settled tokens pushed further for Increase Contrast: the dimmer
+    /// text colors to 7:1 on every surface, plain, selected and hovered, and
+    /// the hairlines to 1.3:1. A theme whose own text is under 7:1 somewhere
+    /// gets its text color for them, which is the most it has.
+    var contrasted: ThemeTokens {
+        var t = self
+        let on = t.backdrops
+        t.text2 = readable(t.text2, toward: t.text, on: on, contrast: Self.contrastedText)
+        t.text3 = readable(t.text3, toward: t.text, on: on, contrast: Self.contrastedText)
+        t.kbdText = readable(t.kbdText, toward: t.text, on: [t.kbd, t.filled(t.kbd)], contrast: Self.contrastedText)
+        t.line = readable(t.line, toward: t.text, on: t.surfaces, contrast: Self.contrastedLine)
+        t.line2 = readable(t.line2, toward: t.text, on: t.surfaces, contrast: Self.contrastedLine)
+        return t
+    }
 }
 
 /// `color` moved toward `target` in 1% steps until its contrast against `bg`

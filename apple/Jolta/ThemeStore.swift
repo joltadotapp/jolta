@@ -50,9 +50,23 @@ final class ThemeStore {
         textSize = defaults.string(forKey: prefix + "TextSize").flatMap(ReadingSize.init(rawValue:)) ?? .standard
         let choice = ThemeChoice.load(defaults, prefix: prefix)
         self.choice = choice
-        active = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
+        active = Self.pair(choice, preview: nil)
         Self.live.withLock { $0 = active }
         force(choice.always)
+        // Increase Contrast switched on or off in System Settings.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { ThemeStore.shared.apply() }
+        }
+    }
+
+    /// The tokens on screen: the chosen themes, a preview in place of the
+    /// theme of its mode, and both pushed further (`ThemeTokens.contrasted`)
+    /// while macOS's Increase Contrast is on.
+    private static func pair(_ choice: ThemeChoice, preview: ThemePalette?) -> ThemePair {
+        var pair = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
+        if let preview { pair[preview.mode] = preview.tokens }
+        guard NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast else { return pair }
+        return ThemePair(dark: pair.dark.contrasted, light: pair.light.contrasted)
     }
 
     /// The tokens on screen for one appearance, for colors mixed from them
@@ -103,8 +117,7 @@ final class ThemeStore {
 
     private func apply() {
         force(preview?.mode ?? choice.always)
-        var pair = ThemePair(dark: choice.dark.tokens, light: choice.light.tokens)
-        if let preview { pair[preview.mode] = preview.tokens }
+        let pair = Self.pair(choice, preview: preview)
         guard pair != active else { return }
         Self.live.withLock { $0 = pair }
         active = pair

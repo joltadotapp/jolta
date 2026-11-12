@@ -48,6 +48,26 @@ for theme in ThemePalette.all {
     check(theme, "text against text3", t.text, t.text3, atLeast: 1.15)
 }
 
+// The same themes as macOS's Increase Contrast shows them: the dimmer text
+// at 7:1, or at the theme's own text where that is less, and hairlines that
+// show on every surface. Nothing else changes, so the checks above hold.
+for theme in ThemePalette.all {
+    let t = theme.tokens.contrasted
+    let plain: [(String, UInt32)] = [("bg", t.bg), ("side", t.side), ("reader", t.reader), ("raise", t.raise)]
+    let selected = plain.map { ("fill on \($0.0)", t.filled($0.1)) }
+    let hovered = plain.map { ("hover on \($0.0)", t.hovered($0.1)) }
+    for (name, surface) in plain + selected + hovered {
+        let reach = min(ThemeTokens.contrastedText, contrast(t.text, surface))
+        check(theme, "high contrast text2 on \(name)", t.text2, surface, atLeast: reach)
+        check(theme, "high contrast text3 on \(name)", t.text3, surface, atLeast: reach)
+    }
+    for (name, surface) in plain {
+        check(theme, "high contrast line against \(name)", t.line, surface, atLeast: ThemeTokens.contrastedLine)
+        check(theme, "high contrast line2 against \(name)", t.line2, surface, atLeast: ThemeTokens.contrastedLine)
+    }
+    check(theme, "high contrast kbdText on kbd", t.kbdText, t.kbd, atLeast: min(ThemeTokens.contrastedText, contrast(t.text, t.kbd)))
+}
+
 if CommandLine.arguments.contains("--print") {
     for theme in ThemePalette.all {
         let t = theme.tokens
@@ -57,7 +77,7 @@ if CommandLine.arguments.contains("--print") {
 }
 
 if failures.isEmpty {
-    print("\(ThemePalette.all.count) themes pass")
+    print("\(ThemePalette.all.count) themes pass, also with Increase Contrast")
 } else {
     failures.forEach { print($0) }
     print("\(failures.count) failures")
