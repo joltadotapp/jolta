@@ -509,8 +509,6 @@ extension MonthView {
 
 struct MonthView: View {
     let cal: CalendarModel
-    /// The day a dragged event would land on.
-    @State private var target: String?
 
     private static let weekday: DateFormatter = {
         let f = DateFormatter()
@@ -540,9 +538,15 @@ struct MonthView: View {
                     ForEach(0..<weeks, id: \.self) { w in
                         HStack(spacing: 0) {
                             ForEach(cal.days[w * 7..<w * 7 + 7]) { day in
-                                MonthCell(cal: cal, day: day, height: rowH, isTarget: target == day.key) { event, drag, ended in
+                                MonthCell(cal: cal, day: day, height: rowH, isTarget: cal.dropDay == day.key) { event, drag, ended in
+                                    // Esc ended this drag: nothing more until the mouse is let go.
+                                    if cal.cancelledMonthDrag == drag.startLocation {
+                                        if ended { cal.cancelledMonthDrag = nil }
+                                        return
+                                    }
+                                    cal.monthDrag = ended ? nil : drag.startLocation
                                     let to = index(drag.location)
-                                    target = ended ? nil : to.map { cal.days[$0].key }
+                                    cal.dropDay = ended ? nil : to.map { cal.days[$0].key }
                                     // By the cells the drag began and ended in, so a long event moves from where it was held.
                                     if ended, let to, let from = index(drag.startLocation), to != from {
                                         cal.move(event, days: to - from, copy: NSEvent.modifierFlags.contains(.option))

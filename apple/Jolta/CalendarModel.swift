@@ -241,6 +241,12 @@ final class CalendarModel {
     var senderPrompt: SenderPrompt?
     /// An event moved on the grid and not saved yet (`GridEditing.swift`).
     var gridChange: GridChange?
+    /// Month view: the day an event being dragged would land on.
+    var dropDay: String?
+    /// Where month view's drag under way began, and the one Esc ended: the
+    /// rest of that gesture does nothing.
+    @ObservationIgnored var monthDrag: CGPoint?
+    @ObservationIgnored var cancelledMonthDrag: CGPoint?
     /// Saves `gridChange` a second after the last key that changed it.
     @ObservationIgnored var gathering: Task<Void, Never>?
     /// Shows a toast, with the token Undo takes back.
@@ -880,8 +886,23 @@ final class CalendarModel {
         return (try? core.planSave(draft: editor.draft))?.unchanged == false
     }
 
-    /// Esc or Cancel: closes, asking first when changes would be lost.
+    /// Esc while an event is dragged: the drag ends and the event stays
+    /// where it was. False when nothing was being dragged.
+    func cancelDrag() -> Bool {
+        var cancelled = false
+        for grid in grids.allObjects where grid.cancelDrag() { cancelled = true }
+        if dropDay != nil {
+            dropDay = nil
+            cancelledMonthDrag = monthDrag
+            cancelled = true
+        }
+        return cancelled
+    }
+
+    /// Esc or Cancel: closes, asking first when changes would be lost. Esc
+    /// during a drag of the draft ends the drag and leaves the editor open.
     func closeEditor() {
+        guard !cancelDrag() else { return }
         guard confirmLeaving({}) else { return }
         dropEditor()
     }

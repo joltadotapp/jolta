@@ -193,6 +193,8 @@ extension AppModel {
             return true
         }
         let cal = calendar
+        // Esc during a drag ends the drag; it doesn't also close or deselect.
+        if event.keyCode == 53, cal.cancelDrag() { return true }
         // The repeat popover moves with ↑ and ↓; Return is Done, Esc Cancel.
         if let editor = cal.editor, let picker = editor.repeatPicker, cal.discard == nil {
             switch event.keyCode {

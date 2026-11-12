@@ -359,6 +359,12 @@ final class CalendarWeekView: NSView {
         hours.frame = CGRect(x: 0, y: h, width: bounds.width, height: max(0, bounds.height - h))
     }
 
+    /// Esc: a drag under way ends and its event stays where it was. False when nothing was being dragged.
+    func cancelDrag() -> Bool {
+        let strip = strip.cancelDrag(), hours = hours.canvas.cancelDrag()
+        return strip || hours
+    }
+
     /// T: the hours scroll to now, when today is among the days.
     func revealNow() {
         if source == .period { hours.scrollToNow() }
@@ -684,6 +690,15 @@ final class DayStrip: CanvasView {
         needsDisplay = true
         // A refused move still goes to the model, which says why.
         if press.days != 0 { drop?(press.item.event, press.days, event.modifierFlags.contains(.option)) }
+    }
+
+    /// Without the press, the rest of the drag and its mouse-up do nothing.
+    func cancelDrag() -> Bool {
+        guard press?.moving == true else { return false }
+        press = nil
+        NSCursor.arrow.set()
+        needsDisplay = true
+        return true
     }
 
     override func resetCursorRects() {
@@ -1189,6 +1204,16 @@ final class HourCanvas: CanvasView {
         }
         // A refused move still goes to the model, which says why.
         drop?(dropped)
+    }
+
+    /// Without the press, the rest of the drag and its mouse-up do nothing.
+    func cancelDrag() -> Bool {
+        guard press?.moving == true else { return false }
+        press = nil
+        NSCursor.arrow.set()
+        window?.invalidateCursorRects(for: self)
+        needsDisplay = true
+        return true
     }
 
     /// The middle of the first event in sight, in window coordinates, where
