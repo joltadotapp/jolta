@@ -213,7 +213,7 @@ struct CalendarSettings: View {
                 OutOfOfficeRows(model: model, switches: switches)
             }
             SettingsSection("Working hours", footer: "Find a time and Insert my availability suggest times inside these hours. Until you set them, Jolta uses your Outlook working hours on Microsoft 365, else Monday to Friday, 9:00 to 17:00.") {
-                WorkingHoursRow(core: model.core)
+                WorkingHoursRow(core: model.core) { model.calendar.refresh() }
             }
             SettingsSection("Subscribe") {
                 SubscribeField(model: model)
@@ -276,6 +276,8 @@ struct ZoomLinkRow: View {
 /// The days and hours Find a time suggests times in, on this Mac's clock.
 struct WorkingHoursRow: View {
     let core: Core
+    /// The calendar shades the hours outside these, so it follows a change.
+    var changed: () -> Void = {}
     @State private var hours: WorkingHoursInfo?
     @State private var custom = false
     @State private var failure: String?
@@ -330,6 +332,7 @@ struct WorkingHoursRow: View {
             hours = new
             custom = true
             failure = nil
+            changed()
         } catch {
             failure = "\(error)"
         }
@@ -357,6 +360,7 @@ struct WorkingHoursRow: View {
     private func reset() {
         try? core.setWorkingHours(hours: nil)
         load()
+        changed()
     }
 }
 

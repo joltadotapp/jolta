@@ -590,7 +590,7 @@ struct MonthCell: View {
         .padding(.top, 6)
         .padding(.horizontal, 3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(day.isWeekend || day.outside ? CalendarColor.offHours : .clear))
+        .background(Color(cal.workSpan(day) == nil || day.outside ? CalendarColor.offHours() : .clear))
         .overlay {
             if isTarget {
                 RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])).padding(2)

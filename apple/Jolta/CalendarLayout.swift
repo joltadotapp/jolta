@@ -28,8 +28,6 @@ enum CalendarLayout {
     static let gutter: CGFloat = 64
     /// Events shorter than this draw at this height, so packing treats them as this long.
     static let shortestMinutes = 20.0
-    static let workStart = 9
-    static let workEnd = 18
 
     /// Timed events of less than a day per day column, packed: overlapping
     /// events share the column's width, each taking the first free column
@@ -129,11 +127,21 @@ enum CalendarColor {
     }
 
     private static var cache: [Key: NSColor] = [:]
+    private static var shades: [CalendarSurface: NSColor] = [:]
 
-    /// Hours outside working hours and weekends: halfway from the background to the sidebar.
-    static let offHours = NSColor(name: nil) { appearance in
-        let t = ThemeStore.tokens(appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light)
-        return NSColor(hex: mix(t.bg, t.side, 0.5))
+    /// Hours outside working hours and days off: the surface moved toward
+    /// the text in 1% steps until the two differ by 1.06:1, which shows
+    /// without competing with the events. Halfway to the sidebar's color,
+    /// as it was, came to 1.02 to 1.04 and could not be seen.
+    static func offHours(on surface: CalendarSurface = .bg) -> NSColor {
+        if let c = shades[surface] { return c }
+        let color = NSColor(name: nil) { appearance in
+            let t = ThemeStore.tokens(appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light)
+            let under = t[keyPath: surface.token]
+            return NSColor(hex: readable(under, toward: t.text, on: under, contrast: 1.06))
+        }
+        shades[surface] = color
+        return color
     }
 
     static func color(_ hex: String?, _ use: Use, on surface: CalendarSurface = .bg) -> NSColor {

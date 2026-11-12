@@ -52,7 +52,6 @@ struct CalendarDay: Identifiable, Equatable {
     let end: Date
     let key: String
     let isToday: Bool
-    let isWeekend: Bool
     /// Month view: the day belongs to the month around it, not the one shown.
     let outside: Bool
 
@@ -249,6 +248,8 @@ final class CalendarModel {
     }
     /// Calendars the user can write to, whose events show resize cursors.
     @ObservationIgnored private(set) var writableCalendars: Set<Int64> = []
+    /// The days and hours of Settings › Calendar, which the views leave unshaded.
+    private(set) var workingHours: WorkingHoursInfo
     /// Ticks every 30 seconds: the now line, past events and Join buttons follow it.
     private(set) var now: Date = .now
     private(set) var nextMeeting: NextMeetingRecord?
@@ -275,6 +276,7 @@ final class CalendarModel {
 
     init(core: Core) {
         self.core = core
+        workingHours = (try? core.workingHours()) ?? core.standardWorkingHours()
         reloadCalendars()
         refresh()
         ticker = Task { [weak self] in
@@ -353,7 +355,7 @@ final class CalendarModel {
             guard let start = cal.date(byAdding: .day, value: i, to: first),
                   let end = cal.date(byAdding: .day, value: 1, to: start) else { return nil }
             let key = keyFormat.string(from: start)
-            return CalendarDay(start: start, end: end, key: key, isToday: key == todayKey, isWeekend: cal.isDateInWeekend(start),
+            return CalendarDay(start: start, end: end, key: key, isToday: key == todayKey,
                                outside: month.map { !$0.contains(start) } ?? false)
         }
     }
@@ -442,6 +444,15 @@ final class CalendarModel {
         }
     }
 
+    /// The working hours of `day` as minutes after its midnight, or nil on a day off.
+    func workSpan(_ day: CalendarDay) -> Range<Int>? {
+        // Monday first, as the setting lists its days.
+        let weekday = (Self.calendar.component(.weekday, from: day.start) + 5) % 7
+        guard workingHours.days.indices.contains(weekday), workingHours.days[weekday] else { return nil }
+        let (start, end) = (Int(workingHours.start), Int(workingHours.end))
+        return start < end ? start..<end : 0..<1440
+    }
+
     func attach(_ grid: CalendarWeekView) {
         grids.add(grid)
     }
@@ -456,6 +467,7 @@ final class CalendarModel {
         now = .now
         busyMonth = nil
         ahead = [:]
+        workingHours = (try? core.workingHours()) ?? core.standardWorkingHours()
         load()
         if let open = detailEvent {
             let same = events.first { $0.record.calendarId == open.record.calendarId && $0.record.uid == open.record.uid && $0.record.time == open.record.time }

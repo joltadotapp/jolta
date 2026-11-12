@@ -6,7 +6,8 @@ import SwiftUI
 /// Everything the hour grid draws for one period.
 struct HourGridContent {
     let placed: [PlacedEvent]
-    let weekends: [Bool]
+    /// Per day, its working hours as minutes after midnight; nil on a day off.
+    let work: [Range<Int>?]
     /// The column of today, for the current-time line.
     let today: Int?
     let todayStart: Date?
@@ -26,9 +27,9 @@ struct HourGridContent {
     /// What the grid lies on.
     var surface = CalendarSurface.bg
 
-    var days: Int { weekends.count }
+    var days: Int { work.count }
 
-    static let empty = HourGridContent(placed: [], weekends: [false], today: nil, todayStart: nil, selectedID: nil, now: .now, gutter: 64, revision: -1)
+    static let empty = HourGridContent(placed: [], work: [nil], today: nil, todayStart: nil, selectedID: nil, now: .now, gutter: 64, revision: -1)
 }
 
 /// A dashed event on one day of the period: the editor's draft, an event
@@ -323,7 +324,7 @@ final class CalendarWeekView: NSView {
         guard !days.isEmpty else { return }
         let today = days.firstIndex(where: \.isToday)
         strip.content = DayStripContent(days: days, lanes: CalendarLayout.lanes(events, days: days), selectedID: selected, now: cal.now, revision: revision)
-        hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), weekends: days.map(\.isWeekend), today: today,
+        hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), work: days.map(cal.workSpan), today: today,
                                                todayStart: today.map { days[$0].start }, selectedID: selected, now: cal.now,
                                                gutter: hours.canvas.gutter, revision: revision, draft: draft, pending: pending,
                                                columns: days, writable: source == .period ? cal.writableCalendars : [], surface: surface)
@@ -714,7 +715,7 @@ final class HourCanvas: CanvasView {
     var content = HourGridContent.empty {
         didSet {
             guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID || content.draft != oldValue.draft
-                    || content.pending != oldValue.pending || content.weekends != oldValue.weekends || content.now != oldValue.now || content.today != oldValue.today else { return }
+                    || content.pending != oldValue.pending || content.work != oldValue.work || content.now != oldValue.now || content.today != oldValue.today else { return }
             elements = nil
             needsDisplay = true
             reportSelection()
@@ -803,15 +804,15 @@ final class HourCanvas: CanvasView {
         let hh = CalendarLayout.hourHeight
         let colW = columnWidth, x0 = content.gutter
         let height = 24 * hh
-        CalendarColor.offHours.setFill()
-        for (i, weekend) in content.weekends.enumerated() {
+        CalendarColor.offHours(on: content.surface).setFill()
+        for (i, work) in content.work.enumerated() {
             let x = x0 + CGFloat(i) * colW
-            if weekend {
-                CGRect(x: x, y: 0, width: colW, height: height).fill()
-            } else {
-                CGRect(x: x, y: 0, width: colW, height: CGFloat(CalendarLayout.workStart) * hh).fill()
-                let end = CGFloat(CalendarLayout.workEnd) * hh
+            if let work {
+                CGRect(x: x, y: 0, width: colW, height: CGFloat(work.lowerBound) / 60 * hh).fill()
+                let end = CGFloat(work.upperBound) / 60 * hh
                 CGRect(x: x, y: end, width: colW, height: height - end).fill()
+            } else {
+                CGRect(x: x, y: 0, width: colW, height: height).fill()
             }
         }
         Theme.line2.setFill()
