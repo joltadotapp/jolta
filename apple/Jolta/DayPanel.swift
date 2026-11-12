@@ -33,7 +33,7 @@ struct DayPanel: View {
                 cal.reveal(eventID: e.record.eventId, time: e.record.time)
             }
             let hour = Double(Calendar.current.component(.hour, from: cal.now))
-            WeekGrid(cal: cal, source: .today, gutter: 48, firstHour: min(max(hour - 1, 7.5), 14), select: show, open: show)
+            WeekGrid(cal: cal, source: .today, gutter: 48, firstHour: min(max(hour - 1, 7.5), 14), surface: .side, select: show, open: show)
             HStack(spacing: 12) {
                 HStack(spacing: 5) { KeyCap(key: "⇧C"); Text("panel") }
                 HStack(spacing: 5) { KeyCap(key: "⌘2"); Text("calendar") }

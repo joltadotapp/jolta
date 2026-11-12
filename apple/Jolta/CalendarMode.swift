@@ -375,7 +375,7 @@ struct CalendarRow: View {
         Button { cal.setShown(c, !c.shown) } label: {
             HStack(spacing: 9) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(c.shown ? Color(CalendarColor.color(c.color, .bar)) : .clear)
+                    .fill(c.shown ? Color(CalendarColor.color(c.color, .bar, on: .side)) : .clear)
                     .strokeBorder(c.shown ? .clear : Color(Theme.text3), lineWidth: 1.5)
                     .frame(width: 10, height: 10)
                 Text(c.name).lineLimit(1).foregroundStyle(Color(c.shown ? Theme.text2 : Theme.text3))

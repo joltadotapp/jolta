@@ -94,14 +94,41 @@ enum CalendarLayout {
     }
 }
 
+/// The surface a calendar view lies on: the window's background in calendar
+/// mode, the sidebar's in the day panel beside mail. Fills, hollow boxes and
+/// the off-hours shading are mixed from it.
+enum CalendarSurface: Hashable, Sendable {
+    case bg, side
+
+    nonisolated var token: KeyPath<ThemeTokens, UInt32> & Sendable {
+        switch self {
+        case .bg: \.bg
+        case .side: \.side
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .bg: Theme.bg
+        case .side: Theme.side
+        }
+    }
+}
+
 /// A calendar's color as each theme draws it. The server's color is moved
-/// toward the theme's text until it reads against the background, so a dark
+/// toward the theme's text until it reads against the surface, so a dark
 /// blue stays visible on a dark theme; fills are that color mixed into the
-/// background. Everything else in the calendar uses the theme's own tokens.
+/// surface. Everything else in the calendar uses the theme's own tokens.
 enum CalendarColor {
     enum Use: Hashable { case bar, fill, allDay, text }
 
-    private static var cache: [String: NSColor] = [:]
+    private struct Key: Hashable {
+        let hex: String?
+        let use: Use
+        let surface: CalendarSurface
+    }
+
+    private static var cache: [Key: NSColor] = [:]
 
     /// Hours outside working hours and weekends: halfway from the background to the sidebar.
     static let offHours = NSColor(name: nil) { appearance in
@@ -109,19 +136,20 @@ enum CalendarColor {
         return NSColor(hex: mix(t.bg, t.side, 0.5))
     }
 
-    static func color(_ hex: String?, _ use: Use) -> NSColor {
-        let key = "\(hex ?? "-")/\(use)"
+    static func color(_ hex: String?, _ use: Use, on surface: CalendarSurface = .bg) -> NSColor {
+        let key = Key(hex: hex, use: use, surface: surface)
         if let c = cache[key] { return c }
         let base = hex.flatMap { UInt32($0.trimmingCharacters(in: ["#"]), radix: 16) }
         let color = NSColor(name: nil) { appearance in
             let mode: ThemeMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             let t = ThemeStore.tokens(mode)
-            let bar = readable(base ?? t.text3, toward: t.text, on: t.bg, contrast: 3)
+            let under = t[keyPath: surface.token]
+            let bar = readable(base ?? t.text3, toward: t.text, on: under, contrast: 3)
             return switch use {
             case .bar: NSColor(hex: bar)
-            case .fill: NSColor(hex: mix(t.bg, bar, mode == .dark ? 0.2 : 0.16))
-            case .allDay: NSColor(hex: mix(t.bg, bar, mode == .dark ? 0.28 : 0.22))
-            case .text: NSColor(hex: readable(bar, toward: t.text, on: t.bg, contrast: 4.5))
+            case .fill: NSColor(hex: mix(under, bar, mode == .dark ? 0.2 : 0.16))
+            case .allDay: NSColor(hex: mix(under, bar, mode == .dark ? 0.28 : 0.22))
+            case .text: NSColor(hex: readable(bar, toward: t.text, on: under, contrast: 4.5))
             }
         }
         cache[key] = color

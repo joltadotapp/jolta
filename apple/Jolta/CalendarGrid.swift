@@ -23,6 +23,8 @@ struct HourGridContent {
     var columns: [CalendarDay] = []
     /// Calendars whose events show the resize cursor at their edges.
     var writable: Set<Int64> = []
+    /// What the grid lies on.
+    var surface = CalendarSurface.bg
 
     var days: Int { weekends.count }
 
@@ -145,8 +147,8 @@ enum EventStyle {
         .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8.5, weight: .semibold).applying(NSImage.SymbolConfiguration(paletteColors: [Theme.text2])))
 
     /// An out-of-office band: the calendar's color at 45 percent, as Find a time draws it.
-    static func awayFill(_ e: CalEvent) -> NSColor {
-        CalendarColor.color(e.record.color, .bar).withAlphaComponent(0.45)
+    static func awayFill(_ e: CalEvent, on surface: CalendarSurface) -> NSColor {
+        CalendarColor.color(e.record.color, .bar, on: surface).withAlphaComponent(0.45)
     }
 
     /// The room the "not synced yet" mark takes at the box's right edge.
@@ -217,13 +219,14 @@ struct WeekGrid: NSViewRepresentable {
     var gutter = CalendarLayout.gutter
     /// The hour at the top when it first shows.
     var firstHour = 7.5
+    var surface = CalendarSurface.bg
     var select: ((CalEvent) -> Void)?
     var open: ((CalEvent) -> Void)?
     /// The selected event's frame in this view, or nil when it isn't in sight.
     var selectedFrame: (CGRect?) -> Void = { _ in }
 
     func makeNSView(context: Context) -> CalendarWeekView {
-        let view = CalendarWeekView(source: source, gutter: gutter, firstHour: firstHour)
+        let view = CalendarWeekView(source: source, gutter: gutter, firstHour: firstHour, surface: surface)
         view.model = cal
         cal.attach(view)
         return view
@@ -260,6 +263,7 @@ final class CalendarWeekView: NSView {
     }
 
     let source: Source
+    let surface: CalendarSurface
     weak var model: CalendarModel?
     let strip: DayStrip
     let hours = HourScrollView()
@@ -273,9 +277,10 @@ final class CalendarWeekView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(source: Source, gutter: CGFloat, firstHour: Double) {
+    init(source: Source, gutter: CGFloat, firstHour: Double, surface: CalendarSurface) {
         self.source = source
-        strip = DayStrip(gutter: gutter, showsNames: source == .period, showsEmptyLane: source == .period)
+        self.surface = surface
+        strip = DayStrip(gutter: gutter, showsNames: source == .period, showsEmptyLane: source == .period, surface: surface)
         super.init(frame: .zero)
         hours.firstHour = firstHour
         hours.canvas.gutter = gutter
@@ -321,7 +326,7 @@ final class CalendarWeekView: NSView {
         hours.canvas.content = HourGridContent(placed: CalendarLayout.timed(events, days: days), weekends: days.map(\.isWeekend), today: today,
                                                todayStart: today.map { days[$0].start }, selectedID: selected, now: cal.now,
                                                gutter: hours.canvas.gutter, revision: revision, draft: draft, pending: pending,
-                                               columns: days, writable: source == .period ? cal.writableCalendars : [])
+                                               columns: days, writable: source == .period ? cal.writableCalendars : [], surface: surface)
         if strip.frame.height != strip.height { needsLayout = true }
         // Draw now, inside the key's own pass, rather than at the next
         // display pass, which waited about 7 ms for the frame on a 120 Hz screen.
@@ -362,6 +367,7 @@ final class DayStrip: CanvasView {
     let gutter: CGFloat
     let showsNames: Bool
     let showsEmptyLane: Bool
+    let surface: CalendarSurface
     var content = DayStripContent.empty {
         didSet {
             guard content.revision != oldValue.revision || content.selectedID != oldValue.selectedID
@@ -407,10 +413,11 @@ final class DayStrip: CanvasView {
     private static let laneFont = NSFont.systemFont(ofSize: 11.5)
     private static let labelFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
 
-    init(gutter: CGFloat, showsNames: Bool, showsEmptyLane: Bool) {
+    init(gutter: CGFloat, showsNames: Bool, showsEmptyLane: Bool, surface: CalendarSurface) {
         self.gutter = gutter
         self.showsNames = showsNames
         self.showsEmptyLane = showsEmptyLane
+        self.surface = surface
         super.init(frame: .zero)
     }
 
@@ -482,7 +489,7 @@ final class DayStrip: CanvasView {
             }
             cg.saveGState()
             if alpha < 1 { cg.setAlpha(alpha) }
-            (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .allDay)).setFill()
+            (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .allDay, on: surface)).setFill()
             NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
             cg.restoreGState()
             EventStyle.drawMark(e, in: r)
@@ -523,7 +530,7 @@ final class DayStrip: CanvasView {
         case .other: "mappin.and.ellipse"
         }
         let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9.5, weight: .medium).applying(NSImage.SymbolConfiguration(paletteColors: [CalendarColor.color(item.event.record.color, .text)])))
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9.5, weight: .medium).applying(NSImage.SymbolConfiguration(paletteColors: [CalendarColor.color(item.event.record.color, .text, on: surface)])))
         let r = box(item)
         for day in item.first...item.last {
             let cell = CGRect(x: gutter + columnWidth * CGFloat(day) + 3, y: r.minY, width: columnWidth - 6, height: r.height)
@@ -547,9 +554,9 @@ final class DayStrip: CanvasView {
     /// The event being dragged, dashed on the days it would move to.
     private func drawMoved(_ item: LaneEvent, cg: CGContext) {
         let r = box(item)
-        let bar = CalendarColor.color(item.event.record.color, .bar)
+        let bar = CalendarColor.color(item.event.record.color, .bar, on: surface)
         let shape = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
-        Theme.bg.setFill()
+        surface.color.setFill()
         shape.fill()
         bar.withAlphaComponent(0.12).setFill()
         shape.fill()
@@ -843,7 +850,7 @@ final class HourCanvas: CanvasView {
         Theme.accent.setFill()
         CGRect(x: x, y: y - 0.75, width: columnWidth, height: 1.5).fill()
         NSBezierPath(ovalIn: CGRect(x: x - 3.5, y: y - 3.5, width: 7, height: 7)).fill()
-        drawLabel(CalendarModel.clockTime(content.now), font: Self.nowFont, color: Theme.accentText, y: y, background: Theme.bg, cg: cg)
+        drawLabel(CalendarModel.clockTime(content.now), font: Self.nowFont, color: Theme.accentText, y: y, background: content.surface.color, cg: cg)
     }
 
     private func draw(_ e: CalEvent, in r: CGRect, cg: CGContext) {
@@ -851,21 +858,22 @@ final class HourCanvas: CanvasView {
         cg.saveGState()
         if alpha < 1 { cg.setAlpha(alpha) }
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-        let bar = CalendarColor.color(e.record.color, .bar)
+        let surface = content.surface
+        let bar = CalendarColor.color(e.record.color, .bar, on: surface)
         if e.isFree {
-            Theme.bg.setFill()
+            surface.color.setFill()
             box.fill()
             bar.withAlphaComponent(0.6).setStroke()
             let edge = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 5.5, yRadius: 5.5)
             edge.lineWidth = 1
             edge.stroke()
         } else {
-            (e.isAway ? EventStyle.awayFill(e) : CalendarColor.color(e.record.color, .fill)).setFill()
+            (e.isAway ? EventStyle.awayFill(e, on: surface) : CalendarColor.color(e.record.color, .fill, on: surface)).setFill()
             box.fill()
             cg.saveGState()
             box.addClip()
             if e.isTentative, !e.isAway {
-                Theme.bg.setStroke()
+                surface.color.setStroke()
                 let stripes = NSBezierPath()
                 stripes.lineWidth = 3.5
                 var x = r.minX
@@ -900,9 +908,9 @@ final class HourCanvas: CanvasView {
 
     private func drawDraft(_ d: DraftBlock, cg: CGContext) {
         let r = rect(d)
-        let bar = CalendarColor.color(d.color, .bar)
+        let bar = CalendarColor.color(d.color, .bar, on: content.surface)
         let box = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
-        Theme.bg.setFill()
+        content.surface.color.setFill()
         box.fill()
         bar.withAlphaComponent(0.12).setFill()
         box.fill()
