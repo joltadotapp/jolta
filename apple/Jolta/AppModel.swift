@@ -63,6 +63,26 @@ final class AppModel {
     var showsDayPanel = UserDefaults.standard.bool(forKey: AppModel.key("DayPanel")) {
         didSet { UserDefaults.standard.set(showsDayPanel, forKey: Self.key("DayPanel")) }
     }
+    /// The sidebar is folded away (⌃⌘S), in mail and in the calendar.
+    var sidebarCollapsed = UserDefaults.standard.bool(forKey: AppModel.key("SidebarCollapsed")) {
+        didSet { UserDefaults.standard.set(sidebarCollapsed, forKey: Self.key("SidebarCollapsed")) }
+    }
+    /// The window has room for the sidebar. Without it the sidebar is folded
+    /// away whatever `sidebarCollapsed` says.
+    var sidebarFits = true
+    /// The window is one column wide: the list, with the conversation or the
+    /// message being written over it.
+    var singleColumn = false {
+        didSet {
+            guard singleColumn != oldValue else { return }
+            readerUp = false
+            // The reader beside the list shows what the cursor was on.
+            if !singleColumn, let open = selectedThreadID { markReadSoon(open) }
+        }
+    }
+    /// In one column, the conversation is over the list. Moving the cursor
+    /// in the list alone opens nothing to read, so it marks nothing read.
+    private(set) var readerUp = false
     /// The first open of calendar mode with no calendar on asks which to show.
     var showsCalendarIntro = false
     @ObservationIgnored var reminderTask: Task<Void, Never>?
@@ -90,7 +110,7 @@ final class AppModel {
     private(set) var turningOffAway: Set<Int64> = []
     /// Counts `AwayChanged`, so Settings reloads states that aren't on now too.
     private(set) var awayRevision = 0
-    var source: ListSource = .unifiedInbox { didSet { section = nil; listChanged(); focusSync() } }
+    var source: ListSource = .unifiedInbox { didSet { section = nil; readerUp = false; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
     var section: SectionInfo? { didSet { listChanged() } }
     private(set) var sections: [SectionInfo] = []
@@ -324,7 +344,10 @@ final class AppModel {
         notifier.onOpen = { [weak self] threadID in
             self?.mode = .mail
             self?.source = .unifiedInbox
-            if let threadID { self?.open(threadID: threadID) }
+            if let threadID {
+                self?.open(threadID: threadID)
+                self?.showReader()
+            }
         }
         notifier.onReply = { [weak self] threadID in
             self?.mode = .mail
@@ -651,7 +674,22 @@ final class AppModel {
     private(set) var focusSearchRequest = 0
 
     func requestSearchFocus() {
+        readerUp = false
         focusSearchRequest += 1
+    }
+
+    /// Return or a click on a row, in one column: the conversation comes over the list.
+    func showReader() {
+        guard singleColumn, !readerUp else { return }
+        readerUp = true
+        if let open = selectedThreadID { markReadSoon(open) }
+    }
+
+    /// Esc in one column: back from the conversation to the list. False when the list already shows.
+    func backToList() -> Bool {
+        guard singleColumn, readerUp, compose == nil else { return false }
+        readerUp = false
+        return true
     }
 
     private func listChanged() {
@@ -1205,9 +1243,20 @@ final class AppModel {
         selectedThreads = []
         openThread = nil
         openFailure = nil
+        readerUp = false
         showSummary(for: nil)
         cursorRow = nil
         cursor = (0, 0)
+    }
+
+    /// Marks the conversation read once it has been open for a second.
+    private func markReadSoon(_ threadID: Int64) {
+        markReadTask?.cancel()
+        markReadTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, selectedThreadID == threadID else { return }
+            _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
+        }
     }
 
     func open(threadID: Int64) {
@@ -1223,11 +1272,7 @@ final class AppModel {
         showSummary(for: threadID)
         let opening = ContinuousClock.now
         markReadTask?.cancel()
-        markReadTask = Task {
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled, selectedThreadID == threadID else { return }
-            _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
-        }
+        if !singleColumn || readerUp { markReadSoon(threadID) }
         let offset = Int32(TimeZone.current.secondsFromGMT())
         Task {
             do {

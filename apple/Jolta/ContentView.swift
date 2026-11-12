@@ -7,12 +7,35 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Group {
-            if model.mode == .calendar {
-                CalendarModeView(model: model)
-            } else {
-                mail
+        GeometryReader { geo in
+            let columns = MailColumns(width: geo.size.width, sidebar: !model.sidebarCollapsed, panel: model.showsDayPanel, listWidth: listWidth)
+            let calendarFits = CalendarModeView.sidebarFits(model, width: geo.size.width)
+            let fits = model.mode == .calendar ? calendarFits : columns.sidebarFits
+            let sidebar = model.mode == .calendar ? calendarFits && !model.sidebarCollapsed : columns.sidebar
+            ZStack(alignment: .topLeading) {
+                if model.mode == .calendar {
+                    CalendarModeView(model: model, showsSidebar: sidebar)
+                } else {
+                    mail(columns)
+                }
+                // Over the list and reader; the list stays underneath for the keys.
+                if model.isInboxZero, model.mode == .mail {
+                    let side: CGFloat = columns.sidebar ? Theme.sidebarWidth : 0
+                    InboxZero(compose: model.startCompose)
+                        // The scene covers the list, and with it the list's toast.
+                        .overlay(alignment: .bottom) { ToastLayer(model: model) }
+                        .frame(width: geo.size.width - side - (columns.panel ? MailColumns.panel : 0), height: geo.size.height)
+                        .padding(.leading, side)
+                        .transition(.opacity)
+                }
+                // The sidebar holds the mode switcher; without it, it sits beside the window buttons.
+                if !sidebar {
+                    ModeSwitcher(model: model).padding(.top, 5).padding(.leading, ModeSwitcher.besideWindowButtons)
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .onChange(of: columns.single, initial: true) { _, single in model.singleColumn = single }
+            .onChange(of: fits, initial: true) { _, fits in model.sidebarFits = fits }
         }
         .sheet(isPresented: Binding(get: { model.showsCalendarIntro }, set: { if !$0 { model.finishCalendarIntro() } })) {
             CalendarIntroSheet(model: model)
@@ -33,21 +56,6 @@ struct ContentView: View {
             AddIMAPAccount(model: model) { added in
                 model.addingIMAP = false
                 if let added { model.notify("Added \(added.address). Jolta is syncing it now.") }
-            }
-        }
-        .overlay(alignment: .trailing) {
-            // Over the list and reader; the list stays underneath for the keys.
-            if model.isInboxZero, model.mode == .mail {
-                GeometryReader { geo in
-                    let panel: CGFloat = model.showsDayPanel ? 300 : 0
-                    InboxZero(compose: model.startCompose)
-                        // The scene covers the list, and with it the list's toast.
-                        .overlay(alignment: .bottom) { ToastLayer(model: model) }
-                        .frame(width: geo.size.width - Theme.sidebarWidth - panel)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.trailing, panel)
-                }
-                .transition(.opacity)
             }
         }
         .animation(.easeInOut(duration: 0.4), value: model.isInboxZero)
@@ -111,23 +119,67 @@ struct ContentView: View {
     }
 }
 
+/// Which of mail's columns a window shows, and how wide. A window too
+/// narrow for all of them loses the Today panel first, then the sidebar, and
+/// under `singleBelow` shows one column: the list, or the reader over it.
+struct MailColumns: Equatable {
+    static let listMin: CGFloat = 380
+    static let readerMin: CGFloat = 480
+    static let readerMinBesidePanel: CGFloat = 360
+    static let panel: CGFloat = 300
+    /// The list's least beside the reader once the sidebar is gone too.
+    static let tightListMin: CGFloat = 340
+    static let singleBelow: CGFloat = 760
+
+    let sidebar: Bool
+    /// The sidebar would show if it weren't folded away by hand.
+    let sidebarFits: Bool
+    let panel: Bool
+    let single: Bool
+    let list: CGFloat
+    let reader: CGFloat
+
+    init(width: CGFloat, sidebar wantsSidebar: Bool, panel wantsPanel: Bool, listWidth: Double) {
+        sidebarFits = width >= Theme.sidebarWidth + Self.listMin + Self.readerMin
+        guard width >= Self.singleBelow else {
+            (sidebar, panel, single, list, reader) = (false, false, true, width, width)
+            return
+        }
+        let side = wantsSidebar && sidebarFits ? Theme.sidebarWidth : 0
+        let panel = wantsPanel && width >= side + Self.listMin + Self.readerMinBesidePanel + Self.panel
+        let rest = width - side - (panel ? Self.panel : 0)
+        // The reader keeps its least, down to what the tightest list leaves it.
+        let reader = panel ? Self.readerMinBesidePanel : min(Self.readerMin, rest - Self.tightListMin)
+        list = min(max(CGFloat(listWidth), Self.listMin), rest - reader)
+        self.reader = rest - list
+        self.panel = panel
+        sidebar = side > 0
+        single = false
+    }
+}
+
 /// The line between list and reader. Dragging it sets the list's width;
 /// a double click goes back to the default. An AppKit view, so it gets the
 /// clicks ahead of the message list's table underneath.
 struct ColumnResizer: NSViewRepresentable {
     @Binding var width: Double
+    /// The list's width on screen, which a narrow window makes less than
+    /// the one stored: a drag starts from what the user sees.
+    let shown: Double
 
     func makeNSView(context: Context) -> Handle { Handle() }
 
     func updateNSView(_ handle: Handle, context: Context) {
-        handle.width = width
+        handle.width = shown
         handle.onChange = { width = $0 }
     }
 
     final class Handle: NSView {
         var width = 0.0
         var onChange: (Double) -> Void = { _ in }
-        private var start: (x: CGFloat, width: Double)?
+        private var start: (x: CGFloat, width: Double)? { didSet { needsDisplay = true } }
+        private var hovering = false { didSet { if hovering != oldValue { needsDisplay = true } } }
+        private var hoverArea: NSTrackingArea?
 
         override var mouseDownCanMoveWindow: Bool { false }
 
@@ -135,9 +187,22 @@ struct ColumnResizer: NSViewRepresentable {
             addCursorRect(bounds, cursor: .columnResize)
         }
 
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let hoverArea { removeTrackingArea(hoverArea) }
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+            addTrackingArea(area)
+            hoverArea = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { hovering = true }
+        override func mouseExited(with event: NSEvent) { hovering = false }
+
         override func draw(_ dirtyRect: NSRect) {
-            Theme.line2.setFill()
-            NSRect(x: bounds.midX - 0.5, y: 0, width: 1, height: bounds.height).fill()
+            let held = hovering || start != nil
+            (held ? Theme.text3 : Theme.line2).setFill()
+            let line: CGFloat = held ? 3 : 1
+            NSRect(x: bounds.midX - line / 2, y: 0, width: line, height: bounds.height).fill()
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -150,7 +215,7 @@ struct ColumnResizer: NSViewRepresentable {
 
         override func mouseDragged(with event: NSEvent) {
             guard let start else { return }
-            onChange(min(max(start.width + event.locationInWindow.x - start.x, 380), 900))
+            onChange(min(max(start.width + event.locationInWindow.x - start.x, MailColumns.listMin), 900))
         }
 
         override func mouseUp(with event: NSEvent) {
@@ -160,28 +225,49 @@ struct ColumnResizer: NSViewRepresentable {
 }
 
 extension ContentView {
-    private var mail: some View {
-        HStack(spacing: 0) {
-            Sidebar(model: model)
-                .frame(width: Theme.sidebarWidth)
-                .background(Color(Theme.side))
-                .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+    private func mail(_ columns: MailColumns) -> some View {
+        let inset: CGFloat = columns.sidebar ? 0 : ModeSwitcher.headerInset
+        // In one column the list and the reader lie side by side, each as
+        // wide as the window, and the pair slides: the list stays in the
+        // window for the keys while the reader is over it.
+        let readerOver = columns.single && (model.readerUp || model.compose != nil)
+        return HStack(spacing: 0) {
+            if columns.sidebar {
+                Sidebar(model: model)
+                    .frame(width: Theme.sidebarWidth)
+                    .background(Color(Theme.side))
+                    .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+                    .transition(.move(edge: .leading))
+            }
             if model.needsAccount {
                 Welcome(model: model)
             } else {
-                // The chosen width, sized before the reader (which keeps its 480 pt
-                // minimum): a narrow window takes width from the list first.
-                ListColumn(model: model)
-                    .frame(minWidth: 380, idealWidth: listWidth, maxWidth: listWidth)
-                    .overlay(alignment: .trailing) { ColumnResizer(width: $listWidth).frame(width: 9).offset(x: 4) }
-                    .layoutPriority(1)
-                    .zIndex(1)
-                ReaderColumn(model: model)
-                    .frame(minWidth: model.showsDayPanel ? 360 : 480, maxWidth: .infinity)
-                    .background(Color(Theme.reader))
-                if model.showsDayPanel {
+                HStack(spacing: 0) {
+                    ListColumn(model: model, width: columns.list)
+                        .frame(width: columns.list)
+                        .overlay(alignment: .trailing) {
+                            if !columns.single { ColumnResizer(width: $listWidth, shown: columns.list).frame(width: 9).offset(x: 4) }
+                        }
+                        .zIndex(1)
+                        .environment(\.headerInset, inset)
+                        .allowsHitTesting(!readerOver)
+                        .accessibilityHidden(readerOver)
+                    ReaderColumn(model: model)
+                        .frame(width: columns.reader)
+                        .background(Color(Theme.reader))
+                        // The list's toast is out of the window with the list.
+                        .overlay(alignment: .bottom) { if readerOver { ToastLayer(model: model) } }
+                        .environment(\.headerInset, columns.single ? inset : 0)
+                        .allowsHitTesting(!columns.single || readerOver)
+                        .accessibilityHidden(columns.single && !readerOver)
+                }
+                .offset(x: readerOver ? -columns.list : 0)
+                .frame(width: columns.single ? columns.list : columns.list + columns.reader, alignment: .leading)
+                .clipped()
+                .animation(Theme.settle, value: readerOver)
+                if columns.panel {
                     DayPanel(model: model)
-                        .frame(width: 300)
+                        .frame(width: MailColumns.panel)
                         .transition(.move(edge: .trailing))
                 }
             }
@@ -533,6 +619,8 @@ struct ListActions: View {
 
 struct ListColumn: View {
     @Bindable var model: AppModel
+    let width: CGFloat
+    @Environment(\.headerInset) private var headerInset
 
     var body: some View {
         VStack(spacing: 0) {
@@ -553,10 +641,11 @@ struct ListColumn: View {
                     }
                     Spacer(minLength: 0)
                 }
-                SortMenu(model: model)
+                // Beside the window buttons a narrow list has no room for it.
+                if width - max(Theme.gutter, headerInset) >= 300 { SortMenu(model: model) }
                 SearchField(model: model)
             }
-            .padding(.leading, Theme.gutter)
+            .padding(.leading, max(Theme.gutter, headerInset))
             .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
             .background(TitleBarArea())
@@ -831,13 +920,10 @@ struct ToastView: View {
 
 struct KeyFooter: View {
     var body: some View {
-        HStack(spacing: 14) {
-            hint(["J", "K"], "move")
-            hint(["E"], "archive")
-            hint(["R"], "reply")
-            hint(["Z"], "undo")
-            Spacer()
-            HStack(spacing: 5) { KeyCap(key: "⌘K"); Text("commands") }.fixedSize()
+        // A narrow list keeps the first hints and the palette's.
+        ViewThatFits(in: .horizontal) {
+            row(all: true)
+            row(all: false)
         }
         .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
@@ -845,6 +931,19 @@ struct KeyFooter: View {
         .padding(.trailing, 20)
         .frame(height: 34)
         .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+
+    private func row(all: Bool) -> some View {
+        HStack(spacing: 14) {
+            hint(["J", "K"], "move")
+            hint(["E"], "archive")
+            if all {
+                hint(["R"], "reply")
+                hint(["Z"], "undo")
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 5) { KeyCap(key: "⌘K"); Text("commands") }.fixedSize()
+        }
     }
 
     private func hint(_ keys: [String], _ label: String) -> some View {
@@ -878,6 +977,7 @@ struct ActionButton: View {
 
 struct ReaderColumn: View {
     let model: AppModel
+    @Environment(\.headerInset) private var headerInset
 
     /// `titles` names the triage buttons, `replyTitles` the reply ones, which
     /// lose their words first when the reader narrows.
@@ -904,6 +1004,9 @@ struct ReaderColumn: View {
 
     private func bar(titles: Bool, replyTitles: Bool, position: Bool, jk: Bool) -> some View {
         HStack(spacing: 4) {
+            if model.singleColumn {
+                ActionButton(icon: "chevron.left", title: "Back to the List", key: "esc", showsTitle: false, showsKey: false) { _ = model.backToList() }
+            }
             if model.openThread != nil || model.isMultiSelection {
                 actions(titles: titles, replyTitles: replyTitles)
             }
@@ -934,7 +1037,7 @@ struct ReaderColumn: View {
                 bar(titles: false, replyTitles: false, position: false, jk: false)
             }
             // A toolbar button's icon sits 7 points inside it.
-            .padding(.leading, Theme.gutter - 7)
+            .padding(.leading, max(Theme.gutter - 7, headerInset))
             .padding(.trailing, 20)
             .frame(height: Theme.headerHeight)
             .background(TitleBarArea())

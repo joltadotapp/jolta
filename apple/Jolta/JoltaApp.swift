@@ -18,7 +18,7 @@ struct JoltaApp: App {
                     ProgressView()
                 }
             }
-            .frame(minWidth: 1140, minHeight: 600)
+            .frame(minWidth: 640, minHeight: 600)
             .background(WindowFrameMemory(name: "Jolta main window"))
             .onOpenURL { url in model?.subscribe(link: url) }
             .task {
@@ -35,6 +35,14 @@ struct JoltaApp: App {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandGroup(replacing: .appSettings) { SettingsMenuButton() }
             CommandGroup(replacing: .newItem) { NewMessageButton(model: model) }
+            CommandGroup(before: .sidebar) {
+                // Folded away for lack of room, it has nothing to show or hide.
+                Button(model?.sidebarCollapsed == false && model?.sidebarFits == true ? "Hide Sidebar" : "Show Sidebar") {
+                    withAnimation(Theme.settle) { model?.sidebarCollapsed.toggle() }
+                }
+                .keyboardShortcut("s", modifiers: [.control, .command])
+                .disabled(model?.sidebarFits != true)
+            }
             CommandMenu("Format") { FormatMenu() }
             CommandMenu("Conversation") {
                 // While a text editor has the keyboard, ⌘U underlines.

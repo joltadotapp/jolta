@@ -35,6 +35,13 @@ extension Theme {
     }
 }
 
+extension EnvironmentValues {
+    /// What the header of the window's first column leaves free on its left
+    /// while the sidebar is folded away: the window buttons and the mode
+    /// switcher sit there. Zero beside the sidebar.
+    @Entry var headerInset: CGFloat = 0
+}
+
 extension AnyTransition {
     /// How a panel comes and goes, under `Theme.quick`. `anchor` is the
     /// panel's middle in its own frame, for one placed with an offset.

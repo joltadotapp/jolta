@@ -5,15 +5,24 @@ import SwiftUI
 /// key hints. ⌘2 opens it and ⌘1 goes back to mail.
 struct CalendarModeView: View {
     let model: AppModel
+    let showsSidebar: Bool
     @State private var cardHeight: CGFloat = 0
+
+    /// The sidebar has room while the period keeps 500 points beside it and the editor.
+    static func sidebarFits(_ model: AppModel, width: CGFloat) -> Bool {
+        width >= Theme.sidebarWidth + 500 + (model.calendar.editor == nil ? 0 : 400)
+    }
 
     var body: some View {
         let cal = model.calendar
         HStack(spacing: 0) {
-            CalendarSidebar(model: model)
-                .frame(width: Theme.sidebarWidth)
-                .background(Color(Theme.side))
-                .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+            if showsSidebar {
+                CalendarSidebar(model: model)
+                    .frame(width: Theme.sidebarWidth)
+                    .background(Color(Theme.side))
+                    .overlay(alignment: .trailing) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
+                    .transition(.move(edge: .leading))
+            }
             VStack(spacing: 0) {
                 CalendarHeader(cal: cal)
                 if let message = cal.lastError { CalendarProblem(message: message) { cal.retry() } }
@@ -27,6 +36,7 @@ struct CalendarModeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 CalendarFooter(span: cal.span)
             }
+            .environment(\.headerInset, showsSidebar ? 0 : ModeSwitcher.headerInset)
             .background(Color(Theme.bg))
             // Not beside `confirmation`: one view presents one sheet.
             .scopePrompt(Binding(get: { cal.scopePrompt }, set: { cal.scopePrompt = $0 }))
@@ -97,7 +107,7 @@ private struct RepeatPopoverLayer: View {
                     .onTapGesture { editor.repeatPicker = nil }
                 RepeatPopover(picker: picker, day: editor.day, arrowY: rowMid - top, cancel: { editor.repeatPicker = nil }, done: { editor.finishRepeat() })
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-                    .offset(x: geo.size.width - 400 - 14 - 340, y: top)
+                    .offset(x: max(8, geo.size.width - 400 - 14 - 340), y: top)
             }
         }
     }
@@ -190,6 +200,7 @@ extension View {
 
 struct CalendarHeader: View {
     let cal: CalendarModel
+    @Environment(\.headerInset) private var headerInset
 
     private static let monthYear: DateFormatter = {
         let f = DateFormatter()
@@ -230,6 +241,23 @@ struct CalendarHeader: View {
     }
 
     var body: some View {
+        // The next meeting goes first when the header runs out of room. One
+        // narrower still, beside the editor in a small window, is cut off at
+        // the right instead of pushing the columns past the window.
+        ViewThatFits(in: .horizontal) {
+            row(meeting: true)
+            row(meeting: false)
+        }
+        .padding(.leading, max(22, headerInset))
+        .padding(.trailing, 20)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .clipped()
+        .frame(height: Theme.headerHeight)
+        .background(TitleBarArea())
+        .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+    }
+
+    private func row(meeting: Bool) -> some View {
         HStack(spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(title.0).font(.system(size: 15, weight: .semibold)).tracking(-0.15)
@@ -252,17 +280,12 @@ struct CalendarHeader: View {
                     .help("Next \(period) (J)")
                     .accessibilityIdentifier("calendar-next")
             }
-            if let next = cal.nextMeeting {
+            if meeting, let next = cal.nextMeeting {
                 NextMeetingLine(next: next, now: cal.now)
             }
             Spacer(minLength: 8)
             SpanSwitcher(cal: cal)
         }
-        .padding(.leading, 22)
-        .padding(.trailing, 20)
-        .frame(height: Theme.headerHeight)
-        .background(TitleBarArea())
-        .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }
 }
 
@@ -343,6 +366,8 @@ struct CalendarFooter: View {
         .font(.system(size: Theme.small))
         .foregroundStyle(Color(Theme.text3))
         .padding(.horizontal, 20)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .clipped()
         .frame(height: 34)
         .overlay(alignment: .top) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
     }

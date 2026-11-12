@@ -32,6 +32,7 @@ struct ComposeView: View {
     /// Each account that can send, with its aliases.
     @State private var senders: [MailSender] = []
     @AppStorage(AppModel.key("showsFormatBar")) private var showsFormatBar = true
+    @Environment(\.headerInset) private var headerInset
 
     private func actions(showsKeys: Bool) -> some View {
         HStack(spacing: 4) {
@@ -71,7 +72,7 @@ struct ComposeView: View {
                     actions(showsKeys: false)
                 }
             }
-            .padding(.leading, Theme.gutter)
+            .padding(.leading, max(Theme.gutter, headerInset))
             .padding(.trailing, 16)
             .frame(height: Theme.headerHeight)
             .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }

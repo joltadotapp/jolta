@@ -248,13 +248,15 @@ struct MessageList: NSViewRepresentable {
                 model.openDraft(threadID: r.threadId)
             } else {
                 model.open(threadID: r.threadId)
+                model.showReader()
             }
         }
 
-        /// In Drafts a click edits the draft; J and K still read through them.
+        /// In Drafts a click edits the draft; J and K still read through
+        /// them. In one column a click brings the conversation over the list.
         @objc func clicked() {
-            guard model.showsDrafts, let table, table.clickedRow >= 0, table.numberOfSelectedRows == 1 else { return }
-            openSelected()
+            guard let table, table.clickedRow >= 0, table.numberOfSelectedRows == 1 else { return }
+            if model.showsDrafts { openSelected() } else { model.showReader() }
         }
 
         func move(_ delta: Int) {
@@ -369,7 +371,7 @@ struct MessageList: NSViewRepresentable {
                 guard model.showsSections else { return false }
                 model.nextSection(backwards: event.modifierFlags.contains(.shift))
                 return true
-            case 53: return clearSelection()
+            case 53: return clearSelection() || model.backToList()
             default: break
             }
             // `characters` keeps what Shift and Option produce, so `#` and `?`
