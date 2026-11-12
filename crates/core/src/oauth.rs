@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -697,6 +697,12 @@ pub fn remember(account_ref: &str, access_token: &str, expires_in: u64) {
     );
 }
 
+/// The access token kept under `key`, unless it has expired by `now`.
+fn cached(key: &str, _now: SystemTime) -> Option<String> {
+    let cache = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    cache.as_ref()?.get(key).filter(|c| c.until > Instant::now()).map(|c| c.token.clone())
+}
+
 /// Drops every access token kept for an account, its room lists' too.
 pub fn forget(account: &Account) {
     if let Some(cache) = TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -757,10 +763,8 @@ pub async fn token(account: &Account, grant: Grant) -> Result<String> {
     let data_dir = data_dir();
     let provider = Provider::for_kind(account.kind).ok_or_else(|| Error::Auth("not an OAuth account".into()))?;
     let key = cache_key(account, grant);
-    if let Some(c) = TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&key)) {
-        if c.until > Instant::now() {
-            return Ok(c.token.clone());
-        }
+    if let Some(token) = cached(&key, SystemTime::now()) {
+        return Ok(token);
     }
     let client = provider.client(&data_dir)?;
     let refresh = secrets::password(&account.secret_ref)?;
@@ -822,6 +826,16 @@ mod tests {
             Some(id) => assert_eq!(Provider::Google.client(&empty).unwrap().id, id),
             None => assert!(Provider::Google.client(&empty).is_err()),
         }
+    }
+
+    /// A Mac that slept past a token's expiry gets a new token on waking,
+    /// so the expiry is kept on the wall clock, which counts the sleep.
+    #[test]
+    fn a_token_expires_by_the_wall_clock() {
+        let key = "test-wall-clock";
+        remember(key, "t", 3600);
+        assert_eq!(cached(key, SystemTime::now()).as_deref(), Some("t"));
+        assert_eq!(cached(key, SystemTime::now() + Duration::from_secs(2 * 3600)), None, "two hours later");
     }
 
     #[test]
