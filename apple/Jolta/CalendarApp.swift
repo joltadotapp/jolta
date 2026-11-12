@@ -206,8 +206,10 @@ extension AppModel {
             }
             return true
         }
-        // The editor's fields and buttons take the keys; Esc closes it.
+        // The editor's fields and buttons take the keys, and its stop the
+        // ones a text field isn't there to take; Esc closes it.
         if cal.editor != nil || cal.discard != nil {
+            if cal.discard == nil, cal.editorStopKey(event) { return true }
             guard event.keyCode == 53, cal.discard == nil else { return false }
             cal.closeEditor()
             return true

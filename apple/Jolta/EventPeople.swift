@@ -65,6 +65,7 @@ struct PeopleField: View {
             .onKeyPress(keys: [.tab, .delete, .leftArrow, .rightArrow, .upArrow, .downArrow, .return, .escape], phases: .down) { press in
                 key(press)
             }
+            .tabStops(editor, from: .people)
             .onSubmit { addTyped() }
             .accessibilityIdentifier("editor-people")
     }
