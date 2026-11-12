@@ -1075,6 +1075,53 @@ final class Journeys: XCTestCase {
         XCTAssertNotEqual(neighbour.value as? String, "Throwaway")
     }
 
+    /// The editor without the mouse. ⇧⌘C puts the keyboard on the calendar,
+    /// where ↓ picks the next one, and Esc then asks before discarding a new
+    /// event whose calendar was changed. ⇧⌘A switches All day on and off.
+    /// After the repeat popover closes, typing goes on in the field it left.
+    func testEditorWithoutTheMouse() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("c", modifierFlags: [])
+        let title = app.textFields["editor-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "C opens the editor")
+        let calendar = app.descendants(matching: .any).matching(identifier: "editor-calendar").firstMatch
+        let first = calendar.title
+        app.typeKey("c", modifierFlags: [.command, .shift])
+        app.typeKey(.downArrow, modifierFlags: [])
+        if calendar.title == first { app.typeKey(.upArrow, modifierFlags: []) }
+        XCTAssertTrue(waitUntil { calendar.title != first }, "⇧⌘C and an arrow key pick another calendar: \(calendar.title)")
+        app.typeKey(.escape, modifierFlags: [])
+        let discard = app.buttons["Discard"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 5), "Esc asks before dropping a new event whose calendar was changed")
+        discard.click()
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+
+        app.typeKey("c", modifierFlags: [])
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let allDay = app.checkBoxes["All day"]
+        let start = app.textFields["editor-start"]
+        XCTAssertTrue(start.exists, "a new event has a start time")
+        app.typeKey("a", modifierFlags: [.command, .shift])
+        XCTAssertTrue(start.waitForNonExistence(timeout: 5), "⇧⌘A makes it all day")
+        XCTAssertEqual(allDay.value as? Int, 1)
+        app.typeKey("a", modifierFlags: [.command, .shift])
+        XCTAssertTrue(start.waitForExistence(timeout: 5), "and timed again")
+
+        title.click()
+        title.typeText("Plan")
+        app.typeKey("r", modifierFlags: .command)
+        let popover = app.descendants(matching: .any).matching(identifier: "repeat-popover").firstMatch
+        XCTAssertTrue(popover.waitForExistence(timeout: 5), "⌘R opens the repeat popover")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(popover.waitForNonExistence(timeout: 5), "Esc closes it")
+        app.typeText("ning")
+        XCTAssertTrue(waitUntil { (title.value as? String) == "Planning" }, "typing goes on in the title: \(title.value as? String ?? "")")
+        app.typeKey(.escape, modifierFlags: [])
+        if discard.waitForExistence(timeout: 3) { discard.click() }
+    }
+
     /// A meeting in a calendar on this Mac, whose invitations Jolta mails
     /// itself: the first save asks once which account sends them, Return
     /// takes the first, and Send invitations? names it and has a message
