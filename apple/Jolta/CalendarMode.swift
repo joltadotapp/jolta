@@ -583,7 +583,7 @@ struct MonthCell: View {
                         .onEnded { dragged(e, $0, true) })
             }
             if list.count > shown {
-                Text("\(list.count - shown) more").font(.system(size: 11)).foregroundStyle(Color(Theme.text3)).padding(.horizontal, 6)
+                MonthMore(count: list.count - shown, day: day) { cal.openDay(day) }
             }
             Spacer(minLength: 0)
         }
@@ -599,6 +599,31 @@ struct MonthCell: View {
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
         .clipped()
+    }
+}
+
+/// "3 more" under a month cell's events: opens that day.
+private struct MonthMore: View {
+    let count: Int
+    let day: CalendarDay
+    let open: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: open) {
+            Text("\(count) more")
+                .font(.system(size: Theme.caption))
+                .foregroundStyle(Color(hovering ? Theme.text : Theme.text2))
+                .padding(.horizontal, 5)
+                .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                .selectedRow(false, hovering: hovering, radius: Theme.radiusKey)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Show this day")
+        .accessibilityLabel("\(count) more \(count == 1 ? "event" : "events"), \(CalendarModel.spokenDay(day.key))")
+        .accessibilityIdentifier("month-more-\(day.key)")
     }
 }
 
