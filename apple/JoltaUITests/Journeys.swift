@@ -166,6 +166,21 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(list.tableRows.firstMatch.isSelected, "the top one")
     }
 
+    /// A list key typed after a click in the message gives the keyboard back
+    /// to the list, which shows its caret only while it has the keyboard.
+    func testListKeyTakesTheKeyboardBack() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        let reader = app.webViews.firstMatch
+        XCTAssertTrue(reader.waitForExistence(timeout: 5), "the conversation opens")
+        let list = app.tables.firstMatch
+        XCTAssertEqual(list.value(forKey: "hasKeyboardFocus") as? Bool, true, "the list has the keyboard")
+        reader.click()
+        XCTAssertTrue(waitUntil { list.value(forKey: "hasKeyboardFocus") as? Bool == false }, "a click in the message takes it")
+        app.typeKey("j", modifierFlags: [])
+        XCTAssertTrue(waitUntil { list.value(forKey: "hasKeyboardFocus") as? Bool == true }, "j gives it back to the list")
+    }
+
     /// Mail that arrives at inbox zero stays unread and unopened until it is
     /// opened, so it can notify. The data folder also has an account on the
     /// local Dovecot (`scripts/test-servers.sh up`), and `scripts/ui-tests.sh`
