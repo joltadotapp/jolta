@@ -368,6 +368,24 @@ struct EventEditorPanel: View {
     @State private var lastFocus: Focus?
     /// The room picker was just closed: the Room field keeps the keyboard without opening it again.
     @State private var roomClosed = false
+    /// The keyboard is on its way back to the field a popover took it from.
+    @State private var returning = false
+
+    /// Gives the keyboard back to the field it was in, unless a stop has it.
+    private func giveBack() {
+        guard editor.stop == nil else { return }
+        returning = focus == nil
+        focus = lastFocus ?? firstFocus
+    }
+
+    /// SwiftUI selects a field's whole text as it gives it the keyboard, so
+    /// the next letter would replace what was typed there. The caret goes
+    /// to the end, where the typing stopped.
+    private static func caretToEnd() {
+        guard let field = KeyRouter.shared.window?.firstResponder as? NSTextView, field.isFieldEditor else { return }
+        let all = NSRange(location: 0, length: field.string.utf16.count)
+        if all.length > 0, field.selectedRange() == all { field.setSelectedRange(NSRange(location: all.length, length: 0)) }
+    }
 
     enum Focus: Hashable {
         case title, day, start, end, people, room, location, description, calendar, showAs, reminder, visibility
@@ -451,6 +469,10 @@ struct EventEditorPanel: View {
                 lastFocus = new
                 editor.stop = nil
             }
+            if returning, new != nil {
+                returning = false
+                DispatchQueue.main.async { Self.caretToEnd() }
+            }
             if old == .room { roomClosed = false }
             // Arriving at Room opens its picker, except back from Location with
             // ⇧⇥ or after closing it, so ⇧⇥ and ⇥ pass the field in both directions.
@@ -470,14 +492,14 @@ struct EventEditorPanel: View {
         }
         // The repeat popover and Find a time take the keyboard; it goes back where it was.
         .onChange(of: editor.repeatPicker != nil) { _, open in
-            if !open, editor.stop == nil { focus = lastFocus ?? firstFocus }
+            if !open { giveBack() }
         }
         .onChange(of: model.findTime != nil) { _, open in
-            if !open, editor.stop == nil { DispatchQueue.main.async { focus = lastFocus ?? firstFocus } }
+            if !open { DispatchQueue.main.async { giveBack() } }
         }
         // The shortcut sheet's filter took it too.
         .onChange(of: model.showsHelp) { _, open in
-            if !open, editor.stop == nil { DispatchQueue.main.async { focus = lastFocus ?? firstFocus } }
+            if !open { DispatchQueue.main.async { giveBack() } }
         }
         // Find a time over the editor takes Esc, Return and ⌘Return.
         .disabled(model.findTime != nil)
