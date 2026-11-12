@@ -960,6 +960,51 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil { line.frame.minX < day.minX - 50 }, "month view moves it a day earlier too")
     }
 
+    /// More all-day events on a day than the row above the hours has lanes
+    /// for: the day says "+N" under its lanes. A click on it opens that day,
+    /// where every one shows. The arrow keys reach it too, and Return opens
+    /// the day from there.
+    func testAllDayOverflow() throws {
+        let app = try launch()
+        app.typeKey("2", modifierFlags: .command)
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        app.typeKey("w", modifierFlags: [])
+        let event = { (label: String) in app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch }
+        let names = (1...4).map { "Offsite \($0)" }
+        let field = app.textFields["editor-title"]
+        for name in names {
+            app.typeKey("c", modifierFlags: [])
+            XCTAssertTrue(field.waitForExistence(timeout: 5), "C opens the editor")
+            field.typeText(name)
+            app.checkBoxes["All day"].click()
+            app.typeKey(.return, modifierFlags: .command)
+            XCTAssertTrue(field.waitForNonExistence(timeout: 5), "⌘↩ saves \(name)")
+        }
+        let week = title.label
+        let more = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "more-")).firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5), "the day says how many all-day events have no lane")
+        let shown = names.filter { event($0 + ", all day").exists }
+        XCTAssertLessThan(shown.count, names.count, "the week has no lane for at least one")
+
+        more.click()
+        XCTAssertTrue(waitUntil { title.label != week }, "a click on +N opens that day")
+        for name in names { XCTAssertTrue(event(name + ", all day").waitForExistence(timeout: 5), "the day view shows \(name)") }
+
+        app.typeKey("w", modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label == week }, "W is the week again")
+        event(try XCTUnwrap(shown.first, "one has a lane") + ", all day").click()
+        let selected = { (more.value as? String) == "selected" }
+        // The events without a lane come before or after the clicked one in the day's order.
+        for key in Array(repeating: XCUIKeyboardKey.downArrow, count: 6) + Array(repeating: .upArrow, count: 10) where !selected() {
+            app.typeKey(key, modifierFlags: [])
+            RunLoop.current.run(until: Date() + 0.3)
+        }
+        XCTAssertTrue(selected(), "the arrow keys reach +N")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil { title.label != week }, "Return on +N opens that day")
+    }
+
     /// A meeting in a calendar on this Mac, whose invitations Jolta mails
     /// itself: the first save asks once which account sends them, Return
     /// takes the first, and Send invitations? names it and has a message
