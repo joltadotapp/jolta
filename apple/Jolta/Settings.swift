@@ -96,7 +96,7 @@ struct VIPSettings: View {
 
     var body: some View {
         SettingsScroll {
-            SettingsSection("VIPs", footer: "Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender. General › New mail banners can limit banners to VIPs.") {
+            SettingsSection("VIPs", footer: "Mail from a VIP has a seal in front of the sender's name and shows in the VIP section. Press ! on a conversation to add or remove its sender. General › Notify me about can limit notifications to VIPs.") {
                 ForEach(vips, id: \.self) { vip in
                     SettingsBlock {
                         HStack(spacing: 10) {

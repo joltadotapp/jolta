@@ -64,7 +64,7 @@ struct AgentsSettings: View {
                         .settingsSwitch()
                 }
                 SettingsRow(title: "Connect an agent", detail: model.mcpStatus) {
-                    Button("Copy Command") {
+                    Button("Copy Path") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(model.mcpHelperPath, forType: .string)
                     }
