@@ -97,6 +97,29 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(identifier: "event-detail-title").firstMatch.waitForExistence(timeout: 5), "and Open opens the event")
     }
 
+    /// ⌘F opens a find bar on the open conversation with the keyboard in
+    /// it: letters go into the field and run no command, and Esc closes the
+    /// bar and gives the keys back to the list. Space from the list scrolls
+    /// the conversation and leaves the list alone.
+    func testFindInConversation() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "the conversation opens")
+        app.typeKey(" ", modifierFlags: [])
+        XCTAssertTrue(visible(app, "Lunch on Friday"), "Space leaves the list as it is")
+        app.typeKey("f", modifierFlags: .command)
+        let find = app.textFields["reader-find"]
+        XCTAssertTrue(find.waitForExistence(timeout: 5), "⌘F opens the find bar")
+        app.typeText("free")
+        XCTAssertTrue(waitUntil { (find.value as? String) == "free" }, "typing goes into the bar: \(find.value as? String ?? "")")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertFalse(app.textFields["compose-to"].exists, "the letters and Return ran no command")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(find.waitForNonExistence(timeout: 5), "Esc closes the bar")
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(text(app, "Lunch on Friday").waitForNonExistence(timeout: 5), "and the list has the keys again")
+    }
+
     /// Z takes the last action back after its message has left the screen.
     func testUndoOutlivesItsToast() throws {
         let app = try launch()
