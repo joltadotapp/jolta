@@ -181,6 +181,8 @@ final class Journeys: XCTestCase {
         page.click()
         let password = app.secureTextFields.firstMatch
         XCTAssertTrue(password.waitForExistence(timeout: 5), "the account page asks for its password")
+        // The row can start below the window's lower edge.
+        password.scroll(byDeltaX: 0, deltaY: -400)
         password.click()
         password.typeText("jolta-test")
         app.buttons["Save"].firstMatch.click()

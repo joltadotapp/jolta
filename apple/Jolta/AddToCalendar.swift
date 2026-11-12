@@ -106,7 +106,9 @@ struct AddCalendarPanel: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10)
+            // Room for the caret of the selected row.
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
             .frame(height: 36)
             .selectedRow(on)
             .contentShape(Rectangle())

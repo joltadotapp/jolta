@@ -294,7 +294,9 @@ private struct RadioRow: View {
                 }
             }
             .foregroundStyle(Color(reason == nil ? Theme.text : Theme.text3))
-            .padding(.horizontal, 10)
+            // Room for the caret of the selected row.
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
             .padding(.vertical, reason == nil ? 0 : 3)
             .frame(minHeight: 24)
             .selectedRow(focused, radius: Theme.radiusControl)

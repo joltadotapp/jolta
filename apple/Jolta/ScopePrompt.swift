@@ -92,7 +92,9 @@ private struct ScopePromptView: View {
                 Spacer(minLength: 0)
                 if first { KeyCap(key: "↩", focused: true) }
             }
-            .padding(.horizontal, 10)
+            // Room for the caret of the selected row.
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
             .padding(.vertical, 8)
             .selectedRow(first)
             .contentShape(Rectangle())

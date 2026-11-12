@@ -127,7 +127,9 @@ struct SuggestionRow: View {
             }
         }
         .font(.system(size: 13))
-        .padding(.horizontal, 10)
+        // Room for the caret of the selected row.
+        .padding(.leading, 14)
+        .padding(.trailing, 10)
         .frame(height: Theme.control)
         .selectedRow(on, hovering: hovering)
         .contentShape(Rectangle())
