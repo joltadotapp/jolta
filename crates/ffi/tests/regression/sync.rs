@@ -200,6 +200,36 @@ fn sending_reaches_smtp_and_sent() {
     assert!(app.events.seen("sent"));
 }
 
+/// Replying to or forwarding a conversation nobody opened marks it read,
+/// here and on the server, once the message has gone out.
+#[test]
+fn replying_or_forwarding_marks_the_conversation_read() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let stamp = now();
+    let (asked, shared) = (format!("Asked {stamp}"), format!("Shared {stamp}"));
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, &asked, "Are you coming?"));
+    server.append("INBOX", &Mail::new("bob@test.invalid", &server.user, &shared, "Pass this on."));
+    let app = App::unstarted();
+    server.sign_in(&app);
+    wait(20, "the inbox synced", || app.subjects("in:inbox is:unread").len() == 2);
+    let thread = |subject: &str| app.list("in:inbox").into_iter().find(|r| r.subject == subject).unwrap().thread_id;
+
+    let reply = block_on(app.core.reply_compose(thread(&asked), jolta_ffi::ReplyMode::Reply, 0)).unwrap();
+    app.core.send(reply, None, None).unwrap();
+    let mut forward = block_on(app.core.reply_compose(thread(&shared), jolta_ffi::ReplyMode::Forward, 0)).unwrap();
+    forward.to = "carl@test.invalid".into();
+    app.core.send(forward, None, None).unwrap();
+
+    wait(30, "both went out", || caught(&format!("Fwd: {shared}")).contains("\"MessageID\"") && caught(&format!("Re: {asked}")).contains("\"MessageID\""));
+    wait(20, "both conversations are read", || app.subjects("in:inbox is:unread").is_empty());
+    wait(20, "the read state reached the server", || {
+        [&asked, &shared].iter().all(|s| server.flags("INBOX", s).iter().any(|f| f.contains("Seen")))
+    });
+}
+
 /// Snoozing moves the thread to a Snoozed folder on the server, so phones
 /// hide it too, and brings it back at its time.
 #[test]
