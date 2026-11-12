@@ -189,9 +189,10 @@ final class AppModel {
     /// The user archived, moved or undid something, so the list's next
     /// change may move the cursor on to the next conversation.
     @ObservationIgnored var userChangedList = false
-    /// The query of the list last shown, nil before the first. The list view
-    /// is made again when the palette or calendar mode gives way, so a list
-    /// switched to meanwhile is told apart from the same list shown again.
+    /// The `listQuery` of the list last shown, nil before the first. The list
+    /// view is made again when the palette or calendar mode gives way, so a
+    /// list switched to meanwhile is told apart from the same list shown
+    /// again. A search typed over the list is not another list.
     @ObservationIgnored var shownListQuery: String?
     let notifier = Notifier()
     /// The Dock badge's number, which the menu bar item shows too.
@@ -245,10 +246,16 @@ final class AppModel {
         }
     }
 
-    var query: String {
+    /// The list without the search typed over it: the folder and its section.
+    var listQuery: String {
         var parts = [source.query]
-        if showsSections, let section { parts.append(section.query) }
-        return searchWithin(list: parts.filter { !$0.isEmpty }.joined(separator: " "), search: search.trimmingCharacters(in: .whitespaces))
+        if source == .unifiedInbox, let section { parts.append(section.query) }
+        return parts.filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// A search runs over the whole folder, not the section it was typed in.
+    var query: String {
+        searchWithin(list: showsSections ? listQuery : source.query, search: search.trimmingCharacters(in: .whitespaces))
     }
 
     init() throws {

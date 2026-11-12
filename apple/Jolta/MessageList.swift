@@ -107,11 +107,12 @@ struct MessageList: NSViewRepresentable {
                 table.reloadData()
                 // A thread opened before the list was built, such as from a
                 // notification while calendar mode showed, keeps its row. A
-                // list the user switched to opens at its top; at launch, or
-                // the same list shown again, nothing else opens, as opening
-                // marks it read.
-                let switched = model.shownListQuery.map { $0 != model.query } ?? false
-                model.shownListQuery = model.query
+                // list the user switched to opens at its top; at launch, the
+                // same list shown again or a search typed, nothing else opens,
+                // as opening marks it read. A result opens when the user
+                // moves to it.
+                let switched = (model.shownListQuery.map { $0 != model.listQuery } ?? false) && model.search.isEmpty
+                model.shownListQuery = model.listQuery
                 let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
                 let row = opened ?? 0
                 table.scrollRowToVisible(row)
