@@ -359,9 +359,6 @@ final class AppModel {
             self?.reply(.reply, threadID: threadID)
         }
         notifier.onAction = { [weak self] id, action in self?.noticeAction(id: id, action: action) }
-        if accounts.contains(where: { $0.account.provider != "Synthetic" }) {
-            notifier.requestPermission()
-        }
         startCalendar()
         // Launch arguments for checking the app from scripts:
         // `-JoltaSearch "subject:x" -JoltaOpenFirst YES`.
@@ -503,9 +500,19 @@ final class AppModel {
         }
     }
 
+    /// Jolta asked macOS for notifications in this run; macOS itself asks the user once.
+    @ObservationIgnored private var askedToNotify = false
+
     private func apply(accounts: [AccountSection], sections: [SectionInfo], snoozed: [SnoozeInfo]) {
         self.accounts = accounts
         accountsLoaded = true
+        // The accounts load after launch, and the first one may be added
+        // later: ask to notify once there is mail to notify about, and
+        // never on a launch without an account.
+        if !askedToNotify, accounts.contains(where: { $0.account.provider != "Synthetic" }) {
+            askedToNotify = true
+            notifier.requestPermission()
+        }
         self.sections = sections
         self.snoozed = snoozed
         if let current = section, !sections.contains(where: { $0.id == current.id }) { section = nil }
