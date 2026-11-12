@@ -18,9 +18,15 @@ struct ComposeView: View {
         // A field that commits as the view closes must not reopen a discarded or sent message.
         Binding(get: { model.compose ?? ComposeData.blank }, set: {
             guard model.compose != nil else { return }
+            if model.compose != $0 { model.composeError = nil }
             model.compose = $0
             scheduleSave()
         })
+    }
+
+    private var hasRecipient: Bool {
+        let d = draft.wrappedValue
+        return [d.to, d.cc, d.bcc].contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 
     /// Each account that can send, with its aliases.
@@ -44,6 +50,8 @@ struct ComposeView: View {
             KitButton(title: "Send", key: "⌘↩", kind: .primary) { model.sendCompose() }
                 // ⌘Return is Find a time's Invite while its panel is up.
                 .keyboardShortcut(model.findTime == nil ? KeyboardShortcut(.return, modifiers: .command) : nil)
+                .disabled(!hasRecipient)
+                .help(hasRecipient ? "Send (⌘↩)" : "Add a recipient to send")
                 .padding(.leading, 6)
         }
         .fixedSize()
@@ -165,6 +173,18 @@ struct ComposeView: View {
 
             if showsFormatBar {
                 FormatBar()
+            }
+
+            if let error = model.composeError {
+                Text(error)
+                    .font(.system(size: Theme.body))
+                    .foregroundStyle(Color(Theme.dangerText))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 12)
+                    .accessibilityIdentifier("compose-error")
             }
 
             // The cursor starts where the user types next: To until it names

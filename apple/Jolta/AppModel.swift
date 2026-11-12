@@ -99,6 +99,9 @@ final class AppModel {
     private(set) var scheduled: [ScheduledInfo] = []
     /// A reminder chosen for the message being written.
     var composeReminder: Reminder?
+    /// Why the message being written couldn't be sent, shown above its
+    /// body until it changes or goes.
+    var composeError: String?
     /// When the message being written was scheduled to go, while it is open
     /// again from the sidebar. Closing it keeps it scheduled.
     var composeSchedule: Reminder?
@@ -903,6 +906,7 @@ final class AppModel {
     func openCompose(_ message: ComposeData) {
         composeReminder = nil
         composeSchedule = nil
+        composeError = nil
         compose = message
         composeSession += 1
     }
@@ -951,10 +955,12 @@ final class AppModel {
             compose = nil
             composeReminder = nil
             composeSchedule = nil
+            composeError = nil
             requestListFocus()
             show(Toast(text: text, undo: .send(token), until: label == nil ? Date.now + Toast.undoWindow : nil))
         } catch {
-            show(Toast(text: "\(error)", undo: nil))
+            // The message stays open, so the reason shows with it.
+            composeError = "\(error)"
         }
     }
 
