@@ -110,7 +110,12 @@ struct ContentView: View {
                         .padding(.top, 110)
                         .transition(.panel())
                 } else if model.showsHelp {
-                    HelpView(model: model).padding(.top, 110).transition(.panel())
+                    GeometryReader { geo in
+                        HelpView(model: model, window: geo.size)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, HelpView.top(in: geo.size))
+                    }
+                    .transition(.panel())
                 }
             }
             .animation(Theme.quick, value: model.palette)

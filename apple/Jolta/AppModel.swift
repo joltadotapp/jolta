@@ -139,7 +139,10 @@ final class AppModel {
     /// Bumped when agents act, so the audit view reloads.
     private(set) var agentRevision = 0
     private(set) var mcpStatus = "MCP server not started"
-    var showsHelp = false
+    var showsHelp = false {
+        // The sheet's filter had the keyboard; the list or the message being written gets it back.
+        didSet { if oldValue, !showsHelp, palette == nil, findTime == nil { returnKeyboard() } }
+    }
     var search = "" { didSet { listChanged() } }
     /// Bumped whenever the list's contents may have changed; views reload on it.
     private(set) var listRevision = 0

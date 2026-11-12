@@ -471,46 +471,99 @@ struct PaletteView: View {
     }
 }
 
-/// Every shortcut, from the keymap.
+/// Every shortcut, from the keymap. It stays inside the window and
+/// scrolls, and its filter has the keyboard: typing narrows the list.
 struct HelpView: View {
     let model: AppModel
+    /// The window's size.
+    let window: CGSize
+    @State private var filter = ""
+    @FocusState private var focused: Bool
+
+    /// From the window's top, less in a short window.
+    static func top(in window: CGSize) -> CGFloat { window.height >= 820 ? 110 : 48 }
+
+    private struct Entry: Identifiable {
+        let id: String
+        let keys: [String]
+        let title: String
+    }
+
+    private func shown(_ entries: [Entry]) -> [Entry] {
+        let typed = filter.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty else { return entries }
+        return entries.filter { $0.title.localizedCaseInsensitiveContains(typed) || $0.keys.joined(separator: " ").localizedCaseInsensitiveContains(typed) }
+    }
+
+    private var mail: [Entry] {
+        shown(Command.allCases.map { c in
+            Entry(id: c.rawValue, keys: c.keys.split(separator: " ").map { KeyCap.shown(String($0)) }, title: c.title)
+        } + [Entry(id: "palette", keys: ["⌘K"], title: "Command Palette"), Entry(id: "new", keys: ["⌘N"], title: "New Message")])
+    }
+
+    private var calendar: [Entry] {
+        shown(CalendarCommand.allCases.map { Entry(id: "calendar-" + $0.rawValue, keys: [KeyCap.shown($0.keys)], title: $0.title) })
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Keyboard shortcuts").font(.system(size: 15, weight: .semibold))
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
-                ForEach(Command.allCases) { c in
-                    HStack(spacing: 10) {
-                        HStack(spacing: 3) { ForEach(c.keys.split(separator: " ").map(String.init), id: \.self) { KeyCap(key: KeyCap.shown($0)) } }
-                            .frame(width: 52, alignment: .leading)
-                        Text(c.title).foregroundStyle(Color(Theme.text2))
+        let wide = window.width >= 928
+        let mail = mail, calendar = calendar
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Text("Keyboard shortcuts").font(.system(size: Theme.title, weight: .semibold))
+                Spacer()
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                    TextField("Filter", text: $filter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: Theme.small))
+                        .focused($focused)
+                        .accessibilityIdentifier("help-filter")
+                }
+                .fieldBox(focused: focused, width: 200)
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 56)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !mail.isEmpty { grid(mail, columns: wide ? 3 : 2) }
+                    if !calendar.isEmpty {
+                        Text("Calendar").font(.system(size: Theme.body, weight: .semibold)).padding(.top, mail.isEmpty ? 0 : 4)
+                        grid(calendar, columns: wide ? 3 : 2)
+                    }
+                    if mail.isEmpty && calendar.isEmpty {
+                        Text("No shortcut matches “\(filter)”").foregroundStyle(Color(Theme.text3))
                     }
                 }
-                HStack(spacing: 10) {
-                    KeyCap(key: "⌘K").frame(width: 52, alignment: .leading)
-                    Text("Command Palette").foregroundStyle(Color(Theme.text2))
-                }
-                HStack(spacing: 10) {
-                    KeyCap(key: "⌘N").frame(width: 52, alignment: .leading)
-                    Text("New Message").foregroundStyle(Color(Theme.text2))
-                }
+                .font(.system(size: Theme.body))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
             }
-            .font(.system(size: Theme.body))
-            Text("Calendar").font(.system(size: 13, weight: .semibold)).padding(.top, 4)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 28), GridItem(.flexible())], alignment: .leading, spacing: 8) {
-                ForEach(CalendarCommand.allCases) { c in
-                    HStack(spacing: 10) {
-                        KeyCap(key: KeyCap.shown(c.keys)).frame(width: 52, alignment: .leading)
-                        Text(c.title).foregroundStyle(Color(Theme.text2))
-                    }
-                }
-            }
-            .font(.system(size: Theme.body))
+            .frame(maxHeight: max(160, window.height - Self.top(in: window) - 56 - 32))
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(24)
-        .frame(width: 600)
+        .frame(width: min(wide ? 880 : 600, window.width - 48))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusPanel))
         .panel()
+        // The editor of a message being written takes the keyboard back on
+        // the next turn of the run loop; take it again after that.
+        .onAppear {
+            focused = true
+            DispatchQueue.main.async { focused = true }
+        }
         .onExitCommand { model.showsHelp = false }
-        .onTapGesture { model.showsHelp = false }
+    }
+
+    private func grid(_ entries: [Entry], columns: Int) -> some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28, alignment: .leading), count: columns), alignment: .leading, spacing: 8) {
+            ForEach(entries) { entry in
+                HStack(spacing: 10) {
+                    HStack(spacing: 3) { ForEach(entry.keys, id: \.self) { KeyCap(key: $0) } }
+                        .frame(width: 52, alignment: .leading)
+                    Text(entry.title).foregroundStyle(Color(Theme.text2)).lineLimit(1)
+                }
+            }
+        }
     }
 }

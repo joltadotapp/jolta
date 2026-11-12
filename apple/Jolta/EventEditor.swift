@@ -475,6 +475,10 @@ struct EventEditorPanel: View {
         .onChange(of: model.findTime != nil) { _, open in
             if !open, editor.stop == nil { DispatchQueue.main.async { focus = lastFocus ?? firstFocus } }
         }
+        // The shortcut sheet's filter took it too.
+        .onChange(of: model.showsHelp) { _, open in
+            if !open, editor.stop == nil { DispatchQueue.main.async { focus = lastFocus ?? firstFocus } }
+        }
         // Find a time over the editor takes Esc, Return and ⌘Return.
         .disabled(model.findTime != nil)
         .accessibilityElement(children: .contain)
