@@ -43,7 +43,22 @@ struct JoltaApp: App {
                 .keyboardShortcut("s", modifiers: [.control, .command])
                 .disabled(model?.sidebarFits != true)
             }
+            CommandGroup(replacing: .undoRedo) {
+                Button("Undo") { model?.undoFromMenu() }
+                    .keyboardShortcut("z")
+                Button("Redo") { model?.redoFromMenu() }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
             CommandMenu("Format") { FormatMenu() }
+            CommandMenu("Message") {
+                ForEach(Array(Command.menu.enumerated()), id: \.offset) { i, group in
+                    if i > 0 { Divider() }
+                    ForEach(group) { command in
+                        Button(command.menuTitle) { model?.run(command) }
+                            .disabled(model?.offers(command) != true)
+                    }
+                }
+            }
             CommandMenu("Conversation") {
                 // While a text editor has the keyboard, ⌘U underlines.
                 Button("Unsubscribe") { model?.run(.unsubscribe) }

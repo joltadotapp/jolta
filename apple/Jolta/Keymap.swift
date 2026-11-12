@@ -151,6 +151,21 @@ enum Command: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The Message menu, a divider between the groups.
+    static let menu: [[Command]] = [
+        [.archive, .trash, .toggleRead, .star, .toggleVIP],
+        [.snooze, .move, .label],
+        [.reply, .replyAll, .forward],
+        [.accept, .maybe, .decline, .propose, .book],
+        [.select, .saveAttachments],
+        [.undo],
+    ]
+
+    /// Its menu item's title. The key is part of the title and not the
+    /// item's key equivalent: one without ⌘ can fire while a text field has
+    /// the keyboard, and the key router already runs these keys.
+    var menuTitle: String { "\(title)  (\(KeyCap.shown(keys)))" }
+
     static func forKey(_ typed: String, after prefix: String?) -> Command? {
         let sequence = prefix.map { "\($0) \(typed)" } ?? typed
         return allCases.first { $0.keys == sequence }
@@ -158,6 +173,29 @@ enum Command: String, CaseIterable, Identifiable {
 }
 
 extension AppModel {
+    /// Whether the Message menu offers the command now: in mail, with a
+    /// conversation under the cursor when it acts on one, and not while a
+    /// message is being written. Undo also takes a calendar change back.
+    func offers(_ command: Command) -> Bool {
+        if command == .undo { return compose == nil }
+        return mode == .mail && compose == nil && (!command.needsThread || cursorRow != nil)
+    }
+
+    /// Edit › Undo: the typing in the text field that has the keyboard,
+    /// else the last mail or calendar action.
+    func undoFromMenu() {
+        guard let window = NSApp.keyWindow else { return }
+        if let text = window.firstResponder as? NSTextView, text.isEditable, let typing = text.undoManager, typing.canUndo {
+            typing.undo()
+        } else if window === KeyRouter.shared.window {
+            undo()
+        }
+    }
+
+    func redoFromMenu() {
+        if let text = NSApp.keyWindow?.firstResponder as? NSTextView, let typing = text.undoManager, typing.canRedo { typing.redo() }
+    }
+
     func run(_ command: Command) {
         let row = cursorRow
         switch command {
