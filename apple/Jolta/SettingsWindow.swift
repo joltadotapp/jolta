@@ -507,6 +507,8 @@ struct GeneralSettings: View {
     @State private var contactsRefused = false
     /// Whether macOS offers Time Sensitive for Jolta: only builds signed with its entitlement.
     @State private var timeSensitive = false
+    /// Notifications are turned off for Jolta in System Settings, so none of the choices below shows anything.
+    @State private var notificationsOff = false
 
     private var notificationsFooter: String {
         let about = "Important mail is mail from your VIPs, replies in conversations you wrote in, mail sent to you by people you've written to, and invitations. With AI sorting on, it also includes mail that asks you for a reply. Several messages at once arrive as one notification."
@@ -516,6 +518,19 @@ struct GeneralSettings: View {
     var body: some View {
         SettingsScroll {
             SettingsSection("Notifications", footer: notificationsFooter) {
+                if notificationsOff {
+                    SettingsRow(title: "Notifications are off for Jolta",
+                                detail: "macOS shows none of Jolta's notifications until you allow them in System Settings › Notifications.",
+                                detailColor: Color(Theme.warningText)) {
+                        KitButton(title: "Open System Settings") {
+                            let id = Bundle.main.bundleIdentifier ?? ""
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .accessibilityIdentifier("notifications-open-settings")
+                    }
+                }
                 SettingsRow(title: "Notify me about", detail: "Which new inbox mail gets a notification while Jolta runs.") {
                     Picker("Notify me about", selection: Binding(get: { model.notifySettings.scope }, set: { model.notifySettings.scope = $0 })) {
                         Text("Important mail").tag(NotifyScope.important)
@@ -554,7 +569,17 @@ struct GeneralSettings: View {
                 }
             }
         }
-        .task { timeSensitive = await UNUserNotificationCenter.current().notificationSettings().timeSensitiveSetting != .notSupported }
+        .task { await readSystemSettings() }
+        // Back from System Settings, the row follows what was changed there.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await readSystemSettings() }
+        }
+    }
+
+    private func readSystemSettings() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        timeSensitive = settings.timeSensitiveSetting != .notSupported
+        notificationsOff = settings.authorizationStatus == .denied
     }
 
     private func toggleContacts(_ on: Bool) {
