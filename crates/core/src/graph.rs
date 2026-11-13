@@ -54,7 +54,21 @@ fn send_failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
 fn failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
     let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     let message = json["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
-    Error::Other(format!("Microsoft Graph {}: {message}", status.as_u16()))
+    let text = format!("Microsoft Graph {}: {message}", status.as_u16());
+    if status.as_u16() == 429 || status.is_server_error() { Error::Unavailable(text) } else { Error::Other(text) }
+}
+
+/// A request that got no answer: no connection, a timeout or a dropped
+/// reply can all work on a later try.
+fn unanswered(e: reqwest::Error) -> Error {
+    let text = format!("Microsoft Graph: {e}");
+    if e.is_builder() {
+        Error::Other(text)
+    } else if e.is_connect() {
+        Error::Offline(text)
+    } else {
+        Error::Unavailable(text)
+    }
 }
 
 /// One page of a folder's delta, or Graph saying it no longer knows the
@@ -162,7 +176,7 @@ impl Graph {
             if let Some((content_type, bytes)) = &body {
                 req = req.header("Content-Type", *content_type).body(bytes.clone());
             }
-            let resp = req.send().await.map_err(http_error)?;
+            let resp = req.send().await.map_err(unanswered)?;
             let status = resp.status();
             // Microsoft can revoke a token before it expires; a fresh one gets one more try.
             if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
@@ -179,7 +193,7 @@ impl Graph {
                 tokio::time::sleep(Duration::from_secs(wait.min(120))).await;
                 continue;
             }
-            let bytes = resp.bytes().await.map_err(http_error)?.to_vec();
+            let bytes = resp.bytes().await.map_err(unanswered)?.to_vec();
             return Ok((status, bytes));
         }
         unreachable!("the last attempt returns")
@@ -631,7 +645,7 @@ mod tests {
         let body = br#"{"error":{"code":"ErrorSendAsDenied","message":"The user account which was used to submit this request does not have the right to send mail on behalf of the specified sending account., Cannot submit message."}}"#;
         assert!(matches!(send_failure(reqwest::StatusCode::FORBIDDEN, body), Error::Refused(_)));
         let throttled = br#"{"error":{"code":"ErrorServerBusy","message":"busy"}}"#;
-        assert!(matches!(send_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, throttled), Error::Other(_)), "anything else is tried again");
+        assert!(!matches!(send_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, throttled), Error::Refused(_)), "anything else is tried again");
     }
 
     #[test]

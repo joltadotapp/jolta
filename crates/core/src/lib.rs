@@ -68,6 +68,21 @@ pub enum Error {
     Other(String),
 }
 
+impl Error {
+    /// The server was down, busy or out of reach, so the same request can
+    /// work later.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Error::Offline(_)
+                | Error::Unavailable(_)
+                | Error::Io(_)
+                | Error::Tls(_)
+                | Error::Imap(async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost)
+        )
+    }
+}
+
 impl From<tokio::task::JoinError> for Error {
     fn from(e: tokio::task::JoinError) -> Self {
         Error::Other(format!("background task failed: {e}"))
