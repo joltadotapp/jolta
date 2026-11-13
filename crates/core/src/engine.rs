@@ -728,9 +728,13 @@ impl Engine {
         let mut sent = Vec::new();
         for item in due {
             let raw = self.jolta.blobs.get(&item.blob)?;
-            let result = match link {
-                Link::Graph(g) => g.send_mime(&raw).await,
-                Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
+            let result = match self.went_before(account, link, &item).await {
+                Ok(true) => Ok(()),
+                Ok(false) => match link {
+                    Link::Graph(g) => g.send_mime(&raw).await,
+                    Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
+                },
+                Err(e) => Err(e),
             };
             match result {
                 Ok(()) => {
@@ -773,19 +777,43 @@ impl Engine {
                     sent.push(item);
                 }
                 Err(e) => {
-                    let refused = matches!(e, crate::Error::Refused(_));
-                    let give_up = refused || item.attempts + 1 >= MAX_ATTEMPTS;
+                    let failure = match &e {
+                        crate::Error::Refused(_) => store::SendFailure::Refused,
+                        e if e.is_transient() => store::SendFailure::Unavailable,
+                        _ => store::SendFailure::Other,
+                    };
                     let message = match &e {
                         crate::Error::Refused(reason) => refusal(account, &item.sender, reason, item.draft.is_some()),
                         e => e.to_string(),
                     };
                     let (id, stored) = (item.id, message.clone());
-                    self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &stored, give_up)).await?;
-                    (self.sink)(Event::SendFailed { message, gave_up: give_up });
+                    let gave_up = self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &stored, failure)).await?;
+                    // An outage is told once, not at every try.
+                    if gave_up || item.attempts == 0 || failure != store::SendFailure::Unavailable {
+                        (self.sink)(Event::SendFailed { message, gave_up });
+                    }
                 }
             }
         }
         Ok(sent)
+    }
+
+    /// Whether a message tried before went out before its answer was lost.
+    /// Microsoft 365 and Gmail file a sent message in Sent themselves, so
+    /// the server's Sent holding its Message-ID says it went, and it isn't
+    /// sent twice.
+    async fn went_before(&self, account: &Account, link: &mut Link, item: &store::OutboxItem) -> Result<bool> {
+        if item.attempts == 0 {
+            return Ok(false);
+        }
+        match link {
+            Link::Graph(g) => g.sent_holds(&item.message_id).await,
+            Link::Imap(session, _) if account.kind == AccountKind::Gmail => {
+                let Some(sent_box) = self.role_mailbox(account.id, MailboxRole::Sent).await? else { return Ok(false) };
+                imap::holds_message_id(session, &sent_box.remote_id, &item.message_id).await
+            }
+            Link::Imap(..) => Ok(false),
+        }
     }
 
     /// Puts a copy of each sent message in Sent, unless the server already

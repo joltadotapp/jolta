@@ -1479,21 +1479,40 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
         .await;
         for (op, result) in sent {
             let now = chrono::Utc::now().timestamp();
-            // Nothing reached the server: the op waits for the network
-            // without using up an attempt, however long it is offline.
-            if let Err(Error::Offline(reason)) = &result {
-                let (id, reason) = (op.id, reason.clone());
-                jolta.store.write_async(move |tx| store::wait_offline_calendar_op(tx, id, &reason, now + OFFLINE_RETRY_SECONDS)).await?;
-                continue;
-            }
             let (result, mailed) = match result {
                 Ok((sent, mailed)) => (Ok(sent), mailed),
-                Err(e) => (Err(e.to_string()), None),
+                Err(e) => (Err(e), None),
             };
-            let settled = jolta.store.write_async(move |tx| settle(tx, &op, result, now, &horizon)).await?;
+            let settled = jolta
+                .store
+                .write_async(move |tx| match result {
+                    Err(e) if wait_out(tx, &op, &e, now)? => Ok(None),
+                    result => settle(tx, &op, result.map_err(|e| e.to_string()), now, &horizon).map(Some),
+                })
+                .await?;
+            let Some(settled) = settled else { continue };
             out.push(Settled { mailed, ..settled });
         }
     }
+}
+
+/// Puts an op back to wait a minute without using up an attempt: one
+/// whose request never reached its server however long it is offline, and
+/// one whose server is down or busy for up to a day. False when the op
+/// should count the attempt.
+pub fn wait_out(conn: &Connection, op: &CalendarOp, error: &Error, now: i64) -> Result<bool> {
+    let waits = match error {
+        Error::Offline(_) => true,
+        e if e.is_transient() => {
+            let created: i64 = conn.query_row("SELECT created FROM calendar_op WHERE id = ?1", [op.id.0], |r| r.get(0))?;
+            now - created < store::OUTAGE_PATIENCE_SECS
+        }
+        _ => false,
+    };
+    if waits {
+        store::wait_offline_calendar_op(conn, op.id, &error.to_string(), now + OFFLINE_RETRY_SECONDS)?;
+    }
+    Ok(waits)
 }
 
 /// Reaches the op's server and keeps the text of the object it left there.
@@ -2117,6 +2136,31 @@ mod tests {
         send_all(&s, Ok(()));
         send_all(&s, Ok(()));
         assert_eq!((state(&s, create).0, state(&s, inverse).0), (OpState::Done, OpState::Done));
+    }
+
+    /// A server that is down or busy holds an edit back for up to a day
+    /// without using up its attempts; the edit shows all the while.
+    #[test]
+    fn an_outage_waits_without_using_up_attempts() {
+        let (s, cal) = setup("outage");
+        q(&s, cal, Change::Create(vec![event("u1", "Standup", "2026-11-24 09:00")])).unwrap();
+        send_all(&s, Ok(()));
+        let edit = q(&s, cal, Change::Update(event("u1", "Daily", "2026-11-24 10:00"))).unwrap();
+        let outage = Error::Unavailable("Microsoft Graph 502: ".into());
+        for attempt in 1..=MAX_ATTEMPTS * 3 {
+            let op = s.read(|c| store::calendar_op(c, edit)).unwrap();
+            assert!(s.write(|tx| wait_out(tx, &op, &outage, NOW)).unwrap(), "attempt {attempt} counted");
+            let op = s.read(|c| store::calendar_op(c, edit)).unwrap();
+            assert_eq!((op.state, op.attempts), (OpState::Pending, 0));
+            assert!(op.send_after > NOW, "it waits");
+        }
+        assert_eq!(shown(&s), pairs(&[("24 10:00", "Daily")]), "the edit shows while the server is down");
+        s.write(|tx| Ok(tx.execute("UPDATE calendar_op SET created = created - 86400 WHERE id = ?1", [edit.0])?)).unwrap();
+        let op = s.read(|c| store::calendar_op(c, edit)).unwrap();
+        assert!(!s.write(|tx| wait_out(tx, &op, &outage, NOW)).unwrap(), "a day later the attempts count");
+        let op = s.read(|c| store::calendar_op(c, edit)).unwrap();
+        assert!(s.write(|tx| wait_out(tx, &op, &Error::Offline("no network".into()), NOW)).unwrap(), "offline never counts");
+        assert!(!s.write(|tx| wait_out(tx, &op, &Error::Other("Microsoft Graph 400: bad".into()), NOW)).unwrap(), "a refusal counts");
     }
 
     #[test]

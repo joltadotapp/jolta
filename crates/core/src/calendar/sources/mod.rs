@@ -509,7 +509,13 @@ pub(crate) fn http_client(follow_redirects: bool) -> Result<reqwest::Client> {
 
 fn http_error(e: reqwest::Error) -> Error {
     let text = format!("calendar request failed: {e}");
-    if e.is_connect() { Error::Offline(text) } else { Error::Other(text) }
+    if e.is_connect() {
+        Error::Offline(text)
+    } else if e.is_builder() {
+        Error::Other(text)
+    } else {
+        Error::Unavailable(text)
+    }
 }
 
 /// Percent-encodes everything but unreserved characters, for an id in a

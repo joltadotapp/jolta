@@ -187,7 +187,7 @@ impl CalDav {
     async fn propfind(&self, url: &Url, depth: &str, body: &str) -> Result<(Url, MultiStatus)> {
         let reply = self.send("PROPFIND", url, depth, body).await?;
         if reply.status != 207 {
-            return Err(Error::Other(format!("CalDAV PROPFIND {}: {}", reply.url, reply.status)));
+            return Err(Error::from_status(reply.status, format!("CalDAV PROPFIND {}: {}", reply.url, reply.status)));
         }
         Ok((reply.url, dav::multistatus(&reply.body)?))
     }
@@ -290,7 +290,7 @@ impl CalDav {
                 207 => {}
                 400 | 403 | 404 | 405 | 409 | 412 | 415 | 422 | 501 if token.is_some() => return Ok(Collection::TokenRefused),
                 400 | 403 | 404 | 405 | 409 | 412 | 415 | 422 | 501 => return Ok(Collection::Unsupported),
-                status => return Err(Error::Other(format!("CalDAV sync of {url}: {status}"))),
+                status => return Err(Error::from_status(status, format!("CalDAV sync of {url}: {status}"))),
             }
             let ms = dav::multistatus(&reply.body)?;
             let truncated = listing.absorb(&ms, &collection);
@@ -364,7 +364,7 @@ impl CalDav {
             );
             let reply = self.send("REPORT", url, "1", &body).await?;
             if reply.status != 207 {
-                return Err(Error::Other(format!("CalDAV multiget on {url}: {}", reply.status)));
+                return Err(Error::from_status(reply.status, format!("CalDAV multiget on {url}: {}", reply.status)));
             }
             for r in dav::multistatus(&reply.body)?.responses {
                 let remote_id = href_key(&r.href);
@@ -422,7 +422,7 @@ impl CalDav {
                     });
                 }
                 412 if attempt == 0 => continue,
-                status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
+                status => return Err(Error::from_status(status, format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
             }
         }
         unreachable!("the last attempt returns")
@@ -469,7 +469,7 @@ impl CalDav {
             200..300 => {}
             412 => return Ok(Gone::Changed),
             404 | 410 => return Ok(Gone::Already),
-            status => return Err(Error::Other(format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
+            status => return Err(Error::from_status(status, format!("CalDAV PUT {url}: {status} {}", reply.body.trim()))),
         }
         // A server that stored something else than what was sent gives no
         // ETag (RFC 4791 section 5.3.4), and someone may write in between.
@@ -506,7 +506,7 @@ impl CalDav {
         match reply.status {
             200..300 | 404 | 410 => Ok(Gone::Deleted(None)),
             412 => Ok(Gone::Changed),
-            status => Err(Error::Other(format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
+            status => Err(Error::from_status(status, format!("CalDAV DELETE {url}: {status} {}", reply.body.trim()))),
         }
     }
 }

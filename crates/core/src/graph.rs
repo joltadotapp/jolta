@@ -54,8 +54,7 @@ fn send_failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
 fn failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
     let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     let message = json["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
-    let text = format!("Microsoft Graph {}: {message}", status.as_u16());
-    if status.as_u16() == 429 || status.is_server_error() { Error::Unavailable(text) } else { Error::Other(text) }
+    Error::from_status(status.as_u16(), format!("Microsoft Graph {}: {message}", status.as_u16()))
 }
 
 /// A request that got no answer: no connection, a timeout or a dropped
@@ -406,6 +405,13 @@ impl Graph {
             return Err(send_failure(status, &bytes));
         }
         Ok(())
+    }
+
+    /// Whether Sent Items holds a message with this Message-ID.
+    pub async fn sent_holds(&self, message_id: &str) -> Result<bool> {
+        let filter = format!("internetMessageId eq '<{}>'", message_id.replace('\'', "''"));
+        let found = self.get(&format!("/me/mailFolders/sentitems/messages?$select=id&$top=1&$filter={}", urlencode(&filter))).await?;
+        Ok(found["value"].as_array().is_some_and(|v| !v.is_empty()))
     }
 
     /// Replaces the server copy of a draft (found by its Message-ID).

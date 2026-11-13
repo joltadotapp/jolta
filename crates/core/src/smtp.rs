@@ -71,6 +71,18 @@ pub async fn send(account: &Account, sender: &str, recipients: &[String], raw: &
     transport
         .send_raw(&envelope, raw)
         .await
-        .map_err(|e| if e.is_permanent() { Error::Refused(format!("{} said: {e}", account.smtp_host)) } else { smtp_error(e) })?;
+        .map_err(|e| {
+            if e.is_permanent() {
+                Error::Refused(format!("{} said: {e}", account.smtp_host))
+            } else if e.is_transient() || account.kind == AccountKind::Gmail {
+                // A 4xx reply took nothing; Gmail files what it took in
+                // Sent, where a later try finds it.
+                Error::Unavailable(format!("SMTP: {e}"))
+            } else {
+                // The connection broke, perhaps after the server took the
+                // message, and nothing shows whether it did.
+                smtp_error(e)
+            }
+        })?;
     Ok(())
 }

@@ -172,6 +172,28 @@ fn changes_from_elsewhere_arrive() {
     wait(20, "the deletion arrived", || !inbox_has(&app, "Delete me"));
 }
 
+/// The outbox asks the server's Sent for a message's Message-ID before
+/// trying it again, so one that went out before its answer was lost isn't
+/// sent twice.
+#[test]
+fn sent_on_the_server_is_found_by_message_id() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let mail = Mail::new(&server.user, "bob@test.invalid", &format!("Went before {}", now()), "Its answer was lost.");
+    server.append("Sent", &mail);
+    let went = mail.id.trim_matches(['<', '>']).to_string();
+    let (found, missing) = server.with(async |s| {
+        (
+            jolta_core::imap::holds_message_id(s, "Sent", &went).await.unwrap(),
+            jolta_core::imap::holds_message_id(s, "Sent", "never-sent@test.invalid").await.unwrap(),
+        )
+    });
+    assert!(found, "the copy in Sent is found");
+    assert!(!missing, "a message that never went isn't");
+}
+
 /// A sent message leaves after the undo window, reaches the SMTP server
 /// with threading headers, and its copy lands in Sent.
 #[test]

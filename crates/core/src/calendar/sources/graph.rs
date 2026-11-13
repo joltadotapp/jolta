@@ -291,7 +291,7 @@ impl GraphCalendar {
             return Error::Auth(format!("Microsoft gave Jolta no calendar access for {}. Turn calendar off and on again for it to ask.", self.account.address));
         }
         let message = json["error"]["message"].as_str().unwrap_or(code);
-        Error::Other(format!("Microsoft Graph {status}: {message}"))
+        Error::from_status(status, format!("Microsoft Graph {status}: {message}"))
     }
 
     pub async fn list_calendars(&self) -> Result<Vec<RemoteCalendar>> {

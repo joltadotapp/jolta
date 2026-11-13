@@ -669,11 +669,14 @@ async fn post_token(provider: Provider, params: &[(&str, &str)]) -> Result<Value
         .await
         .map_err(|e| {
             let text = format!("token request failed: {e}");
-            if e.is_connect() { Error::Offline(text) } else { Error::Other(text) }
+            if e.is_connect() { Error::Offline(text) } else { Error::Unavailable(text) }
         })?;
     let status = response.status();
-    let text = response.text().await.map_err(|e| Error::Other(format!("token response: {e}")))?;
+    let text = response.text().await.map_err(|e| Error::Unavailable(format!("token response: {e}")))?;
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if status.as_u16() == 429 || status.is_server_error() {
+        return Err(Error::Unavailable(format!("{} sign-in server: {status}", provider.env_prefix().to_lowercase())));
+    }
     if !status.is_success() {
         let reason = json["error_description"].as_str().or_else(|| json["error"].as_str()).unwrap_or(&text);
         return Err(Error::Auth(format!("{} said: {reason}", provider.env_prefix().to_lowercase())));
