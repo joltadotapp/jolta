@@ -567,6 +567,12 @@ pub async fn sync_account(
     report
 }
 
+/// Whether `mailbox` on the server holds a message with this Message-ID.
+pub async fn holds_message_id(session: &mut Session, mailbox: &str, message_id: &str) -> Result<bool> {
+    session.examine(mailbox).await?;
+    Ok(!session.uid_search(format!("HEADER Message-ID \"<{}>\"", message_id.replace('"', ""))).await?.is_empty())
+}
+
 pub async fn sync_session(
     jolta: &Jolta,
     session: &mut Session,

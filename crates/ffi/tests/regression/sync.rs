@@ -172,40 +172,26 @@ fn changes_from_elsewhere_arrive() {
     wait(20, "the deletion arrived", || !inbox_has(&app, "Delete me"));
 }
 
-/// A message tried before whose copy is already in Sent went out before
-/// its answer was lost: the outbox counts it as sent and sends nothing
-/// twice.
+/// The outbox asks the server's Sent for a message's Message-ID before
+/// trying it again, so one that went out before its answer was lost isn't
+/// sent twice.
 #[test]
-fn a_retry_with_its_copy_in_sent_is_not_sent_twice() {
+fn sent_on_the_server_is_found_by_message_id() {
     if !available() {
         return;
     }
     let server = Mailbox::new();
-    server.append("Sent", &Mail::new(&server.user, "ann@test.invalid", "Sent earlier", "From before Jolta."));
-    let app = App::unstarted();
-    let account = server.sign_in(&app);
-    wait(20, "Sent synced", || app.subjects("in:sent") == ["Sent earlier"]);
-
-    // The earlier try reached the server, which filed its copy in Sent
-    // after Jolta last read that folder.
     let mail = Mail::new(&server.user, "bob@test.invalid", &format!("Went before {}", now()), "Its answer was lost.");
     server.append("Sent", &mail);
-    let raw = mail.raw();
-    let message_id = mail.id.trim_matches(['<', '>']).to_string();
-    let outbox = app
-        .jolta
-        .store
-        .write(|c| {
-            let blob = app.jolta.blobs.put(&raw)?;
-            let id = jolta_core::store::queue_outbox(c, account.id, None, &blob, &message_id, &server.user, &["bob@test.invalid".into()], None, 0)?;
-            c.execute("UPDATE outbox SET attempts = 1 WHERE id = ?1", [id])?;
-            Ok(id)
-        })
-        .unwrap();
-    app.core.sync_now();
-    let state = || app.jolta.store.read(|c| Ok(c.query_row("SELECT state FROM outbox WHERE id = ?1", [outbox], |r| r.get::<_, String>(0))?)).unwrap();
-    wait(30, "the outbox counted it as sent", || state() == "sent");
-    assert!(!caught(&mail.subject).contains("\"MessageID\""), "nothing went to SMTP");
+    let went = mail.id.trim_matches(['<', '>']).to_string();
+    let (found, missing) = server.with(async |s| {
+        (
+            jolta_core::imap::holds_message_id(s, "Sent", &went).await.unwrap(),
+            jolta_core::imap::holds_message_id(s, "Sent", "never-sent@test.invalid").await.unwrap(),
+        )
+    });
+    assert!(found, "the copy in Sent is found");
+    assert!(!missing, "a message that never went isn't");
 }
 
 /// A sent message leaves after the undo window, reaches the SMTP server

@@ -309,7 +309,8 @@ pub fn outbox_sent(conn: &Connection, item: &OutboxItem) -> Result<()> {
 pub const OUTAGE_PATIENCE_SECS: i64 = 24 * 60 * 60;
 
 /// How often a message is tried while its server is down or busy before it
-/// goes back to Drafts: tries at most 15 minutes apart fill about a day. A
+/// goes back to Drafts: tries 2 to 15 minutes apart fill about a day. The
+/// first wait gives the server time to file a copy it did send in Sent. A
 /// count rather than an age, since a message sent later was made long
 /// before it was due.
 const OUTAGE_TRIES: u32 = 100;
@@ -330,7 +331,7 @@ pub fn outbox_failed(conn: &Connection, id: i64, error: &str, failure: SendFailu
     let attempts: u32 = conn.query_row("SELECT attempts FROM outbox WHERE id = ?1", [id], |r| r.get(0))?;
     let (give_up, wait) = match failure {
         SendFailure::Refused => (true, 0),
-        SendFailure::Unavailable => (attempts + 1 >= OUTAGE_TRIES, (30i64 << attempts.min(5)).min(15 * 60)),
+        SendFailure::Unavailable => (attempts + 1 >= OUTAGE_TRIES, (120i64 << attempts.min(3)).min(15 * 60)),
         SendFailure::Other => (attempts + 1 >= crate::engine::MAX_ATTEMPTS, 30),
     };
     if give_up {

@@ -725,31 +725,16 @@ impl Engine {
     async fn send_due(&self, account: &Account, link: &mut Link) -> Result<Vec<store::OutboxItem>> {
         let account_id = account.id;
         let due = self.jolta.store.read_async(move |c| store::due_outbox(c, account_id)).await?;
-        // A message tried before may have gone out before its answer was
-        // lost. Microsoft 365 and Gmail file it in Sent themselves, so a
-        // copy there means it went and isn't sent twice.
-        if due.iter().any(|item| item.attempts > 0)
-            && let Some(sent_box) = self.role_mailbox(account_id, MailboxRole::Sent).await?
-        {
-            let scope = Scope::Mailboxes(vec![sent_box.id]);
-            match link {
-                Link::Imap(session, caps) => {
-                    imap::sync_session(&self.jolta, session, *caps, account, &scope, SyncOptions { bodies: true }, &mut |_| {}).await?;
-                }
-                Link::Graph(g) => {
-                    g.sync(&self.jolta, &scope, &mut |_| {}).await?;
-                }
-            }
-        }
         let mut sent = Vec::new();
         for item in due {
             let raw = self.jolta.blobs.get(&item.blob)?;
-            let mid = item.message_id.clone();
-            let went = item.attempts > 0 && self.jolta.store.read_async(move |c| store::in_sent(c, account_id, &mid)).await?;
-            let result = match link {
-                _ if went => Ok(()),
-                Link::Graph(g) => g.send_mime(&raw).await,
-                Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
+            let result = match self.went_before(account, link, &item).await {
+                Ok(true) => Ok(()),
+                Ok(false) => match link {
+                    Link::Graph(g) => g.send_mime(&raw).await,
+                    Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
+                },
+                Err(e) => Err(e),
             };
             match result {
                 Ok(()) => {
@@ -811,6 +796,24 @@ impl Engine {
             }
         }
         Ok(sent)
+    }
+
+    /// Whether a message tried before went out before its answer was lost.
+    /// Microsoft 365 and Gmail file a sent message in Sent themselves, so
+    /// the server's Sent holding its Message-ID says it went, and it isn't
+    /// sent twice.
+    async fn went_before(&self, account: &Account, link: &mut Link, item: &store::OutboxItem) -> Result<bool> {
+        if item.attempts == 0 {
+            return Ok(false);
+        }
+        match link {
+            Link::Graph(g) => g.sent_holds(&item.message_id).await,
+            Link::Imap(session, _) if account.kind == AccountKind::Gmail => {
+                let Some(sent_box) = self.role_mailbox(account.id, MailboxRole::Sent).await? else { return Ok(false) };
+                imap::holds_message_id(session, &sent_box.remote_id, &item.message_id).await
+            }
+            Link::Imap(..) => Ok(false),
+        }
     }
 
     /// Puts a copy of each sent message in Sent, unless the server already

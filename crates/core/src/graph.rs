@@ -407,6 +407,13 @@ impl Graph {
         Ok(())
     }
 
+    /// Whether Sent Items holds a message with this Message-ID.
+    pub async fn sent_holds(&self, message_id: &str) -> Result<bool> {
+        let filter = format!("internetMessageId eq '<{}>'", message_id.replace('\'', "''"));
+        let found = self.get(&format!("/me/mailFolders/sentitems/messages?$select=id&$top=1&$filter={}", urlencode(&filter))).await?;
+        Ok(found["value"].as_array().is_some_and(|v| !v.is_empty()))
+    }
+
     /// Replaces the server copy of a draft (found by its Message-ID).
     pub async fn save_draft(&self, raw: Option<&[u8]>, old_message_id: Option<&str>) -> Result<()> {
         if let Some(old) = old_message_id {
