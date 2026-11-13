@@ -201,15 +201,12 @@ impl Graph {
         Ok(me["mail"].as_str().or_else(|| me["userPrincipalName"].as_str()).unwrap_or_default().to_string())
     }
 
-    async fn folders(&self) -> Result<Vec<RemoteMailbox>> {
-        let mut roles: HashMap<String, MailboxRole> = HashMap::new();
+    async fn folders(&self, known: &[Mailbox]) -> Result<Vec<RemoteMailbox>> {
+        let mut lookups = Vec::new();
         for (name, role) in WELL_KNOWN {
-            if let Ok(f) = self.get(&format!("/me/mailFolders/{name}?$select=id")).await {
-                if let Some(id) = f["id"].as_str() {
-                    roles.insert(id.to_string(), *role);
-                }
-            }
+            lookups.push((*role, self.get(&format!("/me/mailFolders/{name}?$select=id")).await));
         }
+        let roles = well_known_roles(lookups, known);
         let mut out = Vec::new();
         // A system folder's children (Sync Issues/Conflicts) are system folders too.
         let mut queue: Vec<(String, String, bool)> =
@@ -245,7 +242,8 @@ impl Graph {
         let account_id = self.account.id;
         let mailboxes = match scope {
             Scope::All => {
-                let remote = self.folders().await?;
+                let known = jolta.store.read_async(move |c| store::mailboxes(c, account_id)).await?;
+                let remote = self.folders(&known).await?;
                 jolta.store.write_async(move |tx| store::sync_mailbox_list(tx, account_id, &remote)).await?
             }
             Scope::Mailboxes(ids) => {
@@ -589,6 +587,25 @@ struct Delta {
     unfiled: Vec<MessageId>,
 }
 
+/// Which folder ids have which role, from Graph's answers for the
+/// well-known folder names. When Graph fails to answer, the folder that
+/// had the role keeps it; only a 404, no such folder, takes it away.
+fn well_known_roles(lookups: Vec<(MailboxRole, Result<Value>)>, known: &[Mailbox]) -> HashMap<String, MailboxRole> {
+    let mut roles = HashMap::new();
+    for (role, answer) in lookups {
+        match answer {
+            Ok(f) => {
+                if let Some(id) = f["id"].as_str() {
+                    roles.insert(id.to_string(), role);
+                }
+            }
+            Err(Error::Other(e)) if e.starts_with("Microsoft Graph 404") => {}
+            Err(_) => roles.extend(known.iter().filter(|m| m.role == Some(role)).map(|m| (m.remote_id.clone(), role))),
+        }
+    }
+    roles
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +743,40 @@ mod tests {
         assert_eq!(graph.1.lock().unwrap().last().map(String::as_str), Some("https://graph/live"));
         assert_eq!(jolta.store.read(|c| Ok(listed(c)?)).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// During Microsoft's outage of 2026-11-12, asking which folder is the
+    /// Inbox failed while the folder list came through, and the Inbox lost
+    /// its role: its mail left the unified inbox and Delete said "This
+    /// account has no inbox". A failed answer keeps the role the folder had;
+    /// only Graph saying there is no such folder (404) takes it away.
+    #[test]
+    fn a_failed_lookup_keeps_the_role() {
+        let folder = |id: i64, remote: &str, role| Mailbox {
+            id: MailboxId(id),
+            account_id: AccountId(1),
+            remote_id: remote.into(),
+            name: remote.into(),
+            role: Some(role),
+            delimiter: Some("/".into()),
+            selectable: true,
+            uidvalidity: None,
+            highest_modseq: None,
+            hidden: false,
+            synced: true,
+        };
+        let known = [folder(1, "in", MailboxRole::Inbox), folder(2, "ar", MailboxRole::Archive), folder(3, "se", MailboxRole::Sent)];
+        let roles = well_known_roles(
+            vec![
+                (MailboxRole::Inbox, Err(Error::Other("Microsoft Graph 500: An internal server error occurred.".into()))),
+                (MailboxRole::Archive, Err(Error::Other("Microsoft Graph 404: The specified object was not found in the store.".into()))),
+                (MailboxRole::Sent, Ok(json!({"id": "se"}))),
+            ],
+            &known,
+        );
+        assert_eq!(roles.get("in"), Some(&MailboxRole::Inbox), "the Inbox keeps its role through a 500");
+        assert_eq!(roles.get("ar"), None, "a folder Graph no longer has loses it");
+        assert_eq!(roles.get("se"), Some(&MailboxRole::Sent));
     }
 
     #[test]
