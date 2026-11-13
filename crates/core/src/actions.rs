@@ -358,6 +358,29 @@ pub fn give_up(conn: &Connection, op: &Op, error: &str) -> Result<()> {
     store::fail_attempt(conn, op.id, error, true)
 }
 
+/// How long an action waits for a server that is down or busy before it
+/// is taken back.
+const OUTAGE_PATIENCE_SECS: i64 = 24 * 60 * 60;
+
+/// Records a failed attempt at `op`. A server that is down or busy gets it
+/// again later, for up to a day; a refusal gives up after `MAX_ATTEMPTS`.
+/// Giving up puts the messages back as they were. True when it gave up.
+pub fn failed(conn: &Connection, op: &Op, error: &Error) -> Result<bool> {
+    let message = error.to_string();
+    let gave_up = if error.is_transient() {
+        let age: i64 = conn.query_row("SELECT unixepoch() - created FROM op WHERE id = ?1", [op.id.0], |r| r.get(0))?;
+        age >= OUTAGE_PATIENCE_SECS
+    } else {
+        op.attempts + 1 >= crate::engine::MAX_ATTEMPTS
+    };
+    if gave_up {
+        give_up(conn, op, &message)?;
+    } else {
+        store::fail_attempt(conn, op.id, &message, false)?;
+    }
+    Ok(gave_up)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +445,42 @@ mod tests {
                 assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "a failed attempt goes back in the queue");
                 store::release_claims(c, AccountId(1))?;
                 assert_eq!(store::claim_op(c, AccountId(1))?.map(|op| op.id), Some(back), "a claim left by a stopped worker");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A server that is down or busy gets the action again later, for up to
+    /// a day, and the message stays where it was put. A refusal takes the
+    /// action back after five tries.
+    #[test]
+    fn an_outage_never_takes_an_action_back() {
+        let (_dir, store) = store();
+        let to_trash = OpKind::Move { from: MailboxId(1), to: MailboxId(2) };
+        let is_in = |c: &Connection, mailbox: i64| -> Result<bool> {
+            Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM message_mailbox WHERE message_id = 3 AND mailbox_id = ?1)", [mailbox], |r| r.get(0))?)
+        };
+        let outage = Error::Unavailable("Microsoft Graph 502: ".into());
+        let refusal = Error::Other("Microsoft Graph 404: The specified object was not found in the store.".into());
+        store
+            .write(|c| {
+                let (_, delete) = queue(c, AccountId(1), &to_trash, &[MessageId(3)])?.unwrap();
+                for attempt in 1..=crate::engine::MAX_ATTEMPTS * 3 {
+                    let op = store::claim_op(c, AccountId(1))?.expect("still queued");
+                    assert!(!failed(c, &op, &outage)?, "attempt {attempt} during an outage gives up");
+                }
+                assert!(is_in(c, 2)? && !is_in(c, 1)?, "the message stays in Trash while the server is down");
+                c.execute("UPDATE op SET created = created - 86400 WHERE id = ?1", [delete.0])?;
+                let op = store::claim_op(c, AccountId(1))?.expect("still queued");
+                assert!(failed(c, &op, &outage)?, "a day later it gives up");
+                assert!(is_in(c, 1)?, "and the message is back in the inbox");
+
+                queue(c, AccountId(1), &to_trash, &[MessageId(3)])?.unwrap();
+                for attempt in 1..=crate::engine::MAX_ATTEMPTS {
+                    let op = store::claim_op(c, AccountId(1))?.expect("still queued");
+                    assert_eq!(failed(c, &op, &refusal)?, attempt == crate::engine::MAX_ATTEMPTS, "refused {attempt} times");
+                }
+                assert!(is_in(c, 1)?, "a refused delete puts the message back");
                 Ok(())
             })
             .unwrap();

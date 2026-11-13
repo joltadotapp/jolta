@@ -60,8 +60,27 @@ pub enum Error {
     /// again.
     #[error("{0}")]
     Refused(String),
+    /// The server is down or busy for now, such as an HTTP 502, 503 or
+    /// 429: the same request can work later.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("{0}")]
     Other(String),
+}
+
+impl Error {
+    /// The server was down, busy or out of reach, so the same request can
+    /// work later.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Error::Offline(_)
+                | Error::Unavailable(_)
+                | Error::Io(_)
+                | Error::Tls(_)
+                | Error::Imap(async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost)
+        )
+    }
 }
 
 impl From<tokio::task::JoinError> for Error {

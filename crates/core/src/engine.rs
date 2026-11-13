@@ -547,18 +547,13 @@ impl Engine {
                     let id = op.id;
                     self.jolta.store.write_async(move |tx| store::finish_op(tx, id)).await?;
                 }
-                Err(e) if op.attempts + 1 >= MAX_ATTEMPTS => {
+                Err(e) => {
                     let message = e.to_string();
-                    let op2 = op.clone();
-                    let m2 = message.clone();
-                    self.jolta.store.write_async(move |tx| actions::give_up(tx, &op2, &m2)).await?;
+                    if !self.jolta.store.write_async(move |tx| actions::failed(tx, &op, &e)).await? {
+                        return Err(crate::Error::Other(message));
+                    }
                     (self.sink)(Event::ActionFailed(message));
                     (self.sink)(Event::ListsChanged);
-                }
-                Err(e) => {
-                    let (id, message) = (op.id, e.to_string());
-                    self.jolta.store.write_async(move |tx| store::fail_attempt(tx, id, &message, false)).await?;
-                    return Err(e);
                 }
             }
         }
