@@ -304,8 +304,21 @@ pub fn outbox_sent(conn: &Connection, item: &OutboxItem) -> Result<()> {
     Ok(())
 }
 
+/// Why a send failed, which decides when the outbox gives up on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendFailure {
+    /// The server refused the message for good.
+    Refused,
+    /// The server was down, busy or out of reach.
+    Unavailable,
+    Other,
+}
+
 /// Records a failed attempt. Giving up puts the message back in Drafts.
-pub fn outbox_failed(conn: &Connection, id: i64, error: &str, give_up: bool) -> Result<()> {
+/// True when it gave up.
+pub fn outbox_failed(conn: &Connection, id: i64, error: &str, failure: SendFailure) -> Result<bool> {
+    let attempts: u32 = conn.query_row("SELECT attempts FROM outbox WHERE id = ?1", [id], |r| r.get(0))?;
+    let give_up = failure == SendFailure::Refused || attempts + 1 >= crate::engine::MAX_ATTEMPTS;
     if give_up {
         conn.execute(
             "UPDATE draft SET state = 'editing', dirty = 1, updated = ?2 WHERE id = (SELECT draft_id FROM outbox WHERE id = ?1) AND state = 'sending'",
@@ -319,7 +332,7 @@ pub fn outbox_failed(conn: &Connection, id: i64, error: &str, give_up: bool) -> 
          WHERE id = ?1",
         params![id, error, give_up, now() + 30],
     )?;
-    Ok(())
+    Ok(give_up)
 }
 
 /// Whether the account's Sent mailbox holds a message with this Message-ID.
@@ -375,6 +388,41 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A server that is down or busy gets the message again, less often
+    /// each time, for up to a day. Any other failure gives up after five
+    /// tries.
+    #[test]
+    fn an_outage_keeps_a_message_in_the_outbox_for_a_day() {
+        let (dir, store) = store();
+        let max = crate::engine::MAX_ATTEMPTS;
+        store
+            .write(|c| {
+                let id = save_draft(c, &compose("During the outage"))?;
+                let queued = queue_outbox(c, AccountId(1), Some(id), "blob", "<m@x>", "a@x", &["b@x".into()], None, 0)?;
+                let wait = |c: &Connection| -> Result<i64> { Ok(c.query_row("SELECT send_after - unixepoch() FROM outbox WHERE id = ?1", [queued], |r| r.get(0))?) };
+                let mut waits = Vec::new();
+                for attempt in 1..=max * 3 {
+                    assert!(!outbox_failed(c, queued, "Microsoft Graph 502: ", SendFailure::Unavailable)?, "attempt {attempt} gave up");
+                    waits.push(wait(c)?);
+                }
+                assert!(waits.windows(2).all(|w| w[0] <= w[1]) && waits[0] < waits[waits.len() - 1], "it waits longer each time: {waits:?}");
+                assert!(*waits.last().unwrap() <= 15 * 60, "but never more than a quarter of an hour: {waits:?}");
+                assert!(drafts(c)?.is_empty(), "the message stays in the outbox");
+                c.execute("UPDATE outbox SET created = created - 86400 WHERE id = ?1", [queued])?;
+                assert!(outbox_failed(c, queued, "Microsoft Graph 502: ", SendFailure::Unavailable)?, "a day later it gives up");
+                assert_eq!(drafts(c)?.len(), 1, "and the message is back in Drafts");
+
+                let id = save_draft(c, &compose("Broken"))?;
+                let queued = queue_outbox(c, AccountId(1), Some(id), "blob", "<n@x>", "a@x", &["b@x".into()], None, 0)?;
+                for attempt in 1..=max {
+                    assert_eq!(outbox_failed(c, queued, "parse error", SendFailure::Other)?, attempt == max, "failed {attempt} times");
+                }
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// A message the outbox gives up on goes back to Drafts, to be fixed
     /// and sent again, instead of staying as being sent for good.
     #[test]
@@ -384,9 +432,9 @@ mod tests {
             .write(|c| {
                 let id = save_draft(c, &compose("Refused"))?;
                 let queued = queue_outbox(c, AccountId(1), Some(id), "blob", "<m@x>", "a@x", &["b@x".into()], None, 0)?;
-                outbox_failed(c, queued, "refused", false)?;
+                outbox_failed(c, queued, "timed out", SendFailure::Other)?;
                 assert!(drafts(c)?.is_empty(), "a message tried again stays out of Drafts");
-                outbox_failed(c, queued, "refused", true)?;
+                outbox_failed(c, queued, "refused", SendFailure::Refused)?;
                 assert_eq!(drafts(c)?.iter().map(|d| d.subject.as_str()).collect::<Vec<_>>(), ["Refused"]);
                 assert_eq!(dirty_drafts(c, AccountId(1))?.len(), 1, "and goes to the server's Drafts");
                 Ok(())

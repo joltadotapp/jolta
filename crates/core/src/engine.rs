@@ -773,15 +773,18 @@ impl Engine {
                     sent.push(item);
                 }
                 Err(e) => {
-                    let refused = matches!(e, crate::Error::Refused(_));
-                    let give_up = refused || item.attempts + 1 >= MAX_ATTEMPTS;
+                    let failure = match &e {
+                        crate::Error::Refused(_) => store::SendFailure::Refused,
+                        e if e.is_transient() => store::SendFailure::Unavailable,
+                        _ => store::SendFailure::Other,
+                    };
                     let message = match &e {
                         crate::Error::Refused(reason) => refusal(account, &item.sender, reason, item.draft.is_some()),
                         e => e.to_string(),
                     };
                     let (id, stored) = (item.id, message.clone());
-                    self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &stored, give_up)).await?;
-                    (self.sink)(Event::SendFailed { message, gave_up: give_up });
+                    let gave_up = self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &stored, failure)).await?;
+                    (self.sink)(Event::SendFailed { message, gave_up });
                 }
             }
         }
