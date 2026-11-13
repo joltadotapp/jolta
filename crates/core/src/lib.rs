@@ -60,6 +60,10 @@ pub enum Error {
     /// again.
     #[error("{0}")]
     Refused(String),
+    /// The server is down or busy for now, such as an HTTP 502, 503 or
+    /// 429: the same request can work later.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("{0}")]
     Other(String),
 }

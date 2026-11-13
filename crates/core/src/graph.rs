@@ -610,6 +610,20 @@ fn well_known_roles(lookups: Vec<(MailboxRole, Result<Value>)>, known: &[Mailbox
 mod tests {
     use super::*;
 
+    /// Graph's outage and throttling answers can work on a later try; a
+    /// 404 or 403 never will.
+    #[test]
+    fn an_outage_is_unavailable_and_a_refusal_is_not() {
+        for status in [429, 500, 502, 503, 504] {
+            let e = failure(reqwest::StatusCode::from_u16(status).unwrap(), b"");
+            assert!(matches!(e, Error::Unavailable(_)), "{status} is {e:?}");
+        }
+        for status in [400, 403, 404] {
+            let e = failure(reqwest::StatusCode::from_u16(status).unwrap(), b"");
+            assert!(matches!(e, Error::Other(_)), "{status} is {e:?}");
+        }
+    }
+
     /// Exchange refuses a From the mailbox may not send as with 403
     /// ErrorSendAsDenied; sending it again can only fail again.
     #[test]
