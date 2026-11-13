@@ -886,7 +886,7 @@ fn reason(body: &[u8]) -> Option<String> {
 fn failure(status: u16, body: &[u8]) -> Error {
     let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let message = v["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
-    Error::Other(format!("Google Calendar {status}: {message}"))
+    Error::from_status(status, format!("Google Calendar {status}: {message}"))
 }
 
 #[cfg(test)]

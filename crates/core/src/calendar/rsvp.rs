@@ -137,7 +137,7 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
     jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
 }
 
-/// `answer`, unless the provider can't be reached or an earlier change to
+/// `answer`, unless the provider can't be reached, is down or busy, or an earlier change to
 /// the copy still waits to be sent: then the answer is kept in the store
 /// and queued behind it, to go through the provider once (`ops::queue_answer`).
 /// True when it was queued.
@@ -155,7 +155,7 @@ pub async fn answer_or_queue(jolta: &Jolta, rsvp: &Rsvp) -> Result<bool> {
         .await?;
     if !waits {
         match answer(jolta, rsvp).await {
-            Err(Error::Offline(_)) => {}
+            Err(e) if e.is_transient() => {}
             done => return done.map(|()| false),
         }
     }

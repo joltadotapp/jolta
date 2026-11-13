@@ -54,8 +54,7 @@ fn send_failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
 fn failure(status: reqwest::StatusCode, bytes: &[u8]) -> Error {
     let json: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     let message = json["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
-    let text = format!("Microsoft Graph {}: {message}", status.as_u16());
-    if status.as_u16() == 429 || status.is_server_error() { Error::Unavailable(text) } else { Error::Other(text) }
+    Error::from_status(status.as_u16(), format!("Microsoft Graph {}: {message}", status.as_u16()))
 }
 
 /// A request that got no answer: no connection, a timeout or a dropped

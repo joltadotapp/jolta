@@ -69,6 +69,12 @@ pub enum Error {
 }
 
 impl Error {
+    /// An HTTP error answer: a server error or 429 is `Unavailable`, any
+    /// other status a refusal of this request.
+    pub fn from_status(status: u16, text: String) -> Error {
+        if status == 429 || (500..600).contains(&status) { Error::Unavailable(text) } else { Error::Other(text) }
+    }
+
     /// The server was down, busy or out of reach, so the same request can
     /// work later.
     pub fn is_transient(&self) -> bool {

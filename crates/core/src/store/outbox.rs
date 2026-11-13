@@ -304,6 +304,16 @@ pub fn outbox_sent(conn: &Connection, item: &OutboxItem) -> Result<()> {
     Ok(())
 }
 
+/// How long an action or a calendar change waits for a server that is
+/// down or busy before it is taken back.
+pub const OUTAGE_PATIENCE_SECS: i64 = 24 * 60 * 60;
+
+/// How often a message is tried while its server is down or busy before it
+/// goes back to Drafts: tries at most 15 minutes apart fill about a day. A
+/// count rather than an age, since a message sent later was made long
+/// before it was due.
+const OUTAGE_TRIES: u32 = 100;
+
 /// Why a send failed, which decides when the outbox gives up on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendFailure {
@@ -318,7 +328,11 @@ pub enum SendFailure {
 /// True when it gave up.
 pub fn outbox_failed(conn: &Connection, id: i64, error: &str, failure: SendFailure) -> Result<bool> {
     let attempts: u32 = conn.query_row("SELECT attempts FROM outbox WHERE id = ?1", [id], |r| r.get(0))?;
-    let give_up = failure == SendFailure::Refused || attempts + 1 >= crate::engine::MAX_ATTEMPTS;
+    let (give_up, wait) = match failure {
+        SendFailure::Refused => (true, 0),
+        SendFailure::Unavailable => (attempts + 1 >= OUTAGE_TRIES, (30i64 << attempts.min(5)).min(15 * 60)),
+        SendFailure::Other => (attempts + 1 >= crate::engine::MAX_ATTEMPTS, 30),
+    };
     if give_up {
         conn.execute(
             "UPDATE draft SET state = 'editing', dirty = 1, updated = ?2 WHERE id = (SELECT draft_id FROM outbox WHERE id = ?1) AND state = 'sending'",
@@ -330,7 +344,7 @@ pub fn outbox_failed(conn: &Connection, id: i64, error: &str, failure: SendFailu
            state = CASE WHEN ?3 THEN 'failed' ELSE state END,
            send_after = CASE WHEN ?3 THEN send_after ELSE ?4 END
          WHERE id = ?1",
-        params![id, error, give_up, now() + 30],
+        params![id, error, give_up, now() + wait],
     )?;
     Ok(give_up)
 }
@@ -401,15 +415,15 @@ mod tests {
                 let queued = queue_outbox(c, AccountId(1), Some(id), "blob", "<m@x>", "a@x", &["b@x".into()], None, 0)?;
                 let wait = |c: &Connection| -> Result<i64> { Ok(c.query_row("SELECT send_after - unixepoch() FROM outbox WHERE id = ?1", [queued], |r| r.get(0))?) };
                 let mut waits = Vec::new();
-                for attempt in 1..=max * 3 {
-                    assert!(!outbox_failed(c, queued, "Microsoft Graph 502: ", SendFailure::Unavailable)?, "attempt {attempt} gave up");
+                while !outbox_failed(c, queued, "Microsoft Graph 502: ", SendFailure::Unavailable)? {
                     waits.push(wait(c)?);
+                    assert!(drafts(c)?.is_empty(), "the message stays in the outbox");
                 }
+                assert!(waits.len() > max as usize * 3, "it keeps trying: {} tries", waits.len());
                 assert!(waits.windows(2).all(|w| w[0] <= w[1]) && waits[0] < waits[waits.len() - 1], "it waits longer each time: {waits:?}");
                 assert!(*waits.last().unwrap() <= 15 * 60, "but never more than a quarter of an hour: {waits:?}");
-                assert!(drafts(c)?.is_empty(), "the message stays in the outbox");
-                c.execute("UPDATE outbox SET created = created - 86400 WHERE id = ?1", [queued])?;
-                assert!(outbox_failed(c, queued, "Microsoft Graph 502: ", SendFailure::Unavailable)?, "a day later it gives up");
+                let waited: i64 = waits.iter().sum();
+                assert!((23 * 3600..25 * 3600).contains(&waited), "it gives up after about a day: {waited} s");
                 assert_eq!(drafts(c)?.len(), 1, "and the message is back in Drafts");
 
                 let id = save_draft(c, &compose("Broken"))?;

@@ -358,10 +358,6 @@ pub fn give_up(conn: &Connection, op: &Op, error: &str) -> Result<()> {
     store::fail_attempt(conn, op.id, error, true)
 }
 
-/// How long an action waits for a server that is down or busy before it
-/// is taken back.
-const OUTAGE_PATIENCE_SECS: i64 = 24 * 60 * 60;
-
 /// Records a failed attempt at `op`. A server that is down or busy gets it
 /// again later, for up to a day; a refusal gives up after `MAX_ATTEMPTS`.
 /// Giving up puts the messages back as they were. True when it gave up.
@@ -369,7 +365,7 @@ pub fn failed(conn: &Connection, op: &Op, error: &Error) -> Result<bool> {
     let message = error.to_string();
     let gave_up = if error.is_transient() {
         let age: i64 = conn.query_row("SELECT unixepoch() - created FROM op WHERE id = ?1", [op.id.0], |r| r.get(0))?;
-        age >= OUTAGE_PATIENCE_SECS
+        age >= store::OUTAGE_PATIENCE_SECS
     } else {
         op.attempts + 1 >= crate::engine::MAX_ATTEMPTS
     };

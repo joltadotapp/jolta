@@ -71,6 +71,12 @@ pub async fn send(account: &Account, sender: &str, recipients: &[String], raw: &
     transport
         .send_raw(&envelope, raw)
         .await
-        .map_err(|e| if e.is_permanent() { Error::Refused(format!("{} said: {e}", account.smtp_host)) } else { smtp_error(e) })?;
+        .map_err(|e| {
+            if e.is_permanent() {
+                Error::Refused(format!("{} said: {e}", account.smtp_host))
+            } else {
+                Error::Unavailable(format!("SMTP: {e}"))
+            }
+        })?;
     Ok(())
 }

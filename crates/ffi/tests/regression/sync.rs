@@ -172,6 +172,42 @@ fn changes_from_elsewhere_arrive() {
     wait(20, "the deletion arrived", || !inbox_has(&app, "Delete me"));
 }
 
+/// A message tried before whose copy is already in Sent went out before
+/// its answer was lost: the outbox counts it as sent and sends nothing
+/// twice.
+#[test]
+fn a_retry_with_its_copy_in_sent_is_not_sent_twice() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    server.append("Sent", &Mail::new(&server.user, "ann@test.invalid", "Sent earlier", "From before Jolta."));
+    let app = App::unstarted();
+    let account = server.sign_in(&app);
+    wait(20, "Sent synced", || app.subjects("in:sent") == ["Sent earlier"]);
+
+    // The earlier try reached the server, which filed its copy in Sent
+    // after Jolta last read that folder.
+    let mail = Mail::new(&server.user, "bob@test.invalid", &format!("Went before {}", now()), "Its answer was lost.");
+    server.append("Sent", &mail);
+    let raw = mail.raw();
+    let message_id = mail.id.trim_matches(['<', '>']).to_string();
+    let outbox = app
+        .jolta
+        .store
+        .write(|c| {
+            let blob = app.jolta.blobs.put(&raw)?;
+            let id = jolta_core::store::queue_outbox(c, account.id, None, &blob, &message_id, &server.user, &["bob@test.invalid".into()], None, 0)?;
+            c.execute("UPDATE outbox SET attempts = 1 WHERE id = ?1", [id])?;
+            Ok(id)
+        })
+        .unwrap();
+    app.core.sync_now();
+    let state = || app.jolta.store.read(|c| Ok(c.query_row("SELECT state FROM outbox WHERE id = ?1", [outbox], |r| r.get::<_, String>(0))?)).unwrap();
+    wait(30, "the outbox counted it as sent", || state() == "sent");
+    assert!(!caught(&mail.subject).contains("\"MessageID\""), "nothing went to SMTP");
+}
+
 /// A sent message leaves after the undo window, reaches the SMTP server
 /// with threading headers, and its copy lands in Sent.
 #[test]

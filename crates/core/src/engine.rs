@@ -725,10 +725,29 @@ impl Engine {
     async fn send_due(&self, account: &Account, link: &mut Link) -> Result<Vec<store::OutboxItem>> {
         let account_id = account.id;
         let due = self.jolta.store.read_async(move |c| store::due_outbox(c, account_id)).await?;
+        // A message tried before may have gone out before its answer was
+        // lost. Microsoft 365 and Gmail file it in Sent themselves, so a
+        // copy there means it went and isn't sent twice.
+        if due.iter().any(|item| item.attempts > 0)
+            && let Some(sent_box) = self.role_mailbox(account_id, MailboxRole::Sent).await?
+        {
+            let scope = Scope::Mailboxes(vec![sent_box.id]);
+            match link {
+                Link::Imap(session, caps) => {
+                    imap::sync_session(&self.jolta, session, *caps, account, &scope, SyncOptions { bodies: true }, &mut |_| {}).await?;
+                }
+                Link::Graph(g) => {
+                    g.sync(&self.jolta, &scope, &mut |_| {}).await?;
+                }
+            }
+        }
         let mut sent = Vec::new();
         for item in due {
             let raw = self.jolta.blobs.get(&item.blob)?;
+            let mid = item.message_id.clone();
+            let went = item.attempts > 0 && self.jolta.store.read_async(move |c| store::in_sent(c, account_id, &mid)).await?;
             let result = match link {
+                _ if went => Ok(()),
                 Link::Graph(g) => g.send_mime(&raw).await,
                 Link::Imap(..) => crate::smtp::send(account, &item.sender, &item.recipients, &raw).await,
             };
@@ -784,7 +803,10 @@ impl Engine {
                     };
                     let (id, stored) = (item.id, message.clone());
                     let gave_up = self.jolta.store.write_async(move |tx| store::outbox_failed(tx, id, &stored, failure)).await?;
-                    (self.sink)(Event::SendFailed { message, gave_up });
+                    // An outage is told once, not at every try.
+                    if gave_up || item.attempts == 0 || failure != store::SendFailure::Unavailable {
+                        (self.sink)(Event::SendFailed { message, gave_up });
+                    }
                 }
             }
         }

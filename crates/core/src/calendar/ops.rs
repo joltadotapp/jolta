@@ -1496,13 +1496,23 @@ pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
     }
 }
 
-/// Puts an op whose request never reached its server back to wait a
-/// minute, without using up an attempt, however long it is offline.
-/// False when the op should count the attempt.
+/// Puts an op back to wait a minute without using up an attempt: one
+/// whose request never reached its server however long it is offline, and
+/// one whose server is down or busy for up to a day. False when the op
+/// should count the attempt.
 pub fn wait_out(conn: &Connection, op: &CalendarOp, error: &Error, now: i64) -> Result<bool> {
-    let Error::Offline(reason) = error else { return Ok(false) };
-    store::wait_offline_calendar_op(conn, op.id, reason, now + OFFLINE_RETRY_SECONDS)?;
-    Ok(true)
+    let waits = match error {
+        Error::Offline(_) => true,
+        e if e.is_transient() => {
+            let created: i64 = conn.query_row("SELECT created FROM calendar_op WHERE id = ?1", [op.id.0], |r| r.get(0))?;
+            now - created < store::OUTAGE_PATIENCE_SECS
+        }
+        _ => false,
+    };
+    if waits {
+        store::wait_offline_calendar_op(conn, op.id, &error.to_string(), now + OFFLINE_RETRY_SECONDS)?;
+    }
+    Ok(waits)
 }
 
 /// Reaches the op's server and keeps the text of the object it left there.
