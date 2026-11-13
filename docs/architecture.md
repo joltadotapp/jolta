@@ -185,6 +185,7 @@ Keep the UniFFI surface small and coarse. Lists cross as pages, never whole mail
 - `Core::open(data_dir, listener) -> Core`
 - `accounts()`, `add_imap_account(...)`, `begin_oauth(provider) -> url`, `remove_account(id)`. Removing an account deletes its rows, its Keychain entries and the access tokens kept in memory. For a Google account it also posts the refresh token to Google's revoke endpoint, in the background with a 10-second limit, so removal works offline; that ends Jolta's grant, which signs the account out on the user's other Macs too. Microsoft gives a public client no revoke for one token, so a Microsoft 365 account is only forgotten locally.
 - `query_count(query) -> u32` and `query_page(query, offset, limit) -> Vec<ThreadRow>` for any list: an account's inbox, the unified inbox, a section, a search
+- `search_within(list, search)` and `search_names_mailbox(search)`: a search runs over all mail but Spam and Trash, or, when the user narrows it with the tabs under the list header, over the open folder; a search that names a mailbox itself (`in:spam`, `label:work`) ignores both.
 - `open_thread(id) -> ThreadDetail` with sanitized HTML per message
 - `perform(action, target) -> UndoToken` and `undo(token)`
 - `thread_labels(thread)`: a Gmail account's own labels, marked when the conversation has them, for Label…

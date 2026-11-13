@@ -411,6 +411,11 @@ struct MessageList: NSViewRepresentable {
                 if (table?.selectedRow ?? 0) < 0 { move(1) } else { openSelected() }
                 return true
             case 48:
+                // During a search Tab switches between all mail and the folder.
+                if model.showsSearchScope {
+                    model.searchScope = model.searchScope.other
+                    return true
+                }
                 // Without sections Tab moves the keyboard on, as anywhere in macOS.
                 guard model.showsSections else { return false }
                 model.nextSection(backwards: event.modifierFlags.contains(.shift))

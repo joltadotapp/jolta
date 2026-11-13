@@ -746,6 +746,12 @@ pub fn search_within(list: String, search: String) -> String {
     search::within(&list, &search)
 }
 
+/// The search says where to look itself, as `in:spam` or `label:work` do.
+#[uniffi::export]
+pub fn search_names_mailbox(search: String) -> bool {
+    search::parse(&search).is_ok_and(|q| q.names_mailbox())
+}
+
 #[derive(uniffi::Enum)]
 pub enum OAuthProvider {
     Google,

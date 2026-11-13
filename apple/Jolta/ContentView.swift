@@ -661,6 +661,8 @@ struct ListColumn: View {
             .background(TitleBarArea())
             if model.showsSections {
                 SectionBar(model: model)
+            } else if model.showsSearchScope {
+                SearchScopeBar(model: model)
             }
             ForEach(model.away, id: \.accountId) { AwayStrip(info: $0, model: model) }
             MessageList(model: model)
@@ -673,26 +675,70 @@ struct ListColumn: View {
     }
 }
 
+/// During a search: all mail or only the open folder, as tabs where the
+/// inbox shows its sections.
+struct SearchScopeBar: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        let search = model.search.trimmingCharacters(in: .whitespaces)
+        TabStrip(hint: "switch", scrolls: false) {
+            SectionTab(name: "All mail", unread: model.unreadCount(searchWithin(list: "", search: search)),
+                       selected: model.searchScope == .allMail) { model.searchScope = .allMail }
+                .fixedSize()
+                .accessibilityIdentifier("search-scope-all")
+            SectionTab(name: model.source.title, unread: model.unreadCount(searchWithin(list: model.source.query, search: search)),
+                       selected: model.searchScope == .list) { model.searchScope = .list }
+                .accessibilityIdentifier("search-scope-list")
+        }
+    }
+}
+
 struct SectionBar: View {
     @Bindable var model: AppModel
 
     var body: some View {
         let tabs: [SectionInfo?] = [nil] + model.sections.map { Optional($0) }
+        TabStrip(hint: "next") { self.tabs(tabs) }
+    }
+
+    private func tabs(_ tabs: [SectionInfo?]) -> some View {
+        ForEach(tabs, id: \.?.id) { c in
+            SectionTab(name: c?.name ?? "Everything", unread: model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " ")),
+                       selected: model.section?.id == c?.id) { model.section = c }
+        }
+    }
+}
+
+/// A row of tabs under the list header, with the key that moves between them.
+private struct TabStrip<Tabs: View>: View {
+    let hint: String
+    /// Tabs that outgrow a narrow list scroll sideways; otherwise their
+    /// names shorten with an ellipsis.
+    var scrolls = true
+    @ViewBuilder let tabs: Tabs
+
+    var body: some View {
         HStack(spacing: 0) {
-            // Tabs that outgrow a narrow list scroll sideways instead of wrapping.
-            ScrollView(.horizontal) {
-                HStack(spacing: 0) { self.tabs(tabs) }
+            if scrolls {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) { tabs }
+                }
+                .scrollIndicators(.never)
+                .scrollBounceBehavior(.basedOnSize)
+            } else {
+                HStack(spacing: 0) { tabs }
+                    .layoutPriority(1)
+                Spacer(minLength: 0)
             }
-            .scrollIndicators(.never)
-            .scrollBounceBehavior(.basedOnSize)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 5) {
                     KeyCap(key: "⇥")
-                    Text("next").font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
+                    Text(hint).font(.system(size: Theme.small)).foregroundStyle(Color(Theme.text3))
                 }
                 .fixedSize()
                 .padding(.leading, 8)
-                Color.clear.frame(width: 0)
+                Color.clear.frame(width: 0, height: 0)
             }
             .padding(.bottom, 8)
             .padding(.trailing, 9)
@@ -702,13 +748,6 @@ struct SectionBar: View {
         .padding(.leading, Theme.gutter - 9)
         .padding(.trailing, 11)
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
-    }
-
-    private func tabs(_ tabs: [SectionInfo?]) -> some View {
-        ForEach(tabs, id: \.?.id) { c in
-            SectionTab(name: c?.name ?? "Everything", unread: model.unreadCount(["in:inbox", c?.query ?? ""].joined(separator: " ")),
-                       selected: model.section?.id == c?.id) { model.section = c }
-        }
     }
 }
 

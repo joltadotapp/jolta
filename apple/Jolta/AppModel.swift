@@ -43,6 +43,13 @@ enum ListSource: Hashable {
     }
 }
 
+/// Where a search looks: all mail but Spam and Trash, or the open folder.
+enum SearchScope {
+    case allMail, list
+
+    var other: SearchScope { self == .allMail ? .list : .allMail }
+}
+
 struct AccountSection: Identifiable {
     let account: AccountInfo
     let mailboxes: [MailboxInfo]
@@ -114,7 +121,7 @@ final class AppModel {
     private(set) var turningOffAway: Set<Int64> = []
     /// Counts `AwayChanged`, so Settings reloads states that aren't on now too.
     private(set) var awayRevision = 0
-    var source: ListSource = .unifiedInbox { didSet { section = nil; readerUp = false; listChanged(); focusSync() } }
+    var source: ListSource = .unifiedInbox { didSet { section = nil; searchScope = .allMail; readerUp = false; listChanged(); focusSync() } }
     /// The split-inbox section shown over the inbox; nil shows everything.
     var section: SectionInfo? { didSet { listChanged() } }
     private(set) var sections: [SectionInfo] = []
@@ -147,7 +154,14 @@ final class AppModel {
         // The sheet's filter had the keyboard; the list or the message being written gets it back.
         didSet { if oldValue, !showsHelp, palette == nil, findTime == nil { returnKeyboard() } }
     }
-    var search = "" { didSet { listChanged() } }
+    var search = "" {
+        didSet {
+            if search.isEmpty { searchScope = .allMail }
+            listChanged()
+        }
+    }
+    /// Where the search looks. A new folder or a new search starts at all mail.
+    var searchScope = SearchScope.allMail { didSet { if searchScope != oldValue { listChanged() } } }
     /// Bumped whenever the list's contents may have changed; views reload on it.
     private(set) var listRevision = 0
     private(set) var syncing: Set<Int64> = []
@@ -309,9 +323,18 @@ final class AppModel {
         return parts.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
-    /// A search runs over the whole folder, not the section it was typed in.
+    /// A search looks through all mail but Spam and Trash, or through the
+    /// whole folder when narrowed to it, never only the section it was typed in.
     var query: String {
-        searchWithin(list: showsSections ? listQuery : source.query, search: search.trimmingCharacters(in: .whitespaces))
+        let search = search.trimmingCharacters(in: .whitespaces)
+        if search.isEmpty { return listQuery }
+        return searchWithin(list: searchScope == .allMail ? "" : source.query, search: search)
+    }
+
+    /// The search can be narrowed to the open folder: it doesn't say where
+    /// to look itself, and the folder isn't all mail already.
+    var showsSearchScope: Bool {
+        source != .allMail && !search.trimmingCharacters(in: .whitespaces).isEmpty && !searchNamesMailbox(search: search)
     }
 
     init() throws {
@@ -368,7 +391,6 @@ final class AppModel {
         // `-JoltaSearch "subject:x" -JoltaOpenFirst YES`.
         let defaults = UserDefaults.standard
         if let query = defaults.string(forKey: "JoltaSearch") {
-            source = .allMail
             search = query
         }
         // `-JoltaEmpty <mailbox id>` asks to empty that one Trash folder.
