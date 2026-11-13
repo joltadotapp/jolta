@@ -663,6 +663,29 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(visible(app, "Lunch on Friday"))
     }
 
+    /// A search looks through all mail, archived included, from whichever
+    /// folder it is typed in. The scope switch narrows it to the folder, and
+    /// Tab in the list switches back.
+    func testSearchFindsArchivedMail() throws {
+        let app = try launch()
+        let rows = rowCount(app)
+        text(app, "Lunch on Friday").click()
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(waitUntil { rowCount(app) == rows - 1 }, "e archives the conversation")
+        let search = app.searchFields.firstMatch.exists ? app.searchFields.firstMatch : app.textFields.firstMatch
+        search.click()
+        search.typeText("lunch")
+        XCTAssertTrue(waitUntil { rowCount(app) == 1 }, "the search finds the archived conversation from the Inbox")
+        let inbox = app.buttons["search-scope-list"]
+        XCTAssertTrue(inbox.waitForExistence(timeout: 5), "a search shows the scope switch")
+        inbox.click()
+        XCTAssertTrue(waitUntil { rowCount(app) == 0 }, "narrowed to the Inbox, the archived conversation is not found")
+        search.click()
+        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(.tab, modifierFlags: [])
+        XCTAssertTrue(waitUntil { rowCount(app) == 1 }, "Tab in the list switches back to all mail")
+    }
+
     /// Typing a search opens none of its results, as opening marks mail
     /// read. J opens the first.
     func testSearchOpensNothingUntilAsked() throws {
