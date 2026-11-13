@@ -588,14 +588,19 @@ struct Delta {
 }
 
 /// Which folder ids have which role, from Graph's answers for the
-/// well-known folder names.
-fn well_known_roles(lookups: Vec<(MailboxRole, Result<Value>)>, _known: &[Mailbox]) -> HashMap<String, MailboxRole> {
+/// well-known folder names. When Graph fails to answer, the folder that
+/// had the role keeps it; only a 404, no such folder, takes it away.
+fn well_known_roles(lookups: Vec<(MailboxRole, Result<Value>)>, known: &[Mailbox]) -> HashMap<String, MailboxRole> {
     let mut roles = HashMap::new();
     for (role, answer) in lookups {
-        if let Ok(f) = answer {
-            if let Some(id) = f["id"].as_str() {
-                roles.insert(id.to_string(), role);
+        match answer {
+            Ok(f) => {
+                if let Some(id) = f["id"].as_str() {
+                    roles.insert(id.to_string(), role);
+                }
             }
+            Err(Error::Other(e)) if e.starts_with("Microsoft Graph 404") => {}
+            Err(_) => roles.extend(known.iter().filter(|m| m.role == Some(role)).map(|m| (m.remote_id.clone(), role))),
         }
     }
     roles
