@@ -533,9 +533,17 @@ final class DayStrip: CanvasView {
                 cg.textPosition = CGPoint(x: x, y: 26)
                 CTLineDraw(name, cg)
                 x += CTLineGetTypographicBounds(name, nil, nil, nil) + 6
-                cg.setFillColor((day.isToday ? Theme.accentText : Theme.text2).cgColor)
+                let number = line("\(Calendar.current.component(.day, from: day.start))", Self.dayFont)
+                if day.isToday {
+                    x += 4
+                    let width = CTLineGetTypographicBounds(number, nil, nil, nil), disc = max(width + 12, 24)
+                    Theme.accent.setFill()
+                    NSBezierPath(roundedRect: CGRect(x: x - 6, y: 26 - Self.dayFont.capHeight / 2 - 12, width: disc, height: 24), xRadius: 12, yRadius: 12).fill()
+                    x += (disc - width) / 2 - 6
+                }
+                cg.setFillColor((day.isToday ? Theme.onAccent : Theme.text2).cgColor)
                 cg.textPosition = CGPoint(x: x, y: 26)
-                CTLineDraw(line("\(Calendar.current.component(.day, from: day.start))", Self.dayFont), cg)
+                CTLineDraw(number, cg)
             }
             Theme.line2.setFill()
             CGRect(x: 0, y: Self.namesHeight, width: bounds.width, height: 1).fill()

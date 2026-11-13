@@ -466,8 +466,8 @@ struct CalendarRow: View {
     }
 }
 
-/// The month around the period, with the period's days marked, today in
-/// the accent's text color and a dot under days that have events.
+/// The month around the period, with the period's days marked, today on
+/// an accent disc and a dot under days that have events.
 struct MiniMonth: View {
     let cal: CalendarModel
 
@@ -532,8 +532,11 @@ struct MiniDay: View, Equatable {
         Button(action: go) {
             Text("\(Calendar.current.component(.day, from: day.start))")
                 // Days of the months around it are lighter in weight, not fainter: text3 at 60% fell to 2.4:1.
-                .font(.system(size: 11, weight: today ? .semibold : day.outside ? .light : .regular).monospacedDigit())
-                .foregroundStyle(Color(today ? Theme.accentText : day.outside ? Theme.text3 : Theme.text2))
+                .font(.system(size: 11, weight: today ? .bold : day.outside ? .light : .regular).monospacedDigit())
+                .foregroundStyle(Color(today ? Theme.onAccent : day.outside ? Theme.text3 : Theme.text2))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background { if today { Capsule().fill(Color(Theme.accent)) } }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .bottom) {
                     if busy { Circle().fill(Color(Theme.text3)).frame(width: 4, height: 4).padding(.bottom, 1) }
@@ -645,9 +648,10 @@ struct MonthCell: View {
         let shown = list.count > fits ? max(0, fits - 1) : list.count
         VStack(alignment: .leading, spacing: 2) {
             Text("\(Calendar.current.component(.day, from: day.start))")
-                .font(.system(size: 12, weight: day.isToday ? .semibold : .medium).monospacedDigit())
-                .foregroundStyle(Color(day.isToday ? Theme.accentText : day.outside ? Theme.text3 : Theme.text2))
+                .font(.system(size: 12, weight: day.isToday ? .bold : .medium).monospacedDigit())
+                .foregroundStyle(Color(day.isToday ? Theme.onAccent : day.outside ? Theme.text3 : Theme.text2))
                 .padding(.horizontal, 6)
+                .background { if day.isToday { Capsule().fill(Color(Theme.accent)).padding(.vertical, -3) } }
                 .padding(.bottom, 2)
                 .onTapGesture { cal.openDay(day) }
             ForEach(list.prefix(shown)) { e in
@@ -665,6 +669,7 @@ struct MonthCell: View {
         .padding(.horizontal, 3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(cal.workSpan(day) == nil || day.outside ? CalendarColor.offHours() : .clear))
+        .background { if day.isToday { Color(Theme.accent).opacity(0.08) } }
         .overlay {
             if isTarget {
                 RoundedRectangle(cornerRadius: 6).strokeBorder(Color(Theme.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3])).padding(2)
@@ -672,6 +677,7 @@ struct MonthCell: View {
         }
         .overlay(alignment: .leading) { Rectangle().fill(Color(Theme.line2)).frame(width: 1) }
         .overlay(alignment: .bottom) { Rectangle().fill(Color(Theme.line2)).frame(height: 1) }
+        .overlay { if day.isToday { Rectangle().strokeBorder(Color(Theme.accent).opacity(0.4), lineWidth: 1) } }
         .clipped()
     }
 }
