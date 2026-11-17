@@ -175,11 +175,13 @@ mod tests {
         for to in ["out@sender.test;boss@victim.test", "out@sender.test%2Cboss@victim.test", "out@sender.test%3Bboss@victim.test"] {
             assert_eq!(method(&raw(&format!("List-Unsubscribe: <mailto:{to}>\r\n"))), None, "{to}");
         }
-        let built = match method(&raw("List-Unsubscribe: <mailto:out@sender.test,boss@victim.test>\r\n")) {
-            Some(Method::Mail { to, .. }) => crate::compose::parse_addresses(&to),
-            _ => Vec::new(),
-        };
-        assert!(built.len() <= 1, "unsubscribe would write to {built:?}");
+        for to in ["out@sender.test,boss@victim.test", "=%3FUTF-8%3FQ%3Fout@sender.test=2Cboss@victim.test%3F=(x)"] {
+            let built = match method(&raw(&format!("List-Unsubscribe: <mailto:{to}>\r\n"))) {
+                Some(Method::Mail { to, .. }) => crate::compose::parse_addresses(&to),
+                _ => Vec::new(),
+            };
+            assert!(built.len() <= 1, "unsubscribe would write to {built:?}");
+        }
     }
 
     #[test]
