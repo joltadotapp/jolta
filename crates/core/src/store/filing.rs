@@ -66,7 +66,8 @@ pub fn unsettled_replies(conn: &Connection, account: AccountId, since: i64) -> R
 
 /// The account's mail carrying an iTIP REPLY for an event of a calendar
 /// on this Mac, not yet read: guests' answers to meetings Jolta sends
-/// itself. Only mail whose body is stored has `invitation` rows.
+/// itself, outside Spam and Trash. Only mail whose body is stored has
+/// `invitation` rows.
 pub fn unread_local_replies(conn: &Connection, account: AccountId) -> Result<Vec<UnsettledReply>> {
     let mut stmt = conn.prepare_cached(
         "SELECT m.id, m.message_id, m.from_addr, m.from_name, m.date, m.blob FROM message m
@@ -74,6 +75,7 @@ pub fn unread_local_replies(conn: &Connection, account: AccountId) -> Result<Vec
            AND coalesce(m.message_id, '') != '' AND coalesce(m.blob, '') != '' AND m.blob NOT LIKE 'synth:%'
            AND EXISTS (SELECT 1 FROM invitation i JOIN event e ON e.uid = i.uid JOIN calendar c ON c.id = e.calendar_id AND c.source = 'local'
                        WHERE i.message_id = m.id AND i.method = 'REPLY')
+           AND NOT EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id WHERE mm.message_id = m.id AND b.role IN ('spam', 'trash'))
            AND NOT EXISTS (SELECT 1 FROM reply_read r WHERE r.account_id = m.account_id AND r.message_id = m.message_id)
          ORDER BY m.date, m.id",
     )?;

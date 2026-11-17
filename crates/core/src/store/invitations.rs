@@ -45,17 +45,22 @@ pub fn set_invitations(conn: &Connection, id: MessageId, invitations: &[Invitati
     Ok(())
 }
 
-/// The organizer's cancellation of the whole event, newer than every
+/// The organizer's cancellation of the whole event, outside Spam and
+/// Trash and newer than every
 /// invitation to it on the account, ends the answer given and takes back
 /// its reply still waiting: an invitation after it, such as the organizer
 /// adding the user again, asks for a new one.
 fn forget_answer(conn: &Connection, message: MessageId, cancel: &Invitation) -> Result<()> {
     let uid = &cancel.event.uid;
-    let (account, address, from): (AccountId, String, String) = conn.query_row(
-        "SELECT m.account_id, a.address, m.from_addr FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
+    let (account, address, from, kept): (AccountId, String, String, bool) = conn.query_row(
+        "SELECT m.account_id, a.address, m.from_addr, NOT EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id WHERE mm.message_id = m.id AND b.role IN ('spam', 'trash'))
+         FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
         [message],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
+    if !kept {
+        return Ok(());
+    }
     let me = [address];
     let organizer = update::organizer(conn, account, &me, uid)?;
     let named = cancel.event.organizer.as_ref().map(|o| o.address.as_str()).unwrap_or_default();

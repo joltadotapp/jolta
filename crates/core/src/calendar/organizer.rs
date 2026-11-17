@@ -233,7 +233,13 @@ pub fn read_replies(jolta: &Jolta, account: AccountId, horizon: &Horizon) -> Res
     let mut changed = Vec::new();
     for reply in unread {
         let Ok(raw) = jolta.blobs.get(&reply.blob) else { continue };
-        let found: Vec<Invitation> = invitation::find(&raw, &[]).into_iter().filter(|i| i.method == Method::Reply).collect();
+        let mut found: Vec<Invitation> = invitation::find(&raw, &[]).into_iter().filter(|i| i.method == Method::Reply).collect();
+        // The sender writes DTSTAMP: one after the mail arrived would
+        // outrank every later answer from the guest.
+        let received = chrono::DateTime::from_timestamp(reply.date, 0).unwrap_or_default();
+        for answer in &mut found {
+            answer.stamp = answer.stamp.map(|s| s.min(received));
+        }
         jolta.store.write(|tx| {
             let mut waits = false;
             for answer in &found {
