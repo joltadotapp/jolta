@@ -168,6 +168,8 @@ fn strip_css_comments(css: &str) -> String {
     let mut rest = css;
     while let Some(i) = rest.find("/*") {
         out.push_str(&rest[..i]);
+        // A space, so `//**/*` can't become a new `/*`.
+        out.push(' ');
         rest = match rest[i + 2..].find("*/") {
             Some(j) => &rest[i + 2 + j + 2..],
             None => "",
