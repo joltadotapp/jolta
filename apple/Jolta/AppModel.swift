@@ -650,8 +650,10 @@ final class AppModel {
                 switch try await core.unsubscribe(threadId: thread) {
                 case .unsubscribed(let list):
                     act(.archive, label: "Unsubscribed from \(list) and archived", threadID: thread)
-                case .emailed(_, let to):
-                    act(.archive, label: "Sent an unsubscribe email to \(to) and archived", threadID: thread)
+                case .emailed(_, let to, let token):
+                    let archived = (try? core.perform(action: .archive, threadIds: [thread], context: source.actionContext)) ?? []
+                    show(Toast(text: "Emailing \(to) to unsubscribe in \(Toast.countdownMark), archived",
+                               undo: .unsubscribe(send: token, archive: archived), until: Date.now + Toast.undoWindow))
                 case .openPage(let list, let url):
                     if let page = URL(string: url) { NSWorkspace.shared.open(page) }
                     act(.archive, label: "Opened \(list)'s unsubscribe page and archived", threadID: thread)
@@ -989,6 +991,13 @@ final class AppModel {
             } else {
                 show(Toast(text: "Already sent", undo: nil))
             }
+        case .unsubscribe(let send, let archive):
+            userChangedList = true
+            let back = try? core.cancelSend(token: send)
+            // The email was never written by hand, so nothing goes to Drafts.
+            if let draft = back?.draftId { try? core.discardDraft(draftId: draft) }
+            try? core.undo(tokens: archive)
+            show(Toast(text: back == nil ? "Already sent; the conversation is back" : "Unsubscribe cancelled", undo: nil))
         case .discard:
             guard var draft = discarded else { return }
             discarded = nil
@@ -1373,6 +1382,8 @@ struct Toast: Equatable {
     enum Undo: Equatable {
         case action([Int64])
         case send(Int64)
+        /// Take back an unsubscribe email and the archive that came with it.
+        case unsubscribe(send: Int64, archive: [Int64])
         /// A calendar edit's op.
         case calendar(Int64)
         /// Set these senders' VIP mark back to this.

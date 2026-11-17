@@ -40,35 +40,43 @@ pub fn method(raw: &[u8]) -> Option<Method> {
             return Some(Method::OneClick(url.to_string()));
         }
     }
-    if let Some(mailto) = urls.iter().find(|u| u.to_ascii_lowercase().starts_with("mailto:")) {
-        return mail(&mailto[7..]);
+    let mail = urls
+        .iter()
+        .filter(|u| u.to_ascii_lowercase().starts_with("mailto:"))
+        .find_map(|u| mail(&u[7..]));
+    if mail.is_some() {
+        return mail;
     }
     urls.iter()
-        .find(|u| u.to_ascii_lowercase().starts_with("http"))
+        .find(|u| {
+            let u = u.to_ascii_lowercase();
+            u.starts_with("https://") || u.starts_with("http://")
+        })
         .map(|u| Method::Page(u.to_string()))
 }
 
-/// `list@example.com?subject=unsubscribe&body=...` from a mailto URL.
+/// The email for `list@example.com?subject=...` from a mailto URL. The
+/// sender wrote the URL and Unsubscribe sends without a review, so it goes
+/// to one address only, with Jolta's body and a short plain subject.
 fn mail(rest: &str) -> Option<Method> {
     let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
     let to = percent_decode(to);
-    if !to.contains('@') {
+    let to = to.trim();
+    if to.contains([',', ';']) || to.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
+    let [(_, to)] = crate::compose::parse_addresses(to).try_into().ok()?;
     let mut subject = String::new();
-    let mut body = String::new();
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        match key.to_ascii_lowercase().as_str() {
-            "subject" => subject = percent_decode(value),
-            "body" => body = percent_decode(value),
-            _ => {}
+        if key.eq_ignore_ascii_case("subject") {
+            subject = percent_decode(value).chars().filter(|c| !c.is_control()).take(100).collect::<String>().trim().to_string();
         }
     }
     if subject.is_empty() {
         subject = "unsubscribe".into();
     }
-    Some(Method::Mail { to, subject, body })
+    Some(Method::Mail { to, subject, body: "unsubscribe".into() })
 }
 
 fn percent_decode(s: &str) -> String {
