@@ -65,7 +65,12 @@ fn mail(rest: &str) -> Option<Method> {
     if to.contains([',', ';']) || to.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
-    let [(_, to)] = crate::compose::parse_addresses(to).try_into().ok()?;
+    // The parser decodes encoded words, which can hide a second address.
+    let [(_, parsed)] = crate::compose::parse_addresses(to).try_into().ok()?;
+    if parsed != to {
+        return None;
+    }
+    let to = parsed;
     let mut subject = String::new();
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));

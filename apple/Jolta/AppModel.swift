@@ -651,6 +651,7 @@ final class AppModel {
                 case .unsubscribed(let list):
                     act(.archive, label: "Unsubscribed from \(list) and archived", threadID: thread)
                 case .emailed(_, let to, let token):
+                    if selectedThreads.contains(thread) { userChangedList = true }
                     let archived = (try? core.perform(action: .archive, threadIds: [thread], context: source.actionContext)) ?? []
                     show(Toast(text: "Unsubscribe email to \(to) in \(Toast.countdownMark)",
                                undo: .unsubscribe(send: token, archive: archived), until: Date.now + Toast.undoWindow))
