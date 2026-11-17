@@ -15,7 +15,7 @@ use jolta_core::{AccountId, Jolta, MailboxId, MessageId, ThreadId, reader, searc
 
 uniffi::setup_scaffolding!();
 
-mod ai;
+pub mod ai;
 mod away;
 pub mod calendar;
 pub mod editor;
