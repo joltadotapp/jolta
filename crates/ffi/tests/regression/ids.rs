@@ -3,15 +3,11 @@
 //! whose row is deleted must never name a newer row, or a stale id acts on
 //! another conversation.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
-
 use jolta_core::MailboxRole::Inbox;
 use jolta_core::store::{self, Grant};
 
+use crate::agents::Agent;
 use crate::fixture::{App, Mail, now, unique};
-use crate::server::wait;
 
 const ME: &str = "me@test.invalid";
 
@@ -87,38 +83,6 @@ fn a_deleted_message_keeps_its_id_to_itself() {
 
     let later = app.deliver(&me, Inbox, &Mail::new("carl@test.invalid", ME, "Third", "Three.").at(at));
     assert_ne!(later, gone, "the deleted message's id is not given out again");
-}
-
-/// An MCP client speaking JSON-RPC, one message per line.
-struct Agent {
-    stream: BufReader<UnixStream>,
-    next: u64,
-}
-
-impl Agent {
-    fn connect(socket: &Path, name: &str) -> Agent {
-        let mut stream = None;
-        wait(5, "the MCP server listens", || {
-            stream = UnixStream::connect(socket).ok();
-            stream.is_some()
-        });
-        let mut agent = Agent { stream: BufReader::new(stream.unwrap()), next: 0 };
-        agent.request("initialize", &format!(r#"{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"{name}"}}}}"#));
-        agent
-    }
-
-    fn request(&mut self, method: &str, params: &str) -> String {
-        self.next += 1;
-        let line = format!(r#"{{"jsonrpc":"2.0","id":{},"method":"{method}","params":{params}}}"#, self.next);
-        self.stream.get_mut().write_all(format!("{line}\n").as_bytes()).unwrap();
-        let mut reply = String::new();
-        self.stream.read_line(&mut reply).unwrap();
-        reply
-    }
-
-    fn call(&mut self, tool: &str, arguments: &str) -> String {
-        self.request("tools/call", &format!(r#"{{"name":"{tool}","arguments":{arguments}}}"#))
-    }
 }
 
 /// An agent searched, then the thread it found was merged into an older
