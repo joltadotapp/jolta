@@ -982,6 +982,8 @@ pub(crate) mod tests {
         import(&j, posing.as_bytes());
         assert_eq!(card_answer(&j, m1, first.as_bytes()), Some(Response::Accepted), "a stranger's cancellation ends nothing");
         assert_eq!(replies(&j).len(), 1, "and the reply still goes");
+        crate::calendar::invitation::tests::import_into(&j, "spam", dated(11, "s1", "CANCEL").as_bytes());
+        assert_eq!(replies(&j).len(), 1, "a cancellation in Spam ends nothing");
         import(&j, dated(11, "r2", "CANCEL").as_bytes());
         assert!(replies(&j).is_empty(), "the Accept still waiting goes with the answer");
         let again = dated(12, "r3", "REQUEST");

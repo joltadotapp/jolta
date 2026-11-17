@@ -192,12 +192,14 @@ pub fn sent_mail(conn: &Connection, message_id: &str) -> Result<Option<StoredMai
         .optional()?)
 }
 
-/// The messages on `account` since `since` that carry a request, with their
-/// sender, date and body blob.
+/// The messages on `account` since `since`, outside Spam and Trash, that
+/// carry a request, with their sender, date and body blob.
 pub fn requests_since(conn: &Connection, account: AccountId, since: DateTime<Utc>) -> Result<Vec<(String, DateTime<Utc>, Option<String>)>> {
     let mut stmt = conn.prepare_cached(
         "SELECT DISTINCT m.id, m.from_addr, m.date, m.blob FROM invitation i JOIN message m ON m.id = i.message_id
-         WHERE i.method = 'REQUEST' AND m.account_id = ?1 AND m.date >= ?2 ORDER BY m.id",
+         WHERE i.method = 'REQUEST' AND m.account_id = ?1 AND m.date >= ?2
+           AND NOT EXISTS (SELECT 1 FROM message_mailbox mm JOIN mailbox b ON b.id = mm.mailbox_id WHERE mm.message_id = m.id AND b.role IN ('spam', 'trash'))
+         ORDER BY m.id",
     )?;
     let rows = stmt.query_map(params![account, since.timestamp()], |r| Ok((r.get::<_, String>(1)?, at(r.get(2)?), r.get::<_, Option<String>>(3)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
