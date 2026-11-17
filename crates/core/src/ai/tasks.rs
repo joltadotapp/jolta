@@ -283,7 +283,11 @@ fn clean_bullets(text: &str) -> String {
 /// A Markdown reference definition, `[1]: url`, which turns `[text][1]` into a link.
 fn link_definition(line: &str) -> bool {
     let l = line.trim_start();
-    l.starts_with('[') && l.find("]:").is_some_and(|i| i > 1)
+    let Some(i) = l.find("]:").filter(|&i| i > 1 && l.starts_with('[')) else { return false };
+    // A definition is one address, then nothing or a title.
+    let mut rest = l[i + 2..].trim().splitn(2, char::is_whitespace);
+    let title = rest.nth(1).unwrap_or("").trim_start();
+    !l[i + 2..].trim().is_empty() && (title.is_empty() || title.starts_with(['"', '\'', '(']))
 }
 
 /// Markdown links and autolinks as plain text: `[label](url)` becomes
