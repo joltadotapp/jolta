@@ -52,12 +52,11 @@ struct Ctx {
     sink: Sink,
 }
 
-/// One connection. Its agent is fixed by its first initialize.
+/// One connection. Its token is fixed before its first initialize.
 #[derive(Default)]
 struct Session {
     token: Option<String>,
     initialized: bool,
-    agent: Option<i64>,
 }
 
 /// Listens on `socket` until the process ends. Each connection is one agent session.
@@ -106,7 +105,7 @@ async fn handle(ctx: &Ctx, session: &mut Session, msg: Value) -> Option<Value> {
     }
     let id = id?; // notifications (no id) get no reply
     let result: std::result::Result<Value, (i64, String)> = match method {
-        "initialize" => initialize(ctx, session, &params),
+        "initialize" => initialize(session, &params),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
         "tools/call" => Ok(call(ctx, session, &params).await),
@@ -118,16 +117,13 @@ async fn handle(ctx: &Ctx, session: &mut Session, msg: Value) -> Option<Value> {
     })
 }
 
-fn initialize(ctx: &Ctx, session: &mut Session, params: &Value) -> std::result::Result<Value, (i64, String)> {
+fn initialize(session: &mut Session, params: &Value) -> std::result::Result<Value, (i64, String)> {
     if session.initialized {
         return Err((-32600, "This connection is already initialized.".into()));
     }
     session.initialized = true;
     let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
     let version = PROTOCOL_VERSIONS.iter().find(|v| **v == requested).copied().unwrap_or(PROTOCOL_VERSIONS[1]);
-    if let Some(token) = &session.token {
-        session.agent = ctx.jolta.store.write(|tx| store::agent_by_token(tx, token)).map_err(|e| (-32603, e.to_string()))?;
-    }
     Ok(json!({
         "protocolVersion": version,
         "capabilities": {"tools": {}},
@@ -198,7 +194,11 @@ fn tool_result(text: String, is_error: bool) -> Value {
 }
 
 async fn call(ctx: &Ctx, session: &Session, params: &Value) -> Value {
-    let agent = session.agent;
+    // Looked up on every call, so Pair Again cuts off a connection that is already open.
+    let agent = match &session.token {
+        Some(token) => ctx.jolta.store.write(|tx| store::agent_by_token(tx, token)).ok().flatten(),
+        None => None,
+    };
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     let summary = summarize(&args);
