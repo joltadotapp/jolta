@@ -191,6 +191,25 @@ fn pairing_again_retires_the_old_token() {
     assert!(with_new.contains("secret numbers"), "the new token works: {with_new}");
 }
 
+/// A connection that is already open loses its agent when the user pairs that agent again.
+#[test]
+fn pairing_again_cuts_off_an_open_connection() {
+    let app = App::new();
+    let thread = one_thread(&app);
+    let old = add(&app, "Reader", &[Grant::Read]);
+    let id = app.core.agents().unwrap()[0].id;
+    let socket = mcp_socket(&app);
+    let mut open = Agent::paired(&socket, &old);
+    let read = format!(r#"{{"thread_id":{thread}}}"#);
+    let before = open.call("read_thread", &read);
+    app.core.pair_agent(id, vec!["read".into()]).unwrap();
+    let after = open.call("read_thread", &read);
+    let _ = std::fs::remove_file(&socket);
+
+    assert!(before.contains("secret numbers"), "the token works at first: {before}");
+    assert!(after.contains("Settings › Agents"), "the old token stops working: {after}");
+}
+
 /// No two agents share a name, so Settings and the audit log stay readable.
 #[test]
 fn an_agent_name_is_used_once() {
