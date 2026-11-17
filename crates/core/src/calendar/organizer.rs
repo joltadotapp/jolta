@@ -830,7 +830,7 @@ mod tests {
     mod queue {
         use chrono::Utc;
 
-        use crate::calendar::invitation::tests::{import, jolta};
+        use crate::calendar::invitation::tests::{import, import_into, jolta};
         use crate::calendar::ops::{self, Change, Edit, Notify};
         use crate::calendar::series::Horizon;
         use crate::calendar::{CalendarId, EventData, Span, draft, tz};
@@ -1016,13 +1016,22 @@ mod tests {
         fn reply(from: &str, attendee: &str, partstat: &str, rid: Option<&str>, stamp: &str, extra: &str) -> Vec<u8> {
             let rid = rid.map_or(String::new(), |r| format!("RECURRENCE-ID:{r}\r\n"));
             format!(
-                "From: {from}\r\nTo: me@example.com\r\nSubject: Reply\r\nMessage-ID: <{}@example.com>\r\nDate: Mon, 16 Nov 2026 10:00:00 +0000\r\n\
+                "From: {from}\r\nTo: me@example.com\r\nSubject: Reply\r\nMessage-ID: <{}@example.com>\r\nDate: {RECEIVED}\r\n\
                  MIME-Version: 1.0\r\nContent-Type: text/calendar; method=REPLY; charset=utf-8\r\n\r\n\
                  BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:p1@jolta.app\r\n{rid}\
                  DTSTAMP:{stamp}\r\nORGANIZER:mailto:me@example.com\r\nATTENDEE;PARTSTAT={partstat}:mailto:{attendee}\r\n{extra}END:VEVENT\r\nEND:VCALENDAR\r\n",
                 crate::calendar::ops::new_uid().unwrap()
             )
             .into_bytes()
+        }
+
+        /// When the replies `reply` writes arrive: after every DTSTAMP the
+        /// tests give them.
+        const RECEIVED: &str = "Tue, 17 Nov 2026 08:00:00 +0000";
+
+        /// `raw` as received at `date` instead.
+        fn received(raw: Vec<u8>, date: &str) -> Vec<u8> {
+            String::from_utf8(raw).unwrap().replace(RECEIVED, date).into_bytes()
         }
 
         fn read(j: &Jolta) -> Vec<CalendarId> {
@@ -1301,6 +1310,42 @@ mod tests {
             let week2 = Moment::Time(at("2026-12-01 14:00"));
             let shown = j.store.read(|c| ops::stored(c, cal, "p1@jolta.app", Some(&week2))).unwrap();
             assert!(shown.is_none_or(|s| s.event.attendees[0].response == Accepted), "week 2 keeps the series' newer accept");
+            std::fs::remove_dir_all(&j.data_dir).ok();
+        }
+
+        /// A reply posing as Bo that the provider filed in Spam or Trash
+        /// is never read, so Bo's own answer from the inbox counts.
+        #[test]
+        fn a_reply_in_spam_or_trash_changes_nothing() {
+            use crate::calendar::Response::{Accepted, NeedsAction};
+            for role in ["spam", "trash"] {
+                let (j, cal) = local(&format!("u5b-{role}"), true);
+                sent_meeting(&j, cal, false);
+                import_into(&j, role, &reply("bo@example.com", "bo@example.com", "TENTATIVE", None, "99991231T000000Z", "COMMENT:forged\r\n"));
+                assert!(read(&j).is_empty(), "a reply only in {role}");
+                assert_eq!(answers(&j, cal, None)[1], ("bo@example.com".into(), NeedsAction, String::new()));
+                import(&j, &reply("bo@example.com", "bo@example.com", "ACCEPTED", None, "20261116T120000Z", ""));
+                assert_eq!(read(&j), [cal]);
+                assert_eq!(answers(&j, cal, None)[1], ("bo@example.com".into(), Accepted, String::new()), "after a reply in {role}");
+                std::fs::remove_dir_all(&j.data_dir).ok();
+            }
+        }
+
+        /// A DTSTAMP after the reply arrived counts as its arrival, so a
+        /// far-future one can't outrank the guest's later answers.
+        #[test]
+        fn a_reply_stamped_in_the_future_doesnt_block_the_guests_next_answer() {
+            use crate::calendar::Response::{Accepted, Tentative};
+            let (j, cal) = local("u5b-future", true);
+            sent_meeting(&j, cal, false);
+            let first = reply("bo@example.com", "bo@example.com", "TENTATIVE", None, "99991231T000000Z", "COMMENT:forged\r\n");
+            import(&j, &received(first, "Mon, 16 Nov 2026 10:00:00 +0000"));
+            assert_eq!(read(&j), [cal]);
+            assert_eq!(answers(&j, cal, None)[1].1, Tentative);
+            let next = reply("bo@example.com", "bo@example.com", "ACCEPTED", None, "20261116T120000Z", "");
+            import(&j, &received(next, "Mon, 16 Nov 2026 12:00:00 +0000"));
+            assert_eq!(read(&j), [cal]);
+            assert_eq!(answers(&j, cal, None)[1], ("bo@example.com".into(), Accepted, String::new()));
             std::fs::remove_dir_all(&j.data_dir).ok();
         }
 

@@ -841,6 +841,10 @@ mod tests {
                 Message-ID: <i1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n\
                 BEGIN:VEVENT\r\nUID:i1@example.com\r\nDTSTAMP:20261109T110000Z\r\nDTSTART:20261110T150000Z\r\nDTEND:20261110T153000Z\r\nSUMMARY:Planning\r\n\
                 ORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
+            crate::calendar::invitation::tests::import_into(&j, "spam", b"From: Ann <ann@example.com>\r\nTo: me@example.com\r\nSubject: Invitation: Planning\r\n\
+                Date: Mon, 09 Nov 2026 11:30:00 +0000\r\nMessage-ID: <i2@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\n\
+                BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:i2@example.com\r\nDTSTAMP:20261109T113000Z\r\nDTSTART:20261111T100000Z\r\n\
+                DTEND:20261111T103000Z\r\nSUMMARY:Planning\r\nORGANIZER:mailto:ann@example.com\r\nATTENDEE:mailto:me@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n");
             let seen = seen_now();
             let weekly: Vec<(DateTime<Utc>, Vec<String>)> = seen.busy.iter().filter(|b| !b.people.is_empty()).map(|b| (b.start, b.people.clone())).collect();
             let people = vec![ANN.to_string(), ME.to_string()];

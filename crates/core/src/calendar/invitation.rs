@@ -219,6 +219,19 @@ pub(crate) mod tests {
         crate::import::import_raw(jolta, crate::AccountId(1), crate::MailboxId(1), raw).unwrap()
     }
 
+    /// Imports `raw` into the account's mailbox with `role`, such as
+    /// 'spam' or 'trash', made on first use.
+    pub(crate) fn import_into(jolta: &crate::Jolta, role: &str, raw: &[u8]) -> crate::MessageId {
+        let mailbox = jolta
+            .store
+            .write(|tx| {
+                tx.execute("INSERT OR IGNORE INTO mailbox (account_id, remote_id, name, role) VALUES (1, ?1, ?1, ?1)", [role])?;
+                Ok(tx.query_row("SELECT id FROM mailbox WHERE account_id = 1 AND role = ?1", [role], |r| r.get(0))?)
+            })
+            .unwrap();
+        crate::import::import_raw(jolta, crate::AccountId(1), crate::MailboxId(mailbox), raw).unwrap()
+    }
+
     fn one(raw: &[u8]) -> Invitation {
         let mut found = find(raw, &[ME.into()]);
         assert_eq!(found.len(), 1, "{found:#?}");
