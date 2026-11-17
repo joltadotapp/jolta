@@ -409,7 +409,8 @@ async fn main() -> Result<()> {
             }
             for a in jolta.store.read(store::agents)? {
                 let grants: Vec<&str> = a.grants.iter().map(|g| g.as_str()).collect();
-                println!("{:>3}  {:<24} {:?}  {}", a.id, a.name, a.state, grants.join(","));
+                let state = if a.paired { format!("{:?}", a.state) } else { "needs pairing again".into() };
+                println!("{:>3}  {:<24} {state}  {}", a.id, a.name, grants.join(","));
             }
             for e in jolta.store.read(|c| store::audit_log(c, 10))? {
                 println!("  audit: {} {} {} -> {}", e.agent, e.tool, e.summary, e.outcome);

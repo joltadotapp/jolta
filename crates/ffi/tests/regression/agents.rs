@@ -35,6 +35,19 @@ impl Agent {
         agent
     }
 
+    /// Connects the way jolta-mcp does: the token first, then initialize.
+    pub fn paired(socket: &Path, token: &str) -> Agent {
+        let mut agent = Agent::open(socket);
+        agent.send_token(token);
+        agent.initialize("Some agent");
+        agent
+    }
+
+    pub fn send_token(&mut self, token: &str) {
+        let line = format!(r#"{{"jsonrpc":"2.0","method":"jolta/token","params":{{"token":"{token}"}}}}"#);
+        self.stream.get_mut().write_all(format!("{line}\n").as_bytes()).unwrap();
+    }
+
     pub fn initialize(&mut self, name: &str) -> String {
         self.request("initialize", &format!(r#"{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"{name}"}}}}"#))
     }
@@ -114,4 +127,75 @@ fn a_second_initialize_changes_nothing() {
 
     assert!(again.contains(r#""error""#), "the second initialize was refused: {again}");
     assert!(!read.contains("secret numbers"), "read_thread was refused: {read}");
+}
+
+fn add(app: &App, name: &str, grants: &[Grant]) -> String {
+    app.jolta.store.write(|tx| store::add_agent(tx, name, grants)).unwrap().1
+}
+
+/// An agent added in Settings connects with its token and gets exactly the
+/// grants it was given there, whatever name it sends.
+#[test]
+fn an_added_agent_gets_its_own_grants() {
+    let app = App::new();
+    let thread = one_thread(&app);
+    let token = add(&app, "Reader", &[Grant::Read]);
+    let socket = mcp_socket(&app);
+
+    let mut reader = Agent::paired(&socket, &token);
+    let read = reader.call("read_thread", &format!(r#"{{"thread_id":{thread}}}"#));
+    let draft = reader.call("create_draft", r#"{"to":"me@test.invalid","subject":"x","body":"x"}"#);
+    let _ = std::fs::remove_file(&socket);
+
+    assert!(read.contains("secret numbers"), "read_thread worked: {read}");
+    assert!(draft.contains(r#""isError":true"#) && app.count("SELECT count(*) FROM draft") == 0, "create_draft was refused: {draft}");
+    let added = &app.core.agents().unwrap()[0];
+    assert_eq!((added.name.as_str(), added.state.as_str(), added.paired), ("Reader", "approved", true));
+}
+
+/// A read-only agent that knows another agent's token still can't switch
+/// to it on an open connection.
+#[test]
+fn a_paired_connection_keeps_its_agent() {
+    let app = App::new();
+    one_thread(&app);
+    let reader = add(&app, "Reader", &[Grant::Read]);
+    let writer = add(&app, "Writer", &[Grant::Read, Grant::Draft]);
+    let socket = mcp_socket(&app);
+
+    let mut agent = Agent::paired(&socket, &reader);
+    agent.send_token(&writer);
+    let again = agent.initialize("Writer");
+    let draft = agent.call("create_draft", r#"{"to":"me@test.invalid","subject":"x","body":"x"}"#);
+    let _ = std::fs::remove_file(&socket);
+
+    assert!(again.contains("already initialized"), "the second initialize was refused: {again}");
+    assert!(draft.contains(r#""isError":true"#) && app.count("SELECT count(*) FROM draft") == 0, "create_draft was refused: {draft}");
+}
+
+/// Pairing an agent again gives it a new token; the old one stops working.
+#[test]
+fn pairing_again_retires_the_old_token() {
+    let app = App::new();
+    let thread = one_thread(&app);
+    let old = add(&app, "Reader", &[Grant::Read]);
+    let id = app.core.agents().unwrap()[0].id;
+    let new = app.core.pair_agent(id, vec!["read".into()]).unwrap();
+    let socket = mcp_socket(&app);
+
+    let read_with = |token: &str| Agent::paired(&socket, token).call("read_thread", &format!(r#"{{"thread_id":{thread}}}"#));
+    let (with_old, with_new) = (read_with(&old), read_with(&new));
+    let _ = std::fs::remove_file(&socket);
+
+    assert!(with_old.contains("Settings › Agents"), "the old token is unknown: {with_old}");
+    assert!(with_new.contains("secret numbers"), "the new token works: {with_new}");
+}
+
+/// No two agents share a name, so Settings and the audit log stay readable.
+#[test]
+fn an_agent_name_is_used_once() {
+    let app = App::new();
+    add(&app, "Reader", &[Grant::Read]);
+    let again = app.core.add_agent("Reader".into(), vec![]);
+    assert!(again.is_err_and(|e| e.to_string().contains("already an agent called Reader")));
 }

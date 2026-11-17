@@ -241,8 +241,6 @@ pub enum CoreEvent {
     Woke { account_id: i64, thread_id: i64, subject: String },
     /// Nobody answered in time; the thread is back in the inbox.
     NoReply { account_id: i64, thread_id: i64, subject: String },
-    /// An agent connected for the first time; ask the user to approve it.
-    AgentRequest { agent_id: i64, name: String },
     /// An agent wrote a draft for the user to review.
     AgentDraft { draft_id: i64, subject: String },
     /// An agent used a tool; the audit log changed.
@@ -669,6 +667,8 @@ pub struct AgentInfo {
     /// read, organize, draft
     pub grants: Vec<String>,
     pub last_seen: i64,
+    /// False for an agent added before tokens; it must be paired again.
+    pub paired: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -1169,7 +1169,6 @@ impl Core {
                 Event::Woke { account, thread, subject } => {
                     CoreEvent::Woke { account_id: account.0, thread_id: thread.0, subject }
                 }
-                Event::AgentRequest { agent, name } => CoreEvent::AgentRequest { agent_id: agent, name },
                 Event::AgentDraft { draft, subject } => CoreEvent::AgentDraft { draft_id: draft, subject },
                 Event::AgentActivity => CoreEvent::AgentActivity,
                 Event::SendFailed { message, gave_up } => CoreEvent::SendFailed { message, gave_up },
@@ -1712,8 +1711,24 @@ impl Core {
                 .into(),
                 grants: a.grants.into_iter().map(|g| g.as_str().to_string()).collect(),
                 last_seen: a.last_seen,
+                paired: a.paired,
             })
             .collect())
+    }
+
+    /// Adds an agent with these grants (read, organize, draft) on every
+    /// account and returns its token, for its MCP configuration. Jolta keeps
+    /// only a hash, so this is the one time the token is shown.
+    pub fn add_agent(&self, name: String, grants: Vec<String>) -> Result<String> {
+        let grants: Vec<store::Grant> = grants.iter().filter_map(|g| store::Grant::parse(g)).collect();
+        Ok(self.jolta.store.write(|tx| store::add_agent(tx, &name, &grants))?.1)
+    }
+
+    /// Gives an agent a new token, shown this once, and approves it with
+    /// these grants. Its old token stops working.
+    pub fn pair_agent(&self, agent_id: i64, grants: Vec<String>) -> Result<String> {
+        let grants: Vec<store::Grant> = grants.iter().filter_map(|g| store::Grant::parse(g)).collect();
+        Ok(self.jolta.store.write(|tx| store::pair_agent(tx, agent_id, &grants))?)
     }
 
     /// Approves an agent with these grants (read, organize, draft) on every

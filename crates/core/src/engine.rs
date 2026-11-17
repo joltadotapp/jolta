@@ -53,8 +53,6 @@ pub enum Event {
     Woke { account: AccountId, thread: ThreadId, subject: String },
     /// A "remind me" reminder found no reply; the thread is back in the inbox.
     NoReply { account: AccountId, thread: ThreadId, subject: String },
-    /// An MCP client connected for the first time and waits for approval.
-    AgentRequest { agent: i64, name: String },
     /// An agent wrote a draft for review.
     AgentDraft { draft: i64, subject: String },
     /// An agent called a tool (the audit log changed).

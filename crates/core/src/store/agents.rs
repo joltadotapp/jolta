@@ -1,7 +1,10 @@
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 
-use crate::Result;
 use crate::model::AccountId;
+use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Grant {
@@ -43,22 +46,54 @@ pub struct Agent {
     pub state: AgentState,
     pub grants: Vec<Grant>,
     pub last_seen: i64,
+    /// False for an agent added before tokens: it must be paired again.
+    pub paired: bool,
 }
 
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Finds the agent by its MCP client name, adding it as pending if new.
-/// Returns its id and whether it is new.
-pub fn agent_seen(conn: &Connection, name: &str) -> Result<(i64, bool)> {
-    let existing: Option<i64> = conn.query_row("SELECT id FROM agent WHERE name = ?1", [name], |r| r.get(0)).optional()?;
-    if let Some(id) = existing {
-        conn.execute("UPDATE agent SET last_seen = ?2 WHERE id = ?1", params![id, now()])?;
-        return Ok((id, false));
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// Adds an agent under the name the user gave it, approved with these
+/// grants. Returns its id and its token, which Jolta keeps only as a hash.
+pub fn add_agent(conn: &Connection, name: &str, grants: &[Grant]) -> Result<(i64, String)> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Other("Give the agent a name.".into()));
     }
-    conn.execute("INSERT INTO agent (name, first_seen, last_seen) VALUES (?1, ?2, ?2)", params![name, now()])?;
-    Ok((conn.last_insert_rowid(), true))
+    let taken: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM agent WHERE name = ?1)", [name], |r| r.get(0))?;
+    if taken {
+        return Err(Error::Other(format!("There is already an agent called {name}. Pair that one again, or pick another name.")));
+    }
+    conn.execute("INSERT INTO agent (name, first_seen, last_seen) VALUES (?1, ?2, 0)", params![name, now()])?;
+    let id = conn.last_insert_rowid();
+    Ok((id, pair_agent(conn, id, grants)?))
+}
+
+/// Gives an agent a new token and approves it with these grants. Its old
+/// token stops working.
+pub fn pair_agent(conn: &Connection, agent: i64, grants: &[Grant]) -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| Error::Other(format!("no randomness: {e}")))?;
+    let token = format!("jolta_{}", URL_SAFE_NO_PAD.encode(bytes));
+    if conn.execute("UPDATE agent SET token_hash = ?2 WHERE id = ?1", params![agent, token_hash(&token)])? == 0 {
+        return Err(Error::NotFound(format!("agent {agent}")));
+    }
+    decide_agent(conn, agent, true, grants)?;
+    Ok(token)
+}
+
+/// The agent a token was issued to, if any.
+pub fn agent_by_token(conn: &Connection, token: &str) -> Result<Option<i64>> {
+    let id: Option<i64> = conn.query_row("SELECT id FROM agent WHERE token_hash = ?1", [token_hash(token)], |r| r.get(0)).optional()?;
+    if let Some(id) = id {
+        conn.execute("UPDATE agent SET last_seen = ?2 WHERE id = ?1", params![id, now()])?;
+    }
+    Ok(id)
 }
 
 pub fn agent_state(conn: &Connection, id: i64) -> Result<AgentState> {
@@ -97,11 +132,11 @@ pub fn decide_agent(conn: &Connection, agent: i64, approve: bool, grants: &[Gran
 }
 
 pub fn agents(conn: &Connection) -> Result<Vec<Agent>> {
-    let mut stmt = conn.prepare("SELECT id, name, state, last_seen FROM agent ORDER BY last_seen DESC")?;
-    let rows: Vec<(i64, String, String, i64)> =
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare("SELECT id, name, state, last_seen, token_hash IS NOT NULL FROM agent ORDER BY last_seen DESC, id DESC")?;
+    let rows: Vec<(i64, String, String, i64, bool)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<rusqlite::Result<_>>()?;
     rows.into_iter()
-        .map(|(id, name, state, last_seen)| {
+        .map(|(id, name, state, last_seen, paired)| {
             let grants = conn
                 .prepare("SELECT DISTINCT class FROM agent_grant WHERE agent_id = ?1")?
                 .query_map([id], |r| r.get::<_, String>(0))?
@@ -112,7 +147,7 @@ pub fn agents(conn: &Connection) -> Result<Vec<Agent>> {
                 "denied" => AgentState::Denied,
                 _ => AgentState::Pending,
             };
-            Ok(Agent { id, name, state, grants, last_seen })
+            Ok(Agent { id, name, state, grants, last_seen, paired })
         })
         .collect()
 }

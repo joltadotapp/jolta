@@ -1,26 +1,63 @@
 @preconcurrency import JoltaFFI
 import SwiftUI
 
-/// Shown when an agent connects for the first time.
-struct AgentApproval: View {
-    let name: String
-    /// Esc: close without an answer.
-    let later: () -> Void
-    let decide: (Bool, [String]) -> Void
+/// Adds an agent, or pairs one again, and shows its MCP configuration once.
+/// Jolta keeps only a hash of the token, so it can't show it later.
+struct AgentPairing: View {
+    struct Request: Identifiable {
+        /// Nil adds a new agent.
+        let agent: AgentInfo?
+        var id: Int64 { agent?.id ?? 0 }
+    }
+
+    let model: AppModel
+    let request: Request
+    let done: () -> Void
+    @State private var name = ""
     @State private var read = true
     @State private var organize = false
     @State private var draft = true
+    @State private var snippet: String?
+    @State private var copied = false
+    @State private var failure: String?
+    @FocusState private var nameFocused: Bool
+
+    private var title: String { request.agent.map { "Pair \($0.name) again" } ?? "Add an agent" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
                 Image(systemName: "cpu").font(.system(size: 18)).foregroundStyle(Color(Theme.text2))
-                Text("\(name) wants to use your mail").font(.system(size: 15, weight: .semibold))
+                Text(title).font(.system(size: 15, weight: .semibold))
             }
-            Text("Agents connect through Jolta's MCP server. They never see your passwords, everything they do is logged, and they cannot send mail: drafts wait here for you.")
+            if let snippet { configuration(snippet) } else { form }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .presentationBackground(Color(Theme.raise))
+        .onAppear {
+            guard let agent = request.agent else { nameFocused = true; return }
+            name = agent.name
+            if agent.state == "approved" || !agent.paired {
+                read = agent.grants.contains("read")
+                organize = agent.grants.contains("organize")
+                draft = agent.grants.contains("draft")
+            }
+        }
+    }
+
+    private var form: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Agents connect through Jolta's MCP server with a token Jolta gives them here. They never see your passwords, everything they do is logged, and they cannot send mail: drafts wait here for you.")
                 .font(.system(size: Theme.body))
                 .foregroundStyle(Color(Theme.text2))
                 .fixedSize(horizontal: false, vertical: true)
+            if request.agent == nil {
+                TextField("Name", text: $name, prompt: Text("Claude Code"))
+                    .focused($nameFocused)
+            } else {
+                Text("Its old token stops working.").font(.system(size: Theme.body)).foregroundStyle(Color(Theme.text2))
+            }
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Read and search mail", isOn: $read)
                 Toggle("Archive, file and snooze conversations", isOn: $organize)
@@ -28,21 +65,69 @@ struct AgentApproval: View {
             }
             .toggleStyle(.checkbox)
             .font(.system(size: 13))
+            if let failure {
+                Text(failure).font(.system(size: 12)).foregroundStyle(Color(Theme.dangerText)).fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: 8) {
-                KitButton(title: "Don't Allow") { decide(false, []) }
                 Spacer()
-                KitButton(title: "Not Now", key: "esc", action: later)
-                    .keyboardShortcut(.cancelAction)
-                // No plain Return: a key meant for the mail must not let an agent in.
-                KitButton(title: "Allow", key: "⌘↩") {
-                    decide(true, [read ? "read" : nil, organize ? "organize" : nil, draft ? "draft" : nil].compactMap { $0 })
-                }
-                .keyboardShortcut(.return, modifiers: .command)
+                KitButton(title: "Cancel", key: "esc", action: done).keyboardShortcut(.cancelAction)
+                KitButton(title: request.agent == nil ? "Add Agent" : "Pair Again", key: "↩", kind: .primary) { pair() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
-        .padding(24)
-        .frame(width: 460)
-        .presentationBackground(Color(Theme.raise))
+    }
+
+    private func configuration(_ snippet: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add this to the agent's MCP configuration, then restart the agent. Jolta shows the token only now.")
+                .font(.system(size: Theme.body))
+                .foregroundStyle(Color(Theme.text2))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(snippet)
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
+            HStack(spacing: 8) {
+                KitButton(title: copied ? "Copied" : "Copy", key: "⌘C", icon: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(snippet, forType: .string)
+                    copied = true
+                }
+                .keyboardShortcut("c", modifiers: .command)
+                Spacer()
+                KitButton(title: "Done", key: "↩", kind: .primary, action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    private func pair() {
+        let grants = [read ? "read" : nil, organize ? "organize" : nil, draft ? "draft" : nil].compactMap { $0 }
+        do {
+            let token = if let agent = request.agent {
+                try model.core.pairAgent(agentId: agent.id, grants: grants)
+            } else {
+                try model.core.addAgent(name: name, grants: grants)
+            }
+            snippet = Self.snippet(helper: model.mcpHelperPath, token: token)
+            failure = nil
+        } catch {
+            failure = "\(error)"
+        }
+        model.agentsChanged()
+    }
+
+    /// The common `mcpServers` shape most agents read.
+    static func snippet(helper: String, token: String) -> String {
+        struct Server: Encodable { let command: String; let env: [String: String] }
+        struct Config: Encodable { let mcpServers: [String: Server] }
+        let config = Config(mcpServers: ["jolta": Server(command: helper, env: ["JOLTA_MCP_TOKEN": token])])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return (try? encoder.encode(config)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
     }
 }
 
@@ -51,9 +136,10 @@ struct AgentsSettings: View {
     let model: AppModel
     @State private var agents: [AgentInfo] = []
     @State private var paused = false
-    /// Why the pause switch, or Revoke or Allow, didn't take.
+    /// Why the pause switch, or Revoke, didn't take.
     @State private var pauseFailure: String?
     @State private var agentFailure: String?
+    @State private var pairing: AgentPairing.Request?
 
     var body: some View {
         SettingsScroll {
@@ -64,28 +150,17 @@ struct AgentsSettings: View {
                         .settingsSwitch()
                 }
                 SettingsRow(title: "Connect an agent", detail: model.mcpStatus) {
-                    Button("Copy Path") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(model.mcpHelperPath, forType: .string)
-                    }
-                    .help(model.mcpHelperPath)
-                }
-                SettingsBlock {
-                    Text(model.mcpHelperPath)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Color(Theme.text3))
-                        .textSelection(.enabled)
+                    Button("Add Agent…") { pairing = .init(agent: nil) }
                 }
             }
             SettingsSection("Connected agents") {
                 ForEach(agents, id: \.id) { a in
-                    SettingsRow(title: a.name, detail: a.state == "approved"
-                                ? "Allowed: \(a.grants.isEmpty ? "nothing" : a.grants.joined(separator: ", "))"
-                                : a.state.capitalized) {
-                        if a.state == "approved" {
-                            Button("Revoke") { decide(a, approve: false, grants: []) }
+                    SettingsRow(title: a.name, detail: detail(a),
+                                detailColor: Color(a.paired ? Theme.text3 : Theme.warningText)) {
+                        if a.paired && a.state == "approved" {
+                            Button("Revoke") { revoke(a) }
                         } else {
-                            Button("Allow Read and Drafts") { decide(a, approve: true, grants: ["read", "draft"]) }
+                            Button("Pair Again…") { pairing = .init(agent: a) }
                         }
                     }
                 }
@@ -93,12 +168,21 @@ struct AgentsSettings: View {
                     SettingsBlock { Text(agentFailure).foregroundStyle(Color(Theme.dangerText)).font(.system(size: Theme.small)) }
                 }
                 if agents.isEmpty {
-                    SettingsRow("No agents yet", detail: "An agent shows up here the first time it connects, and Jolta asks you to allow it.")
+                    SettingsRow("No agents yet", detail: "Add an agent to get the configuration it connects with.")
                 }
             }
         }
         .onAppear(perform: reload)
         .onChange(of: model.agentRevision) { reload() }
+        .sheet(item: $pairing) { request in
+            AgentPairing(model: model, request: request) { pairing = nil }
+        }
+    }
+
+    private func detail(_ a: AgentInfo) -> String {
+        if !a.paired { return "Needs pairing again: Jolta now tells agents apart by a token." }
+        if a.state == "approved" { return "Allowed: \(a.grants.isEmpty ? "nothing" : a.grants.joined(separator: ", "))" }
+        return "Revoked"
     }
 
     private func reload() {
@@ -117,9 +201,9 @@ struct AgentsSettings: View {
         }
     }
 
-    private func decide(_ agent: AgentInfo, approve: Bool, grants: [String]) {
+    private func revoke(_ agent: AgentInfo) {
         do {
-            try model.core.decideAgent(agentId: agent.id, approve: approve, grants: grants)
+            try model.core.decideAgent(agentId: agent.id, approve: false, grants: [])
             agentFailure = nil
         } catch {
             agentFailure = "Jolta couldn't change \(agent.name): \(error)"

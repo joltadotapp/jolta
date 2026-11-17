@@ -1,6 +1,7 @@
 //! `jolta-mcp`: connects an agent's stdio to the MCP server inside Jolta.app.
-//! It copies bytes between the two and does nothing else; it never sees
-//! account secrets.
+//! It sends the agent's token from `JOLTA_MCP_TOKEN` as a first line, then
+//! copies bytes between the two and does nothing else, so it never reads or
+//! changes the agent's messages. It never sees account secrets.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,8 +22,26 @@ fn socket_path() -> PathBuf {
     PathBuf::from(home).join("Library/Group Containers").join(GROUP).join("jolta.sock")
 }
 
+/// The line that tells Jolta which agent this is. Settings › Agents issues
+/// tokens of URL-safe base64, which need no JSON escaping.
+fn token_line() -> Result<Option<String>, String> {
+    let Ok(token) = std::env::var("JOLTA_MCP_TOKEN") else { return Ok(None) };
+    let token = token.trim();
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("JOLTA_MCP_TOKEN isn't a token from Jolta. Copy it again from Settings › Agents.".into());
+    }
+    Ok(Some(format!("{{\"jsonrpc\":\"2.0\",\"method\":\"jolta/token\",\"params\":{{\"token\":\"{token}\"}}}}\n")))
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    let token = match token_line() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("jolta-mcp: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let path = socket_path();
     let stream = match UnixStream::connect(&path).await {
         Ok(s) => s,
@@ -33,6 +52,9 @@ async fn main() -> ExitCode {
     };
     let (mut from_jolta, mut to_jolta) = stream.into_split();
     let upstream = async {
+        if let Some(line) = &token {
+            to_jolta.write_all(line.as_bytes()).await?;
+        }
         tokio::io::copy(&mut stdin(), &mut to_jolta).await?;
         to_jolta.shutdown().await
     };

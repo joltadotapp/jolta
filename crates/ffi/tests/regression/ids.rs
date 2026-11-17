@@ -6,8 +6,8 @@
 use jolta_core::MailboxRole::Inbox;
 use jolta_core::store::{self, Grant};
 
-use crate::agents::Agent;
-use crate::fixture::{App, Mail, now, unique};
+use crate::agents::{Agent, mcp_socket};
+use crate::fixture::{App, Mail, now};
 
 const ME: &str = "me@test.invalid";
 
@@ -96,16 +96,9 @@ fn an_agent_holding_a_merged_threads_id_archives_nothing() {
     app.deliver(&me, Inbox, &merge.older);
     let merged = app.thread_of(app.deliver(&me, Inbox, &merge.newer));
 
-    let socket = std::env::temp_dir().join(format!("jolta-ids-{}-{}.sock", std::process::id(), unique()));
-    app.core.start_mcp(socket.to_string_lossy().into(), 0).unwrap();
-    let mut agent = Agent::connect(&socket, "Stale id agent");
-    app.jolta
-        .store
-        .write(|tx| {
-            let (id, _) = store::agent_seen(tx, "Stale id agent")?;
-            store::decide_agent(tx, id, true, &[Grant::Read, Grant::Organize])
-        })
-        .unwrap();
+    let socket = mcp_socket(&app);
+    let token = app.jolta.store.write(|tx| store::add_agent(tx, "Stale id agent", &[Grant::Read, Grant::Organize])).unwrap().1;
+    let mut agent = Agent::paired(&socket, &token);
     let found = agent.call("search", r#"{"query":"subject:\"Budget numbers\""}"#);
     assert!(found.contains(&format!("thread_id {} ", merged.0)), "the agent found the newer thread: {found}");
 
