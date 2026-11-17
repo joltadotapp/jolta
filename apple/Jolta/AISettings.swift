@@ -434,7 +434,9 @@ private struct RemoteAccount: View {
     private func saveKey() async {
         let typed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty else { return }
-        if await loadModels(key: typed) {
+        let checked = url
+        // The key is saved for the address it was checked against, not one saved meanwhile.
+        if await loadModels(key: typed), url == checked {
             try? model.core.setAiKey(provider: provider, key: typed)
             key = ""
             replacing = false
