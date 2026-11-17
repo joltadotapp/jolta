@@ -130,7 +130,7 @@ mod tests {
         );
         assert_eq!(
             method(&raw(both)),
-            Some(Method::Mail { to: "leave@shop.test".into(), subject: "stop please".into(), body: String::new() }),
+            Some(Method::Mail { to: "leave@shop.test".into(), subject: "stop please".into(), body: "unsubscribe".into() }),
             "without the Post header the https address is a page, so the email wins"
         );
         assert_eq!(
@@ -149,7 +149,54 @@ mod tests {
     fn mailto_without_subject_says_unsubscribe() {
         assert_eq!(
             method(&raw("List-Unsubscribe: <mailto:list-leave%2B42@lists.test>\r\n")),
-            Some(Method::Mail { to: "list-leave+42@lists.test".into(), subject: "unsubscribe".into(), body: String::new() })
+            Some(Method::Mail { to: "list-leave+42@lists.test".into(), subject: "unsubscribe".into(), body: "unsubscribe".into() })
+        );
+    }
+
+    #[test]
+    fn mailto_to_more_than_one_address_is_never_sent() {
+        let payload = "<mailto:out@sender.test,colleague@victim.test,%20boss@victim.test?subject=Re%3A%20invoice&body=Please%20pay>";
+        assert_eq!(method(&raw(&format!("List-Unsubscribe: {payload}\r\n"))), None);
+        assert_eq!(
+            method(&raw(&format!("List-Unsubscribe: {payload}, <https://sender.test/leave>\r\n"))),
+            Some(Method::Page("https://sender.test/leave".into())),
+            "an unusable mailto falls back to the page"
+        );
+        for to in ["out@sender.test;boss@victim.test", "out@sender.test%2Cboss@victim.test", "out@sender.test%3Bboss@victim.test"] {
+            assert_eq!(method(&raw(&format!("List-Unsubscribe: <mailto:{to}>\r\n"))), None, "{to}");
+        }
+        let built = match method(&raw("List-Unsubscribe: <mailto:out@sender.test,boss@victim.test>\r\n")) {
+            Some(Method::Mail { to, .. }) => crate::compose::parse_addresses(&to),
+            _ => Vec::new(),
+        };
+        assert!(built.len() <= 1, "unsubscribe would write to {built:?}");
+    }
+
+    #[test]
+    fn mailto_body_and_subject_come_from_jolta_not_the_sender() {
+        let Some(Method::Mail { to, subject, body }) = method(&raw(
+            "List-Unsubscribe: <mailto:leave@shop.test?subject=Re%3A%20invoice%0D%0ABcc%3A%20boss@victim.test&body=Please%20pay%20to%20the%20new%20account.>\r\n",
+        )) else {
+            panic!("a single-address mailto unsubscribes by email")
+        };
+        assert_eq!(to, "leave@shop.test");
+        assert_eq!(body, "unsubscribe");
+        assert!(!subject.chars().any(char::is_control), "{subject:?}");
+        let long = "x".repeat(500);
+        let Some(Method::Mail { subject, .. }) = method(&raw(&format!("List-Unsubscribe: <mailto:leave@shop.test?subject={long}>\r\n")))
+        else {
+            panic!()
+        };
+        assert!(subject.chars().count() <= 100, "{} characters", subject.chars().count());
+    }
+
+    #[test]
+    fn page_must_be_http_or_https() {
+        assert_eq!(method(&raw("List-Unsubscribe: <httpx://shop.test/u>\r\n")), None);
+        assert_eq!(method(&raw("List-Unsubscribe: <http-evil:open>\r\n")), None);
+        assert_eq!(
+            method(&raw("List-Unsubscribe: <HTTP://shop.test/u>\r\n")),
+            Some(Method::Page("HTTP://shop.test/u".into()))
         );
     }
 }
