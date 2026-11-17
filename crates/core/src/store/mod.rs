@@ -45,7 +45,7 @@ pub use outbox::*;
 pub use reminders::*;
 pub use sections::*;
 
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql"), include_str!("schema16.sql"), include_str!("schema17.sql"), include_str!("schema18.sql"), include_str!("schema19.sql"), include_str!("schema20.sql"), include_str!("schema21.sql"), include_str!("schema22.sql"), include_str!("schema23.sql"), include_str!("schema24.sql"), include_str!("schema25.sql"), include_str!("schema26.sql"), include_str!("schema27.sql"), include_str!("schema28.sql"), include_str!("schema29.sql"), include_str!("schema30.sql"), include_str!("schema31.sql"), include_str!("schema32.sql"), include_str!("schema33.sql"), include_str!("schema34.sql"), include_str!("schema35.sql"), include_str!("schema36.sql"), include_str!("schema37.sql"), include_str!("schema38.sql"), include_str!("schema39.sql"), include_str!("schema40.sql"), include_str!("schema41.sql"), include_str!("schema42.sql"), include_str!("schema43.sql"), include_str!("schema44.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema2.sql"), include_str!("schema3.sql"), include_str!("schema4.sql"), include_str!("schema5.sql"), include_str!("schema6.sql"), include_str!("schema7.sql"), include_str!("schema8.sql"), include_str!("schema9.sql"), include_str!("schema10.sql"), include_str!("schema11.sql"), include_str!("schema12.sql"), include_str!("schema13.sql"), include_str!("schema14.sql"), include_str!("schema15.sql"), include_str!("schema16.sql"), include_str!("schema17.sql"), include_str!("schema18.sql"), include_str!("schema19.sql"), include_str!("schema20.sql"), include_str!("schema21.sql"), include_str!("schema22.sql"), include_str!("schema23.sql"), include_str!("schema24.sql"), include_str!("schema25.sql"), include_str!("schema26.sql"), include_str!("schema27.sql"), include_str!("schema28.sql"), include_str!("schema29.sql"), include_str!("schema30.sql"), include_str!("schema31.sql"), include_str!("schema32.sql"), include_str!("schema33.sql"), include_str!("schema34.sql"), include_str!("schema35.sql"), include_str!("schema36.sql"), include_str!("schema37.sql"), include_str!("schema38.sql"), include_str!("schema39.sql"), include_str!("schema40.sql"), include_str!("schema41.sql"), include_str!("schema42.sql"), include_str!("schema43.sql"), include_str!("schema44.sql"), include_str!("schema45.sql")];
 const READERS: usize = 4;
 const MMAP_BYTES: i64 = 2 << 30;
 const WRITER_CACHE_KIB: i64 = 8_000;
@@ -231,5 +231,35 @@ mod tests {
         assert_eq!(conn.last_insert_rowid(), 10, "past the reminder's merged-away thread");
         conn.execute("DELETE FROM thread WHERE id = 4", []).unwrap();
         assert_eq!(one("SELECT count(*) || '' FROM ai_summary"), "0", "a summary still goes with its thread");
+    }
+
+    /// An agent approved before schema 45 was known by its name alone. It
+    /// keeps its row, grants and audit log, shows as needing pairing again,
+    /// and no token reaches it until the user pairs it.
+    #[test]
+    fn schema45_leaves_older_agents_unpaired() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn, WRITER_CACHE_KIB).unwrap();
+        let tx = conn.transaction().unwrap();
+        for sql in &MIGRATIONS[..44] {
+            tx.execute_batch(sql).unwrap();
+        }
+        tx.pragma_update(None, "user_version", 44).unwrap();
+        tx.execute_batch(
+            "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'a@x', 'a@x', 'r', 0);
+             INSERT INTO agent (id, name, state, first_seen, last_seen) VALUES (3, 'Old agent', 'approved', 0, 0);
+             INSERT INTO agent_grant (agent_id, account_id, class) VALUES (3, 1, 'read');
+             INSERT INTO audit (agent_id, tool, summary, outcome, at) VALUES (3, 'search', '{}', 'ok', 0);",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let old = &agents(&conn).unwrap()[0];
+        assert_eq!((old.id, old.paired, old.grants.as_slice()), (3, false, &[Grant::Read][..]));
+        assert_eq!(audit_log(&conn, 10).unwrap()[0].agent, "Old agent");
+        let token = pair_agent(&conn, 3, &[Grant::Read]).unwrap();
+        assert_eq!(agent_by_token(&conn, &token).unwrap(), Some(3), "pairing again brings it back");
     }
 }

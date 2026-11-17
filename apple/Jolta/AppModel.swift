@@ -145,8 +145,6 @@ final class AppModel {
     var cursorRow: ThreadRow?
     /// The ⌘K palette, when open.
     var palette: PaletteMode?
-    /// An agent that connected for the first time and waits for approval.
-    var pendingAgent: (id: Int64, name: String)?
     /// Bumped when agents act, so the audit view reloads.
     private(set) var agentRevision = 0
     private(set) var mcpStatus = "MCP server not started"
@@ -368,7 +366,7 @@ final class AppModel {
         }
         core.setForeground(active: NSApp?.isActive ?? false)
         startNotifications()
-        if !Self.isTestData { startMCP() }
+        startMCP()
         power.start(core: core)
         AddressBook.load(into: core)
         notifier.onOpen = { [weak self] threadID in
@@ -403,12 +401,13 @@ final class AppModel {
                 }
             }
         }
-        // `-JoltaSettings general|ai|calendar|appearance` opens the settings window on that page, for screenshots.
+        // `-JoltaSettings general|ai|calendar|appearance|agents` opens the settings window on that page, for screenshots.
         switch defaults.string(forKey: "JoltaSettings") {
         case "general": settingsRequest = .general
         case "ai": settingsRequest = .ai
         case "appearance": settingsRequest = .appearance
         case "calendar": settingsRequest = .calendar
+        case "agents": settingsRequest = .agents
         default: break
         }
         // `-JoltaTheme tokyo-night` previews that theme, for screenshots.
@@ -547,13 +546,14 @@ final class AppModel {
     static let appGroup = "RWQLHW7V7V.app.jolta"
 
     /// The MCP socket lives in the app group container, where the sandboxed
-    /// jolta-mcp helper can reach it.
+    /// jolta-mcp helper can reach it. A test store serves its own socket,
+    /// `jolta-<folder>.sock`, so a check never takes over the real one.
     private func startMCP() {
         guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup) else {
             mcpStatus = "MCP is off: no app group container"
             return
         }
-        let socket = group.appendingPathComponent("jolta.sock").path
+        let socket = group.appendingPathComponent(Self.testFolder.map { "jolta-\($0).sock" } ?? "jolta.sock").path
         do {
             try core.startMcp(socketPath: socket, utcOffset: utcOffset)
             mcpStatus = "Listening on \(socket)"
@@ -567,21 +567,8 @@ final class AppModel {
         Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/jolta-mcp").path
     }
 
-    func decideAgent(approve: Bool, grants: [String]) {
-        guard let agent = pendingAgent else { return }
-        try? core.decideAgent(agentId: agent.id, approve: approve, grants: grants)
-        pendingAgent = nil
-        agentRevision += 1
-        show(Toast(text: approve ? "\(agent.name) can use Jolta" : "\(agent.name) was turned away", undo: nil))
-    }
-
-    /// Closes the question without an answer. The agent stays waiting in
-    /// Settings › Agents, where it can be allowed or revoked.
-    func postponeAgent() {
-        guard let agent = pendingAgent else { return }
-        pendingAgent = nil
-        show(Toast(text: "\(agent.name) is waiting in Settings › Agents", undo: nil))
-    }
+    /// Settings › Agents and Activity reload.
+    func agentsChanged() { agentRevision += 1 }
 
     func reviewDraft(_ id: Int64) {
         if let draft = try? core.draft(draftId: id) {
@@ -783,9 +770,6 @@ final class AppModel {
             notifier.deliver(notice)
         case .actionFailed(let message):
             show(Toast(text: "Couldn't sync that change: \(message)", undo: nil))
-        case .agentRequest(let id, let name):
-            pendingAgent = (id, name)
-            agentRevision += 1
         case .agentDraft(let draftID, let subject):
             show(Toast(text: "An agent wrote a draft: \(subject.isEmpty ? "(no subject)" : subject)", undo: nil, review: draftID))
         case .agentActivity:

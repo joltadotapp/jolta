@@ -3,15 +3,11 @@
 //! whose row is deleted must never name a newer row, or a stale id acts on
 //! another conversation.
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
-
 use jolta_core::MailboxRole::Inbox;
 use jolta_core::store::{self, Grant};
 
-use crate::fixture::{App, Mail, now, unique};
-use crate::server::wait;
+use crate::agents::{Agent, mcp_socket};
+use crate::fixture::{App, Mail, now};
 
 const ME: &str = "me@test.invalid";
 
@@ -89,38 +85,6 @@ fn a_deleted_message_keeps_its_id_to_itself() {
     assert_ne!(later, gone, "the deleted message's id is not given out again");
 }
 
-/// An MCP client speaking JSON-RPC, one message per line.
-struct Agent {
-    stream: BufReader<UnixStream>,
-    next: u64,
-}
-
-impl Agent {
-    fn connect(socket: &Path, name: &str) -> Agent {
-        let mut stream = None;
-        wait(5, "the MCP server listens", || {
-            stream = UnixStream::connect(socket).ok();
-            stream.is_some()
-        });
-        let mut agent = Agent { stream: BufReader::new(stream.unwrap()), next: 0 };
-        agent.request("initialize", &format!(r#"{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"{name}"}}}}"#));
-        agent
-    }
-
-    fn request(&mut self, method: &str, params: &str) -> String {
-        self.next += 1;
-        let line = format!(r#"{{"jsonrpc":"2.0","id":{},"method":"{method}","params":{params}}}"#, self.next);
-        self.stream.get_mut().write_all(format!("{line}\n").as_bytes()).unwrap();
-        let mut reply = String::new();
-        self.stream.read_line(&mut reply).unwrap();
-        reply
-    }
-
-    fn call(&mut self, tool: &str, arguments: &str) -> String {
-        self.request("tools/call", &format!(r#"{{"name":"{tool}","arguments":{arguments}}}"#))
-    }
-}
-
 /// An agent searched, then the thread it found was merged into an older
 /// one. Archiving with the id it kept archives nothing, where the id used
 /// to name the next new conversation and archive that.
@@ -132,16 +96,9 @@ fn an_agent_holding_a_merged_threads_id_archives_nothing() {
     app.deliver(&me, Inbox, &merge.older);
     let merged = app.thread_of(app.deliver(&me, Inbox, &merge.newer));
 
-    let socket = std::env::temp_dir().join(format!("jolta-ids-{}-{}.sock", std::process::id(), unique()));
-    app.core.start_mcp(socket.to_string_lossy().into(), 0).unwrap();
-    let mut agent = Agent::connect(&socket, "Stale id agent");
-    app.jolta
-        .store
-        .write(|tx| {
-            let (id, _) = store::agent_seen(tx, "Stale id agent")?;
-            store::decide_agent(tx, id, true, &[Grant::Read, Grant::Organize])
-        })
-        .unwrap();
+    let socket = mcp_socket(&app);
+    let token = app.jolta.store.write(|tx| store::add_agent(tx, "Stale id agent", &[Grant::Read, Grant::Organize])).unwrap().1;
+    let mut agent = Agent::paired(&socket, &token);
     let found = agent.call("search", r#"{"query":"subject:\"Budget numbers\""}"#);
     assert!(found.contains(&format!("thread_id {} ", merged.0)), "the agent found the newer thread: {found}");
 

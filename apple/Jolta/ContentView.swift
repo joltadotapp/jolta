@@ -43,12 +43,6 @@ struct ContentView: View {
         .sheet(item: Binding(get: { model.awaySheet }, set: { model.awaySheet = $0 })) { request in
             AwaySheet(model: model, request: request) { model.awaySheet = nil }
         }
-        // A sheet, so no key reaches the mail behind it while it asks.
-        .sheet(isPresented: Binding(get: { model.pendingAgent != nil }, set: { if !$0 { model.postponeAgent() } })) {
-            if let agent = model.pendingAgent {
-                AgentApproval(name: agent.name, later: model.postponeAgent) { approve, grants in model.decideAgent(approve: approve, grants: grants) }
-            }
-        }
         .sheet(item: Binding(get: { model.focusSheet }, set: { model.focusSheet = $0 })) { _ in
             FocusSheet(model: model) { model.focusSheet = nil }
         }
