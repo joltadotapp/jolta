@@ -265,14 +265,101 @@ pub async fn summarise(
 }
 
 /// Keeps the bullet lines and drops any preamble a model adds anyway.
+/// Links become plain text: mail text can steer the model into writing one.
 fn clean_bullets(text: &str) -> String {
     let bullets: Vec<String> = text
         .lines()
         .map(str::trim)
         .filter_map(|l| l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).or_else(|| l.strip_prefix("• ")))
-        .map(|l| format!("- {}", l.replace("**", "").trim()))
+        .map(|l| format!("- {}", unlink(&l.replace("**", "")).trim()))
         .collect();
-    if bullets.is_empty() { text.trim().to_string() } else { bullets.join("\n") }
+    if !bullets.is_empty() {
+        return bullets.join("\n");
+    }
+    let lines: Vec<String> = text.lines().filter(|l| !link_definition(l)).map(unlink).collect();
+    lines.join("\n").trim().to_string()
+}
+
+/// A Markdown reference definition, `[1]: url`, which turns `[text][1]` into a link.
+fn link_definition(line: &str) -> bool {
+    let l = line.trim_start();
+    let Some(i) = l.find("]:").filter(|&i| i > 1 && l.starts_with('[')) else { return false };
+    // A definition is one address, then nothing or a title.
+    let mut rest = l[i + 2..].trim().splitn(2, char::is_whitespace);
+    let title = rest.nth(1).unwrap_or("").trim_start();
+    !l[i + 2..].trim().is_empty() && (title.is_empty() || title.starts_with(['"', '\'', '(']))
+}
+
+/// Markdown links and autolinks as plain text: `[label](url)` becomes
+/// `label (url)` so a label can't hide where it points, `[label][ref]`
+/// becomes `label` and `<https://…>` the bare address.
+fn unlink(line: &str) -> String {
+    let mut text = line.to_string();
+    // Taking one link apart can leave brackets that form another.
+    for _ in 0..8 {
+        let next = unlink_once(&text);
+        if next == text {
+            break;
+        }
+        text = next;
+    }
+    text
+}
+
+fn unlink_once(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        let after = &rest[c.len_utf8()..];
+        if c == '<' {
+            if let Some(end) = after.find('>') {
+                let inner = &after[..end];
+                let scheme = inner.split_once(':').is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+                if !inner.is_empty() && !inner.contains(char::is_whitespace) && (scheme || inner.contains('@')) {
+                    out.push_str(inner);
+                    rest = &after[end + 1..];
+                    continue;
+                }
+            }
+        }
+        let open = if c == '!' && after.starts_with('[') { Some(&after[1..]) } else if c == '[' { Some(after) } else { None };
+        if let Some((label, tail)) = open.and_then(|o| closing(o, '[', ']').map(|i| (&o[..i], &o[i + 1..]))) {
+            if let Some(i) = tail.strip_prefix('(').and_then(|t| closing(t, '(', ')')) {
+                let target = tail[1..1 + i].trim();
+                let url = target.split_whitespace().next().unwrap_or("").trim_start_matches('<').trim_end_matches('>');
+                out.push_str(label);
+                if !url.is_empty() && url != label {
+                    out.push_str(&format!(" ({url})"));
+                }
+                rest = &tail[i + 2..];
+                continue;
+            }
+            if let Some(i) = tail.strip_prefix('[').and_then(|t| t.find(']')) {
+                out.push_str(label);
+                rest = &tail[i + 2..];
+                continue;
+            }
+        }
+        out.push(c);
+        rest = after;
+    }
+    out
+}
+
+/// Where the bracket that `text`'s caller opened closes, counting nested pairs.
+fn closing(text: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in text.char_indices() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            if depth == 0 {
+                return Some(i);
+            }
+            depth -= 1;
+        }
+    }
+    None
 }
 
 /// Writes the part of a message the writer would type, from their
@@ -410,5 +497,51 @@ Tuesday works.\r\n\r\n\r\n\r\nSee you then.\r\n-- \r\nAnn\r\nCEO\r\n";
             "- Launch moved to 3 Dec.\n- Pauline owes the URLs."
         );
         assert_eq!(clean_bullets("Just one line."), "Just one line.");
+        assert_eq!(clean_bullets("- Meet at [time] on [day]."), "- Meet at [time] on [day].");
+        assert_eq!(clean_bullets("Pay at [the portal][1] or <ann@example.test>.\n\n[1]: https://x.test/"), "Pay at the portal or ann@example.test.");
+        assert_eq!(clean_bullets("- [[a](x:1)](x:2)"), "- a (x:1) (x:2)");
+        assert_eq!(clean_bullets("[Update]: the meeting moved to Friday."), "[Update]: the meeting moved to Friday.");
+        assert_eq!(clean_bullets("See [1].\n[1]: <https://x.test/> \"Portal\""), "See [1].");
+    }
+
+    /// A sender's text can steer the model into writing a link; the reader
+    /// sees its label as plain text and nothing it could click.
+    #[tokio::test]
+    async fn a_summary_keeps_no_links() {
+        const ANSWER: &str = "- The tenant must pay at [view invoice](http://127.0.0.1:9/steered).\n\
+- See <https://example.test/portal> and [the portal][1].\n\
+- Files are in ![shared folder](file:///System/Applications/Calculator.app) by [Ann](x-dummy://open?id=1).\n\n\
+[1]: x-dummy://open?id=2";
+        let url = super::super::quick::tests::fixture_server(&[ANSWER], std::time::Duration::ZERO).await;
+        crate::secrets::use_memory_store();
+        let dir = std::env::temp_dir().join(format!("jolta-ai-summary-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let jolta = Jolta::open(&dir).unwrap();
+        jolta
+            .store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'me@example.com', 'me', 'a1', 0);
+                     INSERT INTO mailbox (id, account_id, remote_id, name, role) VALUES (1, 1, 'INBOX', 'Inbox', 'inbox');",
+                )?;
+                let mut s = super::super::settings(tx)?;
+                s.provider = Some(super::super::Provider::OpenAi);
+                s.openai = super::super::Remote { base_url: url.clone(), model: "fixture".into() };
+                super::super::save_settings(tx, &s)
+            })
+            .unwrap();
+        let raw = "From: Mallory <m@example.test>\r\nTo: me@example.com\r\nSubject: Invoice\r\nMessage-ID: <1@example.test>\r\n\
+Date: Tue, 17 Nov 2026 10:00:00 +0100\r\n\r\nPlease pay [view invoice](http://127.0.0.1:9/steered).\r\n";
+        let id = crate::import::import_raw(&jolta, AccountId(1), MailboxId(1), raw.as_bytes()).unwrap();
+        let thread: ThreadId = jolta.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [id], |r| r.get(0))?)).unwrap();
+        let ai = Ai::new(&dir, dir.join("no-helper"));
+        let outcome = summarise(&jolta, &ai, thread, false, true, &Cancel::default(), &mut |_| {}).await.unwrap();
+        let SummaryOutcome::Done(summary) = outcome else { panic!("{outcome:?}") };
+        let want = "- The tenant must pay at view invoice (http://127.0.0.1:9/steered).\n\
+- See https://example.test/portal and the portal.\n\
+- Files are in shared folder (file:///System/Applications/Calculator.app) by Ann (x-dummy://open?id=1).";
+        assert_eq!(summary.text, want);
+        assert_eq!(jolta.store.read(|c| cached_summary(c, thread)).unwrap().unwrap().text, want, "the saved summary");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

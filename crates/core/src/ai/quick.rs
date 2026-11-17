@@ -288,7 +288,7 @@ pub fn merge(parsed: &mut Parsed, ai: Reading) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::TimeZone;
     use chrono_tz::Europe::{Brussels, Lisbon};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -432,7 +432,7 @@ mod tests {
 
     /// An OpenAI-compatible server on this Mac that streams one answer, so
     /// the whole path runs as it does with a provider, offline.
-    async fn fixture_server(answers: &'static [&'static str], delay: Wait) -> String {
+    pub(crate) async fn fixture_server(answers: &'static [&'static str], delay: Wait) -> String {
         let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

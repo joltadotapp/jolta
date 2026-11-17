@@ -109,6 +109,17 @@ final class Journeys: XCTestCase {
     /// it: letters go into the field and run no command, and Esc closes the
     /// bar and gives the keys back to the list. Space from the list scrolls
     /// the conversation and leaves the list alone.
+    /// A summary saved with a link the model wrote, from before Jolta took
+    /// links out, shows its words and nothing to click.
+    func testSummaryShowsNoLinks() throws {
+        let app = try launch()
+        text(app, "Lunch on Friday").click()
+        XCTAssertTrue(text(app, "Bob asks to pay at view invoice").waitForExistence(timeout: 5), "the saved summary shows")
+        XCTAssertTrue(text(app, "The menu is at https://example.test/menu").exists)
+        XCTAssertEqual(app.links.matching(NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "view invoice", "example.test")).count, 0,
+                       "no link in the summary: \(app.links.allElementsBoundByIndex.map(\.label))")
+    }
+
     func testFindInConversation() throws {
         let app = try launch()
         text(app, "Lunch on Friday").click()

@@ -221,13 +221,17 @@ struct SummaryCard: View {
         }
     }
 
-    /// Bullets without their dash, with inline Markdown (a stray **bold**) rendered.
+    /// Bullets without their dash, with inline Markdown (a stray **bold**)
+    /// rendered. Links stay plain words: mail can steer the model into
+    /// writing one, and the text streams in before the core removes them.
     private var lines: [AttributedString] {
         summary.text.split(separator: "\n").compactMap { raw in
             var line = raw.trimmingCharacters(in: .whitespaces)
             for prefix in ["- ", "* ", "• "] where line.hasPrefix(prefix) { line.removeFirst(prefix.count) }
             guard !line.isEmpty else { return nil }
-            return (try? AttributedString(markdown: line)) ?? AttributedString(line)
+            var text = (try? AttributedString(markdown: line)) ?? AttributedString(line)
+            text.link = nil
+            return text
         }
     }
 

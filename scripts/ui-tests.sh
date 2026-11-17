@@ -121,6 +121,11 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 	if [ "$t" = testWideImageInScaledMailFitsAndZooms ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/16-wide-screenshot-wide-signature.eml" >/dev/null
 	fi
+	if [ "$t" = testSummaryShowsNoLinks ]; then
+		sqlite3 "$dir/jolta.sqlite" "INSERT INTO ai_summary (thread_id, last_message, model, text, at)
+			SELECT thread_id, id, 'fixture', '- Bob asks to pay at [view invoice](http://127.0.0.1:9/summary-link).' || char(10) || '- The menu is at <https://example.test/menu>.', 0
+			FROM message WHERE subject = 'Lunch on Friday'"
+	fi
 	if [ "$t" = testComposeFocusesWhereYouType ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid drafts "$FIXTURES/13-draft.eml" >/dev/null
 	fi
