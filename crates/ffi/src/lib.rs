@@ -135,8 +135,9 @@ pub struct ThreadView {
 #[derive(uniffi::Enum)]
 pub enum UnsubscribeResult {
     Unsubscribed { list: String },
-    /// An unsubscribe email to `to` is in the outbox.
-    Emailed { list: String, to: String },
+    /// An unsubscribe email to `to` is in the outbox; `token` is for
+    /// `cancel_send` while it waits out the undo window.
+    Emailed { list: String, to: String, token: i64 },
     /// The list only offers a page where the reader confirms by hand.
     OpenPage { list: String, url: String },
     NotAList,
@@ -1132,8 +1133,12 @@ impl Core {
                         UnsubscribeResult::Unsubscribed { list }
                     }
                     Some(jolta_core::unsubscribe::Method::Mail { to, subject, body }) => {
-                        engine.send(&Compose { account: Some(account), to: to.clone(), subject, body, ..Default::default() }, None, None)?;
-                        UnsubscribeResult::Emailed { list, to }
+                        let token = engine.send(
+                            &Compose { account: Some(account), to: to.clone(), subject, body, ..Default::default() },
+                            None,
+                            None,
+                        )?;
+                        UnsubscribeResult::Emailed { list, to, token }
                     }
                     Some(jolta_core::unsubscribe::Method::Page(url)) => UnsubscribeResult::OpenPage { list, url },
                 })

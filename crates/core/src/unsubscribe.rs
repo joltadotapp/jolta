@@ -40,35 +40,50 @@ pub fn method(raw: &[u8]) -> Option<Method> {
             return Some(Method::OneClick(url.to_string()));
         }
     }
-    if let Some(mailto) = urls.iter().find(|u| u.to_ascii_lowercase().starts_with("mailto:")) {
-        return mail(&mailto[7..]);
+    let mail = urls
+        .iter()
+        .filter(|u| u.to_ascii_lowercase().starts_with("mailto:"))
+        .find_map(|u| mail(&u[7..]));
+    if mail.is_some() {
+        return mail;
     }
     urls.iter()
-        .find(|u| u.to_ascii_lowercase().starts_with("http"))
+        .find(|u| {
+            let u = u.to_ascii_lowercase();
+            u.starts_with("https://") || u.starts_with("http://")
+        })
         .map(|u| Method::Page(u.to_string()))
 }
 
-/// `list@example.com?subject=unsubscribe&body=...` from a mailto URL.
+/// The email for `list@example.com?subject=...` from a mailto URL. The
+/// sender wrote the URL and Unsubscribe sends without a review, so it goes
+/// to one address only, with Jolta's body and a short plain subject.
 fn mail(rest: &str) -> Option<Method> {
     let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
     let to = percent_decode(to);
-    if !to.contains('@') {
+    let to = to.trim();
+    if to.contains([',', ';']) || to.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
+    // The parser decodes encoded words, which can hide a second address.
+    let [(_, parsed)] = crate::compose::parse_addresses(to).try_into().ok()?;
+    if parsed != to {
+        return None;
+    }
+    let to = parsed;
     let mut subject = String::new();
-    let mut body = String::new();
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        match key.to_ascii_lowercase().as_str() {
-            "subject" => subject = percent_decode(value),
-            "body" => body = percent_decode(value),
-            _ => {}
+        if key.eq_ignore_ascii_case("subject") {
+            let plain = percent_decode(value).replace(|c: char| c.is_control(), " ");
+            subject = plain.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(100).collect();
+            subject.truncate(subject.trim_end().len());
         }
     }
     if subject.is_empty() {
         subject = "unsubscribe".into();
     }
-    Some(Method::Mail { to, subject, body })
+    Some(Method::Mail { to, subject, body: "unsubscribe".into() })
 }
 
 fn percent_decode(s: &str) -> String {
@@ -130,7 +145,7 @@ mod tests {
         );
         assert_eq!(
             method(&raw(both)),
-            Some(Method::Mail { to: "leave@shop.test".into(), subject: "stop please".into(), body: String::new() }),
+            Some(Method::Mail { to: "leave@shop.test".into(), subject: "stop please".into(), body: "unsubscribe".into() }),
             "without the Post header the https address is a page, so the email wins"
         );
         assert_eq!(
@@ -149,7 +164,56 @@ mod tests {
     fn mailto_without_subject_says_unsubscribe() {
         assert_eq!(
             method(&raw("List-Unsubscribe: <mailto:list-leave%2B42@lists.test>\r\n")),
-            Some(Method::Mail { to: "list-leave+42@lists.test".into(), subject: "unsubscribe".into(), body: String::new() })
+            Some(Method::Mail { to: "list-leave+42@lists.test".into(), subject: "unsubscribe".into(), body: "unsubscribe".into() })
+        );
+    }
+
+    #[test]
+    fn mailto_to_more_than_one_address_is_never_sent() {
+        let payload = "<mailto:out@sender.test,colleague@victim.test,%20boss@victim.test?subject=Re%3A%20invoice&body=Please%20pay>";
+        assert_eq!(method(&raw(&format!("List-Unsubscribe: {payload}\r\n"))), None);
+        assert_eq!(
+            method(&raw(&format!("List-Unsubscribe: {payload}, <https://sender.test/leave>\r\n"))),
+            Some(Method::Page("https://sender.test/leave".into())),
+            "an unusable mailto falls back to the page"
+        );
+        for to in ["out@sender.test;boss@victim.test", "out@sender.test%2Cboss@victim.test", "out@sender.test%3Bboss@victim.test"] {
+            assert_eq!(method(&raw(&format!("List-Unsubscribe: <mailto:{to}>\r\n"))), None, "{to}");
+        }
+        for to in ["out@sender.test,boss@victim.test", "=%3FUTF-8%3FQ%3Fout@sender.test=2Cboss@victim.test%3F=(x)"] {
+            let built = match method(&raw(&format!("List-Unsubscribe: <mailto:{to}>\r\n"))) {
+                Some(Method::Mail { to, .. }) => crate::compose::parse_addresses(&to),
+                _ => Vec::new(),
+            };
+            assert!(built.len() <= 1, "unsubscribe would write to {built:?}");
+        }
+    }
+
+    #[test]
+    fn mailto_body_and_subject_come_from_jolta_not_the_sender() {
+        let Some(Method::Mail { to, subject, body }) = method(&raw(
+            "List-Unsubscribe: <mailto:leave@shop.test?subject=Re%3A%20invoice%0D%0ABcc%3A%20boss@victim.test&body=Please%20pay%20to%20the%20new%20account.>\r\n",
+        )) else {
+            panic!("a single-address mailto unsubscribes by email")
+        };
+        assert_eq!(to, "leave@shop.test");
+        assert_eq!(body, "unsubscribe");
+        assert!(!subject.chars().any(char::is_control), "{subject:?}");
+        let long = "x".repeat(500);
+        let Some(Method::Mail { subject, .. }) = method(&raw(&format!("List-Unsubscribe: <mailto:leave@shop.test?subject={long}>\r\n")))
+        else {
+            panic!()
+        };
+        assert!(subject.chars().count() <= 100, "{} characters", subject.chars().count());
+    }
+
+    #[test]
+    fn page_must_be_http_or_https() {
+        assert_eq!(method(&raw("List-Unsubscribe: <httpx://shop.test/u>\r\n")), None);
+        assert_eq!(method(&raw("List-Unsubscribe: <http-evil:open>\r\n")), None);
+        assert_eq!(
+            method(&raw("List-Unsubscribe: <HTTP://shop.test/u>\r\n")),
+            Some(Method::Page("HTTP://shop.test/u".into()))
         );
     }
 }
