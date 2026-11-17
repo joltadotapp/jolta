@@ -70,7 +70,9 @@ fn mail(rest: &str) -> Option<Method> {
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         if key.eq_ignore_ascii_case("subject") {
-            subject = percent_decode(value).chars().filter(|c| !c.is_control()).take(100).collect::<String>().trim().to_string();
+            let plain = percent_decode(value).replace(|c: char| c.is_control(), " ");
+            subject = plain.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(100).collect();
+            subject.truncate(subject.trim_end().len());
         }
     }
     if subject.is_empty() {

@@ -652,7 +652,7 @@ final class AppModel {
                     act(.archive, label: "Unsubscribed from \(list) and archived", threadID: thread)
                 case .emailed(_, let to, let token):
                     let archived = (try? core.perform(action: .archive, threadIds: [thread], context: source.actionContext)) ?? []
-                    show(Toast(text: "Emailing \(to) to unsubscribe in \(Toast.countdownMark), archived",
+                    show(Toast(text: "Unsubscribe email to \(to) in \(Toast.countdownMark)",
                                undo: .unsubscribe(send: token, archive: archived), until: Date.now + Toast.undoWindow))
                 case .openPage(let list, let url):
                     if let page = URL(string: url) { NSWorkspace.shared.open(page) }
