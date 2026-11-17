@@ -4,7 +4,7 @@
 //!
 //! One JSON object per line on stdin:
 //!   {"op":"load","model":"/path/model.gguf","ctx":16384}
-//!   {"op":"generate","prompt":"…","max_tokens":600,"temperature":0,"grammar":null}
+//!   {"op":"generate","parts":[{"text":"<|turn>system\n","special":true},{"text":"…","special":false},…],"max_tokens":600,"temperature":0,"grammar":null}
 //!   {"op":"cancel"}
 //! and one per line on stdout:
 //!   {"event":"loaded","seconds":0.5}
@@ -12,7 +12,8 @@
 //!   {"event":"text","text":"…"}
 //!   {"event":"done","prompt_tokens":5210,"tokens":180,"seconds":4.1,"cancelled":false}
 //!   {"event":"error","message":"…"}
-//! The prompt arrives already in the model's chat format. EOF on stdin quits.
+//! The parts, joined, are the prompt in the model's chat format. Control
+//! tokens count only in parts marked special. EOF on stdin quits.
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,11 +122,20 @@ mod engine {
 
     fn generate(backend: &LlamaBackend, l: &Loaded, request: &Value, cancel: &AtomicBool) -> Result<(), String> {
         let started = Instant::now();
-        let prompt = request["prompt"].as_str().unwrap_or_default();
+        let parts = request["parts"].as_array().map(Vec::as_slice).unwrap_or_default();
         let max_tokens = request["max_tokens"].as_u64().unwrap_or(600) as usize;
         let temperature = request["temperature"].as_f64().unwrap_or(0.0) as f32;
         let vocab = l.model.vocab();
-        let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
+        // Only the chat template's own parts may hold control tokens; the
+        // rest is mail text, read as plain text whatever it contains.
+        let mut tokens = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let text = part["text"].as_str().unwrap_or_default();
+            tokens.extend(vocab.tokenize(text.as_bytes(), i == 0, part["special"] == true));
+        }
+        if tokens.is_empty() {
+            return Err("the request is empty".into());
+        }
         if tokens.len() + max_tokens > l.ctx as usize {
             return Err(format!("the request is too long for the model ({} tokens, {} fit)", tokens.len(), l.ctx as usize - max_tokens));
         }

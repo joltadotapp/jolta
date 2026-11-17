@@ -57,13 +57,19 @@ pub fn model(id: &str) -> &'static LocalModel {
     MODELS.iter().find(|m| m.id == id).unwrap_or(&MODELS[0])
 }
 
-/// Gemma 4's chat format, with thinking off (no `<|think|>` in the system turn).
-fn prompt(request: &Request) -> String {
-    format!(
-        "<|turn>system\n{}<turn|>\n<|turn>user\n{}<turn|>\n<|turn>model\n",
-        request.system.trim(),
-        request.user.trim()
-    )
+/// Gemma 4's chat format, with thinking off (no `<|think|>` in the system
+/// turn), in parts. The helper reads control tokens only in the template's
+/// own parts: the request holds mail text, which may contain them.
+fn prompt(request: &Request) -> Value {
+    let template = |text: &str| json!({"text": text, "special": true});
+    let text = |text: &str| json!({"text": text, "special": false});
+    json!([
+        template("<|turn>system\n"),
+        text(request.system.trim()),
+        template("<turn|>\n<|turn>user\n"),
+        text(request.user.trim()),
+        template("<turn|>\n<|turn>model\n"),
+    ])
 }
 
 const CONTEXT: u32 = 16_384;
@@ -213,7 +219,7 @@ impl Local {
             h.model = Some(path.to_path_buf());
         }
         let h = slot.as_mut().expect("loaded above");
-        h.send(json!({"op": "generate", "prompt": prompt(request), "max_tokens": request.max_tokens,
+        h.send(json!({"op": "generate", "parts": prompt(request), "max_tokens": request.max_tokens,
                       "temperature": request.temperature, "grammar": request.grammar}))
             .await?;
         let mut text = String::new();
@@ -258,7 +264,7 @@ for line in sys.stdin:
     if r["op"] == "load":
         print(json.dumps({"event": "loaded", "seconds": 0}), flush=True)
     elif r["op"] == "generate":
-        ask = r["prompt"].split("<|turn>user\n")[1].split("<turn|>")[0]
+        ask = r["parts"][3]["text"]
         if "slow" in ask:
             time.sleep(1.5)
         print(json.dumps({"event": "text", "text": "answer to " + ask}), flush=True)
