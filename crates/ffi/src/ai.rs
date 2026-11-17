@@ -167,10 +167,10 @@ impl Core {
             local_model: s.local_model.clone(),
             openai_url: s.openai.base_url.clone(),
             openai_model: s.openai.model.clone(),
-            openai_key_saved: ai::key(Provider::OpenAi).is_some(),
+            openai_key_saved: ai::key(Provider::OpenAi, &s.openai.base_url).is_some(),
             anthropic_url: s.anthropic.base_url.clone(),
             anthropic_model: s.anthropic.model.clone(),
-            anthropic_key_saved: ai::key(Provider::Anthropic).is_some(),
+            anthropic_key_saved: ai::key(Provider::Anthropic, &s.anthropic.base_url).is_some(),
             auto_summary: s.auto_summary,
             sort_mail: s.sort_mail,
             sorts_mail: s.sorts_new_mail(),
@@ -218,16 +218,20 @@ impl Core {
         self.background.pending() as u32
     }
 
-    /// Saves an API key in the Keychain; an empty one removes it.
+    /// Saves an API key for the provider's current address in the Keychain;
+    /// an empty one removes it.
     pub fn set_ai_key(&self, provider: AiProvider, key: String) -> Result<()> {
-        Ok(ai::set_key(provider.into(), &key)?)
+        let s = self.jolta.store.read(ai::settings)?;
+        let provider: Provider = provider.into();
+        let url = if provider == Provider::Anthropic { s.anthropic.base_url } else { s.openai.base_url };
+        Ok(ai::set_key(provider, &url, &key)?)
     }
 
     /// The provider's models, which also proves the address and key work.
-    /// Without `key`, the saved one is used.
+    /// Without `key`, the one saved for `base_url` is used.
     pub async fn ai_models(&self, provider: AiProvider, base_url: String, key: Option<String>) -> Result<Vec<AiModelInfo>> {
         let provider: Provider = provider.into();
-        let key = key.filter(|k| !k.trim().is_empty()).map(|k| k.trim().to_string()).or_else(|| ai::key(provider));
+        let key = key.filter(|k| !k.trim().is_empty()).map(|k| k.trim().to_string()).or_else(|| ai::key(provider, &base_url));
         let list = self
             .runtime
             .spawn(async move { ai::models(provider, &base_url, key).await })

@@ -31,6 +31,25 @@ pub(super) fn base(provider: Provider, base_url: &str) -> Result<String> {
     }
 }
 
+/// The scheme, host and port a saved API key is tied to. None for plain
+/// http, which never carries a key.
+pub(super) fn key_origin(provider: Provider, base_url: &str) -> Result<Option<String>> {
+    let url = reqwest::Url::parse(&base(provider, base_url)?).map_err(|e| Error::Other(e.to_string()))?;
+    Ok((url.scheme() == "https").then(|| url.origin().ascii_serialization()))
+}
+
+/// `base`, refusing to send a key over plain http.
+fn keyed_base(provider: Provider, base_url: &str, key: Option<&str>) -> Result<String> {
+    if key.is_some() && key_origin(provider, base_url)?.is_none() {
+        return Err(no_key_over_http());
+    }
+    base(provider, base_url)
+}
+
+pub(super) fn no_key_over_http() -> Error {
+    Error::Other("Jolta sends an API key only over https. Use an https:// address, or leave the key out for a server on your own network.".into())
+}
+
 /// Whether `host` is this Mac or on the user's own network: loopback,
 /// private and link-local addresses, Tailscale's 100.64.0.0/10, and the
 /// names reserved for local networks: `.local` (Bonjour), `.home.arpa`
@@ -118,7 +137,7 @@ pub struct ModelChoice {
 /// The provider's models, newest first. Also checks that the address and
 /// key work. On api.openai.com only the text models are listed.
 pub async fn models(provider: Provider, base_url: &str, key: Option<String>) -> Result<Vec<ModelChoice>> {
-    let base = base(provider, base_url)?;
+    let base = keyed_base(provider, base_url, key.as_deref())?;
     let url = match provider {
         Provider::Anthropic => format!("{base}/v1/models?limit=100"),
         _ => format!("{base}/models"),
@@ -177,7 +196,7 @@ pub async fn generate(
     if key.is_none() && remote.base_url.trim().is_empty() {
         return Err(Error::Other(format!("Add your {} API key in Settings › AI.", company(provider))));
     }
-    let base = base(provider, &remote.base_url)?;
+    let base = keyed_base(provider, &remote.base_url, key.as_deref())?;
     let (url, body) = match provider {
         Provider::Anthropic => (
             format!("{base}/v1/messages"),
@@ -323,7 +342,7 @@ mod tests {
             }
             requests
         });
-        assert!(models(Provider::Anthropic, &format!("http://127.0.0.1:{port}/v1"), Some("sk-test".into())).await.is_err());
+        assert!(models(Provider::Anthropic, &format!("http://127.0.0.1:{port}/v1"), None).await.is_err());
         assert_eq!(server.await.unwrap(), 1, "the redirect was followed");
     }
 

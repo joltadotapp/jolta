@@ -42,9 +42,17 @@ impl Provider {
         [Provider::Local, Provider::OpenAi, Provider::Anthropic].into_iter().find(|p| p.name() == s)
     }
 
-    /// The Keychain entry for this provider's API key.
-    fn key_ref(self) -> String {
-        format!("ai:{}", self.name())
+    /// The Keychain entry for this provider's API key at `base_url`, so a
+    /// key goes only to the address it was saved for. The provider's own
+    /// address keeps the entry used before keys were tied to an address.
+    /// None for plain http, which never carries a key.
+    fn key_ref(self, base_url: &str) -> Result<Option<String>> {
+        let Some(origin) = remote::key_origin(self, base_url)? else { return Ok(None) };
+        Ok(Some(if Some(&origin) == remote::key_origin(self, "")?.as_ref() {
+            format!("ai:{}", self.name())
+        } else {
+            format!("ai:{}@{origin}", self.name())
+        }))
     }
 }
 
@@ -142,16 +150,21 @@ pub fn save_settings(conn: &Connection, s: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// Saves a provider's API key in the Keychain; an empty key removes it.
-pub fn set_key(provider: Provider, key: &str) -> Result<()> {
-    match key.trim() {
-        "" => secrets::delete(&provider.key_ref()),
-        key => secrets::set_password(&provider.key_ref(), key),
+/// Saves a provider's API key for `base_url` in the Keychain; an empty key
+/// removes it.
+pub fn set_key(provider: Provider, base_url: &str, key: &str) -> Result<()> {
+    match (key.trim(), provider.key_ref(base_url)?) {
+        ("", None) => Ok(()),
+        ("", Some(r)) => secrets::delete(&r),
+        (_, None) => Err(remote::no_key_over_http()),
+        (key, Some(r)) => secrets::set_password(&r, key),
     }
 }
 
-pub fn key(provider: Provider) -> Option<String> {
-    secrets::password(&provider.key_ref()).ok().filter(|k| !k.is_empty())
+/// The key saved for `base_url`.
+pub fn key(provider: Provider, base_url: &str) -> Option<String> {
+    let secret_ref = provider.key_ref(base_url).ok()??;
+    secrets::password(&secret_ref).ok().filter(|k| !k.is_empty())
 }
 
 /// One request to a model.
@@ -255,7 +268,7 @@ impl Ai {
             }
             Some(p @ (Provider::OpenAi | Provider::Anthropic)) => {
                 let remote = if p == Provider::OpenAi { &settings.openai } else { &settings.anthropic };
-                remote::generate(p, remote, key(p), request, cancel, on).await
+                remote::generate(p, remote, key(p, &remote.base_url), request, cancel, on).await
             }
         }
     }
