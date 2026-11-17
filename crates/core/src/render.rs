@@ -976,6 +976,12 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     #[test]
+    fn removing_a_comment_opens_no_new_one() {
+        let css = filter_css(".x{//**/*} */ } .jolta-sig{display:none}", "#m1");
+        assert!(!css.contains("/*"), "{css}");
+    }
+
+    #[test]
     fn sender_css_loads_no_remote_image() {
         for decl in [
             r#"background-image: image-set("x-remote:https://beacon.example.test/a" 1x)"#,
