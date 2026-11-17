@@ -309,6 +309,8 @@ private struct RemoteAccount: View {
     private var name: String { provider == .openAi ? "OpenAI" : "Anthropic" }
     private var saved: Bool { provider == .openAi ? model.ai.openaiKeySaved : model.ai.anthropicKeySaved }
     private var url: String { provider == .openAi ? model.ai.openaiUrl : model.ai.anthropicUrl }
+    /// Jolta never sends a key over plain http.
+    private var plainHTTP: Bool { url.lowercased().hasPrefix("http://") }
     private var chosen: String { provider == .openAi ? model.ai.openaiModel : model.ai.anthropicModel }
     private var keysPage: URL {
         URL(string: provider == .openAi ? "https://platform.openai.com/api-keys" : "https://console.anthropic.com/settings/keys")!
@@ -363,7 +365,8 @@ private struct RemoteAccount: View {
         if let problem { return problem }
         if checking { return "Checking the key with \(name)…" }
         if saved && !replacing { return "Saved in your Mac's Keychain. Jolta only shows that it's there." }
-        if !url.isEmpty { return "Optional for a server on your own network. Jolta keeps a key in your Mac's Keychain." }
+        if plainHTTP { return "Jolta sends no key over http. A server on your own network usually needs none." }
+        if !url.isEmpty { return "Paste a key for this address if the server needs one. A key saved for another address isn't sent here." }
         return "Paste a key from your \(name) account. Jolta keeps it in your Mac's Keychain."
     }
 
@@ -384,7 +387,8 @@ private struct RemoteAccount: View {
                 SecureField(provider == .openAi ? "sk-…" : "sk-ant-…", text: $key)
                     .settingsField(width: 210, mono: true)
                     .onSubmit { Task { await saveKey() } }
-                Button("Save") { Task { await saveKey() } }.disabled(key.trimmingCharacters(in: .whitespaces).isEmpty || checking)
+                    .disabled(plainHTTP)
+                Button("Save") { Task { await saveKey() } }.disabled(key.trimmingCharacters(in: .whitespaces).isEmpty || checking || plainHTTP)
                 if replacing { Button("Cancel") { replacing = false; problem = nil } }
             }
         }

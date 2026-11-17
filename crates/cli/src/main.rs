@@ -1055,10 +1055,7 @@ async fn ai(jolta: &Jolta, cmd: AiCommand) -> Result<()> {
     match cmd {
         AiCommand::Use { provider, model, url } => {
             let provider = ai_provider(&provider)?;
-            if let (Some(p), Ok(key)) = (provider, std::env::var("JOLTA_AI_KEY")) {
-                ai::set_key(p, &key)?;
-            }
-            jolta.store.write(|tx| {
+            let s = jolta.store.write(|tx| {
                 let mut s = ai::settings(tx)?;
                 s.provider = provider;
                 let remote = match provider {
@@ -1080,15 +1077,20 @@ async fn ai(jolta: &Jolta, cmd: AiCommand) -> Result<()> {
                         r.base_url = u.clone();
                     }
                 }
-                ai::save_settings(tx, &s)
+                ai::save_settings(tx, &s)?;
+                Ok(s)
             })?;
-            println!("{:?}", jolta.store.read(ai::settings)?);
+            if let (Some(p @ (ai::Provider::OpenAi | ai::Provider::Anthropic)), Ok(key)) = (provider, std::env::var("JOLTA_AI_KEY")) {
+                let url = if p == ai::Provider::Anthropic { &s.anthropic.base_url } else { &s.openai.base_url };
+                ai::set_key(p, url, &key)?;
+            }
+            println!("{s:?}");
         }
         AiCommand::Models { provider } => {
             let p = ai_provider(&provider)?.context("models of which provider?")?;
             let s = jolta.store.read(ai::settings)?;
             let url = if p == ai::Provider::Anthropic { s.anthropic.base_url } else { s.openai.base_url };
-            for m in ai::models(p, &url, ai::key(p)).await? {
+            for m in ai::models(p, &url, ai::key(p, &url)).await? {
                 println!("{}  {}", m.id, m.name);
             }
         }
