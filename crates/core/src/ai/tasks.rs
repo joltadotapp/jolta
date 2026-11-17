@@ -411,4 +411,45 @@ Tuesday works.\r\n\r\n\r\n\r\nSee you then.\r\n-- \r\nAnn\r\nCEO\r\n";
         );
         assert_eq!(clean_bullets("Just one line."), "Just one line.");
     }
+
+    /// A sender's text can steer the model into writing a link; the reader
+    /// sees its label as plain text and nothing it could click.
+    #[tokio::test]
+    async fn a_summary_keeps_no_links() {
+        const ANSWER: &str = "- The tenant must pay at [view invoice](http://127.0.0.1:9/steered).\n\
+- See <https://example.test/portal> and [the portal][1].\n\
+- Files are in ![shared folder](file:///System/Applications/Calculator.app) by [Ann](x-dummy://open?id=1).\n\n\
+[1]: x-dummy://open?id=2";
+        let url = super::super::quick::tests::fixture_server(&[ANSWER], std::time::Duration::ZERO).await;
+        crate::secrets::use_memory_store();
+        let dir = std::env::temp_dir().join(format!("jolta-ai-summary-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let jolta = Jolta::open(&dir).unwrap();
+        jolta
+            .store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'me@example.com', 'me', 'a1', 0);
+                     INSERT INTO mailbox (id, account_id, remote_id, name, role) VALUES (1, 1, 'INBOX', 'Inbox', 'inbox');",
+                )?;
+                let mut s = super::super::settings(tx)?;
+                s.provider = Some(super::super::Provider::OpenAi);
+                s.openai = super::super::Remote { base_url: url.clone(), model: "fixture".into() };
+                super::super::save_settings(tx, &s)
+            })
+            .unwrap();
+        let raw = "From: Mallory <m@example.test>\r\nTo: me@example.com\r\nSubject: Invoice\r\nMessage-ID: <1@example.test>\r\n\
+Date: Tue, 17 Nov 2026 10:00:00 +0100\r\n\r\nPlease pay [view invoice](http://127.0.0.1:9/steered).\r\n";
+        let id = crate::import::import_raw(&jolta, AccountId(1), MailboxId(1), raw.as_bytes()).unwrap();
+        let thread: ThreadId = jolta.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [id], |r| r.get(0))?)).unwrap();
+        let ai = Ai::new(&dir, dir.join("no-helper"));
+        let outcome = summarise(&jolta, &ai, thread, false, true, &Cancel::default(), &mut |_| {}).await.unwrap();
+        let SummaryOutcome::Done(summary) = outcome else { panic!("{outcome:?}") };
+        let want = "- The tenant must pay at view invoice (http://127.0.0.1:9/steered).\n\
+- See https://example.test/portal and the portal.\n\
+- Files are in shared folder (file:///System/Applications/Calculator.app) by Ann (x-dummy://open?id=1).";
+        assert_eq!(summary.text, want);
+        assert_eq!(jolta.store.read(|c| cached_summary(c, thread)).unwrap().unwrap().text, want, "the saved summary");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
