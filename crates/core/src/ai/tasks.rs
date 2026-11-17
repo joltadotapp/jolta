@@ -496,6 +496,8 @@ Tuesday works.\r\n\r\n\r\n\r\nSee you then.\r\n-- \r\nAnn\r\nCEO\r\n";
         assert_eq!(clean_bullets("- Meet at [time] on [day]."), "- Meet at [time] on [day].");
         assert_eq!(clean_bullets("Pay at [the portal][1] or <ann@example.test>.\n\n[1]: https://x.test/"), "Pay at the portal or ann@example.test.");
         assert_eq!(clean_bullets("- [[a](x:1)](x:2)"), "- a (x:1) (x:2)");
+        assert_eq!(clean_bullets("[Update]: the meeting moved to Friday."), "[Update]: the meeting moved to Friday.");
+        assert_eq!(clean_bullets("See [1].\n[1]: <https://x.test/> \"Portal\""), "See [1].");
     }
 
     /// A sender's text can steer the model into writing a link; the reader
