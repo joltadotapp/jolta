@@ -367,7 +367,7 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
                     let mut c = store
                         .read(|conn| compose::reply(conn, message, &raw, ReplyKind::ReplyAll, local_offset()))
                         .map_err(|e| e.to_string())?;
-                    c.body = format!("{}{}", arg_str(args, "body"), c.body);
+                    c.body = format!("{}{}", draft_text(args), c.body);
                     c
                 }
                 None => {
@@ -382,7 +382,7 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
                             .ok_or("No account this agent may write drafts in.")?,
                     };
                     need(account, Grant::Draft)?;
-                    Compose { account: Some(account), body: arg_str(args, "body").into(), ..Default::default() }
+                    Compose { account: Some(account), body: draft_text(args), ..Default::default() }
                 }
             };
             for (field, key) in [(&mut c.to, "to"), (&mut c.cc, "cc"), (&mut c.subject, "subject")] {
@@ -397,6 +397,11 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
         }
         other => Err(format!("Jolta has no tool called {other:?}. Sending mail is not possible for agents.")),
     }
+}
+
+/// The agent's body, which the tool declares plain text, in the draft format.
+fn draft_text(args: &Value) -> String {
+    arg_str(args, "body").to_string()
 }
 
 fn grant_verb(g: Grant) -> &'static str {
@@ -436,6 +441,15 @@ mod tests {
             tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, ["search", "read_thread", "list_mailboxes", "archive", "label", "snooze", "create_draft"]);
         assert!(!names.iter().any(|n| n.contains("send") || n.contains("forward")));
+    }
+
+    #[test]
+    fn draft_text_stays_as_typed() {
+        let typed = "See [section 2], 2*3*4 = 24, snake_case_name, ~approx~ and C:\\temp\\notes.";
+        let body = draft_text(&json!({"body": typed}));
+        assert_eq!(crate::rich::to_text(&body), typed);
+        let spans: Vec<_> = crate::rich::lines(&body).into_iter().flat_map(|l| l.spans).collect();
+        assert_eq!(spans, [crate::rich::Span { text: typed.into(), ..Default::default() }], "no formatting, link or image");
     }
 
     #[test]
