@@ -129,7 +129,7 @@ impl AiTask {
     }
 }
 
-fn progress(listener: &Arc<dyn AiListener>) -> impl FnMut(Progress) + Send + use<> {
+fn progress(listener: &Arc<dyn AiListener>, encode_text: fn(&str) -> String) -> impl FnMut(Progress) + Send + use<> {
     let listener = listener.clone();
     move |p| match p {
         Progress::Phase(phase) => listener.on_phase(match phase {
@@ -137,7 +137,7 @@ fn progress(listener: &Arc<dyn AiListener>) -> impl FnMut(Progress) + Send + use
             Phase::Reading => AiPhase::Reading,
             Phase::Writing => AiPhase::Writing,
         }),
-        Progress::Text(text) => listener.on_text(text.to_string()),
+        Progress::Text(text) => listener.on_text(encode_text(text)),
     }
 }
 
@@ -337,7 +337,7 @@ impl Core {
         let cancel = Cancel::default();
         let (jolta, ai, stop) = (self.jolta.clone(), self.ai.clone(), cancel.clone());
         self.runtime.spawn(async move {
-            let mut on = progress(&listener);
+            let mut on = progress(&listener, str::to_owned);
             let outcome = match tasks::summarise(&jolta, &ai, ThreadId(thread_id), automatic, fresh, &stop, &mut on).await {
                 Ok(tasks::SummaryOutcome::Done(s)) => AiOutcome::Done { text: s.text, model: s.model },
                 Ok(tasks::SummaryOutcome::NotNeeded) => AiOutcome::NotNeeded,
@@ -356,7 +356,7 @@ impl Core {
         let cancel = Cancel::default();
         let (jolta, ai, stop) = (self.jolta.clone(), self.ai.clone(), cancel.clone());
         self.runtime.spawn(async move {
-            let mut on = progress(&listener);
+            let mut on = progress(&listener, tasks::draft_body);
             let label = jolta.store.read(ai::settings).map(|s| s.label()).unwrap_or_default();
             let outcome = match tasks::draft(&jolta, &ai, &compose.into(), &instruction, &stop, &mut on).await {
                 Ok(Some(Finish::Done(text))) => AiOutcome::Done { text, model: label },

@@ -365,7 +365,8 @@ fn closing(text: &str, open: char, close: char) -> Option<usize> {
 /// Writes the part of a message the writer would type, from their
 /// instruction, anything they typed already, and the conversation it
 /// answers. Returns the text in the body format, for
-/// `compose::with_written`; None when AI is off.
+/// `compose::with_written`; None when AI is off. Progress contains the
+/// model's plain text.
 pub async fn draft(
     jolta: &Jolta,
     ai: &Ai,
@@ -462,9 +463,14 @@ pub async fn draft(
     user.push_str(&reminder);
     let request = Request { system, user, max_tokens: 700, temperature: 0.3, grammar: None };
     Ok(Some(match ai.generate(&settings, &request, cancel, on).await? {
-        Finish::Done(text) => Finish::Done(rich::escape(text.trim())),
+        Finish::Done(text) => Finish::Done(draft_body(text.trim())),
         f => f,
     }))
+}
+
+/// Encodes model text one line at a time for the compose editor.
+pub fn draft_body(text: &str) -> String {
+    text.split('\n').map(rich::escape).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
