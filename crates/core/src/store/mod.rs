@@ -237,6 +237,36 @@ mod tests {
     /// keeps its row, grants and audit log, shows as needing pairing again,
     /// and no token reaches it until the user pairs it.
     #[test]
+    fn upgrading_clears_future_guest_reply_ordering() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn, WRITER_CACHE_KIB).unwrap();
+        let tx = conn.transaction().unwrap();
+        for sql in &MIGRATIONS[..45] {
+            tx.execute_batch(sql).unwrap();
+        }
+        tx.pragma_update(None, "user_version", 45).unwrap();
+        tx.execute_batch(
+            "INSERT INTO calendar (id, source, remote_id, name) VALUES (1, 'local', 'local', 'On this Mac');
+             INSERT INTO guest_reply (calendar_id, uid, guest, stamp) VALUES
+                (1, 'meeting', 'past@test.invalid', 123),
+                (1, 'meeting', 'future@test.invalid', unixepoch() + 3600);",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let stamps: Vec<i64> = conn
+            .prepare("SELECT stamp FROM guest_reply WHERE calendar_id = 1 ORDER BY stamp")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(stamps, [123]);
+    }
+
+    #[test]
     fn schema45_leaves_older_agents_unpaired() {
         let mut conn = Connection::open_in_memory().unwrap();
         configure(&conn, WRITER_CACHE_KIB).unwrap();
