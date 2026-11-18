@@ -139,6 +139,16 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 	ONLY+=("-only-testing:JoltaUITests/Journeys/$t")
 done
 
-xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Debug test "${ONLY[@]}" 2>&1 | tee /tmp/jolta-ui-tests.log \
-	| grep -E "Test Case .*(passed|failed)|error:|Executed|TEST (SUCCEEDED|FAILED)|\*\* TEST" || true
-test "${PIPESTATUS[0]}" -eq 0
+LOG=/tmp/jolta-ui-tests.log
+status=0
+xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Debug test "${ONLY[@]}" 2>&1 | tee "$LOG" \
+	| { grep -E "Test Case .*(passed|failed|skipped)|error:|Executed|TEST (SUCCEEDED|FAILED)|\*\* TEST" || true; } || status=$?
+
+# xcodebuild reports success when a journey was skipped or never ran.
+for t in $TESTS; do
+	if ! grep -q "^Test Case '-\[JoltaUITests\.Journeys $t\]' passed" "$LOG"; then
+		echo "$t did not pass; the full log is in $LOG" >&2
+		[ "$status" -ne 0 ] || status=1
+	fi
+done
+exit "$status"
