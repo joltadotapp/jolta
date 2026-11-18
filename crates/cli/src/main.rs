@@ -1109,7 +1109,7 @@ async fn ai(jolta: &Jolta, cmd: AiCommand) -> Result<()> {
                     c.cancel();
                 });
             }
-            let outcome = tasks::summarise(jolta, &engine, jolta_core::ThreadId(thread), false, fresh, &cancel, &mut on).await?;
+            let outcome = tasks::summarise(jolta, &engine, jolta_core::ThreadId(thread), ai::Origin::Asked, fresh, &cancel, &mut on).await?;
             println!();
             eprintln!("[{:.2} s] {outcome:?}", start.elapsed().as_secs_f64());
         }
@@ -1133,7 +1133,7 @@ async fn ai(jolta: &Jolta, cmd: AiCommand) -> Result<()> {
             let (mut right, mut checked) = ((0, 0), 0);
             for id in ids {
                 let t = Instant::now();
-                let Some(got) = ai::triage::sort(jolta, &engine, id, &ai::Cancel::default()).await? else { continue };
+                let Some(got) = ai::triage::sort(jolta, &engine, id, ai::Origin::Asked, &ai::Cancel::default()).await? else { continue };
                 let raw = imap::message_source(jolta, id).await?;
                 let subject = jolta.store.read(|c| Ok(c.query_row("SELECT subject FROM message WHERE id = ?1", [id], |r| r.get::<_, String>(0))?))?;
                 let answer = format!("{} {}", got.category, if got.needs_reply { "yes" } else { "no" });

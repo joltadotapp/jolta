@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use jolta_core::ai::{self, Cancel, Finish, Phase, Progress, Provider, download, local, tasks};
+use jolta_core::ai::{self, Cancel, Finish, Origin, Phase, Progress, Provider, download, local, tasks};
 use jolta_core::compose;
 use jolta_core::{AccountId, ThreadId};
 
@@ -336,9 +336,10 @@ impl Core {
     pub fn summarize(&self, thread_id: i64, automatic: bool, fresh: bool, listener: Arc<dyn AiListener>) -> Arc<AiTask> {
         let cancel = Cancel::default();
         let (jolta, ai, stop) = (self.jolta.clone(), self.ai.clone(), cancel.clone());
+        let origin = if automatic { Origin::Opened } else { Origin::Asked };
         self.runtime.spawn(async move {
             let mut on = progress(&listener, str::to_owned);
-            let outcome = match tasks::summarise(&jolta, &ai, ThreadId(thread_id), automatic, fresh, &stop, &mut on).await {
+            let outcome = match tasks::summarise(&jolta, &ai, ThreadId(thread_id), origin, fresh, &stop, &mut on).await {
                 Ok(tasks::SummaryOutcome::Done(s)) => AiOutcome::Done { text: s.text, model: s.model },
                 Ok(tasks::SummaryOutcome::NotNeeded) => AiOutcome::NotNeeded,
                 Ok(tasks::SummaryOutcome::NotSetUp) => AiOutcome::NotSetUp,

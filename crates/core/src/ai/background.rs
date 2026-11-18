@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use rusqlite::OptionalExtension;
 
-use super::{Ai, Cancel, Provider, tasks, triage};
+use super::{Ai, Cancel, Origin, Provider, tasks, triage};
 use crate::model::*;
 use crate::{Jolta, Result};
 
@@ -116,10 +116,10 @@ impl Background {
             return;
         };
         let mut jobs = Vec::new();
-        if settings.sorts_new_mail() {
+        if settings.may_sort(Origin::Background) {
             jobs.extend(found.iter().filter(|(_, _, unsorted)| *unsorted).map(|(m, _, _)| Job::Sort(*m)));
         }
-        if settings.auto_summary && settings.provider == Some(Provider::Local) {
+        if settings.may_summarise(Origin::Background) {
             jobs.extend(found.iter().map(|(_, t, _)| Job::Summary(*t)));
         }
         self.push(jobs);
@@ -187,10 +187,10 @@ impl Background {
         let cancel = Cancel::default();
         match job {
             Job::Sort(message) => {
-                triage::sort(jolta, ai, message, &cancel).await?;
+                triage::sort(jolta, ai, message, Origin::Background, &cancel).await?;
             }
             Job::Summary(thread) => {
-                tasks::summarise(jolta, ai, thread, true, false, &cancel, &mut |_| {}).await?;
+                tasks::summarise(jolta, ai, thread, Origin::Background, false, &cancel, &mut |_| {}).await?;
             }
         }
         Ok(())

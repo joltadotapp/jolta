@@ -5,7 +5,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{Ai, Cancel, Finish, Request};
+use super::{Ai, Cancel, Finish, Origin, Request};
 use crate::model::*;
 use crate::{Jolta, Result, imap};
 
@@ -77,8 +77,9 @@ pub fn unsorted_inbox(conn: &Connection, since: i64) -> Result<Vec<MessageId>> {
 }
 
 /// Sorts one message and stores the answer. None when it was sorted already,
-/// is the user's own, or the request was cancelled.
-pub async fn sort(jolta: &Jolta, ai: &Ai, message: MessageId, cancel: &Cancel) -> Result<Option<Triage>> {
+/// is the user's own, the settings don't allow it for `origin`, or the
+/// request was cancelled.
+pub async fn sort(jolta: &Jolta, ai: &Ai, message: MessageId, origin: Origin, cancel: &Cancel) -> Result<Option<Triage>> {
     let (settings, meta) = jolta
         .store
         .read_async(move |c| {
@@ -97,7 +98,7 @@ pub async fn sort(jolta: &Jolta, ai: &Ai, message: MessageId, cancel: &Cancel) -
         })
         .await?;
     let Some((name, address, subject, mine)) = meta else { return Ok(None) };
-    if mine || settings.provider.is_none() {
+    if mine || !settings.may_sort(origin) {
         return Ok(None);
     }
     let raw = imap::message_source(jolta, message).await?;

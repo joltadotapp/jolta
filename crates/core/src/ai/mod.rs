@@ -106,12 +106,22 @@ pub enum Origin {
 }
 
 impl Settings {
+    /// Background summaries stay on this Mac: a cloud provider would get
+    /// every long conversation that arrives.
     pub fn may_summarise(&self, origin: Origin) -> bool {
-        self.provider.is_some() && (origin == Origin::Asked || self.auto_summary)
+        self.provider.is_some()
+            && match origin {
+                Origin::Asked => true,
+                Origin::Opened => self.auto_summary,
+                Origin::Background => self.auto_summary && self.provider == Some(Provider::Local),
+            }
     }
 
-    pub fn may_sort(&self, _origin: Origin) -> bool {
-        self.provider.is_some()
+    pub fn may_sort(&self, origin: Origin) -> bool {
+        match origin {
+            Origin::Background => self.sorts_new_mail(),
+            Origin::Asked | Origin::Opened => self.provider.is_some(),
+        }
     }
 
     pub fn sorts_new_mail(&self) -> bool {

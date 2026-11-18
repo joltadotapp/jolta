@@ -9,7 +9,7 @@
 use mail_parser::MessageParser;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{Ai, Cancel, Finish, Progress, Request, Settings};
+use super::{Ai, Cancel, Finish, Origin, Progress, Request, Settings};
 use crate::compose::{self, Compose};
 use crate::model::*;
 use crate::reader::{self, ThreadMessage};
@@ -202,15 +202,15 @@ pub enum SummaryOutcome {
     Cancelled,
 }
 
-/// Summarises a conversation, or brings its summary up to date. With
-/// `automatic`, short conversations are skipped and so is everything when
-/// the user turned automatic summaries off. `fresh` writes a new summary
-/// even when the saved one is current.
+/// Summarises a conversation, or brings its summary up to date. Unless the
+/// user asked, short conversations are skipped, and so is everything the
+/// settings don't allow for `origin` (`Settings::may_summarise`). `fresh`
+/// writes a new summary even when the saved one is current.
 pub async fn summarise(
     jolta: &Jolta,
     ai: &Ai,
     thread: ThreadId,
-    automatic: bool,
+    origin: Origin,
     fresh: bool,
     cancel: &Cancel,
     on: &mut (dyn FnMut(Progress) + Send),
@@ -220,7 +220,7 @@ pub async fn summarise(
     if settings.provider.is_none() {
         return Ok(SummaryOutcome::NotSetUp);
     }
-    if automatic && !settings.auto_summary {
+    if !settings.may_summarise(origin) {
         return Ok(SummaryOutcome::NotNeeded);
     }
     let (subject, messages) = load(jolta, thread).await?;
@@ -229,7 +229,7 @@ pub async fn summarise(
         return Ok(SummaryOutcome::Done(c.clone()));
     }
     let length: usize = messages.iter().map(|m| m.text.len()).sum();
-    if automatic && cached.is_none() && messages.len() < 3 && length < WORTH_SUMMARISING {
+    if origin != Origin::Asked && cached.is_none() && messages.len() < 3 && length < WORTH_SUMMARISING {
         return Ok(SummaryOutcome::NotNeeded);
     }
     let budget = Ai::budget(&settings);
@@ -541,7 +541,7 @@ Date: Tue, 17 Nov 2026 10:00:00 +0100\r\n\r\nPlease pay [view invoice](http://12
         let id = crate::import::import_raw(&jolta, AccountId(1), MailboxId(1), raw.as_bytes()).unwrap();
         let thread: ThreadId = jolta.store.read(|c| Ok(c.query_row("SELECT thread_id FROM message WHERE id = ?1", [id], |r| r.get(0))?)).unwrap();
         let ai = Ai::new(&dir, dir.join("no-helper"));
-        let outcome = summarise(&jolta, &ai, thread, false, true, &Cancel::default(), &mut |_| {}).await.unwrap();
+        let outcome = summarise(&jolta, &ai, thread, Origin::Asked, true, &Cancel::default(), &mut |_| {}).await.unwrap();
         let SummaryOutcome::Done(summary) = outcome else { panic!("{outcome:?}") };
         let want = "- The tenant must pay at view invoice (http://127.0.0.1:9/steered).\n\
 - See https://example.test/portal and the portal.\n\
