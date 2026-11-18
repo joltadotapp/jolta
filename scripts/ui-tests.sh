@@ -17,22 +17,33 @@ cd "$(dirname "$0")/.."
 JOLTA=target/release/jolta
 FIXTURES=apple/JoltaUITests/Fixtures
 DATA="$HOME/Library/Application Support/Jolta"
+TESTS=("$@")
+if [ "$#" -eq 0 ]; then
+	TESTS=($(sed -n 's/^ *func \(test[A-Za-z0-9]*\)().*/\1/p' apple/JoltaUITests/*.swift))
+fi
+if [ -z "${TESTS[*]-}" ]; then
+	echo "No Jolta UI test journeys selected." >&2
+	exit 1
+fi
+for t in "${TESTS[@]}"; do
+	if ! [[ "$t" =~ ^test[A-Za-z0-9]+$ ]]; then
+		echo "Invalid Jolta UI test name: $t" >&2
+		exit 1
+	fi
+done
 [ -x "$JOLTA" ] || scripts/build-cli.sh
-
-TESTS=$(sed -n 's/^ *func \(test[A-Za-z0-9]*\)().*/\1/p' apple/JoltaUITests/*.swift)
-if [ $# -gt 0 ]; then TESTS="$*"; fi
 
 WATCHERS=()
 SECRETS=()
 cleanup() {
 	for pid in ${WATCHERS[@]+"${WATCHERS[@]}"}; do kill "$pid" 2>/dev/null || true; done
 	for ref in ${SECRETS[@]+"${SECRETS[@]}"}; do security delete-generic-password -s app.jolta.mac -a "$ref" >/dev/null 2>&1 || true; done
-	for t in $TESTS; do rm -rf "$DATA/UITest-$t"; done
+	for t in "${TESTS[@]}"; do rm -rf "$DATA/UITest-$t"; done
 }
 trap cleanup EXIT
 
 ONLY=()
-for t in $TESTS; do
+for t in "${TESTS[@]}"; do
 	dir="$DATA/UITest-$t"
 	rm -rf "$dir"
 	"$JOLTA" --data-dir "$dir" dev local-account me@test.invalid >/dev/null
@@ -141,12 +152,18 @@ done
 
 LOG=/tmp/jolta-ui-tests.log
 status=0
-xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Debug test "${ONLY[@]}" 2>&1 | tee "$LOG" \
-	| { grep -E "Test Case .*(passed|failed|skipped)|error:|Executed|TEST (SUCCEEDED|FAILED)|\*\* TEST" || true; } || status=$?
+if xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Debug test "${ONLY[@]}" 2>&1 | tee "$LOG" \
+	| { grep -E "Test Case .*(passed|failed|skipped)|error:|Executed|TEST (SUCCEEDED|FAILED)|\*\* TEST" || true; }; then
+	:
+else
+	statuses=("${PIPESTATUS[@]}")
+	status=${statuses[0]}
+	[ "$status" -ne 0 ] || status=${statuses[1]}
+fi
 
-# xcodebuild reports success when a journey was skipped or never ran.
-for t in $TESTS; do
-	if ! grep -q "^Test Case '-\[JoltaUITests\.Journeys $t\]' passed" "$LOG"; then
+# xcodebuild can report success when a journey was skipped or never ran.
+for t in "${TESTS[@]}"; do
+	if ! awk -v prefix="Test Case '-[JoltaUITests.Journeys $t]' passed (" 'index($0, prefix) == 1 { found = 1; exit } END { exit !found }' "$LOG"; then
 		echo "$t did not pass; the full log is in $LOG" >&2
 		[ "$status" -ne 0 ] || status=1
 	fi
