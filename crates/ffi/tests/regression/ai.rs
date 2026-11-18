@@ -1,20 +1,18 @@
-//! A saved OpenAI or Anthropic API key goes only to the address it was
-//! saved for, and never over plain http.
+//! AI settings and draft output through the app bridge.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use jolta_ffi::ai::AiProvider;
+use jolta_ffi::ai::{AiListener, AiOutcome, AiPhase, AiProvider};
 
 use crate::fixture::{App, block_on};
 
 /// API keys live in one process-wide store, so these tests take turns.
 static KEYS: Mutex<()> = Mutex::new(());
 
-/// A plain-http server on loopback that answers every request with an empty
-/// model list and keeps each request's headers.
+/// An HTTP server on loopback that keeps each request's headers.
 struct Listener {
     url: String,
     seen: Arc<Mutex<Vec<String>>>,
@@ -22,6 +20,10 @@ struct Listener {
 
 impl Listener {
     fn start() -> Listener {
+        Self::replying("application/json", r#"{"data":[]}"#)
+    }
+
+    fn replying(content_type: &'static str, body: &'static str) -> Listener {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -39,9 +41,8 @@ impl Listener {
                     }
                 }
                 record.lock().unwrap().push(String::from_utf8_lossy(&request).into_owned());
-                let body = r#"{"data":[]}"#;
                 let reply = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(reply.as_bytes());
@@ -128,4 +129,47 @@ fn a_key_typed_for_an_http_address_is_neither_sent_nor_saved() {
 
 fn name(provider: AiProvider) -> &'static str {
     if provider == AiProvider::OpenAi { "OpenAI" } else { "Anthropic" }
+}
+
+#[test]
+fn a_draft_preview_keeps_plain_text_and_leading_whitespace() {
+    struct DraftListener {
+        updates: Mutex<Vec<String>>,
+        result: std::sync::mpsc::Sender<AiOutcome>,
+    }
+
+    impl AiListener for DraftListener {
+        fn on_phase(&self, _: AiPhase) {}
+
+        fn on_text(&self, text: String) {
+            self.updates.lock().unwrap().push(text);
+        }
+
+        fn on_finish(&self, outcome: AiOutcome) {
+            self.result.send(outcome).unwrap();
+        }
+    }
+
+    let server = Listener::replying(
+        "text/event-stream",
+        concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"  Hi *all*,\\n\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"see you at [time].\"}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n",
+        ),
+    );
+    let app = App::new();
+    use_address(&app, AiProvider::OpenAi, &server.url);
+    let (result, response) = std::sync::mpsc::channel();
+    let listener = Arc::new(DraftListener { updates: Mutex::new(Vec::new()), result });
+    let compose = app.core.new_compose(None).unwrap();
+    let _task = app.core.draft_message(compose, "Say hi".into(), listener.clone());
+    let outcome = response.recv_timeout(Duration::from_secs(5)).unwrap();
+    let AiOutcome::Done { text, .. } = outcome else { panic!("draft generation did not finish") };
+
+    assert_eq!(*listener.updates.lock().unwrap(), [
+        "  Hi \\*all\\*,\n",
+        "  Hi \\*all\\*,\nsee you at \\[time\\].",
+    ]);
+    assert_eq!(jolta_core::rich::to_text(&text), "Hi *all*,\nsee you at [time].");
 }
