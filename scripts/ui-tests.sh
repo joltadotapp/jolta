@@ -150,7 +150,8 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 	ONLY+=("-only-testing:JoltaUITests/Journeys/$t")
 done
 
-LOG=/tmp/jolta-ui-tests.log
+LOG=$(mktemp /tmp/jolta-ui-tests.XXXXXX)
+echo "Full UI test log is in $LOG"
 status=0
 if xcodebuild -project apple/Jolta.xcodeproj -scheme Jolta -configuration Debug test "${ONLY[@]}" 2>&1 | tee "$LOG" \
 	| { grep -E "Test Case .*(passed|failed|skipped)|error:|Executed|TEST (SUCCEEDED|FAILED)|\*\* TEST" || true; }; then
