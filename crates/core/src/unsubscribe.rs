@@ -110,6 +110,7 @@ fn percent_decode(s: &str) -> String {
 pub async fn one_click(url: &str) -> Result<()> {
     crate::oauth::init_tls();
     let client = reqwest::Client::builder()
+        .referer(false)
         .timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
