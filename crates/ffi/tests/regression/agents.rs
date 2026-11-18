@@ -153,6 +153,38 @@ fn an_added_agent_gets_its_own_grants() {
     assert_eq!((added.name.as_str(), added.state.as_str(), added.paired), ("Reader", "approved", true));
 }
 
+#[test]
+fn agent_draft_body_preserves_plain_text_and_reply_quotes() {
+    use jolta_core::rich;
+
+    let app = App::new();
+    let thread = one_thread(&app);
+    let token = add(&app, "Writer", &[Grant::Draft]);
+    let socket = mcp_socket(&app);
+    let mut agent = Agent::paired(&socket, &token);
+
+    let typed = "See [section 2], 2*3*4 = 24, snake_case_name and ~approx~.\nVisit https://example.test/help";
+    for reply_to in [None, Some(thread)] {
+        let arguments = serde_json::json!({"body": typed, "reply_to_thread_id": reply_to});
+        let result = agent.call("create_draft", &arguments.to_string());
+        let id = app.count("SELECT coalesce(max(id), 0) FROM draft");
+        let draft = app.core.draft(id).unwrap().unwrap_or_else(|| panic!("draft was not saved: {result}"));
+        let plain = rich::to_text(&draft.body);
+        assert!(plain.starts_with(typed), "plain text changed: {plain}");
+        assert!(rich::images(&draft.body).is_empty());
+        let html = rich::to_html(&draft.body, &|_| panic!("an image was not expected"));
+        assert!(html.contains("2*3*4 = 24"));
+        assert!(html.contains(r#"href="https://example.test/help""#));
+        if reply_to.is_some() {
+            assert!(plain.contains("> The secret numbers."));
+            assert!(html.contains("<blockquote"));
+        } else {
+            assert_eq!(plain, typed);
+        }
+    }
+    let _ = std::fs::remove_file(&socket);
+}
+
 /// A read-only agent that knows another agent's token still can't switch
 /// to it on an open connection.
 #[test]
