@@ -196,3 +196,54 @@ impl Background {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_jobs_respect_changed_ai_settings() {
+        let dir = std::env::temp_dir().join(format!("jolta-ai-background-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let jolta = Jolta::open(&dir).unwrap();
+        jolta.store.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account (id, kind, address, username, secret_ref, created) VALUES (1, 'imap', 'me@example.test', 'me', 'a1', 0);
+                 INSERT INTO mailbox (id, account_id, remote_id, name, role) VALUES (1, 1, 'INBOX', 'Inbox', 'inbox');",
+            )?;
+            let settings = super::super::Settings { provider: Some(Provider::Local), ..Default::default() };
+            super::super::save_settings(tx, &settings)
+        }).unwrap();
+        let raw = format!(
+            "From: a@example.test\r\nTo: me@example.test\r\nSubject: Planning\r\nMessage-ID: <planning@example.test>\r\n\r\n{}",
+            "The meeting starts at noon.\r\n".repeat(110),
+        );
+        let message = crate::import::import_raw(&jolta, AccountId(1), MailboxId(1), raw.as_bytes()).unwrap();
+        let bg = Background { queue: Mutex::default(), wake: Notify::new(), allowed: AtomicBool::new(true) };
+        bg.arrived(&jolta, &[message]);
+        let mut queue = bg.queue.into_inner().unwrap();
+        let Some(Job::Sort(queued_message)) = queue.pop() else { panic!("missing sort job") };
+        let Some(Job::Summary(thread)) = queue.pop() else { panic!("missing summary job") };
+        assert_eq!(queued_message, message);
+        assert!(queue.pop().is_none());
+
+        jolta.store.write(|tx| {
+            let mut settings = super::super::settings(tx)?;
+            settings.provider = Some(Provider::OpenAi);
+            settings.sort_mail = Some(false);
+            settings.openai = super::super::Remote { base_url: "http://localhost".into(), model: String::new() };
+            super::super::save_settings(tx, &settings)
+        }).unwrap();
+        let ai = Ai::new(&dir, dir.join("no-helper"));
+        Background::work(&jolta, &ai, Job::Sort(message)).await.unwrap();
+        Background::work(&jolta, &ai, Job::Summary(thread)).await.unwrap();
+
+        let cancel = Cancel::default();
+        let sort = triage::sort(&jolta, &ai, message, Origin::Asked, &cancel).await;
+        let summary = tasks::summarise(&jolta, &ai, thread, Origin::Opened, false, &cancel, &mut |_| {}).await;
+        for error in [sort.unwrap_err(), summary.unwrap_err()] {
+            assert!(error.to_string().contains("model in Settings"), "{error}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
