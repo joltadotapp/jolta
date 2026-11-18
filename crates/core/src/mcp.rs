@@ -401,7 +401,7 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
 
 /// The agent's body, which the tool declares plain text, in the draft format.
 fn draft_text(args: &Value) -> String {
-    arg_str(args, "body").to_string()
+    crate::rich::escape(arg_str(args, "body"))
 }
 
 fn grant_verb(g: Grant) -> &'static str {
