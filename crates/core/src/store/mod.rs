@@ -233,9 +233,6 @@ mod tests {
         assert_eq!(one("SELECT count(*) || '' FROM ai_summary"), "0", "a summary still goes with its thread");
     }
 
-    /// An agent approved before schema 45 was known by its name alone. It
-    /// keeps its row, grants and audit log, shows as needing pairing again,
-    /// and no token reaches it until the user pairs it.
     #[test]
     fn upgrading_clears_future_guest_reply_ordering() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -266,6 +263,9 @@ mod tests {
         assert_eq!(stamps, [123]);
     }
 
+    /// An agent approved before schema 45 was known by its name alone. It
+    /// keeps its row, grants and audit log, shows as needing pairing again,
+    /// and no token reaches it until the user pairs it.
     #[test]
     fn schema45_leaves_older_agents_unpaired() {
         let mut conn = Connection::open_in_memory().unwrap();
