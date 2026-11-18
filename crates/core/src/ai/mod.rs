@@ -92,7 +92,28 @@ impl Default for Settings {
     }
 }
 
+/// Who wants a summary or a sort. Background work was queued under the
+/// settings of that moment, so it is checked again against the settings it
+/// would run with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// The user asked for it.
+    Asked,
+    /// A conversation opened.
+    Opened,
+    /// The background queue.
+    Background,
+}
+
 impl Settings {
+    pub fn may_summarise(&self, origin: Origin) -> bool {
+        self.provider.is_some() && (origin == Origin::Asked || self.auto_summary)
+    }
+
+    pub fn may_sort(&self, _origin: Origin) -> bool {
+        self.provider.is_some()
+    }
+
     pub fn sorts_new_mail(&self) -> bool {
         self.provider.is_some() && self.sort_mail.unwrap_or(self.provider == Some(Provider::Local))
     }
@@ -277,6 +298,35 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_work_runs_only_while_its_settings_still_allow_it() {
+        let local = Settings { provider: Some(Provider::Local), ..Settings::default() };
+        let cloud = Settings { provider: Some(Provider::OpenAi), ..Settings::default() };
+        let cloud_sorting = Settings { sort_mail: Some(true), ..cloud.clone() };
+        let local_not_sorting = Settings { sort_mail: Some(false), ..local.clone() };
+        let no_auto = Settings { auto_summary: false, ..local.clone() };
+
+        assert!(local.may_summarise(Origin::Background));
+        assert!(!cloud.may_summarise(Origin::Background), "a cloud provider never gets background summaries");
+        assert!(!no_auto.may_summarise(Origin::Background));
+        assert!(local.may_sort(Origin::Background));
+        assert!(cloud_sorting.may_sort(Origin::Background));
+        assert!(!cloud.may_sort(Origin::Background), "sorting is off by default for a cloud provider");
+        assert!(!local_not_sorting.may_sort(Origin::Background));
+
+        assert!(cloud.may_summarise(Origin::Opened));
+        assert!(!no_auto.may_summarise(Origin::Opened));
+        assert!(no_auto.may_summarise(Origin::Asked));
+        assert!(cloud.may_summarise(Origin::Asked));
+        assert!(local_not_sorting.may_sort(Origin::Asked));
+        assert!(cloud.may_sort(Origin::Asked));
+
+        let off = Settings::default();
+        for origin in [Origin::Asked, Origin::Opened, Origin::Background] {
+            assert!(!off.may_summarise(origin) && !off.may_sort(origin));
+        }
+    }
 
     fn saves(address: &str) -> Result<()> {
         let conn = Connection::open_in_memory()?;
