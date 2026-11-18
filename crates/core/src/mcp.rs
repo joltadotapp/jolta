@@ -181,7 +181,7 @@ fn tools() -> Value {
                 "to": {"type": "string", "description": "Comma-separated addresses; optional for replies."},
                 "cc": {"type": "string"},
                 "subject": {"type": "string"},
-                "body": {"type": "string", "description": "Plain text."},
+                "body": {"type": "string", "description": "Text. Jolta recognizes line-start list and quote markers and links web addresses."},
                 "reply_to_thread_id": {"type": "integer"},
                 "account_id": {"type": "integer", "description": "Account to send from; defaults to the thread's or the first account."}
             }, "required": ["body"]}
@@ -399,9 +399,8 @@ async fn run_tool(ctx: &Ctx, agent: Option<i64>, name: &str, args: &Value) -> st
     }
 }
 
-/// The agent's body, which the tool declares plain text, in the draft format.
 fn draft_text(args: &Value) -> String {
-    crate::rich::escape(arg_str(args, "body"))
+    arg_str(args, "body").split('\n').map(crate::rich::escape).collect::<Vec<_>>().join("\n")
 }
 
 fn grant_verb(g: Grant) -> &'static str {
