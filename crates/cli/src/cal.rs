@@ -1082,8 +1082,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         }
         CalCommand::Fact { fact, account } => {
             let account = account.map(|spec| jolta.store.read(|c| store::find_account(c, &spec))).transpose()?;
-            // Some facts write test events to the provider.
-            let _folder = crate::lock_folder(jolta)?;
+            // The If-Match check writes a test event to the provider.
+            let _folder = matches!(fact, crate::cal_fact::Fact::GraphIfMatch).then(|| crate::lock_folder(jolta)).transpose()?;
             crate::cal_fact::run(fact, account.as_ref()).await
         }
         CalCommand::Bench { runs } => bench(jolta, runs),

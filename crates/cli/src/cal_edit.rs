@@ -434,63 +434,106 @@ pub(crate) async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Re
         return wait_for_op(jolta, id, FOLDER_WAIT).await;
     }
     crate::cal::send_calendar_ops(jolta).await?;
-    print_op(jolta, &jolta.store.read(|c| store::calendar_op(c, id))?);
+    for op in edit_ops(jolta, id)? {
+        print_op(jolta, &op);
+    }
     Ok(())
 }
 
-/// Sends the op, then its invitations, each once this command can take the
-/// data folder. Jolta or `jolta watch` may send them meanwhile, but a
-/// one-shot command such as `jolta sync` never does, so this keeps trying
-/// and fails once the folder stayed busy for `patience`.
+/// The op and, for this and following, the new series' create it waits for.
+fn edit_ops(jolta: &Jolta, id: CalendarOpId) -> Result<Vec<CalendarOp>> {
+    let op = jolta.store.read(|c| store::calendar_op(c, id))?;
+    let first = match op.after {
+        Some(first) => Some(jolta.store.read(|c| store::calendar_op(c, first))?),
+        None => None,
+    };
+    Ok(first.into_iter().chain([op]).collect())
+}
+
+/// Sends the edit's ops, then their invitations, each once this command can
+/// take the data folder. Jolta or `jolta watch` may send them meanwhile,
+/// but a one-shot command such as `jolta sync` never does. Succeeds only
+/// when every op is done and every invitation left; gives up `patience`
+/// after the last hold ends, while the folder stays busy or the server
+/// can't be reached.
 pub(crate) async fn wait_for_op(jolta: &Jolta, id: CalendarOpId, patience: std::time::Duration) -> Result<()> {
-    let mut busy_since = None;
+    let due = edit_ops(jolta, id)?.iter().map(|op| op.send_after).max().unwrap_or(0);
+    let deadline = due.max(Utc::now().timestamp()) + patience.as_secs() as i64;
+    let mut waiting = false;
     loop {
-        let op = jolta.store.read(|c| store::calendar_op(c, id))?;
-        let settled = !matches!(op.state, OpState::Pending | OpState::Sending);
-        if settled && queued_mail(jolta, id)?.is_empty() {
-            print_op(jolta, &op);
-            let failed = jolta.store.read(|c| store::failed_calendar_op_mail(c, id))?;
+        let ops = edit_ops(jolta, id)?;
+        let ids: Vec<CalendarOpId> = ops.iter().map(|op| op.id).collect();
+        if let Some(op) = ops.iter().find(|op| !matches!(op.state, OpState::Pending | OpState::Sending | OpState::Done)) {
+            ops.iter().for_each(|op| print_op(jolta, op));
+            let error = op.error.as_deref().map(|e| format!(": {}", printable(e))).unwrap_or_default();
+            bail!("The change didn't go through: op {} is {}{error}. `jolta cal ops` shows it.", op.id.0, op.state);
+        }
+        let settled = ops.iter().all(|op| op.state == OpState::Done);
+        let queued = queued_mail(jolta, &ids)?;
+        if settled && queued.is_empty() {
+            ops.iter().for_each(|op| print_op(jolta, op));
+            let mut failed = Vec::new();
+            for id in &ids {
+                failed.extend(jolta.store.read(|c| store::failed_calendar_op_mail(c, *id))?);
+            }
             if !failed.is_empty() {
-                let each: Vec<String> = failed.iter().map(|(to, error)| format!("to {to}: {error}")).collect();
+                let each: Vec<String> = failed.iter().map(|(to, error)| format!("to {}: {}", printable(to), printable(error))).collect();
                 bail!("The change is sent, but its invitation failed {}", each.join("; "));
             }
             return Ok(());
         }
-        let took = if settled { send_mail(jolta, id).await? } else { crate::cal::replay_if_free(jolta).await? };
-        if took {
-            busy_since = None;
-            let op = jolta.store.read(|c| store::calendar_op(c, id))?;
-            if matches!(op.state, OpState::Pending | OpState::Sending) {
-                let left = (op.send_after - Utc::now().timestamp()).clamp(1, 60);
-                tokio::time::sleep(std::time::Duration::from_secs(left as u64)).await;
-            }
-            continue;
-        }
-        if busy_since.is_none() {
-            println!("Waiting for this data folder: Jolta or another jolta command syncs it.");
-        }
-        if busy_since.get_or_insert_with(std::time::Instant::now).elapsed() >= patience {
-            print_op(jolta, &op);
+        let now = Utc::now().timestamp();
+        if now >= deadline {
+            ops.iter().for_each(|op| print_op(jolta, op));
             let what = if settled { "The change is sent, but its invitations are still queued" } else { "The change is saved, but still queued" };
-            bail!(
-                "{what}: Jolta or another jolta command kept this data folder for {} s. Jolta or jolta watch sends it once it syncs the folder; `jolta cal ops` shows where it is.",
-                patience.as_secs()
-            );
+            let why = if waiting {
+                "Jolta or another jolta command kept this data folder".to_string()
+            } else {
+                match ops.iter().find_map(|op| op.error.as_deref()) {
+                    Some(error) => format!("its last try failed: {}", printable(error)),
+                    None => "it didn't go through in time".to_string(),
+                }
+            };
+            bail!("{what}: {why}. Jolta or jolta watch sends it once it syncs the folder; `jolta cal ops` shows where it is.");
         }
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let took = if settled { send_mail(jolta, &ids).await? } else { crate::cal::replay_if_free(jolta).await? };
+        let next = if took {
+            waiting = false;
+            let ops = edit_ops(jolta, id)?;
+            ops.iter().filter(|op| matches!(op.state, OpState::Pending | OpState::Sending)).map(|op| op.send_after).min().unwrap_or(now)
+        } else {
+            if !waiting {
+                println!("Waiting for this data folder: Jolta or another jolta command syncs it.");
+            }
+            waiting = true;
+            now + 3
+        };
+        let pause = (next.min(deadline) - Utc::now().timestamp()).clamp(1, 60);
+        tokio::time::sleep(std::time::Duration::from_secs(pause as u64)).await;
     }
 }
 
-/// The outbox rows of the invitations an op queued that haven't left.
-fn queued_mail(jolta: &Jolta, id: CalendarOpId) -> Result<Vec<i64>> {
-    Ok(jolta.store.read(|c| store::calendar_op_outbox(c, id))?.into_iter().filter(|(_, state, _)| state == "queued").map(|(row, _, _)| row).collect())
+/// Text from a server or a recipient list, with control characters made
+/// spaces so it can't rewrite the terminal.
+fn printable(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
-/// Sends the invitations an op queued, through the engine as the app
+/// The outbox rows of the invitations the ops queued that haven't left.
+fn queued_mail(jolta: &Jolta, ids: &[CalendarOpId]) -> Result<Vec<i64>> {
+    let mut queued = Vec::new();
+    for id in ids {
+        let rows = jolta.store.read(|c| store::calendar_op_outbox(c, *id))?;
+        queued.extend(rows.into_iter().filter(|(_, state, _)| state == "queued").map(|(row, _, _)| row));
+    }
+    Ok(queued)
+}
+
+/// Sends the invitations the ops queued, through the engine as the app
 /// does, and waits up to three minutes for each to leave. False while
 /// another program syncs the data folder.
-async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<bool> {
-    let Some(&row) = queued_mail(jolta, id)?.first() else { return Ok(true) };
+async fn send_mail(jolta: &Jolta, ids: &[CalendarOpId]) -> Result<bool> {
+    let Some(&row) = queued_mail(jolta, ids)?.first() else { return Ok(true) };
     let account: jolta_core::AccountId = jolta.store.read(|c| Ok(c.query_row("SELECT account_id FROM outbox WHERE id = ?1", [row], |r| r.get(0))?))?;
     let sink: jolta_core::engine::Sink = std::sync::Arc::new(|_| {});
     let engine = match jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current()) {
@@ -498,7 +541,7 @@ async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<bool> {
         started => started?,
     };
     let started = std::time::Instant::now();
-    while !queued_mail(jolta, id)?.is_empty() {
+    while !queued_mail(jolta, ids)?.is_empty() {
         if started.elapsed() > std::time::Duration::from_secs(180) {
             bail!("the invitations didn't leave the outbox within three minutes");
         }
@@ -582,11 +625,6 @@ async fn finish(jolta: &Jolta, saved: draft::Saved, send: &Send) -> Result<()> {
                 jolta.store.write(|tx| store::hold_calendar_op(tx, id, Utc::now().timestamp() + hold))?;
             }
             settle_op(jolta, id, send.wait).await?;
-            // This and following waits for the new series' create first.
-            let op = jolta.store.read(|c| store::calendar_op(c, id))?;
-            if let Some(first) = op.after {
-                print_op(jolta, &jolta.store.read(|c| store::calendar_op(c, first))?);
-            }
         }
     }
     Ok(())
@@ -772,7 +810,7 @@ fn print_op(jolta: &Jolta, op: &CalendarOp) {
         OpState::Pending if op.send_after > now => format!(", due in {} s", op.send_after - now),
         _ => String::new(),
     };
-    let error = op.error.as_deref().map(|e| format!(", last error: {e}")).unwrap_or_default();
+    let error = op.error.as_deref().map(|e| format!(", last error: {}", printable(e))).unwrap_or_default();
     let lost = if op.lost.is_empty() { String::new() } else { format!(", the server kept: {}", op.lost.iter().map(|f| f.noun()).collect::<Vec<_>>().join(", ")) };
     let from = op.moved_from().map(|f| format!(" from {f}")).unwrap_or_default();
     println!(
@@ -786,7 +824,7 @@ fn print_op(jolta: &Jolta, op: &CalendarOp) {
         op.attempts
     );
     for (row, state, to) in jolta.store.read(|c| store::calendar_op_outbox(c, op.id)).unwrap_or_default() {
-        println!("          mail: outbox {row} to {to}, {state}");
+        println!("          mail: outbox {row} to {}, {state}", printable(&to));
     }
 }
 
