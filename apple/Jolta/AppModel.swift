@@ -571,9 +571,13 @@ final class AppModel {
 
     /// The Terminal command that links the bundled `jolta` into the PATH. The
     /// sandbox can't write `/usr/local/bin`, so the user runs it; the link
-    /// follows the app across updates.
-    var cliLinkCommand: String {
-        let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/jolta").path
+    /// follows the app across updates. Nil outside /Applications: a link into
+    /// a folder other users can write, or into the temporary copy macOS runs a
+    /// quarantined app from, would run whatever ends up there.
+    var cliLinkCommand: String? {
+        let app = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        guard app.path.hasPrefix("/Applications/") else { return nil }
+        let cli = app.appendingPathComponent("Contents/Helpers/jolta").path
         return "sudo mkdir -p /usr/local/bin && sudo ln -sf \(Self.shellQuoted(cli)) /usr/local/bin/jolta"
     }
 

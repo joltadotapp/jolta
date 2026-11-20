@@ -134,11 +134,9 @@ struct AgentPairing: View {
 /// The `jolta` command-line tool ships inside the app. The sandbox can't put
 /// it on the PATH, so the row shows the command that does and copies it.
 private struct CommandLineToolRow: View {
-    let command: String
+    /// Nil while Jolta runs from outside Applications.
+    let command: String?
     @State private var copied = false
-
-    /// macOS runs a quarantined app from a temporary copy; a link to it would break.
-    private var translocated: Bool { command.contains("/AppTranslocation/") }
 
     var body: some View {
         SettingsBlock {
@@ -146,7 +144,7 @@ private struct CommandLineToolRow: View {
                 HStack(spacing: 20) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Command-line tool").font(.system(size: 13, weight: .medium))
-                        Text(translocated
+                        Text(command == nil
                              ? "Quit Jolta, move it to Applications and open it again to set this up."
                              : "Run this in Terminal to use jolta there. Anything that runs it, agents included, has your full access: agent permissions, the pause switch and Activity don't apply.")
                             .font(.system(size: 12))
@@ -154,7 +152,7 @@ private struct CommandLineToolRow: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 12)
-                    if !translocated {
+                    if let command {
                         Button(copied ? "Copied" : "Copy") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(command, forType: .string)
@@ -162,12 +160,12 @@ private struct CommandLineToolRow: View {
                         }
                     }
                 }
-                if !translocated { commandText }
+                if let command { commandText(command) }
             }
         }
     }
 
-    private var commandText: some View {
+    private func commandText(_ command: String) -> some View {
         Text(command)
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(Color(Theme.text2))
