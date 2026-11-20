@@ -280,6 +280,11 @@ final class AppModel {
     private var markReadTask: Task<Void, Never>?
     /// Counts opens, also of the conversation already open.
     private(set) var opens = 0
+    /// The reader is loading a page, which may fail and leave Try Again in
+    /// its place: the mark-read delay waits until the page is in.
+    @ObservationIgnored var readerLoading = false {
+        didSet { if readerLoading != oldValue { readShownSoon() } }
+    }
     /// Replies that arrived while the conversation was open below the
     /// reader's view, oldest first, each until it comes into view. Kept here,
     /// so a reader built anew, as after Compose, marks them new again.
@@ -1375,6 +1380,10 @@ final class AppModel {
         Task {
             guard let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
                   refresh == refreshes, selectedThreadID == threadID, view.html != openThread?.html else { return }
+            // A message new since the last render waits for the reader to
+            // report it in view, also when the reader isn't on screen now.
+            let known = Set(openThread?.messages.map(\.id) ?? [])
+            unseenReplies += view.messages.filter { !known.contains($0.id) }
             openThread = view
             summary?.refresh(label: ai.label)
         }
@@ -1420,10 +1429,10 @@ final class AppModel {
         markShownSoon()
     }
 
-    /// Mail shows the reader, beside the list or over it, and nothing covers
-    /// it: not Compose, a multiple selection or a failed open.
+    /// Mail shows the reader, beside the list or over it, with its page in
+    /// and nothing over it: not Compose, a multiple selection or a failed open.
     private var readerShows: Bool {
-        mode == .mail && (!singleColumn || readerUp) && compose == nil && !isMultiSelection && openFailure == nil
+        mode == .mail && (!singleColumn || readerUp) && compose == nil && !isMultiSelection && openFailure == nil && !readerLoading
     }
 
     /// Starts the mark-read delay for the messages the reader has shown,
@@ -1451,7 +1460,6 @@ final class AppModel {
             shownUnread = []
             unseenReplies = []
             openStart = nil
-            shownPage = nil
         }
         refreshes += 1
         selectedThreadID = threadID

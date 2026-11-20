@@ -235,7 +235,7 @@ final class ReaderPage {
     /// selection, expanded messages and loaded images stay. Messages that
     /// changed are replaced and new ones added with a "New" mark, which
     /// earlier new ones lose once they have been in view. Returns the new
-    /// messages whose header is not wholly in view; nil when the page can't
+    /// messages whose header is not below the view; nil when the page can't
     /// be updated and has to load again, or `page` is no longer on screen.
     func update(html: String, page: Int) async -> [Int64]? {
         guard page == generation, let previous = shown else { return nil }
@@ -293,7 +293,7 @@ final class ReaderPage {
         }
         const moved = anchorKey && document.getElementById(anchorKey);
         if (moved) scrollBy(0, moved.closest("details.jolta-message").getBoundingClientRect().top - top);
-        return added.filter((d) => d.querySelector(":scope > summary").getBoundingClientRect().bottom > innerHeight).map((d) => key(d).slice(1));
+        return added.filter((d) => d.querySelector(":scope > summary").getBoundingClientRect().bottom <= innerHeight).map((d) => key(d).slice(1));
         """
         let arguments: [String: Any] = ["html": html, "previous": previous, "images": images.css, "page": String(page)]
         guard let below = await call(script, arguments: arguments) as? [String] else { return nil }
@@ -302,8 +302,10 @@ final class ReaderPage {
 
     /// Marks messages new again after the page loaded anew, so their "New"
     /// mark shows and the seen script reports them once they are in view.
-    func markNew(_ messages: [Int64]) {
+    /// Returns those whose header is not below the view.
+    func markNew(_ messages: [Int64]) async -> [Int64] {
         let script = """
+        const above = [];
         for (const id of ids) {
           const node = document.getElementById("m" + id)?.closest("body > details.jolta-message");
           if (!node || node.classList.contains("jolta-new")) continue;
@@ -311,9 +313,12 @@ final class ReaderPage {
           next.classList.add("jolta-new");
           next.querySelector(":scope > summary > .jolta-from")?.insertAdjacentHTML("afterend", '<span class="jolta-new-mark">New</span>');
           node.replaceWith(next);
+          if (next.querySelector(":scope > summary").getBoundingClientRect().bottom <= innerHeight) above.push(id);
         }
+        return above;
         """
-        run(script, arguments: ["ids": messages.map(String.init)])
+        let above = await call(script, arguments: ["ids": messages.map(String.init)]) as? [String] ?? []
+        return above.compactMap(Int64.init)
     }
 
     /// Scrolls the message's header to the top of the reader.
@@ -779,6 +784,8 @@ struct ReaderView: View {
     /// Loads of the page in a row that failed. The first failure loads it
     /// again at once; after the second the reader offers Try Again.
     @State private var failedLoads = 0
+    /// The page is placing replies new to it, so the pill waits to count only those below the view.
+    @State private var placing = false
     /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
     @State private var finding = false
     @State private var findText = ""
@@ -819,6 +826,7 @@ struct ReaderView: View {
         loads += 1
         let load = loads
         loading = true
+        model.readerLoading = true
         reader.show(html: thread.html) { loaded in
             guard load == loads else { return }
             loading = false
@@ -830,15 +838,25 @@ struct ReaderView: View {
                 return
             }
             failedLoads = 0
+            model.readerLoading = false
             if opening { model.conversationShown(threadID, messages: messages) }
             opening = false
-            // A page loaded anew has lost the marks of replies still below.
-            if !model.unseenReplies.isEmpty { reader.markNew(model.unseenReplies.map(\.id)) }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
             let expanded = model.expandedMessages
             if !expanded.isEmpty { reader.expand(expanded) }
             if let start { reader.reveal(message: start, smooth: false) }
+            // A page loaded anew has lost the marks of replies still below.
+            if !model.unseenReplies.isEmpty {
+                placing = true
+                Task {
+                    let inView = await reader.markNew(model.unseenReplies.map(\.id))
+                    withAnimation(Theme.quick) {
+                        model.unseenReplies.removeAll { inView.contains($0.id) }
+                        placing = false
+                    }
+                }
+            }
             if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
         }
     }
@@ -847,15 +865,19 @@ struct ReaderView: View {
     /// place, so the reader keeps its place; another conversation loads.
     private func refresh() {
         guard shownThread == thread.threadId, !loading else { return render() }
-        let (html, messages, load, page, threadID) = (thread.html, thread.messages, loads, reader.generation, thread.threadId)
+        let (html, load, page, threadID) = (thread.html, loads, reader.generation, thread.threadId)
         reader.images.allowed = allowedImages
+        placing = true
         Task {
             let update = await reader.update(html: html, page: page)
             // Another page loaded meanwhile, maybe another conversation's.
-            guard load == loads, model.openThread?.threadId == threadID else { return }
-            guard let update else { return render() }
-            let below = messages.filter { m in update.contains(m.id) && !model.unseenReplies.contains { $0.id == m.id } }
-            withAnimation(Theme.quick) { model.unseenReplies += below }
+            guard load == loads, model.openThread?.threadId == threadID else { placing = false; return }
+            guard let inView = update else { placing = false; return render() }
+            // The model holds every reply new to the page; those in view aren't waiting below.
+            withAnimation(Theme.quick) {
+                model.unseenReplies.removeAll { inView.contains($0.id) }
+                placing = false
+            }
             if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
         }
     }
@@ -868,7 +890,7 @@ struct ReaderView: View {
 
     /// Over the reader's foot while replies that arrived are below its view.
     @ViewBuilder private var newRepliesPill: some View {
-        if let first = model.unseenReplies.first {
+        if let first = model.unseenReplies.first, !loading, !placing {
             let title = model.unseenReplies.count == 1 ? "New reply from \(first.from)" : "\(model.unseenReplies.count) new replies"
             Button {
                 reader.reveal(message: first.id, smooth: Theme.quick != nil)
