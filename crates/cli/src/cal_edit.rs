@@ -461,7 +461,7 @@ async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<()> {
     let engine = match jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current()) {
         // The edit is saved, so failing would only invite a second copy.
         Err(jolta_core::Error::EngineBusy) => {
-            println!("The invitations are queued; the Jolta that syncs this data folder sends them.");
+            println!("The invitations are queued. Jolta or jolta watch sends them once it syncs this data folder.");
             return Ok(());
         }
         started => started?,

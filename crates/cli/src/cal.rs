@@ -1389,7 +1389,7 @@ async fn add_focus(jolta: &Jolta, calendar: i64, start: &str, minutes: i64, decl
 pub(crate) async fn send_calendar_ops(jolta: &Jolta) -> Result<bool> {
     let lock = match jolta_core::FolderLock::take(&jolta.data_dir) {
         Err(jolta_core::Error::EngineBusy) => {
-            println!("The change is queued; the Jolta that syncs this data folder sends it.");
+            println!("The change is queued. Jolta or jolta watch sends it once it syncs this data folder.");
             return Ok(false);
         }
         lock => lock?,

@@ -562,6 +562,7 @@ final class AppModel {
                 do {
                     guard try core.start() else { continue }
                 } catch {
+                    waitingForEngine = false
                     show(Toast(text: "Jolta couldn't start syncing: \(error)", undo: nil))
                     return
                 }

@@ -127,6 +127,8 @@ impl Engine {
                 }
             })
         };
+        // Read before the scheduler starts, so a failed start leaves no task holding the lock.
+        let accounts = jolta.store.read(store::accounts)?;
         let calendars = Scheduler::start(jolta.clone(), lock.clone(), sink.clone(), &runtime);
         let engine = Arc::new(Engine {
             jolta,
@@ -144,7 +146,7 @@ impl Engine {
                 engine.wake(account);
             }
         }));
-        for account in engine.jolta.store.read(store::accounts)? {
+        for account in accounts {
             engine.spawn(account);
         }
         let (jolta, sink) = (engine.jolta.clone(), engine.sink.clone());
