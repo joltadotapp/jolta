@@ -1948,6 +1948,23 @@ final class Journeys: XCTestCase {
         XCTAssertFalse((to.value as? String)?.contains("me@test.invalid") == true, "never the user")
     }
 
+    /// A message's attachments sit above its text in compose, as they do in
+    /// the reader, and a click on a chip's x removes it.
+    func testComposeShowsAttachmentsAboveTheText() throws {
+        let app = try launch()
+        text(app, "Invoice October").click()
+        app.typeKey("f", modifierFlags: [])
+        let body = app.textViews["compose-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5), "f opens compose")
+        let remove = app.buttons["Remove invoice.txt"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5), "the forward carries the invoice")
+        XCTAssertLessThanOrEqual(remove.frame.maxY, body.frame.minY, "the attachment sits above the message text")
+        XCTAssertGreaterThanOrEqual(remove.frame.minY, app.textFields["compose-subject"].frame.maxY, "and below the subject")
+        remove.click()
+        XCTAssertTrue(remove.waitForNonExistence(timeout: 5), "x removes the attachment")
+        app.buttons["⌘⌫"].click()
+    }
+
     /// Compose puts the cursor where the user starts typing, with no click:
     /// the To field of a new message and a forward, the first line of the
     /// body, above the quote, for a reply and reply all (from a key or the
