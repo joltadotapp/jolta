@@ -209,6 +209,7 @@ struct ComposeView: View {
                 }
                 .scrollIndicators(.never)
                 .padding(.top, 14)
+                .padding(.bottom, 6)
             }
 
             if let writer {
