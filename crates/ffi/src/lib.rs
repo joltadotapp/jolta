@@ -116,9 +116,8 @@ pub struct ThreadView {
     pub subject: String,
     pub message_count: u32,
     pub html: String,
-    pub remote_images: u32,
-    /// The messages that have remote images.
-    pub remote_image_messages: Vec<i64>,
+    /// Each message's remote image count, for the messages that have any.
+    pub remote_images: std::collections::HashMap<i64, u32>,
     /// The one sender of this conversation's remote images, or empty.
     pub image_sender: String,
     /// The messages with remote images whose own sender is trusted.
@@ -1120,13 +1119,12 @@ impl Core {
             subject: detail.subject,
             message_count: detail.messages.len() as u32,
             html: detail.rendered.html,
-            remote_images: detail.rendered.remote_images,
-            remote_image_messages: detail
+            remote_images: detail
                 .messages
                 .iter()
                 .zip(&detail.rendered.remote_by_message)
                 .filter(|(_, n)| **n > 0)
-                .map(|(m, _)| m.id.0)
+                .map(|(m, n)| (m.id.0, *n))
                 .collect(),
             files_message_id: detail.rendered.files_message,
             image_sender: detail.images.sender.unwrap_or_default(),

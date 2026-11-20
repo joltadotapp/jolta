@@ -787,14 +787,19 @@ struct ReaderView: View {
     /// message with remote images, so trusting it here covers them all.
     private var trustedImages: Set<Int64> {
         guard let trustOverride, trustOverride.sender == thread.imageSender else { return Set(thread.trustedImageMessages) }
-        return trustOverride.trusted ? Set(thread.remoteImageMessages) : []
+        return trustOverride.trusted ? Set(thread.remoteImages.keys) : []
     }
     private var trusted: Bool { !thread.imageSender.isEmpty && !trustedImages.isEmpty }
-    private var imagesBlocked: Bool { thread.remoteImages > 0 && !allowedImages.isSuperset(of: thread.remoteImageMessages) }
+    private var imagesBlocked: Bool { blockedImages > 0 }
+    /// The remote images of the messages whose images don't load yet.
+    private var blockedImages: UInt32 {
+        let allowed = allowedImages
+        return thread.remoteImages.filter { !allowed.contains($0.key) }.values.reduce(0, +)
+    }
     /// The messages whose remote images load: those from a trusted sender
     /// and those the user loaded.
     private var allowedImages: Set<Int64> {
-        trustedImages.union(model.imagesLoaded.intersection(thread.remoteImageMessages))
+        trustedImages.union(model.imagesLoaded.intersection(thread.remoteImages.keys))
     }
 
     private func render() {
@@ -1020,7 +1025,7 @@ struct ReaderView: View {
     }
 
     private func loadImages() {
-        model.imagesLoaded.formUnion(thread.remoteImageMessages)
+        model.imagesLoaded.formUnion(thread.remoteImages.keys)
         render()
     }
 
@@ -1028,7 +1033,7 @@ struct ReaderView: View {
         guard !thread.imageSender.isEmpty else { return }
         try? core.setSenderTrusted(address: thread.imageSender, trusted: trust)
         trustOverride = (thread.imageSender, trust)
-        if !trust { model.imagesLoaded.subtract(thread.remoteImageMessages) }
+        if !trust { model.imagesLoaded.subtract(thread.remoteImages.keys) }
         render()
     }
 
@@ -1063,7 +1068,7 @@ struct ReaderView: View {
                 if imagesBlocked {
                     HStack(spacing: 10) {
                         Image(systemName: "photo.badge.exclamationmark").foregroundStyle(Color(Theme.text3))
-                        Text(thread.remoteImages == 1 ? "1 remote image blocked" : "\(thread.remoteImages) remote images blocked")
+                        Text(blockedImages == 1 ? "1 remote image blocked" : "\(blockedImages) remote images blocked")
                             .foregroundStyle(Color(Theme.text2))
                             .fixedSize()
                             .help("Jolta blocks remote images so senders can't see when you read their mail.")

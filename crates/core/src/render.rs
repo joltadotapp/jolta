@@ -29,9 +29,8 @@ const CSP: &str = "default-src 'none'; img-src cid: data: x-remote:; style-src '
 pub struct Rendered {
     /// A full HTML document.
     pub html: String,
-    /// Number of remote images that are blocked until the user allows them.
-    pub remote_images: u32,
-    /// The same count per message, in the order they were given.
+    /// Each message's number of remote images, which stay blocked until the
+    /// user allows them, in the order the messages were given.
     pub remote_by_message: Vec<u32>,
     /// The last message with attachments listed, for Save all from the keyboard.
     pub files_message: Option<i64>,
@@ -664,7 +663,7 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
             layout = if wide { " jolta-wide" } else { "" },
         ));
     }
-    Rendered { html: document(app_css, &css, &body), remote_images: remote_by_message.iter().sum(), remote_by_message, files_message }
+    Rendered { html: document(app_css, &css, &body), remote_by_message, files_message }
 }
 
 /// The summary row's chip and the open message's line under "to" for a
@@ -953,7 +952,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
             assert!(!html.contains(&url), "leaked {url}:\n{html}");
         }
         assert!(html.contains("src=\"x-remote:1/http://evil.test/pixel.gif\""), "remote URLs name their message");
-        assert_eq!(out.remote_images, 1);
+        assert_eq!(out.remote_by_message, [1]);
         assert!(html.contains("src=\"cid:1/logo@x\""), "cid URLs name their message");
         assert!(html.contains("data:image/png"));
         assert!(!html.contains("<script"));
