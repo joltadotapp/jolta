@@ -352,6 +352,25 @@ fn an_invitation_answered_from_the_reader() {
     assert_eq!(shown, [(message.0, false)], "the invitation is listed, collapsed");
 }
 
+/// While `jolta watch` syncs the data folder, the app's engine waits and the
+/// reply sits in the outbox until watch sends it, so the toast can't say it
+/// went out.
+#[test]
+fn an_invitation_answered_while_another_program_syncs() {
+    let app = App::unstarted();
+    let me = app.account("me@test.invalid");
+    let ics = invitation("review@test.invalid", "ann@test.invalid", next_monday(tz::here()), "REQUEST", 0);
+    let message = app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Invitation: Design review", "Join us.").attach("invite.ics", &ics));
+    let cli = tokio::runtime::Runtime::new().unwrap();
+    let _watch = jolta_core::engine::Engine::start(app.jolta.clone(), Arc::new(|_| {}), cli.handle().clone()).unwrap();
+    assert!(!app.core.start().unwrap(), "the app's engine waits while jolta watch runs");
+
+    let options = AnswerOptions { note: String::new(), notify: true, occurrence_only: false };
+    let toast = block_on(app.core.answer_invitation(message.0, InvitationAnswer::Accept, options)).expect("the answer is queued");
+    assert!(toast.starts_with("Accepted. Jolta will email "), "the reply hasn't gone out yet: {toast}");
+    assert_eq!(app.count("SELECT count(*) FROM outbox"), 1, "the reply waits in the outbox");
+}
+
 /// An invitation part for `uid` from `organizer` to the test account, on
 /// `day` from 14:00 to 15:00 UTC.
 fn invitation(uid: &str, organizer: &str, day: NaiveDate, method: &str, sequence: u32) -> String {
