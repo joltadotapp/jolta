@@ -592,14 +592,16 @@ final class AppModel {
 
     /// The Terminal command that links the bundled `jolta` into the PATH. The
     /// sandbox can't write `/usr/local/bin`, so the user runs it; the link
-    /// follows the app across updates. Nil outside /Applications: a link into
-    /// a folder other users can write, or into the temporary copy macOS runs a
-    /// quarantined app from, would run whatever ends up there.
+    /// follows the app across updates. Nil unless the app sits directly in
+    /// /Applications: a link into a subfolder other users can write, or into
+    /// the temporary copy macOS runs a quarantined app from, would run
+    /// whatever ends up there. `-h` replaces an old link itself rather than
+    /// writing into the folder it points at.
     var cliLinkCommand: String? {
         let app = Bundle.main.bundleURL.resolvingSymlinksInPath()
-        guard app.path.hasPrefix("/Applications/") else { return nil }
+        guard app.deletingLastPathComponent().path == "/Applications" else { return nil }
         let cli = app.appendingPathComponent("Contents/Helpers/jolta").path
-        return "sudo mkdir -p /usr/local/bin && sudo ln -sf \(Self.shellQuoted(cli)) /usr/local/bin/jolta"
+        return "sudo mkdir -p /usr/local/bin && sudo ln -sfh \(Self.shellQuoted(cli)) /usr/local/bin/jolta"
     }
 
     static func shellQuoted(_ s: String) -> String {
