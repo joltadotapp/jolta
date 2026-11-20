@@ -65,3 +65,12 @@ async fn ops_send_refuses_while_another_program_syncs() {
     assert!(refused.to_string().contains("is syncing this data folder"), "{refused}");
     assert_eq!(folder.state(op), OpState::Pending);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_shot_sync_refuses_while_another_program_syncs() {
+    let folder = Synced::new("sync");
+    let refused = crate::sync(&folder.jolta, None, false).await.expect_err("jolta sync refuses");
+    assert!(refused.to_string().contains("is syncing this data folder"), "{refused}");
+    let refused = crate::cal::run(&folder.jolta, crate::cal::CalCommand::Sync { calendar: None }).await.expect_err("jolta cal sync refuses");
+    assert!(refused.to_string().contains("is syncing this data folder"), "{refused}");
+}
