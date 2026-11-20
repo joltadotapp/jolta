@@ -791,14 +791,14 @@ pub struct SignIn {
 
 type SharedEngine = Arc<Mutex<Option<Arc<Engine>>>>;
 
-/// The engine running now. Read it after saving an account: `Core::start`
-/// holds the slot while the engine reads the accounts, so an engine found
-/// here may have missed the account and takes it now, and one that starts
-/// later reads it from the store.
 /// Why a write to a provider waits: without its engine, the app doesn't
 /// hold the data folder.
 const ANOTHER_PROGRAM: &str = "Another program, such as jolta watch, is syncing this data folder. Jolta takes over when it stops.";
 
+/// The engine running now. Read it after saving an account: `Core::start`
+/// holds the slot while the engine reads the accounts, so an engine found
+/// here may have missed the account and takes it now, and one that starts
+/// later reads it from the store.
 fn running(engine: &SharedEngine) -> Option<Arc<Engine>> {
     engine.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
