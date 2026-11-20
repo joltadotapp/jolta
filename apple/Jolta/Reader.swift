@@ -1274,6 +1274,18 @@ enum ReaderStyle {
       @keyframes jolta-arrive { from { opacity: 0; } }
       details.jolta-new { animation: jolta-arrive .3s ease-out; }
     }
+    .jolta-quoted { margin: 8px 0 0; }
+    .jolta-quoted > summary { list-style: none; display: inline-flex; align-items: center; height: 14px; padding: 0 7px;
+      border-radius: 7px; background: var(--fill); color: var(--tx2); font: 700 9px/14px -apple-system, system-ui;
+      letter-spacing: 1px; cursor: default; user-select: none; -webkit-user-select: none; }
+    .jolta-quoted > summary::-webkit-details-marker { display: none; }
+    .jolta-quoted > summary:hover, .jolta-quoted[open] > summary { color: var(--tx); background: color-mix(in srgb, var(--tx) 16%, transparent); }
+    .jolta-quoted > summary:focus { outline: none; }
+    .jolta-quoted > summary:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+    .jolta-quoted[open] > summary { margin-bottom: 10px; }
+    @media (prefers-reduced-motion: no-preference) {
+      .jolta-quoted > summary { transition: background-color .16s ease, color .16s ease; }
+    }
     """
 }
 
