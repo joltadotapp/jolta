@@ -137,11 +137,12 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
     jolta.store.write_async(move |tx| store_answer(tx, calendar_id, &target, &rsvp, &landed, written, here)).await
 }
 
-/// `answer`, unless the provider can't be reached or an earlier change to
-/// the copy still waits to be sent: then the answer is kept in the store
-/// and queued behind it, to go through the provider once (`ops::queue_answer`).
+/// `answer`, unless the provider can't be reached, an earlier change to
+/// the copy still waits to be sent, or there is no `folder` because another
+/// program syncs the data folder: then the answer is kept in the store and
+/// queued behind it, to go through the provider once (`ops::queue_answer`).
 /// True when it was queued.
-pub async fn answer_or_queue(jolta: &Jolta, _folder: Option<&crate::FolderLock>, rsvp: &Rsvp) -> Result<bool> {
+pub async fn answer_or_queue(jolta: &Jolta, folder: Option<&crate::FolderLock>, rsvp: &Rsvp) -> Result<bool> {
     let event = rsvp.event;
     let waits = jolta
         .store
@@ -153,7 +154,7 @@ pub async fn answer_or_queue(jolta: &Jolta, _folder: Option<&crate::FolderLock>,
             store::calendar_op_waiting(c, calendar, &uid)
         })
         .await?;
-    if !waits {
+    if !waits && folder.is_some() {
         match answer(jolta, rsvp).await {
             Err(Error::Offline(_)) => {}
             done => return done.map(|()| false),

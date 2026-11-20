@@ -502,6 +502,7 @@ impl Core {
     /// as its Remove from calendar link does. Returns the words for the
     /// toast: "Removed from your calendar."
     pub async fn remove_cancelled(&self, message_id: i64) -> Result<String> {
+        self.running_engine()?;
         let jolta = self.jolta.clone();
         let removed = self
             .runtime
@@ -530,6 +531,7 @@ impl Core {
     /// Puts the invitation on a message into a calendar, the menu's default
     /// without one, telling nobody. Returns the toast's words: "Added to Work."
     pub async fn add_to_calendar(&self, message_id: i64, calendar_id: Option<i64>) -> Result<String> {
+        self.running_engine()?;
         let jolta = self.jolta.clone();
         let added = self
             .runtime
@@ -543,6 +545,7 @@ impl Core {
     /// Writes the newer invitation on a message over the copy the user
     /// added, telling nobody. Returns the toast's words: "Updated in Work."
     pub async fn update_added_copy(&self, message_id: i64) -> Result<String> {
+        self.running_engine()?;
         let jolta = self.jolta.clone();
         let updated = self
             .runtime
@@ -565,6 +568,7 @@ impl Core {
     /// of the calendar. `occurrence_only` does both for the occurrence at
     /// `time`. Returns the words for the toast.
     pub async fn decline_and_remove(&self, event_id: i64, time: Option<OccurrenceTime>, occurrence_only: bool, tell: bool) -> Result<String> {
+        self.running_engine()?;
         let at = time.map(Bounds::try_from).transpose()?;
         let here = tz::here();
         // A CalDAV answer stores the resource again, under new row ids, so
@@ -664,16 +668,16 @@ impl Core {
             self.check_away();
             return Ok(Vec::new());
         }
+        // The list replaces the account's calendars beside the engine's syncs.
+        let engine = self.running_engine()?;
         let jolta = self.jolta.clone();
         let list = self
             .runtime
             .spawn(async move { sync::enable(&jolta, account).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        if let Some(scheduler) = self.scheduler() {
-            list.iter().filter(|c| c.shown).for_each(|c| scheduler.sync(c.id));
-            scheduler.check_away();
-        }
+        list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
+        engine.calendars().check_away();
         Ok(self.calendars()?.accounts.into_iter().find(|a| a.account.id == account_id).map(|a| a.calendars).unwrap_or_default())
     }
 
@@ -727,23 +731,30 @@ impl Core {
 
     /// Subscribes to a `webcal://` or `https://` feed and downloads it. A
     /// failed first download leaves the subscription, with `sync_error` set,
-    /// for the next round to retry.
+    /// for the next round to retry. While another program syncs the data
+    /// folder, its next round downloads it.
     pub async fn subscribe_calendar(&self, url: String) -> Result<CalendarInfo> {
         let jolta = self.jolta.clone();
+        let syncs = self.running_engine().is_ok();
         let (calendar, synced) = self
             .runtime
             .spawn(async move {
                 let calendar = sync::subscribe(&jolta, &url).await?;
-                let synced = sync::sync_calendar(&jolta, calendar.id).await;
+                let synced = match syncs {
+                    true => Some(sync::sync_calendar(&jolta, calendar.id).await),
+                    false => None,
+                };
                 Ok::<_, jolta_core::Error>((calendar, synced))
             })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        let error = synced.as_ref().err().map(ToString::to_string);
-        if synced.is_ok_and(|r| r.upserted + r.removed > 0) {
-            self.calendar_changed([calendar.id]);
+        let error = synced.as_ref().and_then(|s| s.as_ref().err()).map(ToString::to_string);
+        if let Some(synced) = synced {
+            if synced.is_ok_and(|r| r.upserted + r.removed > 0) {
+                self.calendar_changed([calendar.id]);
+            }
+            self.listener.on_event(CoreEvent::CalendarSynced { calendar_id: calendar.id.0, error: error.clone() });
         }
-        self.listener.on_event(CoreEvent::CalendarSynced { calendar_id: calendar.id.0, error: error.clone() });
         let mut info = self
             .calendars()?
             .other_calendars

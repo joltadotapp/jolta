@@ -795,6 +795,10 @@ type SharedEngine = Arc<Mutex<Option<Arc<Engine>>>>;
 /// holds the slot while the engine reads the accounts, so an engine found
 /// here may have missed the account and takes it now, and one that starts
 /// later reads it from the store.
+/// Why a write to a provider waits: without its engine, the app doesn't
+/// hold the data folder.
+const ANOTHER_PROGRAM: &str = "Another program, such as jolta watch, is syncing this data folder. Jolta takes over when it stops.";
+
 fn running(engine: &SharedEngine) -> Option<Arc<Engine>> {
     engine.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -832,11 +836,10 @@ impl SignIn {
             let signed = pending.finish().await.map_err(explain)?;
             if let SignInFor::Calendar(account) = purpose {
                 jolta_core::oauth::save_grant(&account, &signed)?;
+                let engine = running(&engine).ok_or_else(|| jolta_core::Error::Other(ANOTHER_PROGRAM.into()))?;
                 let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
-                if let Some(engine) = running(&engine) {
-                    list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
-                    engine.calendars().check_away();
-                }
+                list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
+                engine.calendars().check_away();
                 let account = jolta.store.read(|c| store::account(c, account.id))?;
                 return Ok(AccountInfo::from(account));
             }
@@ -1899,6 +1902,7 @@ impl Core {
     /// Starts the browser sign-in that grants calendar access to a Google
     /// or Microsoft account. `finish()` turns calendar on for it.
     pub async fn begin_calendar_consent(&self, account_id: i64) -> Result<Arc<SignIn>> {
+        self.running_engine()?;
         let account = self.jolta.store.read(|c| store::account(c, AccountId(account_id)))?;
         let provider = jolta_core::oauth::Provider::for_kind(account.kind)
             .ok_or_else(|| CoreError::Failed { message: format!("{} needs no sign-in for its calendars", account.address) })?;
@@ -1982,7 +1986,7 @@ impl Core {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .ok_or_else(|| CoreError::Failed { message: "Another program, such as jolta watch, is syncing this data folder. Jolta takes over when it stops.".into() })
+            .ok_or_else(|| CoreError::Failed { message: ANOTHER_PROGRAM.into() })
     }
 }
 

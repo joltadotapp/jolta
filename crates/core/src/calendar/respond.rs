@@ -259,9 +259,20 @@ async fn answer_at(jolta: &Jolta, folder: Option<&crate::FolderLock>, req: &Requ
         .await?;
     let mut calendar = r.copy.filter(|_| plan.provider.is_some()).map(|c| c.calendar);
     let mut text = told(req, &r, plan, queued);
-    // A copy the user added elsewhere follows the answer, telling nobody.
+    // A copy the user added elsewhere follows the answer, telling nobody,
+    // only from the program that syncs the data folder.
     if r.copy.is_none() {
-        match super::add::follow(jolta, r.account, &r.uid, rid, req.answer).await {
+        let followed = match folder {
+            Some(_) => super::add::follow(jolta, r.account, &r.uid, rid, req.answer).await,
+            None => {
+                let uid = r.uid.clone();
+                match jolta.store.read_async(move |c| store::added_copy(c, account, &uid)).await? {
+                    Some(_) => Err(Error::Other("another program, such as jolta watch, is syncing this data folder.".into())),
+                    None => Ok(None),
+                }
+            }
+        };
+        match followed {
             Ok(Some(id)) => calendar = Some(id),
             Ok(None) => {}
             Err(e) => text = format!("{text} The copy in your calendar didn't change: {e}"),

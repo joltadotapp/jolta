@@ -169,6 +169,7 @@ impl Core {
 
     /// Sets out of office for the request's accounts. Returns the toast.
     pub async fn set_away(&self, request: AwayRequest) -> Result<String> {
+        self.running_engine()?;
         let here = tz::here();
         let request = request.core(here)?;
         if let Some(problem) = request.problem(Utc::now(), here) {
@@ -246,6 +247,7 @@ impl Core {
 
 impl Core {
     async fn end(&self, account_ids: Vec<i64>, reach: Reach) -> Result<String> {
+        self.running_engine()?;
         let here = tz::here();
         let jolta = self.jolta.clone();
         let ids = account_ids.clone();
