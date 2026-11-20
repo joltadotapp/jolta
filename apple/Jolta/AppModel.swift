@@ -1382,7 +1382,10 @@ final class AppModel {
                   refresh == refreshes, selectedThreadID == threadID, view.html != openThread?.html else { return }
             // A message new since the last render waits for the reader to
             // report it in view, also when the reader isn't on screen now.
+            // A reply deleted elsewhere leaves the pill with its header.
             let known = Set(openThread?.messages.map(\.id) ?? [])
+            let present = Set(view.messages.map(\.id))
+            unseenReplies.removeAll { !present.contains($0.id) }
             unseenReplies += view.messages.filter { !known.contains($0.id) }
             openThread = view
             summary?.refresh(label: ai.label)
