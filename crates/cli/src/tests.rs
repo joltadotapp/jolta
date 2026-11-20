@@ -145,21 +145,11 @@ async fn a_waiting_edit_reports_an_invitation_that_failed() {
     let mut folder = Synced::new("wait-failed-mail");
     let op = folder.queue_local_edit();
     folder.release_after(0).join().unwrap();
+    let account = account(&folder.jolta);
     folder
         .jolta
         .store
         .write(|tx| {
-            let new = store::NewAccount {
-                kind: jolta_core::AccountKind::Imap,
-                address: "me@test.invalid".into(),
-                display_name: "me".into(),
-                username: "me@test.invalid".into(),
-                imap_host: String::new(),
-                imap_port: 993,
-                smtp_host: String::new(),
-                smtp_port: 465,
-            };
-            let account = store::insert_account(tx, &new)?;
             tx.execute(
                 "INSERT INTO outbox (account_id, blob, message_id, sender, recipients, send_after, state, error, created)
                  VALUES (?1, 'b', '<m@test>', 'me@test.invalid', 'ann@test.invalid', 0, 'failed', '550 no such user', 0)",
@@ -171,6 +161,80 @@ async fn a_waiting_edit_reports_an_invitation_that_failed() {
         .unwrap();
     let failed = crate::cal_edit::wait_for_op(&folder.jolta, op, std::time::Duration::from_secs(1)).await.expect_err("the invitation didn't go");
     assert!(failed.to_string().contains("ann@test.invalid") && failed.to_string().contains("550 no such user"), "{failed}");
+}
+
+/// An IMAP account `me@test.invalid` in the folder.
+fn account(jolta: &Jolta) -> jolta_core::Account {
+    let new = store::NewAccount {
+        kind: jolta_core::AccountKind::Imap,
+        address: "me@test.invalid".into(),
+        display_name: "me".into(),
+        username: "me@test.invalid".into(),
+        imap_host: String::new(),
+        imap_port: 993,
+        smtp_host: String::new(),
+        smtp_port: 465,
+    };
+    jolta.store.write(|tx| store::insert_account(tx, &new)).unwrap()
+}
+
+/// With --wait, an edit for a provider Jolta can't reach gives up after
+/// its patience, though each try puts the op back in the queue.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_edit_gives_up_on_a_provider_it_cant_reach() {
+    let mut folder = Synced::new("wait-offline");
+    let op = folder.queue_local_edit();
+    folder.release_after(0).join().unwrap();
+    let a = account(&folder.jolta);
+    folder
+        .jolta
+        .store
+        .write(|tx| Ok(tx.execute("UPDATE calendar SET source = 'google', account_id = ?1, remote_id = ?2, access = 'owner'", (a.id.0, &a.address))?))
+        .unwrap();
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(20), crate::cal_edit::wait_for_op(&folder.jolta, op, std::time::Duration::from_secs(2))).await;
+    let failed = waited.expect("the command doesn't wait forever on a provider it can't reach").expect_err("the op wasn't sent");
+    assert!(failed.to_string().starts_with("The change is saved, but still queued"), "{failed}");
+    assert_eq!(folder.state(op), OpState::Pending);
+}
+
+/// With --wait, an edit the provider refused fails rather than reporting
+/// it sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_edit_reports_a_refused_change() {
+    let mut folder = Synced::new("wait-conflict");
+    let op = folder.queue_local_edit();
+    folder.release_after(0).join().unwrap();
+    folder.jolta.store.write(|tx| Ok(tx.execute("UPDATE calendar_op SET state = 'conflict', error = 'changed on the server' WHERE id = ?1", [op.0])?)).unwrap();
+    let failed = crate::cal_edit::wait_for_op(&folder.jolta, op, std::time::Duration::from_secs(1)).await.expect_err("the change didn't go through");
+    assert!(failed.to_string().contains("conflict") && failed.to_string().contains("changed on the server"), "{failed}");
+}
+
+/// With --wait, a this-and-following edit also reports the new series'
+/// invitation, which its first op mailed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_split_reports_the_new_series_invitation() {
+    let mut folder = Synced::new("wait-split");
+    let create = folder.queue_local_edit();
+    let shorten = folder.queue_local_edit();
+    folder.release_after(0).join().unwrap();
+    let a = account(&folder.jolta);
+    folder
+        .jolta
+        .store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO outbox (account_id, blob, message_id, sender, recipients, send_after, state, error, created)
+                 VALUES (?1, 'b', '<m@test>', 'me@test.invalid', 'ann@test.invalid', 0, 'failed', '550 no such user', 0)",
+                [a.id.0],
+            )?;
+            store::set_calendar_op_outbox(tx, create, &[tx.last_insert_rowid()])?;
+            tx.execute("UPDATE calendar_op SET target = json_set(target, '$.after', ?1) WHERE id = ?2", [create.0, shorten.0])?;
+            store::settle_calendar_op(tx, create, OpState::Done)?;
+            store::settle_calendar_op(tx, shorten, OpState::Done)
+        })
+        .unwrap();
+    let failed = crate::cal_edit::wait_for_op(&folder.jolta, shorten, std::time::Duration::from_secs(1)).await.expect_err("the new series' invitation didn't go");
+    assert!(failed.to_string().contains("ann@test.invalid"), "{failed}");
 }
 
 /// With --wait, an edit gives up on a folder that stays busy, and says the
