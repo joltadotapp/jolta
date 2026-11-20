@@ -16,6 +16,7 @@ use crate::calendar::card::Card;
 use crate::smime::{Protection, Verdict};
 
 mod invitation;
+mod quote;
 
 pub const REMOTE_SCHEME: &str = "x-remote";
 
