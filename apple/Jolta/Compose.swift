@@ -175,6 +175,42 @@ struct ComposeView: View {
             // Suggestions hang over the subject and the body.
             .zIndex(1)
 
+            // Above the text, as the reader shows a received message's files.
+            if !draft.wrappedValue.attachments.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(draft.wrappedValue.attachments.enumerated()), id: \.offset) { i, file in
+                            HStack(spacing: 9) {
+                                FileIcon(core: model.core, name: file.name, mimeType: file.mimeType)
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Text(file.name).font(.system(size: 12.5, weight: .medium)).lineLimit(1).frame(maxWidth: 220, alignment: .leading)
+                                    if let size = Self.size(of: file) {
+                                        Text(size).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
+                                    }
+                                }
+                                Button { model.compose?.attachments.remove(at: i); scheduleSave() } label: {
+                                    Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color(Theme.text3))
+                                // The glyph stays where it was in the chip.
+                                .padding(.horizontal, -7)
+                                .help("Remove \(file.name)")
+                                .accessibilityLabel("Remove \(file.name)")
+                            }
+                            .padding(.leading, 9)
+                            .padding(.trailing, 12)
+                            .frame(height: 40)
+                            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color(Theme.line2), lineWidth: 1))
+                        }
+                    }
+                    .padding(.horizontal, Theme.gutter)
+                }
+                .scrollIndicators(.never)
+                .padding(.top, 14)
+            }
+
             if let writer {
                 WriteBar(writer: writer, model: model, focused: $focus) { closeWriter() }
                     .onChange(of: model.compose?.body) { _, body in
@@ -209,36 +245,6 @@ struct ComposeView: View {
                 .padding(.horizontal, Theme.gutter)
                 .padding(.top, 14)
                 .environment(\.pasteTarget, PasteTarget(core: model.core, attach: attach, failed: model.notify))
-
-            if !draft.wrappedValue.attachments.isEmpty {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(draft.wrappedValue.attachments.enumerated()), id: \.offset) { i, file in
-                            HStack(spacing: 8) {
-                                FileIcon(core: model.core, name: file.name, mimeType: file.mimeType)
-                                Text(file.name).lineLimit(1)
-                                Button { model.compose?.attachments.remove(at: i); scheduleSave() } label: {
-                                    Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
-                                        .frame(width: Theme.controlSmall, height: Theme.controlSmall).contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(Color(Theme.text3))
-                                // The glyph stays where it was in the chip.
-                                .padding(.horizontal, -7)
-                                .help("Remove \(file.name)")
-                                .accessibilityLabel("Remove \(file.name)")
-                            }
-                            .font(.system(size: Theme.body))
-                            .padding(.horizontal, 12)
-                            .frame(height: 34)
-                            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(Theme.line), lineWidth: 1))
-                        }
-                    }
-                    .padding(.horizontal, Theme.gutter)
-                }
-                .scrollIndicators(.never)
-                .padding(.bottom, 16)
-            }
         }
         .background(Color(Theme.reader))
         .onAppear {
@@ -316,6 +322,12 @@ struct ComposeView: View {
             guard !Task.isCancelled else { return }
             model.saveDraft()
         }
+    }
+
+    /// The file's size on disk, as the reader shows a received file's.
+    private static func size(of file: ComposeFile) -> String? {
+        guard let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.size] as? UInt64 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     private func attach() {
