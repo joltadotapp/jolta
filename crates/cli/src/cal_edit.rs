@@ -449,6 +449,11 @@ pub(crate) async fn wait_for_op(jolta: &Jolta, id: CalendarOpId, patience: std::
         let settled = !matches!(op.state, OpState::Pending | OpState::Sending);
         if settled && queued_mail(jolta, id)?.is_empty() {
             print_op(jolta, &op);
+            let failed = jolta.store.read(|c| store::failed_calendar_op_mail(c, id))?;
+            if !failed.is_empty() {
+                let each: Vec<String> = failed.iter().map(|(to, error)| format!("to {to}: {error}")).collect();
+                bail!("The change is sent, but its invitation failed {}", each.join("; "));
+            }
             return Ok(());
         }
         let took = if settled { send_mail(jolta, id).await? } else { crate::cal::replay_if_free(jolta).await? };

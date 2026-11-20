@@ -383,8 +383,9 @@ fn calendar_writes_wait_while_another_program_syncs() {
     let invite = app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Invitation: Review", "Join us.").attach("invite.ics", &invitation("review@test.invalid", "ann@test.invalid", day, "REQUEST", 0)));
     let cancel = app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Cancelled: Review", "Off.").attach("invite.ics", &invitation("review@test.invalid", "ann@test.invalid", day, "CANCEL", 1)));
     let server = Feed::serve(feed(day, "Standup"));
-    let cli = tokio::runtime::Runtime::new().unwrap();
-    let _watch = jolta_core::engine::Engine::start(app.jolta.clone(), Arc::new(|_| {}), cli.handle().clone()).unwrap();
+    // The folder's lock alone: a running watch's scheduler could download
+    // the feed itself before the app reads back its events.
+    let _watch = jolta_core::FolderLock::take(&app.jolta.data_dir).unwrap();
     assert!(!app.core.start().unwrap(), "the app's engine waits while jolta watch runs");
 
     let busy = |what: &str, result: Result<String, jolta_ffi::CoreError>| {

@@ -306,6 +306,19 @@ pub fn calendar_op_outbox(conn: &Connection, id: CalendarOpId) -> Result<Vec<(i6
     Ok(out)
 }
 
+/// The recipients and error of each invitation an op mailed that the mail
+/// server refused for good.
+pub fn failed_calendar_op_mail(conn: &Connection, id: CalendarOpId) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached("SELECT recipients, coalesce(error, '') FROM outbox WHERE id = ?1 AND state = 'failed'")?;
+    let mut out = Vec::new();
+    for (row, _, _) in calendar_op_outbox(conn, id)? {
+        if let Some(failed) = stmt.query_row([row], |r| Ok((r.get(0)?, r.get(1)?))).optional()? {
+            out.push(failed);
+        }
+    }
+    Ok(out)
+}
+
 /// Rewrites an op's `base` and `target` columns from the op.
 pub fn rewrite_calendar_op(conn: &Connection, op: &CalendarOp) -> Result<()> {
     let (base, target) = written(op)?;

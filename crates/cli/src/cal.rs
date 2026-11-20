@@ -1082,6 +1082,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         }
         CalCommand::Fact { fact, account } => {
             let account = account.map(|spec| jolta.store.read(|c| store::find_account(c, &spec))).transpose()?;
+            // Some facts write test events to the provider.
+            let _folder = crate::lock_folder(jolta)?;
             crate::cal_fact::run(fact, account.as_ref()).await
         }
         CalCommand::Bench { runs } => bench(jolta, runs),
@@ -1409,6 +1411,9 @@ pub(crate) async fn replay_if_free(jolta: &Jolta) -> Result<bool> {
 }
 
 pub(crate) async fn replay_calendar_ops(jolta: &Jolta, lock: &jolta_core::FolderLock) -> Result<()> {
+    // This command took the folder, so no worker runs: an op still claimed
+    // was left mid-send by one that stopped, as the scheduler finds at start.
+    jolta.store.write(|tx| store::release_calendar_claims(tx))?;
     for settled in jolta_core::calendar::ops::run_due(jolta, lock, Horizon::around(Utc::now(), tz::here())).await? {
         if let Some(f) = settled.failure {
             println!("{}", f.message);
