@@ -278,6 +278,8 @@ final class AppModel {
     /// they stay unread in the list.
     private var shownUnread: [Int64] = []
     private var markReadTask: Task<Void, Never>?
+    /// Counts opens, also of the conversation already open.
+    private(set) var opens = 0
     /// Replies that arrived while the conversation was open below the
     /// reader's view, oldest first, each until it comes into view. Kept here,
     /// so a reader built anew, as after Compose, marks them new again.
@@ -1440,6 +1442,7 @@ final class AppModel {
     }
 
     func open(threadID: Int64) {
+        opens += 1
         if selectedThreadID != threadID {
             answerChoices = AnswerChoices()
             rsvpPanel = nil

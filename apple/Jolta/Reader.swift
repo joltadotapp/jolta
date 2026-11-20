@@ -672,9 +672,11 @@ private final class Navigator: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        for load in loads { load.end("web content process ended") }
+        let ended = loads
         loads.removeAll()
         onTerminate?()
+        // After the page loads again: an `end` that loads it once more replaces that load.
+        for load in ended { load.end("web content process ended") }
     }
 
     /// No page opens a window: a `target="_blank"` link was already decided
@@ -774,6 +776,9 @@ struct ReaderView: View {
     /// it is in.
     @State private var opening = false
     @State private var startMessage: Int64?
+    /// Loads of the page in a row that failed. The first failure loads it
+    /// again at once; after the second the reader offers Try Again.
+    @State private var failedLoads = 0
     /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
     @State private var finding = false
     @State private var findText = ""
@@ -805,6 +810,7 @@ struct ReaderView: View {
             arriving = shownThread != nil && Theme.quick != nil
             shownThread = thread.threadId
             trustOverride = nil
+            failedLoads = 0
             opening = true
             startMessage = model.openStart?.thread == thread.threadId ? model.openStart?.message : thread.startMessageId
         }
@@ -818,7 +824,12 @@ struct ReaderView: View {
             loading = false
             if arriving { withAnimation(Theme.quick) { arriving = false } }
             // A page that didn't load showed nothing to read; the next one opens.
-            guard loaded else { return }
+            guard loaded else {
+                failedLoads += 1
+                if failedLoads == 1 { render() }
+                return
+            }
+            failedLoads = 0
             if opening { model.conversationShown(threadID, messages: messages) }
             opening = false
             // A page loaded anew has lost the marks of replies still below.
@@ -880,6 +891,20 @@ struct ReaderView: View {
             .help("Scroll to the first new reply")
             .accessibilityIdentifier("reader-new-replies")
             .transition(.panel(anchor: .bottom))
+        }
+    }
+
+    /// In place of a page that failed to load twice.
+    @ViewBuilder private var loadFailed: some View {
+        if failedLoads > 1, !loading {
+            VStack(spacing: 10) {
+                Text("The messages didn't load").font(.system(size: Theme.body)).foregroundStyle(Color(Theme.text3))
+                KitButton(title: "Try Again", size: .small, action: render)
+                    .accessibilityIdentifier("reader-try-again")
+            }
+            .padding(.top, 40)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(Color(Theme.reader))
         }
     }
 
@@ -1094,6 +1119,7 @@ struct ReaderView: View {
                 .overlay(alignment: .topLeading) { rsvpPanel }
                 .overlay(alignment: .topTrailing) { if finding { findBar } }
                 .overlay(alignment: .bottom) { newRepliesPill }
+                .overlay(alignment: .top) { loadFailed }
         }
         .opacity(arriving ? 0 : 1)
         .animation(Theme.quick, value: model.rsvpPanel)
@@ -1131,6 +1157,8 @@ struct ReaderView: View {
             #endif
         }
         .onChange(of: thread.html) { refresh() }
+        // Opening the conversation again loads a page that failed, also when its HTML is the same.
+        .onChange(of: model.opens) { if failedLoads > 1 { render() } }
         .task(id: HoldsKey(thread: thread.threadId, revision: model.holdsRevision)) {
             let line = try? model.core.holdsForThread(threadId: thread.threadId)
             if line?.setId != model.holdLine?.setId { model.holdCursor = nil }
