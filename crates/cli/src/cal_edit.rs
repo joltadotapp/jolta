@@ -424,50 +424,76 @@ async fn submit(jolta: &Jolta, edit: Edit, send: &Send) -> Result<()> {
     Ok(())
 }
 
+/// How long `--wait` waits for a data folder another program syncs.
+const FOLDER_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Sends what is due and prints the op; with `wait`, until it is settled
 /// and the invitations it queued have left the outbox.
 pub(crate) async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Result<()> {
+    if wait {
+        return wait_for_op(jolta, id, FOLDER_WAIT).await;
+    }
+    crate::cal::send_calendar_ops(jolta).await?;
+    print_op(jolta, &jolta.store.read(|c| store::calendar_op(c, id))?);
+    Ok(())
+}
+
+/// Sends the op, then its invitations, each once this command can take the
+/// data folder. Jolta or `jolta watch` may send them meanwhile, but a
+/// one-shot command such as `jolta sync` never does, so this keeps trying
+/// and fails once the folder stayed busy for `patience`.
+pub(crate) async fn wait_for_op(jolta: &Jolta, id: CalendarOpId, patience: std::time::Duration) -> Result<()> {
+    let mut busy_since = None;
     loop {
-        let sent = crate::cal::send_calendar_ops(jolta).await?;
         let op = jolta.store.read(|c| store::calendar_op(c, id))?;
-        if !sent {
+        let settled = !matches!(op.state, OpState::Pending | OpState::Sending);
+        if settled && queued_mail(jolta, id)?.is_empty() {
             print_op(jolta, &op);
             return Ok(());
         }
-        if !wait || !matches!(op.state, OpState::Pending | OpState::Sending) {
-            if wait {
-                send_mail(jolta, id).await?;
+        let took = if settled { send_mail(jolta, id).await? } else { crate::cal::replay_if_free(jolta).await? };
+        if took {
+            busy_since = None;
+            let op = jolta.store.read(|c| store::calendar_op(c, id))?;
+            if matches!(op.state, OpState::Pending | OpState::Sending) {
+                let left = (op.send_after - Utc::now().timestamp()).clamp(1, 60);
+                tokio::time::sleep(std::time::Duration::from_secs(left as u64)).await;
             }
-            print_op(jolta, &op);
-            return Ok(());
+            continue;
         }
-        let left = (op.send_after - Utc::now().timestamp()).clamp(1, 60);
-        tokio::time::sleep(std::time::Duration::from_secs(left as u64)).await;
+        if busy_since.is_none() {
+            println!("Waiting for this data folder: Jolta or another jolta command syncs it.");
+        }
+        if busy_since.get_or_insert_with(std::time::Instant::now).elapsed() >= patience {
+            print_op(jolta, &op);
+            let what = if settled { "The change is sent, but its invitations are still queued" } else { "The change is saved, but still queued" };
+            bail!(
+                "{what}: Jolta or another jolta command kept this data folder for {} s. Jolta or jolta watch sends it once it syncs the folder; `jolta cal ops` shows where it is.",
+                patience.as_secs()
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
+/// The outbox rows of the invitations an op queued that haven't left.
+fn queued_mail(jolta: &Jolta, id: CalendarOpId) -> Result<Vec<i64>> {
+    Ok(jolta.store.read(|c| store::calendar_op_outbox(c, id))?.into_iter().filter(|(_, state, _)| state == "queued").map(|(row, _, _)| row).collect())
+}
+
 /// Sends the invitations an op queued, through the engine as the app
-/// does, and waits up to three minutes for each to leave.
-async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<()> {
-    let waiting = |j: &Jolta| -> Result<Vec<i64>> { Ok(j.store.read(|c| store::calendar_op_outbox(c, id))?.into_iter().filter(|(_, state, _)| state == "queued").map(|(row, _, _)| row).collect()) };
-    if waiting(jolta)?.is_empty() {
-        return Ok(());
-    }
-    let account: jolta_core::AccountId = jolta.store.read(|c| {
-        let rows = store::calendar_op_outbox(c, id)?;
-        Ok(c.query_row("SELECT account_id FROM outbox WHERE id = ?1", [rows[0].0], |r| r.get(0))?)
-    })?;
+/// does, and waits up to three minutes for each to leave. False while
+/// another program syncs the data folder.
+async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<bool> {
+    let Some(&row) = queued_mail(jolta, id)?.first() else { return Ok(true) };
+    let account: jolta_core::AccountId = jolta.store.read(|c| Ok(c.query_row("SELECT account_id FROM outbox WHERE id = ?1", [row], |r| r.get(0))?))?;
     let sink: jolta_core::engine::Sink = std::sync::Arc::new(|_| {});
     let engine = match jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current()) {
-        // The edit is saved, so failing would only invite a second copy.
-        Err(jolta_core::Error::EngineBusy) => {
-            println!("The invitations are queued. Jolta or jolta watch sends them once it syncs this data folder.");
-            return Ok(());
-        }
+        Err(jolta_core::Error::EngineBusy) => return Ok(false),
         started => started?,
     };
     let started = std::time::Instant::now();
-    while !waiting(jolta)?.is_empty() {
+    while !queued_mail(jolta, id)?.is_empty() {
         if started.elapsed() > std::time::Duration::from_secs(180) {
             bail!("the invitations didn't leave the outbox within three minutes");
         }
@@ -476,7 +502,7 @@ async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<()> {
     }
     // Lets the engine file the Sent copies.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    Ok(())
+    Ok(true)
 }
 
 fn stored_event(jolta: &Jolta, id: i64) -> Result<(CalendarId, String, EventData)> {

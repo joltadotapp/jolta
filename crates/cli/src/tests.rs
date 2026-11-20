@@ -124,3 +124,14 @@ async fn a_waiting_edit_sends_once_the_folder_is_free() {
     sync_ends.join().unwrap();
     assert_eq!(folder.state(op), OpState::Done, "the command waited for the folder and sent the op");
 }
+
+/// With --wait, an edit gives up on a folder that stays busy, and says the
+/// change is saved and still queued.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_edit_fails_when_the_folder_stays_busy() {
+    let folder = Synced::new("wait-busy");
+    let op = folder.queue_local_edit();
+    let failed = crate::cal_edit::wait_for_op(&folder.jolta, op, std::time::Duration::from_secs(1)).await.expect_err("the op wasn't sent");
+    assert!(failed.to_string().starts_with("The change is saved, but still queued"), "{failed}");
+    assert_eq!(folder.state(op), OpState::Pending);
+}

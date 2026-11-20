@@ -491,11 +491,11 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::NewLocal { name, color } => crate::cal_edit::new_local(jolta, &name, color.as_deref()),
         CalCommand::Holds { release: Some(set), .. } => {
             crate::cal_holds::release(jolta, &set)?;
-            send_calendar_ops(jolta).await.map(drop)
+            send_calendar_ops(jolta).await
         }
         CalCommand::Holds { undo: Some(set), ops, .. } => {
             crate::cal_holds::undo(jolta, &set, &ops)?;
-            send_calendar_ops(jolta).await.map(drop)
+            send_calendar_ops(jolta).await
         }
         CalCommand::Holds { check, .. } => crate::cal_holds::holds(jolta, check),
         CalCommand::Hold { account, to, subject, slots, minutes, message_id } => {
@@ -518,6 +518,8 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::Go { text, today } => crate::cal_edit::go(&text.join(" "), today.as_deref()),
         CalCommand::Default { calendar, clear } => crate::cal_edit::default_calendar(jolta, calendar, clear),
         CalCommand::Enable { account, port } => {
+            // A list read beside the program that syncs could take out a calendar it just added.
+            let _lock = crate::lock_folder(jolta)?;
             let a = jolta.store.read(|c| store::find_account(c, &account))?;
             if sync::needs_consent(&a) {
                 let provider = Provider::for_kind(a.kind).context("an OAuth account")?;
@@ -550,6 +552,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             set_away(jolta, &name, &from, &until, message, decline, outside).await
         }
         CalCommand::Away { account: Some(name), off: true, .. } => {
+            let lock = crate::lock_folder(jolta)?;
             let a = jolta.store.read(|c| store::find_account(c, &name))?;
             let here = tz::here();
             let (ended, _) = away::plan::end(jolta, a.id, away::plan::Reach::NowOrNext, &Horizon::around(Utc::now(), here), here).await?;
@@ -563,7 +566,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 },
                 ended.events
             );
-            send_calendar_ops(jolta).await.map(drop)
+            replay_calendar_ops(jolta, &lock).await
         }
         CalCommand::Away { account, .. } => {
             let accounts = match account {
@@ -999,6 +1002,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             }
         }
         CalCommand::Remove { message } => {
+            let _lock = crate::lock_folder(jolta)?;
             let t = Instant::now();
             let done = remove::remove(jolta, jolta_core::MessageId(message)).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
@@ -1011,12 +1015,14 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 }
                 return Ok(());
             }
+            let _lock = crate::lock_folder(jolta)?;
             let t = Instant::now();
             let done = add::add(jolta, jolta_core::MessageId(message), calendar.map(CalendarId)).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
             Ok(())
         }
         CalCommand::Update { message } => {
+            let _lock = crate::lock_folder(jolta)?;
             let t = Instant::now();
             let done = add::update(jolta, jolta_core::MessageId(message)).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
@@ -1314,6 +1320,7 @@ pub enum OutsideArg {
 /// event's op at once.
 async fn set_away(jolta: &Jolta, name: &str, from: &str, until: &str, message: String, decline: DeclineArg, outside: OutsideArg) -> Result<()> {
     use jolta_core::calendar::away::plan::{self, Absence, Request};
+    let lock = crate::lock_folder(jolta)?;
     let here = tz::here();
     let a = jolta.store.read(|c| store::find_account(c, name))?;
     let day = |t: &str| NaiveDate::parse_from_str(t.trim(), "%Y-%m-%d");
@@ -1355,7 +1362,7 @@ async fn set_away(jolta: &Jolta, name: &str, from: &str, until: &str, message: S
     for done in applied {
         done.result?;
     }
-    send_calendar_ops(jolta).await.map(drop)
+    replay_calendar_ops(jolta, &lock).await
 }
 
 /// Adds focus time as the sheet does, says what the calendar gets, and
@@ -1380,22 +1387,25 @@ async fn add_focus(jolta: &Jolta, calendar: i64, start: &str, minutes: i64, decl
     })?;
     println!("{}: {}", c.name, focus::line(holds, &request, &c));
     jolta.store.write(|tx| focus::add(tx, &c, &request, now, &horizon))?;
-    send_calendar_ops(jolta).await.map(drop)
+    send_calendar_ops(jolta).await
 }
 
-/// Sends the calendar ops due now, as the app's worker would. Returns false
-/// while Jolta.app or another jolta command syncs the data folder, which
-/// sends them instead.
-pub(crate) async fn send_calendar_ops(jolta: &Jolta) -> Result<bool> {
-    let lock = match jolta_core::FolderLock::take(&jolta.data_dir) {
-        Err(jolta_core::Error::EngineBusy) => {
-            println!("The change is queued. Jolta or jolta watch sends it once it syncs this data folder.");
-            return Ok(false);
-        }
-        lock => lock?,
-    };
-    replay_calendar_ops(jolta, &lock).await?;
-    Ok(true)
+/// Sends the calendar ops due now, as the app's worker would, or leaves
+/// them to Jolta.app or the jolta command that syncs the data folder.
+pub(crate) async fn send_calendar_ops(jolta: &Jolta) -> Result<()> {
+    if !replay_if_free(jolta).await? {
+        println!("The change is queued. Jolta or jolta watch sends it once it syncs this data folder.");
+    }
+    Ok(())
+}
+
+/// Sends the calendar ops due now unless another program syncs the data
+/// folder. False when it does.
+pub(crate) async fn replay_if_free(jolta: &Jolta) -> Result<bool> {
+    match jolta_core::FolderLock::take(&jolta.data_dir) {
+        Err(jolta_core::Error::EngineBusy) => Ok(false),
+        lock => replay_calendar_ops(jolta, &lock?).await.map(|()| true),
+    }
 }
 
 pub(crate) async fn replay_calendar_ops(jolta: &Jolta, lock: &jolta_core::FolderLock) -> Result<()> {
