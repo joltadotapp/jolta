@@ -214,7 +214,10 @@ struct ComposeView: View {
                 .padding(.bottom, 6)
                 .task(id: draft.wrappedValue.attachments.map(\.path)) {
                     let paths = draft.wrappedValue.attachments.map(\.path)
-                    fileSizes = await Task.detached { Self.sizes(of: paths) }.value
+                    let sizes = await Task.detached { Self.sizes(of: paths) }.value
+                    // A newer list started its own lookup; this one is stale.
+                    guard !Task.isCancelled else { return }
+                    fileSizes = sizes
                 }
             }
 
