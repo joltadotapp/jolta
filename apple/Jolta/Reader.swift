@@ -784,11 +784,7 @@ struct ReaderView: View {
         guard !thread.imageSender.isEmpty else { return }
         try? core.setSenderTrusted(address: thread.imageSender, trusted: trust)
         trustOverride = trust
-        if trust {
-            model.imagesLoaded.formUnion(thread.remoteImageMessages)
-        } else {
-            model.imagesLoaded.subtract(thread.remoteImageMessages)
-        }
+        if !trust { model.imagesLoaded.subtract(thread.remoteImageMessages) }
         render()
     }
 
