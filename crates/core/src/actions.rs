@@ -296,8 +296,19 @@ pub fn mark_read(conn: &Connection, messages: &[MessageId]) -> Result<Vec<(Accou
 /// and other copies of them, such as the one in Sent. Mail that reached the
 /// conversation after the reader showed it stays unread.
 pub fn mark_shown_read(conn: &Connection, thread: ThreadId, shown: &[MessageId]) -> Result<Option<(AccountId, OpId)>> {
-    let _ = shown;
-    perform(conn, thread, Action::MarkRead, Context::Inbox)
+    let mut stmt = conn.prepare_cached("SELECT id, message_id, flags FROM message WHERE thread_id = ?1")?;
+    let rows: Vec<(MessageId, Option<String>, Flags)> =
+        stmt.query_map([thread], |r| Ok((r.get(0)?, r.get(1)?, Flags(r.get(2)?))))?.collect::<rusqlite::Result<_>>()?;
+    let shown_headers: std::collections::HashSet<&String> =
+        rows.iter().filter(|(id, ..)| shown.contains(id)).filter_map(|(_, header, _)| header.as_ref()).collect();
+    let unread: Vec<MessageId> = rows
+        .iter()
+        .filter(|(id, header, flags)| {
+            !flags.has(Flags::SEEN) && (shown.contains(id) || header.as_ref().is_some_and(|h| shown_headers.contains(h)))
+        })
+        .map(|(id, ..)| *id)
+        .collect();
+    queue(conn, thread_account(conn, thread)?, &OpKind::Flags { add: Flags::SEEN, remove: 0 }, &unread)
 }
 
 /// After a reply or forward went out: marks read the message it answered,

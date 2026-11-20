@@ -32,6 +32,12 @@ final class ReaderPage {
         get { links.onToggle }
         set { links.onToggle = newValue }
     }
+    /// Called once when the header of a message that `update` added is
+    /// wholly in view.
+    var onSeen: ((Int64) -> Void)? {
+        get { links.onSeen }
+        set { links.onSeen = newValue }
+    }
     /// The context menu's items after Copy, for the page on screen.
     var menuExtras: () -> [MenuEntry] = { [] }
     private let links = LinkActions()
@@ -67,6 +73,9 @@ final class ReaderPage {
         // toggles it to its own size. A fixed-width layout zooms down to the
         // reader's width, except while one of its images shows at its own
         // size; below half size it scrolls sideways instead.
+        //
+        // A message that `update` adds is fitted as it arrives, and reported
+        // once its header is wholly in view.
         let script = """
         const zoom = (body) => {
           body.style.zoom = "";
@@ -116,9 +125,28 @@ final class ReaderPage {
           const href = a ? (typeof a.href === "string" ? a.href : a.href.baseVal) : "";
           webkit.messageHandlers.menu.postMessage(href);
         }, true);
+        const seen = new IntersectionObserver((entries) => {
+          for (const e of entries) {
+            if (!e.isIntersecting) continue;
+            seen.unobserve(e.target);
+            e.target.parentElement.classList.add("jolta-seen");
+            const body = e.target.parentElement.querySelector(":scope > .jolta-body");
+            if (body) webkit.messageHandlers.seen.postMessage(body.id.slice(1));
+          }
+        }, { threshold: 1 });
+        document.addEventListener("DOMContentLoaded", () => {
+          new MutationObserver((records) => {
+            for (const node of records.flatMap((r) => [...r.addedNodes])) {
+              if (!node.matches?.("details.jolta-message")) continue;
+              if (node.open) fit(node.querySelector(":scope > .jolta-body"));
+              if (node.classList.contains("jolta-new")) seen.observe(node.querySelector(":scope > summary"));
+            }
+          }).observe(document.body, { childList: true });
+        });
         """
         content.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient))
         content.add(ToggleMessages(links: links), contentWorld: .defaultClient, name: "toggle")
+        content.add(SeenMessages(links: links), contentWorld: .defaultClient, name: "seen")
         let menuLinks = MenuLinks()
         content.add(menuLinks, contentWorld: .defaultClient, name: "menu")
 
@@ -193,6 +221,89 @@ final class ReaderPage {
             }
             #endif
         }
+    }
+
+    /// Brings the page on screen up to `html`, a newer render of the same
+    /// conversation, without loading it again: the scroll position, the
+    /// selection, expanded messages and loaded images stay. Messages that
+    /// changed are replaced and new ones added with a "New" mark, which
+    /// earlier new ones lose once they have been in view. Returns
+    /// the new messages, and those of them whose header is not wholly in
+    /// view; nil when the page can't be updated and has to load again.
+    func update(html: String, remoteImages: Bool) async -> (added: [Int64], below: [Int64])? {
+        guard let previous = shown else { return nil }
+        shown = html
+        let script = """
+        const parse = (text) => new DOMParser().parseFromString(text, "text/html");
+        const fresh = parse(html);
+        const key = (d) => d.querySelector(":scope > .jolta-body")?.id;
+        // Whether a message changed, apart from whether it starts open.
+        const shape = (d) => { const c = d.cloneNode(true); c.removeAttribute("open"); return c.outerHTML; };
+        const before = new Map([...parse(previous).querySelectorAll("body > details.jolta-message")].map((d) => [key(d), shape(d)]));
+        const wanted = [...fresh.querySelectorAll("body > details.jolta-message")];
+        const styles = [...document.head.querySelectorAll("style:not([id])")];
+        const freshStyles = [...fresh.head.querySelectorAll("style:not([id])")];
+        if (styles.length !== freshStyles.length || wanted.some((d) => !key(d))) return null;
+        const ids = new Set(wanted.map(key));
+        const live = [...document.querySelectorAll("body > details.jolta-message")];
+        // The first message on screen keeps its distance from the top.
+        const anchor = live.find((d) => ids.has(key(d)) && d.getBoundingClientRect().bottom > 0);
+        const anchorKey = anchor && key(anchor), top = anchor?.getBoundingClientRect().top;
+        freshStyles.forEach((s, i) => { if (styles[i].textContent !== s.textContent) styles[i].textContent = s.textContent; });
+        document.body.classList.toggle("jolta-images", remote);
+        for (const d of live) if (!ids.has(key(d))) d.remove();
+        const added = [];
+        let previousNode = null;
+        for (const d of wanted) {
+          const id = key(d);
+          let node = document.getElementById(id)?.closest("body > details.jolta-message");
+          if (!node || before.get(id) !== shape(d)) {
+            const next = document.importNode(d, true);
+            if (!node || node.classList.contains("jolta-new")) {
+              next.classList.add("jolta-new");
+              next.querySelector(":scope > summary > .jolta-from")?.insertAdjacentHTML("afterend", '<span class="jolta-new-mark">New</span>');
+            }
+            if (node) {
+              next.open = node.open;
+              node.replaceWith(next);
+            } else {
+              added.push(next);
+            }
+            node = next;
+          }
+          if (previousNode ? previousNode.nextElementSibling !== node : document.body.firstElementChild !== node) {
+            if (previousNode) previousNode.after(node); else document.body.prepend(node);
+          }
+          previousNode = node;
+        }
+        // Only what arrived since the reader last looked keeps its mark.
+        if (added.length) {
+          for (const d of document.querySelectorAll("details.jolta-new.jolta-seen")) {
+            d.classList.remove("jolta-new", "jolta-seen");
+            d.querySelector(":scope > summary > .jolta-new-mark")?.remove();
+          }
+        }
+        const moved = anchorKey && document.getElementById(anchorKey);
+        if (moved) scrollBy(0, moved.closest("details.jolta-message").getBoundingClientRect().top - top);
+        const id = (d) => key(d).slice(1);
+        return {
+          added: added.map(id),
+          below: added.filter((d) => d.querySelector(":scope > summary").getBoundingClientRect().bottom > innerHeight).map(id),
+        };
+        """
+        guard let result = await call(script, arguments: ["html": html, "previous": previous, "remote": remoteImages]) as? [String: Any],
+              let added = result["added"] as? [String], let below = result["below"] as? [String] else {
+            return nil
+        }
+        return (added.compactMap(Int64.init), below.compactMap(Int64.init))
+    }
+
+    /// Scrolls the message's header to the top of the reader.
+    func reveal(message: Int64, smooth: Bool) {
+        let script = """
+        document.getElementById("m" + id)?.closest("details.jolta-message")?.scrollIntoView({ block: "start", behavior: smooth ? "smooth" : "instant" });
+        """
+        run(script, arguments: ["id": String(message), "smooth": smooth])
     }
 
     /// Runs the app's own script on the page. The page world, as WebKit for
@@ -443,6 +554,21 @@ private final class LinkActions {
     var onSaveAll: ((Int64) -> Void)?
     var onRsvp: ((Int64, String) -> Void)?
     var onToggle: ((Int64, Bool) -> Void)?
+    var onSeen: ((Int64) -> Void)?
+}
+
+/// The seen script's messages: the id of a new message whose header came into view.
+private final class SeenMessages: NSObject, WKScriptMessageHandler {
+    let links: LinkActions
+
+    init(links: LinkActions) {
+        self.links = links
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let id = (message.body as? String).flatMap(Int64.init) else { return }
+        MainActor.assumeIsolated { links.onSeen?(id) }
+    }
 }
 
 /// The toggle script's messages: `{id, open}` for one message.
@@ -610,6 +736,16 @@ struct ReaderView: View {
     @State private var shownThread: Int64?
     /// Another conversation is loading: it fades in once its page is in.
     @State private var arriving = false
+    /// Counts page loads, so only the last one's completion acts.
+    @State private var loads = 0
+    /// A page is loading; a newer render loads in full instead of updating it.
+    @State private var loading = false
+    /// The page loading opens the conversation, so it scrolls to the start
+    /// message, even when a newer render replaces it before it is in.
+    @State private var opening = false
+    /// Replies that arrived while open below the reader's view, oldest
+    /// first, until the first of them comes into view.
+    @State private var unseenReplies: [ReaderMessage] = []
     /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
     @State private var finding = false
     @State private var findText = ""
@@ -626,15 +762,75 @@ struct ReaderView: View {
             arriving = shownThread != nil && Theme.quick != nil
             shownThread = thread.threadId
             trustOverride = nil
+            unseenReplies = []
+            opening = true
         }
+        let start = opening ? thread.startMessageId : nil
         reader.images.allowsRemote = imagesLoaded || trusted
+        loads += 1
+        let load = loads
+        loading = true
         reader.show(html: thread.html) {
+            guard load == loads else { return }
+            loading = false
+            opening = false
             if arriving { withAnimation(Theme.quick) { arriving = false } }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
             let expanded = model.expandedMessages
             if !expanded.isEmpty { reader.expand(expanded) }
+            if let start { reader.reveal(message: start, smooth: false) }
             if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
+        }
+    }
+
+    /// A newer render of the conversation on screen goes into the page in
+    /// place, so the reader keeps its place; another conversation loads.
+    private func refresh() {
+        guard shownThread == thread.threadId, !loading else { return render() }
+        let (html, messages) = (thread.html, thread.messages)
+        reader.images.allowsRemote = imagesLoaded || trusted
+        Task {
+            guard let update = await reader.update(html: html, remoteImages: reader.images.allowsRemote) else { return render() }
+            let below = messages.filter { m in update.below.contains(m.id) && !unseenReplies.contains { $0.id == m.id } }
+            withAnimation(Theme.quick) { unseenReplies += below }
+            if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
+        }
+    }
+
+    /// A reply that arrived while open came into view.
+    private func seen(_ message: Int64) {
+        withAnimation(Theme.quick) {
+            if unseenReplies.first?.id == message { unseenReplies = [] } else { unseenReplies.removeAll { $0.id == message } }
+        }
+        model.replyCameIntoView(message)
+    }
+
+    /// Over the reader's foot while replies that arrived are below its view.
+    @ViewBuilder private var newRepliesPill: some View {
+        if let first = unseenReplies.first {
+            let title = unseenReplies.count == 1 ? "New reply from \(first.from)" : "\(unseenReplies.count) new replies"
+            Button {
+                reader.reveal(message: first.id, smooth: Theme.quick != nil)
+            } label: {
+                HStack(spacing: 6) {
+                    Text(title).lineLimit(1).truncationMode(.middle)
+                    Image(systemName: "arrow.down").font(.system(size: Theme.caption, weight: .semibold))
+                }
+                .font(.system(size: Theme.small, weight: .medium))
+                .foregroundStyle(Color(Theme.bg))
+                .padding(.horizontal, 12)
+                .frame(height: Theme.controlSmall + 4)
+                .background(Capsule().fill(Color(Theme.text)))
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .menuShadow()
+            .frame(maxWidth: 360)
+            .padding(.bottom, 18)
+            .help("Scroll to the first new reply")
+            .accessibilityIdentifier("reader-new-replies")
+            .transition(.panel(anchor: .bottom))
         }
     }
 
@@ -848,6 +1044,7 @@ struct ReaderView: View {
             ReaderPageView(page: reader, menu: imageMenu)
                 .overlay(alignment: .topLeading) { rsvpPanel }
                 .overlay(alignment: .topTrailing) { if finding { findBar } }
+                .overlay(alignment: .bottom) { newRepliesPill }
         }
         .opacity(arriving ? 0 : 1)
         .animation(Theme.quick, value: model.rsvpPanel)
@@ -876,6 +1073,7 @@ struct ReaderView: View {
             reader.onSaveAll = onSaveAll
             reader.onRsvp = { rsvp($0, $1) }
             reader.onToggle = { model.expandedMessages[$0] = $1 }
+            reader.onSeen = { seen($0) }
             reader.images.core = core
             render()
             #if DEBUG
@@ -883,7 +1081,7 @@ struct ReaderView: View {
             if UserDefaults.standard.bool(forKey: "JoltaLoadImages"), imagesBlocked { loadImages() }
             #endif
         }
-        .onChange(of: thread.html) { render() }
+        .onChange(of: thread.html) { refresh() }
         .task(id: HoldsKey(thread: thread.threadId, revision: model.holdsRevision)) {
             let line = try? model.core.holdsForThread(threadId: thread.threadId)
             if line?.setId != model.holdLine?.setId { model.holdCursor = nil }
@@ -1070,6 +1268,12 @@ enum ReaderStyle {
     .jolta-invite-reply { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; padding: 10px 14px; }
     .jolta-invite-reply b { color: var(--tx); font-weight: 600; }
     .jolta-invite-about { margin-left: auto; color: var(--tx3); }
+    .jolta-new-mark { flex: none; margin-left: -8px; padding: 0 5px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--tx3);
+      color: var(--tx2); font-size: 10px; font-weight: 600; letter-spacing: .03em; line-height: 15px; }
+    @media (prefers-reduced-motion: no-preference) {
+      @keyframes jolta-arrive { from { opacity: 0; } }
+      details.jolta-new { animation: jolta-arrive .3s ease-out; }
+    }
     """
 }
 

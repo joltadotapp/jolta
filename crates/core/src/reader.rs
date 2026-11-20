@@ -112,8 +112,8 @@ pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, V
 /// Where the reader starts, from the read flags before the open marks
 /// anything read.
 pub fn start_message(messages: &[ThreadMessage]) -> Option<MessageId> {
-    let _ = messages;
-    None
+    let start = messages.iter().position(|m| !m.flags.has(Flags::SEEN)).unwrap_or(messages.len().saturating_sub(1));
+    (start > 0).then(|| messages[start].id)
 }
 
 /// `29 Oct 2026, 14:05` in the viewer's time zone.

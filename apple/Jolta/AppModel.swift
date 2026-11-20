@@ -89,6 +89,7 @@ final class AppModel {
             readerUp = false
             // The reader beside the list shows what the cursor was on.
             if !singleColumn, let open = selectedThreadID { markReadSoon(open) }
+            readRepliesSoon()
         }
     }
     /// In one column, the conversation is over the list. Moving the cursor
@@ -259,6 +260,11 @@ final class AppModel {
     var searchFocused = false
     private(set) var aiSearching = false
     private var markReadTask: Task<Void, Never>?
+    /// Replies that arrived while their conversation was open and have since
+    /// come into view. They count as read once the app is active for the
+    /// mark-read delay; until then they stay unread in the list.
+    private var repliesInView: [Int64] = []
+    private var replyReadTask: Task<Void, Never>?
     /// The user archived, moved or undid something, so the list's next
     /// change may move the cursor on to the next conversation.
     @ObservationIgnored var userChangedList = false
@@ -358,6 +364,7 @@ final class AppModel {
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification) {
                 self?.core.checkAway()
                 self?.core.setForeground(active: true)
+                self?.readRepliesSoon()
                 if let toast = self?.noticeToast {
                     self?.noticeToast = nil
                     self?.show(toast)
@@ -367,6 +374,7 @@ final class AppModel {
         Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didResignActiveNotification) {
                 self?.core.setForeground(active: false)
+                self?.replyReadTask?.cancel()
             }
         }
         core.setForeground(active: NSApp?.isActive ?? false)
@@ -781,6 +789,7 @@ final class AppModel {
         guard singleColumn, !readerUp else { return }
         readerUp = true
         if let open = selectedThreadID { markReadSoon(open) }
+        readRepliesSoon()
     }
 
     /// Esc in one column: back from the conversation to the list. False when the list already shows.
@@ -1359,14 +1368,36 @@ final class AppModel {
         cursor = (0, 0)
     }
 
-    /// Marks the conversation read once it has been on screen as long as the setting asks.
+    /// Marks the conversation read once it has been on screen as long as the
+    /// setting asks: the messages it showed now, not a reply that arrives meanwhile.
     private func markReadSoon(_ threadID: Int64) {
         markReadTask?.cancel()
-        guard let delay = markRead.delay else { return }
+        guard let delay = markRead.delay, let shown = openThread, shown.threadId == threadID else { return }
+        let messages = shown.messages.map(\.id)
         markReadTask = Task {
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
-            _ = try? core.perform(action: .markRead, threadIds: [threadID], context: source.actionContext)
+            _ = try? core.markReadShown(threadId: threadID, messageIds: messages)
+        }
+    }
+
+    /// The reader scrolled a reply that arrived while it was open into view.
+    func replyCameIntoView(_ message: Int64) {
+        repliesInView.append(message)
+        readRepliesSoon()
+    }
+
+    /// Starts the mark-read delay for the replies in view, while the app is
+    /// active and the reader shows. Leaving the app stops it; coming back starts it again.
+    private func readRepliesSoon() {
+        replyReadTask?.cancel()
+        guard let threadID = selectedThreadID, openThread?.threadId == threadID, !repliesInView.isEmpty,
+              let delay = markRead.delay, NSApp.isActive, !singleColumn || readerUp else { return }
+        replyReadTask = Task {
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
+            _ = try? core.markReadShown(threadId: threadID, messageIds: repliesInView)
+            repliesInView = []
         }
     }
 
@@ -1376,6 +1407,8 @@ final class AppModel {
             rsvpPanel = nil
             rsvpMessage = nil
             expandedMessages = [:]
+            repliesInView = []
+            replyReadTask?.cancel()
         }
         selectedThreadID = threadID
         selectedThreads = [threadID]
