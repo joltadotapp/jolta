@@ -1037,6 +1037,17 @@ input[value^="a"] { background: url(http://evil.test/5) }
         assert_eq!(css, "@media only screen and (max-width: 600px){#m3 .col{width: 100% !important; padding: 0 10px}\n}\n");
     }
 
+    #[test]
+    fn image_markup_written_as_text_is_no_image() {
+        let plain = "Subject: t\r\nContent-Type: text/plain\r\n\r\nPaste <img src=\"x-remote:https://example.test/a.png\"> or src=\"cid:logo\" here.\r\n";
+        let html = "Subject: t\r\nContent-Type: text/html\r\n\r\n<p>Paste src=\"x-remote:https://example.test/b.png\" here.</p>\r\n";
+        for raw in [plain, html] {
+            let out = render_thread(&[view(raw.as_bytes())], "");
+            assert_eq!(out.remote_by_message, [0], "{}", out.html);
+            assert!(!out.html.contains("x-remote:1/") && !out.html.contains("cid:1/"), "text keeps its words: {}", out.html);
+        }
+    }
+
     fn view(raw: &[u8]) -> MessageView<'_> {
         MessageView { id: 1, from: "a", to: "b", date: "today", snippet: "", raw, open: true, vip: false, protection: &Protection::None, cards: &[] }
     }

@@ -116,6 +116,31 @@ pub fn start_message(messages: &[ThreadMessage]) -> Option<MessageId> {
     (start > 0).then(|| messages[start].id)
 }
 
+/// Whose remote images load without the user asking.
+#[derive(Debug, PartialEq)]
+pub struct ImageTrust {
+    /// The one sender of every message with remote images, for Always Load
+    /// Images. None when there are several, or one has no sender address.
+    pub sender: Option<String>,
+    /// The messages with remote images whose own sender is trusted.
+    pub trusted: Vec<MessageId>,
+}
+
+/// `remote` counts each message's remote images; `trusted` answers for a
+/// lowercased sender address.
+pub fn image_trust(messages: &[ThreadMessage], remote: &[u32], trusted: impl Fn(&str) -> bool) -> ImageTrust {
+    let with_images: Vec<(&ThreadMessage, String)> =
+        messages.iter().zip(remote).filter(|(_, n)| **n > 0).map(|(m, _)| (m, m.from_addr.to_ascii_lowercase())).collect();
+    let mut senders: Vec<&String> = with_images.iter().map(|(_, a)| a).filter(|a| !a.is_empty()).collect();
+    senders.sort_unstable();
+    senders.dedup();
+    let all = !senders.is_empty() && senders.iter().all(|a| trusted(a));
+    ImageTrust {
+        sender: (senders.len() == 1).then(|| senders[0].clone()),
+        trusted: if all { with_images.iter().map(|(m, _)| m.id).collect() } else { Vec::new() },
+    }
+}
+
 /// `29 Oct 2026, 14:05` in the viewer's time zone.
 pub fn format_date(unix: i64, utc_offset: i32) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -277,5 +302,39 @@ mod tests {
         assert_eq!(start_message(&messages(&[false])), None, "one read message");
         assert_eq!(start_message(&messages(&[true])), None, "one unread message");
         assert_eq!(start_message(&[]), None, "no messages");
+    }
+
+    fn from(senders: &[&str]) -> Vec<ThreadMessage> {
+        let mut out = messages(&vec![false; senders.len()]);
+        for (m, s) in out.iter_mut().zip(senders) {
+            m.from_addr = s.to_string();
+        }
+        out
+    }
+
+    fn trusting(address: &str) -> bool {
+        address == "ann@example.com"
+    }
+
+    #[test]
+    fn a_reply_without_a_sender_address_loads_no_image_on_another_senders_trust() {
+        let trust = image_trust(&from(&["Ann@example.com", ""]), &[2, 1], trusting);
+        assert_eq!(trust.trusted, [MessageId(1)], "only the trusted sender's own message");
+        assert_eq!(trust.sender, None, "Always Load Images can't name the reply's sender");
+    }
+
+    #[test]
+    fn an_untrusted_reply_leaves_a_trusted_senders_images_loading() {
+        let trust = image_trust(&from(&["ann@example.com", "bo@example.com", "ann@example.com"]), &[1, 1, 0], trusting);
+        assert_eq!(trust.trusted, [MessageId(1)]);
+        assert_eq!(trust.sender, None);
+    }
+
+    #[test]
+    fn one_trusted_sender_loads_every_message_with_images() {
+        let trust = image_trust(&from(&["ann@example.com", "bo@example.com", "ANN@example.com"]), &[1, 0, 3], trusting);
+        assert_eq!(trust.trusted, [MessageId(1), MessageId(3)]);
+        assert_eq!(trust.sender.as_deref(), Some("ann@example.com"));
+        assert_eq!(image_trust(&from(&["bo@example.com"]), &[1], trusting).trusted, []);
     }
 }
