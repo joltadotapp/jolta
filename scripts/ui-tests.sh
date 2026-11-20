@@ -126,7 +126,7 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 			WATCHERS+=($!)
 		fi
 	fi
-	if [ "$t" = testNewReplyShowsInOpenConversation ] || [ "$t" = testNewReplyStaysUnreadAfterCompose ]; then
+	if [ "$t" = testNewReplyShowsInOpenConversation ] || [ "$t" = testNewReplyStaysUnreadAfterCompose ] || [ "$t" = testNewReplyInCalendarStaysUnread ]; then
 		# A long unread message on the local Dovecot, and a reply delivered once
 		# the journey has opened it and Jolta has marked it read.
 		server="new-reply-$(date +%s)-$t@test.invalid"
@@ -152,6 +152,8 @@ m.append("INBOX", "", None, raw.encode())'
 				until [ "$(sqlite3 "$dir/jolta.sqlite" "SELECT flags & 1 FROM message WHERE subject = 'Spring order terms'" 2>/dev/null)" = 1 ]; do
 					sleep 0.5
 				done
+				# Time for the journey to switch to the calendar first.
+				[ "$t" != testNewReplyInCalendarStaysUnread ] || sleep 3
 				python3 -I -c "$deliver" "$server" reply
 			) &
 			WATCHERS+=($!)

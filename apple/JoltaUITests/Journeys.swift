@@ -449,6 +449,36 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 10) { count() != before }, "it counts as read once it comes into view")
     }
 
+    /// A reply that arrives while the calendar covers the open conversation
+    /// stays unread below the view, with its pill, when mail shows again.
+    func testNewReplyInCalendarStaysUnread() throws {
+        let app = try launch()
+        try signInToDovecot(app, prefix: "new-reply-")
+        let row = text(app, "Spring order terms")
+        XCTAssertTrue(row.waitForExistence(timeout: 30), "the conversation syncs")
+        let count = unreadCount(app)
+        let unopened = count()
+        row.click()
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "the conversation opens")
+        XCTAssertTrue(waitUntil(timeout: 10) { count() != unopened }, "the open marks it read")
+        let before = count()
+
+        app.typeKey("2", modifierFlags: .command)
+        let title = app.descendants(matching: .any).matching(identifier: "calendar-title").firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "⌘2 opens calendar mode")
+        RunLoop.current.run(until: Date() + 20)
+        app.typeKey("1", modifierFlags: .command)
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "⌘1 shows the conversation again")
+        RunLoop.current.run(until: Date() + 0.5)
+        XCTAssertTrue(text(app, "2 messages").exists, "the reply arrived while the calendar showed")
+        let pill = app.buttons["reader-new-replies"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5), "a pill says a reply is below the view")
+        RunLoop.current.run(until: Date() + 3)
+        XCTAssertNotEqual(count(), before, "the reply below the view stays unread")
+        pill.click()
+        XCTAssertTrue(waitUntil(timeout: 10) { count() == before }, "it counts as read once it comes into view")
+    }
+
     /// The open's mark-read delay stops while Compose covers the reader.
     func testComposeOverTheReaderKeepsItUnread() throws {
         let app = try launch()
