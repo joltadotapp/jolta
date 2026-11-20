@@ -3,7 +3,8 @@
 //! ammonia removes scripts, handlers, forms, frames and unknown schemes.
 //! `<style>` blocks are cut out first, filtered by `filter_css`, and put back
 //! after ammonia runs, because ammonia drops them. Remote images become
-//! `x-remote:` URLs that the app resolves only when the user allows them. The
+//! `x-remote:<message id>/<URL>` URLs that the app resolves only when the
+//! user allows that message's images. The
 //! document carries a CSP that blocks every load except `cid:`, `data:` and
 //! `x-remote:` images, as a second layer behind the sanitizer.
 
@@ -586,7 +587,9 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let mut conversation = quote::Conversation::default();
     for m in messages {
         let (clean, styles) = clean_body(m.raw, &clean_builder);
-        let mut clean = clean.replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
+        let mut clean = clean
+            .replace("src=\"cid:", &format!("src=\"cid:{}/", m.id))
+            .replace(&format!("src=\"{REMOTE_SCHEME}:"), &format!("src=\"{REMOTE_SCHEME}:{}/", m.id));
         if messages.len() > 1 {
             clean = conversation.fold(clean);
         }

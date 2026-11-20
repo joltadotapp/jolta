@@ -65,7 +65,13 @@ final class AppModel {
     let core: Core
     let calendar: CalendarModel
     /// Mail or the full calendar (⌘1, ⌘2).
-    var mode: AppMode = .mail { didSet { if mode != oldValue { modeChanged() } } }
+    var mode: AppMode = .mail {
+        didSet {
+            guard mode != oldValue else { return }
+            modeChanged()
+            readRepliesSoon()
+        }
+    }
     /// Today's calendar beside the mail, toggled with ⇧C.
     var showsDayPanel = UserDefaults.standard.bool(forKey: AppModel.key("DayPanel")) {
         didSet { UserDefaults.standard.set(showsDayPanel, forKey: Self.key("DayPanel")) }
@@ -260,6 +266,8 @@ final class AppModel {
     var searchFocused = false
     private(set) var aiSearching = false
     private var markReadTask: Task<Void, Never>?
+    /// Counts re-renders of the open conversation, so only the latest one shows.
+    @ObservationIgnored private var refreshes = 0
     /// Replies that arrived while their conversation was open and have since
     /// come into view. They count as read once the app is active for the
     /// mark-read delay; until then they stay unread in the list.
@@ -374,7 +382,7 @@ final class AppModel {
         Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didResignActiveNotification) {
                 self?.core.setForeground(active: false)
-                self?.replyReadTask?.cancel()
+                self?.readRepliesSoon()
             }
         }
         core.setForeground(active: NSApp?.isActive ?? false)
@@ -796,6 +804,7 @@ final class AppModel {
     func backToList() -> Bool {
         guard singleColumn, readerUp, compose == nil else { return false }
         readerUp = false
+        readRepliesSoon()
         return true
     }
 
@@ -1347,9 +1356,11 @@ final class AppModel {
     /// in, a message moved). Leaves read state alone: a refresh is not a read.
     private func refreshOpenThread() {
         guard let threadID = selectedThreadID, openThread?.threadId == threadID, compose == nil else { return }
+        refreshes += 1
+        let refresh = refreshes
         Task {
             guard let view = try? await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: utcOffset),
-                  selectedThreadID == threadID, view.html != openThread?.html else { return }
+                  refresh == refreshes, selectedThreadID == threadID, view.html != openThread?.html else { return }
             openThread = view
             summary?.refresh(label: ai.label)
         }
@@ -1387,15 +1398,24 @@ final class AppModel {
         readRepliesSoon()
     }
 
+    /// The reader put the conversation it opened on screen.
+    func conversationShown(_ threadID: Int64) {
+        if selectedThreadID == threadID, !singleColumn || readerUp { markReadSoon(threadID) }
+    }
+
+    /// Mail shows the reader: in mail mode, beside the list or over it.
+    private var readerShows: Bool { mode == .mail && (!singleColumn || readerUp) }
+
     /// Starts the mark-read delay for the replies in view, while the app is
-    /// active and the reader shows. Leaving the app stops it; coming back starts it again.
+    /// active and the reader shows. Leaving the app or the reader stops it;
+    /// coming back starts it again.
     private func readRepliesSoon() {
         replyReadTask?.cancel()
         guard let threadID = selectedThreadID, openThread?.threadId == threadID, !repliesInView.isEmpty,
-              let delay = markRead.delay, NSApp.isActive, !singleColumn || readerUp else { return }
+              let delay = markRead.delay, NSApp.isActive, readerShows else { return }
         replyReadTask = Task {
             if delay > .zero { try? await Task.sleep(for: delay) }
-            guard !Task.isCancelled, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
+            guard !Task.isCancelled, NSApp.isActive, readerShows, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
             _ = try? core.markReadShown(threadId: threadID, messageIds: repliesInView)
             repliesInView = []
         }
@@ -1427,8 +1447,11 @@ final class AppModel {
             do {
                 let view = try await core.openThread(threadId: threadID, appCss: ReaderStyle.css, utcOffset: offset)
                 if selectedThreadID == threadID {
+                    // The reader starts the mark-read delay once it shows a
+                    // conversation it opens; one it shows already is in view.
+                    let shown = openThread?.threadId == threadID
                     openThread = view
-                    if !singleColumn || readerUp { markReadSoon(threadID) }
+                    if shown, !singleColumn || readerUp { markReadSoon(threadID) }
                     let ms = (ContinuousClock.now - opening).components
                     Self.timing(String(format: "open thread %lld: %.1f ms (%d messages)", threadID,
                                        Double(ms.seconds) * 1000 + Double(ms.attoseconds) / 1e15, view.messageCount))

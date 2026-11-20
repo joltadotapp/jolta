@@ -125,15 +125,17 @@ final class ReaderPage {
           const href = a ? (typeof a.href === "string" ? a.href : a.href.baseVal) : "";
           webkit.messageHandlers.menu.postMessage(href);
         }, true);
+        // Wholly in view, or filling the view when taller than it.
         const seen = new IntersectionObserver((entries) => {
           for (const e of entries) {
-            if (!e.isIntersecting) continue;
+            const whole = e.intersectionRatio > 0.99 || (e.rootBounds && e.intersectionRect.height >= e.rootBounds.height * 0.98);
+            if (!e.isIntersecting || !whole) continue;
             seen.unobserve(e.target);
             e.target.parentElement.classList.add("jolta-seen");
             const body = e.target.parentElement.querySelector(":scope > .jolta-body");
             if (body) webkit.messageHandlers.seen.postMessage(body.id.slice(1));
           }
-        }, { threshold: 1 });
+        }, { threshold: [...Array(101).keys()].map((i) => i / 100) });
         document.addEventListener("DOMContentLoaded", () => {
           new MutationObserver((records) => {
             for (const node of records.flatMap((r) => [...r.addedNodes])) {
@@ -190,11 +192,11 @@ final class ReaderPage {
     /// once the load failed or was replaced by the next one.
     func show(html: String, then done: (@MainActor () -> Void)? = nil) {
         shown = html
-        var page = images.allowsRemote ? html.replacingOccurrences(of: "<body>", with: "<body class=\"jolta-images\">") : html
+        var page = html
         // Here rather than in the core's `appCss`: a page loads again, with
         // images, from HTML rendered before the theme last changed.
         if let head = page.range(of: "</head>") {
-            page.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>", at: head.lowerBound)
+            page.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>\(images.style)", at: head.lowerBound)
         }
         let html = page
         let navigation = webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
@@ -227,10 +229,10 @@ final class ReaderPage {
     /// conversation, without loading it again: the scroll position, the
     /// selection, expanded messages and loaded images stay. Messages that
     /// changed are replaced and new ones added with a "New" mark, which
-    /// earlier new ones lose once they have been in view. Returns
-    /// the new messages, and those of them whose header is not wholly in
-    /// view; nil when the page can't be updated and has to load again.
-    func update(html: String, remoteImages: Bool) async -> (added: [Int64], below: [Int64])? {
+    /// earlier new ones lose once they have been in view. Returns the new
+    /// messages whose header is not wholly in view; nil when the page can't
+    /// be updated and has to load again.
+    func update(html: String) async -> [Int64]? {
         guard let previous = shown else { return nil }
         shown = html
         let script = """
@@ -250,7 +252,7 @@ final class ReaderPage {
         const anchor = live.find((d) => ids.has(key(d)) && d.getBoundingClientRect().bottom > 0);
         const anchorKey = anchor && key(anchor), top = anchor?.getBoundingClientRect().top;
         freshStyles.forEach((s, i) => { if (styles[i].textContent !== s.textContent) styles[i].textContent = s.textContent; });
-        document.body.classList.toggle("jolta-images", remote);
+        document.getElementById("jolta-images").textContent = images;
         for (const d of live) if (!ids.has(key(d))) d.remove();
         const added = [];
         let previousNode = null;
@@ -285,17 +287,27 @@ final class ReaderPage {
         }
         const moved = anchorKey && document.getElementById(anchorKey);
         if (moved) scrollBy(0, moved.closest("details.jolta-message").getBoundingClientRect().top - top);
-        const id = (d) => key(d).slice(1);
-        return {
-          added: added.map(id),
-          below: added.filter((d) => d.querySelector(":scope > summary").getBoundingClientRect().bottom > innerHeight).map(id),
-        };
+        return added.filter((d) => d.querySelector(":scope > summary").getBoundingClientRect().bottom > innerHeight).map((d) => key(d).slice(1));
         """
-        guard let result = await call(script, arguments: ["html": html, "previous": previous, "remote": remoteImages]) as? [String: Any],
-              let added = result["added"] as? [String], let below = result["below"] as? [String] else {
-            return nil
+        let arguments: [String: Any] = ["html": html, "previous": previous, "images": images.css]
+        guard let below = await call(script, arguments: arguments) as? [String] else { return nil }
+        return below.compactMap(Int64.init)
+    }
+
+    /// Marks messages new again after the page loaded anew, so their "New"
+    /// mark shows and the seen script reports them once they are in view.
+    func markNew(_ messages: [Int64]) {
+        let script = """
+        for (const id of ids) {
+          const node = document.getElementById("m" + id)?.closest("body > details.jolta-message");
+          if (!node || node.classList.contains("jolta-new")) continue;
+          const next = node.cloneNode(true);
+          next.classList.add("jolta-new");
+          next.querySelector(":scope > summary > .jolta-from")?.insertAdjacentHTML("afterend", '<span class="jolta-new-mark">New</span>');
+          node.replaceWith(next);
         }
-        return (added.compactMap(Int64.init), below.compactMap(Int64.init))
+        """
+        run(script, arguments: ["ids": messages.map(String.init)])
     }
 
     /// Scrolls the message's header to the top of the reader.
@@ -471,8 +483,16 @@ struct ReaderPageView: NSViewRepresentable {
 @MainActor
 final class ImageSource {
     var core: Core?
-    /// Set when the user asks to load this conversation's remote images.
-    var allowsRemote = false
+    /// The messages whose remote images the user allowed.
+    var allowed: Set<Int64> = []
+
+    /// Hides every remote image outside the allowed messages.
+    var css: String {
+        let shown = allowed.sorted().map { ":not([src^=\"x-remote:\($0)/\"])" }.joined()
+        return "body:not(#jolta-a):not(#jolta-b) .jolta-body img[src^=\"x-remote:\"]\(shown) { display: none !important; }"
+    }
+
+    var style: String { "<style id=\"jolta-images\">\(css)</style>" }
 }
 
 /// Answers a custom scheme's loads with what `serve` returns. WebKit stops a
@@ -524,8 +544,8 @@ private struct InlineImages {
     }
 }
 
-/// `x-remote:<http URL>`: nothing until the user loads images, then a
-/// cookieless, cacheless fetch that sends no referrer.
+/// `x-remote:<message id>/<http URL>`: nothing until the user loads that
+/// message's images, then a cookieless, cacheless fetch that sends no referrer.
 @MainActor
 private struct RemoteImages {
     let source: ImageSource
@@ -539,8 +559,10 @@ private struct RemoteImages {
     }())
 
     func serve(_ url: URL) async -> ImageScheme.Reply {
-        let target = URL(string: String(url.absoluteString.dropFirst("x-remote:".count)))
-        guard source.allowsRemote, let target, ["http", "https"].contains(target.scheme?.lowercased() ?? "") else {
+        let path = url.absoluteString.dropFirst("x-remote:".count)
+        let (message, address) = (path.prefix { $0 != "/" }, path.drop { $0 != "/" }.dropFirst())
+        guard let message = Int64(message), source.allowed.contains(message), let target = URL(string: String(address)),
+              ["http", "https"].contains(target.scheme?.lowercased() ?? "") else {
             return ("image/gif", Data())
         }
         let fetched = try? await Self.session.data(from: target)
@@ -731,8 +753,9 @@ struct ReaderView: View {
     var onSaveAll: (Int64) -> Void = { _ in }
     var onUnsubscribe: () -> Void = {}
     @State private var reader = ReaderPage()
-    /// Set when the user trusts or stops trusting the sender in this view.
-    @State private var trustOverride: Bool?
+    /// Set when the user trusts or stops trusting the sender in this view;
+    /// it holds only while that sender is the conversation's image sender.
+    @State private var trustOverride: (sender: String, trusted: Bool)?
     @State private var shownThread: Int64?
     /// Another conversation is loading: it fades in once its page is in.
     @State private var arriving = false
@@ -741,10 +764,12 @@ struct ReaderView: View {
     /// A page is loading; a newer render loads in full instead of updating it.
     @State private var loading = false
     /// The page loading opens the conversation, so it scrolls to the start
-    /// message, even when a newer render replaces it before it is in.
+    /// message the open found, even when a newer render replaces it before
+    /// it is in.
     @State private var opening = false
+    @State private var startMessage: Int64?
     /// Replies that arrived while open below the reader's view, oldest
-    /// first, until the first of them comes into view.
+    /// first, each until it comes into view.
     @State private var unseenReplies: [ReaderMessage] = []
     /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
     @State private var finding = false
@@ -752,9 +777,17 @@ struct ReaderView: View {
     @State private var findMissed = false
     @FocusState private var findFocused: Bool
 
-    private var trusted: Bool { trustOverride ?? thread.imagesTrusted }
+    private var trusted: Bool {
+        guard let trustOverride, trustOverride.sender == thread.imageSender else { return thread.imagesTrusted }
+        return trustOverride.trusted
+    }
     private var imagesLoaded: Bool { !thread.remoteImageMessages.isEmpty && model.imagesLoaded.isSuperset(of: thread.remoteImageMessages) }
     private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
+    /// The messages whose remote images load: all of them for a trusted
+    /// sender, else those the user loaded.
+    private var allowedImages: Set<Int64> {
+        trusted ? Set(thread.remoteImageMessages) : model.imagesLoaded.intersection(thread.remoteImageMessages)
+    }
 
     private func render() {
         if shownThread != thread.threadId {
@@ -764,16 +797,20 @@ struct ReaderView: View {
             trustOverride = nil
             unseenReplies = []
             opening = true
+            startMessage = thread.startMessageId
         }
-        let start = opening ? thread.startMessageId : nil
-        reader.images.allowsRemote = imagesLoaded || trusted
+        let (start, threadID) = (opening ? startMessage : nil, thread.threadId)
+        reader.images.allowed = allowedImages
         loads += 1
         let load = loads
         loading = true
         reader.show(html: thread.html) {
             guard load == loads else { return }
             loading = false
+            if opening { model.conversationShown(threadID) }
             opening = false
+            // A page loaded anew has lost the marks of replies still below.
+            if !unseenReplies.isEmpty { reader.markNew(unseenReplies.map(\.id)) }
             if arriving { withAnimation(Theme.quick) { arriving = false } }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
@@ -788,11 +825,14 @@ struct ReaderView: View {
     /// place, so the reader keeps its place; another conversation loads.
     private func refresh() {
         guard shownThread == thread.threadId, !loading else { return render() }
-        let (html, messages) = (thread.html, thread.messages)
-        reader.images.allowsRemote = imagesLoaded || trusted
+        let (html, messages, load) = (thread.html, thread.messages, loads)
+        reader.images.allowed = allowedImages
         Task {
-            guard let update = await reader.update(html: html, remoteImages: reader.images.allowsRemote) else { return render() }
-            let below = messages.filter { m in update.below.contains(m.id) && !unseenReplies.contains { $0.id == m.id } }
+            let update = await reader.update(html: html)
+            // Another page loaded meanwhile, maybe another conversation's.
+            guard load == loads else { return }
+            guard let update else { return render() }
+            let below = messages.filter { m in update.contains(m.id) && !unseenReplies.contains { $0.id == m.id } }
             withAnimation(Theme.quick) { unseenReplies += below }
             if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
         }
@@ -800,9 +840,7 @@ struct ReaderView: View {
 
     /// A reply that arrived while open came into view.
     private func seen(_ message: Int64) {
-        withAnimation(Theme.quick) {
-            if unseenReplies.first?.id == message { unseenReplies = [] } else { unseenReplies.removeAll { $0.id == message } }
-        }
+        withAnimation(Theme.quick) { unseenReplies.removeAll { $0.id == message } }
         model.replyCameIntoView(message)
     }
 
@@ -979,7 +1017,7 @@ struct ReaderView: View {
     private func trustSender(_ trust: Bool) {
         guard !thread.imageSender.isEmpty else { return }
         try? core.setSenderTrusted(address: thread.imageSender, trusted: trust)
-        trustOverride = trust
+        trustOverride = (thread.imageSender, trust)
         if !trust { model.imagesLoaded.subtract(thread.remoteImageMessages) }
         render()
     }
@@ -1151,7 +1189,6 @@ enum ReaderStyle {
     .jolta-notice { margin: 0 0 18px; color: var(--tx2); }
     .jolta-body { padding: 14px 0 24px; max-width: 62ch; overflow-wrap: anywhere; }
     .jolta-body img { max-width: 100%; height: auto; }
-    body:not(.jolta-images):not(#jolta-a):not(#jolta-b) .jolta-body img[src^="x-remote:"] { display: none !important; }
     .jolta-body.jolta-wide { max-width: 100%; width: fit-content; margin: 0 auto; overflow-x: auto; }
     .jolta-body img.jolta-fit { height: auto !important; }
     .jolta-body img.jolta-fit:not(.jolta-full):not(a[href] img) { cursor: zoom-in; }
