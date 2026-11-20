@@ -932,7 +932,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
             let url = format!("evil.test/{n}");
             assert!(!html.contains(&url), "leaked {url}:\n{html}");
         }
-        assert!(html.contains("x-remote:http://evil.test/pixel.gif"));
+        assert!(html.contains("src=\"x-remote:1/http://evil.test/pixel.gif\""), "remote URLs name their message");
         assert_eq!(out.remote_images, 1);
         assert!(html.contains("src=\"cid:1/logo@x\""), "cid URLs name their message");
         assert!(html.contains("data:image/png"));
@@ -1023,7 +1023,7 @@ input[value^="a"] { background: url(http://evil.test/5) }
             <img src=\"https://example.test/logo.png\">\r\n";
         let out = render_thread(&[view(raw.as_bytes())], "");
         assert!(!out.html.contains("beacon.example.test"), "{}", out.html);
-        assert_eq!(out.html.matches("x-remote:http").count() as u32, out.remote_by_message[0], "every remote load is counted");
+        assert_eq!(out.html.matches("x-remote:1/http").count() as u32, out.remote_by_message[0], "every remote load is counted");
     }
 
     #[test]
