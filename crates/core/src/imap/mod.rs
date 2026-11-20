@@ -846,10 +846,13 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, caps: Caps, op: &sto
 }
 
 /// Holds IDLE on INBOX over its own connection and calls `changed` whenever
-/// the server reports something. Returns only on a connection error.
+/// the server reports something, and once on connecting: IDLE reports only
+/// what arrives after it starts, so mail from while it was down needs a sync.
+/// Returns only on a connection error.
 pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
     let mut session = connect_to(account, &Endpoint { answer_within: None, ..Endpoint::imap(account) }).await?;
     session.examine("INBOX").await?;
+    changed();
     loop {
         let mut handle = session.idle();
         handle.init().await?;
