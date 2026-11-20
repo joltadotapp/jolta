@@ -584,3 +584,39 @@ fn a_message_due_during_a_failing_round_leaves_when_it_ends() {
     let took = sent_at.elapsed().as_secs_f64();
     assert!(took < 25.0, "the message left {took:.1} s after Send; the round it fell due in failed after about 15 s");
 }
+
+/// A conversation opens at its first unread message. A reply that IDLE
+/// brings in while it is open reaches the reader's next render, and marking
+/// read what the reader showed before leaves that reply unread.
+#[test]
+fn a_reply_that_arrives_while_open_stays_unread() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let first = Mail::new("Ann Berg <ann@example.com>", &server.user, "Autumn order", "The terms are attached.");
+    let mut second = Mail::reply(&first, "Bo Nilsson <bo@example.com>", "Looks good to me.");
+    // SEARCH SUBJECT matches substrings; the read flag goes on the first message only.
+    second.subject = "Terms".into();
+    server.append("INBOX", &first);
+    server.append("INBOX", &second);
+    server.store("INBOX", "Autumn order", "+FLAGS (\\Seen)");
+    let app = App::unstarted();
+    server.sign_in(&app);
+    wait(20, "the conversation synced", || app.list("in:inbox").first().is_some_and(|r| r.message_count == 2));
+    let thread = jolta_core::ThreadId(app.list("in:inbox")[0].thread_id);
+    let view = app.open(thread);
+    assert_eq!(view.messages.iter().map(|m| m.from.as_str()).collect::<Vec<_>>(), ["Ann Berg", "Bo Nilsson"]);
+    assert_eq!(view.start_message_id, Some(view.messages[1].id), "the reader starts at the unread reply");
+
+    let third = Mail::reply(&second, "Cleo Dahl <cleo@example.com>", "I'll send the signed copy tomorrow.");
+    server.append("INBOX", &third);
+    wait(20, "IDLE brought the reply into the open conversation", || app.open(thread).messages.len() == 3);
+    let shown = view.messages.iter().map(|m| m.id).collect();
+    app.core.mark_read_shown(thread.0, shown).unwrap();
+    assert_eq!(app.list("in:inbox")[0].unread_count, 1, "the reply that came in after the reader showed it stays unread");
+    let refreshed = app.open(thread);
+    assert_eq!(refreshed.messages[2].from, "Cleo Dahl");
+    app.core.mark_read_shown(thread.0, refreshed.messages.iter().map(|m| m.id).collect()).unwrap();
+    assert_eq!(app.list("in:inbox")[0].unread_count, 0, "once shown, it is read too");
+}

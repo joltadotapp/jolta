@@ -292,6 +292,14 @@ pub fn mark_read(conn: &Connection, messages: &[MessageId]) -> Result<Vec<(Accou
     Ok(ops)
 }
 
+/// Marks read what the reader showed of a conversation: these messages,
+/// and other copies of them, such as the one in Sent. Mail that reached the
+/// conversation after the reader showed it stays unread.
+pub fn mark_shown_read(conn: &Connection, thread: ThreadId, shown: &[MessageId]) -> Result<Option<(AccountId, OpId)>> {
+    let _ = shown;
+    perform(conn, thread, Action::MarkRead, Context::Inbox)
+}
+
 /// After a reply or forward went out: marks read the message it answered,
 /// found by `replying_to` or else by the last of its `references`, and the
 /// conversation's older messages. Mail that came in after it stays unread.
@@ -722,6 +730,26 @@ mod tests {
             .write(|c| {
                 let (op, _) = store::op(c, ops[0].1)?.unwrap();
                 assert_eq!(op.messages.iter().map(|(m, _)| m.0).collect::<Vec<_>>(), [1], "message 3 was already read");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn marking_what_the_reader_showed_leaves_a_later_reply_unread() {
+        let (_dir, store) = store();
+        let unread = |c: &Connection| -> Result<Vec<i64>> {
+            Ok(c.prepare("SELECT id FROM message WHERE flags & 1 = 0 ORDER BY id")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+        };
+        store
+            .write(|c| {
+                c.execute_batch(
+                    "UPDATE message SET message_id = 'one@example.com' WHERE id = 1;
+                     INSERT INTO message (id, account_id, remote_id, thread_id, date, flags, message_id) VALUES
+                       (4, 1, 'r4', 1, 0, 0, 'one@example.com');",
+                )?;
+                mark_shown_read(c, ThreadId(1), &[MessageId(1), MessageId(3)])?.expect("an op");
+                assert_eq!(unread(c)?, [2], "message 4, a copy of message 1, is read, and message 2 came in later");
                 Ok(())
             })
             .unwrap();

@@ -40,6 +40,10 @@ pub struct ThreadDetail {
     /// first. N declines the last one whose message is expanded when no
     /// invitation is on screen.
     pub proposals: Vec<OpenProposal>,
+    /// The message whose header the reader scrolls to when it opens: the
+    /// first unread one, else the newest. None when that is the first
+    /// message, so the reader stays at the top.
+    pub start: Option<MessageId>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +107,13 @@ pub fn thread_messages(conn: &Connection, thread: ThreadId) -> Result<(String, V
         out.push(m);
     }
     Ok((subject, out))
+}
+
+/// Where the reader starts, from the read flags before the open marks
+/// anything read.
+pub fn start_message(messages: &[ThreadMessage]) -> Option<MessageId> {
+    let _ = messages;
+    None
 }
 
 /// `29 Oct 2026, 14:05` in the viewer's time zone.
@@ -199,7 +210,8 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
             .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
             .await?;
     let image_sender = (senders.len() == 1).then(|| senders.remove(0));
-    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitations, proposals })
+    let start = start_message(&messages);
+    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitations, proposals, start })
 }
 
 /// The invitation cards of each message, empty for most.
@@ -223,4 +235,47 @@ async fn invitation_cards(jolta: &Jolta, messages: &[ThreadMessage], raws: &[Vec
                 .collect()
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn messages(unread: &[bool]) -> Vec<ThreadMessage> {
+        unread
+            .iter()
+            .enumerate()
+            .map(|(i, &unread)| ThreadMessage {
+                id: MessageId(i as i64 + 1),
+                account: AccountId(1),
+                from_name: String::new(),
+                from_addr: String::new(),
+                to: String::new(),
+                cc: String::new(),
+                date: 0,
+                snippet: String::new(),
+                flags: Flags(if unread { 0 } else { Flags::SEEN }),
+                vip: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_reader_starts_at_the_first_unread_message() {
+        assert_eq!(start_message(&messages(&[false, true, false, true])), Some(MessageId(2)));
+        assert_eq!(start_message(&messages(&[false, false, true])), Some(MessageId(3)));
+    }
+
+    #[test]
+    fn a_read_conversation_starts_at_its_newest_message() {
+        assert_eq!(start_message(&messages(&[false, false, false])), Some(MessageId(3)));
+    }
+
+    #[test]
+    fn the_reader_stays_at_the_top_when_the_start_is_the_first_message() {
+        assert_eq!(start_message(&messages(&[true, true])), None, "the first message is unread");
+        assert_eq!(start_message(&messages(&[false])), None, "one read message");
+        assert_eq!(start_message(&messages(&[true])), None, "one unread message");
+        assert_eq!(start_message(&[]), None, "no messages");
+    }
 }

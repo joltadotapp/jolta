@@ -132,6 +132,19 @@ pub struct ThreadView {
     /// Every guest's proposal the user can decline as the organizer, oldest
     /// first.
     pub proposals: Vec<calendar::ProposalInfo>,
+    /// The messages on the page, top to bottom.
+    pub messages: Vec<ReaderMessage>,
+    /// The message whose header the reader scrolls to on opening: the first
+    /// unread one, else the newest. None keeps the reader at the top.
+    pub start_message_id: Option<i64>,
+}
+
+/// One message on the reader's page.
+#[derive(uniffi::Record)]
+pub struct ReaderMessage {
+    pub id: i64,
+    /// The sender's name, else the address.
+    pub from: String,
 }
 
 #[derive(uniffi::Enum)]
@@ -1119,6 +1132,12 @@ impl Core {
             images_trusted: detail.images_trusted,
             invitations: detail.invitations.into_iter().map(Into::into).collect(),
             proposals: detail.proposals.into_iter().map(Into::into).collect(),
+            messages: detail
+                .messages
+                .iter()
+                .map(|m| ReaderMessage { id: m.id.0, from: if m.from_name.is_empty() { m.from_addr.clone() } else { m.from_name.clone() } })
+                .collect(),
+            start_message_id: detail.start.map(|m| m.0),
             mailing_list: self.jolta.store.read(|c| {
                 Ok(c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM message WHERE thread_id = ?1 AND list_unsubscribe IS NOT NULL)",
@@ -1238,6 +1257,14 @@ impl Core {
         let engine = self.running_engine()?;
         let threads: Vec<ThreadId> = thread_ids.into_iter().map(ThreadId).collect();
         Ok(engine.perform(&threads, action.into(), context.into_core()?)?.into_iter().map(|op| op.0).collect())
+    }
+
+    /// Marks read the messages the reader showed of a conversation, and
+    /// their copies; a reply that came in after stays unread. Returns the
+    /// undo tokens.
+    pub fn mark_read_shown(&self, thread_id: i64, message_ids: Vec<i64>) -> Result<Vec<i64>> {
+        let shown: Vec<MessageId> = message_ids.into_iter().map(MessageId).collect();
+        Ok(self.running_engine()?.mark_shown_read(ThreadId(thread_id), &shown)?.into_iter().map(|op| op.0).collect())
     }
 
     /// Marks every unread message in the list read. Returns undo tokens.

@@ -299,6 +299,16 @@ impl Engine {
         Ok(())
     }
 
+    /// Marks read what the reader showed of a conversation. Returns the undo token.
+    pub fn mark_shown_read(&self, thread: ThreadId, shown: &[MessageId]) -> Result<Option<OpId>> {
+        let queued = self.jolta.store.write(|tx| actions::mark_shown_read(tx, thread, shown))?;
+        if let Some(op) = queued {
+            (self.sink)(Event::ListsChanged);
+            self.wake_all(&[op]);
+        }
+        Ok(queued.map(|(_, op)| op))
+    }
+
     /// Marks every unread message the query matches read. Returns undo tokens.
     pub fn mark_all_read(&self, query: &crate::search::Query) -> Result<Vec<OpId>> {
         let queued = self.jolta.store.write(|tx| {
