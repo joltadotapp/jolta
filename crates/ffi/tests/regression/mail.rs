@@ -221,3 +221,30 @@ fn a_conversation_reads_in_date_order_whatever_order_it_arrived_in() {
     let (thank, confirm) = (view.html.find("Thank you both.").unwrap(), view.html.find("Confirmed.").unwrap());
     assert!(confirm < thank, "the page shows the older reply first");
 }
+
+/// The reader counts only the images still blocked, so it needs each
+/// message's count: a trusted sender's images load while a reply's wait.
+#[test]
+fn the_reader_gets_each_messages_remote_image_count() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let html = |mail: &Mail| String::from_utf8(mail.raw()).unwrap().replace("text/plain", "text/html").into_bytes();
+    let inbox = app.mailbox(me.id, MailboxRole::Inbox);
+    let ask = Mail::new(
+        "ann@test.invalid",
+        "me@test.invalid",
+        "Photos",
+        r#"<p>Two</p><img src="https://ann.test/1.png"><img src="https://ann.test/2.png">"#,
+    )
+    .at(now() - 7200);
+    let answer = Mail::reply(&ask, "bo@test.invalid", r#"<p>Three</p><img src="https://bo.test/1.png"><img src="https://bo.test/2.png"><img src="https://bo.test/3.png">"#);
+    let plain = Mail::reply(&answer, "cleo@test.invalid", "No images here.");
+    let ann = jolta_core::import::import_raw(&app.jolta, me.id, inbox, &html(&ask)).unwrap();
+    let bo = jolta_core::import::import_raw(&app.jolta, me.id, inbox, &html(&answer)).unwrap();
+    app.deliver(&me, MailboxRole::Inbox, &plain);
+    app.core.set_sender_trusted("ann@test.invalid".into(), true).unwrap();
+
+    let view = app.open(app.thread_of(ann));
+    assert_eq!(view.remote_images, std::collections::HashMap::from([(ann.0, 2), (bo.0, 3)]), "a count per message with remote images");
+    assert_eq!(view.trusted_image_messages, [ann.0]);
+}
