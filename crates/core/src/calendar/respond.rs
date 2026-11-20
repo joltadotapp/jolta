@@ -1328,7 +1328,8 @@ pub(crate) mod tests {
         assert_eq!((ops_of(&j).len(), outbox(&j).len()), (1, 1), "one op, one mail");
 
         let at = chrono::Utc::now().timestamp();
-        assert!(ops::run_due(&j, series::Horizon::now()).await.unwrap().is_empty(), "nothing settled while offline");
+        let lock = crate::FolderLock::take(&j.data_dir).unwrap();
+        assert!(ops::run_due(&j, &lock, series::Horizon::now()).await.unwrap().is_empty(), "nothing settled while offline");
         let waiting = &ops_of(&j)[0];
         assert_eq!((waiting.state, waiting.attempts), (OpState::Pending, 0), "a try that never reached the server isn't an attempt");
         assert!(waiting.send_after >= at + ops::OFFLINE_RETRY_SECONDS, "tried again in a minute");
@@ -1336,10 +1337,10 @@ pub(crate) mod tests {
         let (_, at_server, server) = caldav_server(vec![("204 No Content", Some("\"2\""), None)]).await;
         point_at(reqwest::Url::parse(&at_server.remote_id).unwrap().port().unwrap()).unwrap();
         j.store.write(|tx| Ok(tx.execute_batch("UPDATE calendar_op SET send_after = 0")?)).unwrap();
-        let settled = ops::run_due(&j, series::Horizon::now()).await.unwrap();
+        let settled = ops::run_due(&j, &lock, series::Horizon::now()).await.unwrap();
         assert_eq!(settled.iter().map(|s| s.failure.is_none()).collect::<Vec<_>>(), [true]);
         assert_eq!(ops_of(&j)[0].state, OpState::Done);
-        assert!(ops::run_due(&j, series::Horizon::now()).await.unwrap().is_empty(), "sent once");
+        assert!(ops::run_due(&j, &lock, series::Horizon::now()).await.unwrap().is_empty(), "sent once");
         assert_eq!(server.await.unwrap(), ["PUT /cal/invite.ics If-Match \"1\""], "one quiet PUT over the version Jolta held");
         let marked: bool = j.store.read(|c| Ok(c.query_row("SELECT changed_locally FROM event WHERE calendar_id = ?1", [calendar], |r| r.get(0))?)).unwrap();
         assert!(!marked, "synced");

@@ -22,7 +22,7 @@ use super::away::Watcher;
 use super::series::Horizon;
 use super::{Calendar, CalendarId, CalendarSource, holds, ops, sync, tz};
 use crate::engine::{Event, Sink};
-use crate::{Jolta, Result, store};
+use crate::{FolderLock, Jolta, Result, store};
 
 const ACCOUNT_EVERY: Duration = Duration::from_secs(5 * 60);
 const FEED_DEFAULT: i64 = 6 * 3600;
@@ -51,6 +51,10 @@ pub type MailWaker = Box<dyn Fn(crate::AccountId) + Send + Sync>;
 
 pub struct Scheduler {
     jolta: Jolta,
+    /// Replaying the queue and taking back claims a stopped run left both
+    /// assume no other process sends the queue, so the lock lives as long
+    /// as this task can write, even past the engine.
+    lock: Arc<FolderLock>,
     sink: Sink,
     wake: Notify,
     state: Mutex<State>,
@@ -59,9 +63,9 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn start(jolta: Jolta, sink: Sink, runtime: &tokio::runtime::Handle) -> Arc<Scheduler> {
+    pub fn start(jolta: Jolta, lock: Arc<FolderLock>, sink: Sink, runtime: &tokio::runtime::Handle) -> Arc<Scheduler> {
         let away = Watcher::start(jolta.clone(), sink.clone(), runtime);
-        let scheduler = Arc::new(Scheduler { jolta, sink, wake: Notify::new(), state: Mutex::default(), mail: std::sync::OnceLock::new(), away });
+        let scheduler = Arc::new(Scheduler { jolta, lock, sink, wake: Notify::new(), state: Mutex::default(), mail: std::sync::OnceLock::new(), away });
         runtime.spawn(scheduler.clone().run());
         scheduler
     }
@@ -169,7 +173,7 @@ impl Scheduler {
     /// Sends the due calendar ops and reports what changed. Returns how
     /// long until the next waiting op is due.
     async fn send_ops(&self) -> Result<Option<Duration>> {
-        let settled = ops::run_due(&self.jolta, Horizon::around(Utc::now(), tz::here())).await?;
+        let settled = ops::run_due(&self.jolta, &self.lock, Horizon::around(Utc::now(), tz::here())).await?;
         let mut changed: Vec<CalendarId> = Vec::new();
         for s in settled {
             if let (Some(account), Some(wake)) = (s.mailed, self.mail.get()) {

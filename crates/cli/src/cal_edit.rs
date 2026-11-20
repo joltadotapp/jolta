@@ -428,8 +428,12 @@ async fn submit(jolta: &Jolta, edit: Edit, send: &Send) -> Result<()> {
 /// and the invitations it queued have left the outbox.
 async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Result<()> {
     loop {
-        send_due(jolta).await?;
+        let sent = crate::cal::send_calendar_ops(jolta).await?;
         let op = jolta.store.read(|c| store::calendar_op(c, id))?;
+        if !sent {
+            print_op(jolta, &op);
+            return Ok(());
+        }
         if !wait || !matches!(op.state, OpState::Pending | OpState::Sending) {
             if wait {
                 send_mail(jolta, id).await?;
@@ -472,15 +476,6 @@ async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<()> {
     }
     // Lets the engine file the Sent copies.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    Ok(())
-}
-
-async fn send_due(jolta: &Jolta) -> Result<()> {
-    for s in ops::run_due(jolta, horizon()).await? {
-        if let Some(f) = s.failure {
-            println!("{}", f.message);
-        }
-    }
     Ok(())
 }
 
@@ -727,7 +722,7 @@ pub async fn apply_mine(jolta: &Jolta, op: i64, wait: bool) -> Result<()> {
 
 pub async fn list_ops(jolta: &Jolta, send: bool) -> Result<()> {
     if send {
-        send_due(jolta).await?;
+        crate::cal::replay_calendar_ops(jolta, &crate::lock_folder(jolta)?).await?;
     }
     let ops = jolta.store.read(|c| store::calendar_ops(c, 50))?;
     if ops.is_empty() {
@@ -770,7 +765,7 @@ pub async fn undo(jolta: &Jolta, op: i64) -> Result<()> {
     match undone {
         Undone::Dropped => println!("Op {op} was never sent: dropped, and the event is back as it was."),
         Undone::Queued(inverse) => {
-            send_due(jolta).await?;
+            crate::cal::send_calendar_ops(jolta).await?;
             println!("Op {op} may have reached the server; its opposite is queued:");
             print_op(jolta, &jolta.store.read(|c| store::calendar_op(c, inverse))?);
         }

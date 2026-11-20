@@ -1459,7 +1459,9 @@ fn place(calendar: &Calendar) -> &'static str {
 }
 
 /// Sends every due op, up to `AT_ONCE` at a time, and records how each went.
-pub async fn run_due(jolta: &Jolta, horizon: Horizon) -> Result<Vec<Settled>> {
+/// Only the folder's lock holder sends: another process would take back
+/// this one's claims as left by a stopped run, and send them again.
+pub async fn run_due(jolta: &Jolta, _sender: &crate::FolderLock, horizon: Horizon) -> Result<Vec<Settled>> {
     let mut out = Vec::new();
     loop {
         let now = chrono::Utc::now().timestamp();

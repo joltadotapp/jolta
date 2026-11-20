@@ -491,11 +491,11 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
         CalCommand::NewLocal { name, color } => crate::cal_edit::new_local(jolta, &name, color.as_deref()),
         CalCommand::Holds { release: Some(set), .. } => {
             crate::cal_holds::release(jolta, &set)?;
-            send_calendar_ops(jolta).await
+            send_calendar_ops(jolta).await.map(drop)
         }
         CalCommand::Holds { undo: Some(set), ops, .. } => {
             crate::cal_holds::undo(jolta, &set, &ops)?;
-            send_calendar_ops(jolta).await
+            send_calendar_ops(jolta).await.map(drop)
         }
         CalCommand::Holds { check, .. } => crate::cal_holds::holds(jolta, check),
         CalCommand::Hold { account, to, subject, slots, minutes, message_id } => {
@@ -563,7 +563,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 },
                 ended.events
             );
-            send_calendar_ops(jolta).await
+            send_calendar_ops(jolta).await.map(drop)
         }
         CalCommand::Away { account, .. } => {
             let accounts = match account {
@@ -1353,7 +1353,7 @@ async fn set_away(jolta: &Jolta, name: &str, from: &str, until: &str, message: S
     for done in applied {
         done.result?;
     }
-    send_calendar_ops(jolta).await
+    send_calendar_ops(jolta).await.map(drop)
 }
 
 /// Adds focus time as the sheet does, says what the calendar gets, and
@@ -1378,12 +1378,26 @@ async fn add_focus(jolta: &Jolta, calendar: i64, start: &str, minutes: i64, decl
     })?;
     println!("{}: {}", c.name, focus::line(holds, &request, &c));
     jolta.store.write(|tx| focus::add(tx, &c, &request, now, &horizon))?;
-    send_calendar_ops(jolta).await
+    send_calendar_ops(jolta).await.map(drop)
 }
 
-/// Sends the calendar ops due now, as the app's worker would.
-pub(crate) async fn send_calendar_ops(jolta: &Jolta) -> Result<()> {
-    for settled in jolta_core::calendar::ops::run_due(jolta, Horizon::around(Utc::now(), tz::here())).await? {
+/// Sends the calendar ops due now, as the app's worker would. Returns false
+/// while Jolta.app or another jolta command syncs the data folder, which
+/// sends them instead.
+pub(crate) async fn send_calendar_ops(jolta: &Jolta) -> Result<bool> {
+    let lock = match jolta_core::FolderLock::take(&jolta.data_dir) {
+        Err(jolta_core::Error::EngineBusy) => {
+            println!("The change is queued; the Jolta that syncs this data folder sends it.");
+            return Ok(false);
+        }
+        lock => lock?,
+    };
+    replay_calendar_ops(jolta, &lock).await?;
+    Ok(true)
+}
+
+pub(crate) async fn replay_calendar_ops(jolta: &Jolta, lock: &jolta_core::FolderLock) -> Result<()> {
+    for settled in jolta_core::calendar::ops::run_due(jolta, lock, Horizon::around(Utc::now(), tz::here())).await? {
         if let Some(f) = settled.failure {
             println!("{}", f.message);
         }

@@ -30,19 +30,6 @@ const FULL_SYNC_EVERY: Duration = Duration::from_secs(10 * 60);
 /// Graph has no IDLE; the inbox's delta is polled this often.
 const GRAPH_POLL: Duration = Duration::from_secs(30);
 
-/// Two engines on one data folder would both send the outbox and repeat
-/// every server write, so the engine holds an exclusive flock for its life.
-/// The lock belongs to the open file, so it keeps out a second engine in the
-/// same process too, and the OS drops it when the process ends.
-fn lock_data_folder(data_dir: &std::path::Path) -> Result<std::fs::File> {
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(data_dir.join("engine.lock"))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(crate::Error::EngineBusy),
-        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
-    }
-}
-
 /// A worker's open line to its server.
 enum Link {
     Imap(Session, Caps),
@@ -120,14 +107,14 @@ pub struct Engine {
     calendars: Arc<Scheduler>,
     notices: Arc<Notices>,
     background: Mutex<Option<Arc<Background>>>,
-    _lock: std::fs::File,
+    _lock: Arc<crate::FolderLock>,
 }
 
 impl Engine {
     /// Starts a worker and an IDLE task for every account that has a server.
-    /// Fails with `EngineBusy` while another engine runs on the data folder.
+    /// Fails with `EngineBusy` while another process holds the data folder.
     pub fn start(jolta: Jolta, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
-        let lock = lock_data_folder(&jolta.data_dir)?;
+        let lock = Arc::new(crate::FolderLock::take(&jolta.data_dir)?);
         let notices = Notices::start(jolta.clone(), sink.clone(), &runtime)?;
         // Every change to stored mail may take a notification back or change the badge.
         let sink: Sink = {
@@ -140,7 +127,7 @@ impl Engine {
                 }
             })
         };
-        let calendars = Scheduler::start(jolta.clone(), sink.clone(), &runtime);
+        let calendars = Scheduler::start(jolta.clone(), lock.clone(), sink.clone(), &runtime);
         let engine = Arc::new(Engine {
             jolta,
             sink,

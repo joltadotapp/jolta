@@ -637,12 +637,24 @@ async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, u
     Ok(())
 }
 
+const BUSY: &str = "Jolta or another jolta command, such as jolta watch, is syncing this data folder. Quit it, or use --no-wait where the command has it.";
+
 /// Starts the sync engine. Jolta.app runs its own on the same data folder,
 /// and two would both send the outbox, so this fails while the app runs.
 fn start_engine(jolta: &Jolta, sink: jolta_core::engine::Sink) -> Result<Arc<jolta_core::engine::Engine>> {
     match jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current()) {
-        Err(jolta_core::Error::EngineBusy) => bail!("Jolta or another jolta command, such as jolta watch, is syncing this data folder. Quit it, or use --no-wait where the command has it."),
+        Err(jolta_core::Error::EngineBusy) => bail!(BUSY),
         started => Ok(started?),
+    }
+}
+
+/// Takes the data folder for a command that writes to the servers or saves
+/// sync progress without an engine, and fails while Jolta.app or another
+/// jolta command holds it.
+fn lock_folder(jolta: &Jolta) -> Result<jolta_core::FolderLock> {
+    match jolta_core::FolderLock::take(&jolta.data_dir) {
+        Err(jolta_core::Error::EngineBusy) => bail!(BUSY),
+        taken => Ok(taken?),
     }
 }
 

@@ -5,6 +5,7 @@ pub mod calendar;
 pub mod compose;
 pub mod engine;
 pub mod file_icon;
+mod folder_lock;
 pub mod gmail_settings;
 pub mod graph;
 pub mod imap;
@@ -32,6 +33,7 @@ pub mod when;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+pub use folder_lock::FolderLock;
 pub use model::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -66,7 +68,8 @@ pub enum Error {
     Unavailable(String),
     #[error("{0}")]
     Other(String),
-    /// Another process runs the sync engine on this data folder.
+    /// Another holder has the data folder's `FolderLock`, such as the
+    /// engine of Jolta.app or of `jolta watch`.
     #[error("another Jolta is syncing this data folder")]
     EngineBusy,
 }

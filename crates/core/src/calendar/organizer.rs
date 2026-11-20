@@ -866,7 +866,8 @@ mod tests {
 
         fn run(j: &Jolta) -> Vec<ops::Settled> {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            rt.block_on(ops::run_due(j, horizon())).unwrap()
+            let lock = crate::FolderLock::take(&j.data_dir).unwrap();
+            rt.block_on(ops::run_due(j, &lock, horizon())).unwrap()
         }
 
         /// The outbox: (method, sender, recipient, SEQUENCE).
