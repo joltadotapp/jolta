@@ -569,7 +569,8 @@ fn escape(s: &str) -> String {
 }
 
 /// Renders a thread into one locked-down HTML document. Each message is a
-/// `<details>` element, so collapsing and expanding needs no JavaScript.
+/// `<details>` element, so collapsing and expanding needs no JavaScript, and
+/// so is quoted history the earlier messages already show (`quote`).
 /// `app_css` is the app's own stylesheet for the page around the messages.
 pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let mut body = String::new();
@@ -577,9 +578,13 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let mut remote_by_message = Vec::with_capacity(messages.len());
     let mut files_message = None;
     let clean_builder = sanitizer();
+    let mut conversation = quote::Conversation::default();
     for m in messages {
         let (html, styles) = extract_styles(&body_html(m.raw));
         let mut clean = clean_builder.clean(&html).to_string().replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
+        if messages.len() > 1 {
+            clean = conversation.fold(clean);
+        }
         if let (Protection::Encrypted, Some(notice)) = (m.protection, m.protection.detail()) {
             clean.insert_str(0, &format!("<p class=\"jolta-notice\">{}</p>", escape(&notice)));
         }
