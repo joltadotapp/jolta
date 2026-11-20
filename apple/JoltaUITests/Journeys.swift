@@ -420,6 +420,74 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(reply.waitForExistence(timeout: 5) && reply.isHittable, "the reply is in view")
     }
 
+    /// A reply that arrived below the view stays unread, with its pill,
+    /// after Compose covers the reader and closes again: the reader built
+    /// anew marks only what was on the page before the reply came.
+    func testNewReplyStaysUnreadAfterCompose() throws {
+        let app = try launch()
+        try signInToDovecot(app, prefix: "new-reply-")
+        let row = text(app, "Spring order terms")
+        XCTAssertTrue(row.waitForExistence(timeout: 30), "the conversation syncs")
+        row.click()
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "the conversation opens")
+        XCTAssertTrue(text(app, "2 messages").waitForExistence(timeout: 60), "the reply reaches the open conversation")
+        let pill = app.buttons["reader-new-replies"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5), "a pill says a reply arrived below the view")
+        let count = unreadCount(app)
+        RunLoop.current.run(until: Date() + 1.5)
+        let before = count()
+
+        app.typeKey("c", modifierFlags: [])
+        let to = app.textFields["compose-to"]
+        XCTAssertTrue(to.waitForExistence(timeout: 5), "c opens compose")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(to.waitForNonExistence(timeout: 5), "Esc closes it")
+        XCTAssertTrue(pill.waitForExistence(timeout: 5), "the pill is back over the reader")
+        RunLoop.current.run(until: Date() + 3)
+        XCTAssertEqual(count(), before, "the reply below the view stays unread")
+        pill.click()
+        XCTAssertTrue(waitUntil(timeout: 10) { count() != before }, "it counts as read once it comes into view")
+    }
+
+    /// The open's mark-read delay stops while Compose covers the reader.
+    func testComposeOverTheReaderKeepsItUnread() throws {
+        let app = try launch()
+        let count = unreadCount(app)
+        app.typeKey(",", modifierFlags: .command)
+        let picker = app.popUpButtons["mark-read"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "General has Mark as read")
+        picker.click()
+        app.menuItems["After 5 seconds"].click()
+        app.typeKey("w", modifierFlags: .command)
+        addTeardownBlock { @MainActor in
+            app.typeKey(",", modifierFlags: .command)
+            app.popUpButtons["mark-read"].click()
+            app.menuItems["After 1 second"].click()
+            app.typeKey("w", modifierFlags: .command)
+        }
+        let before = count()
+
+        text(app, "Lunch on Friday").click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5), "the conversation opens")
+        RunLoop.current.run(until: Date() + 1)
+        app.typeKey("c", modifierFlags: [])
+        let to = app.textFields["compose-to"]
+        XCTAssertTrue(to.waitForExistence(timeout: 5), "c opens compose")
+        RunLoop.current.run(until: Date() + 6)
+        XCTAssertEqual(count(), before, "it stays unread while compose covers the reader")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(to.waitForNonExistence(timeout: 5), "Esc closes compose")
+        XCTAssertTrue(waitUntil(timeout: 10) { count() != before }, "the delay runs again once the reader shows")
+    }
+
+    /// The text of the list's unread count, as it reads now.
+    private func unreadCount(_ app: XCUIApplication) -> () -> String {
+        let unread = app.staticTexts.matching(NSPredicate(format: "value ENDSWITH ' unread' OR label ENDSWITH ' unread'")).firstMatch
+        XCTAssertTrue(unread.waitForExistence(timeout: 10), "the inbox shows its unread count")
+        return { unread.label.isEmpty ? (unread.value as? String ?? "") : unread.label }
+    }
+
     /// With Mark as read set to Never, a conversation stays unread however
     /// long it is open.
     func testNeverMarkReadKeepsItUnread() throws {
@@ -2273,8 +2341,8 @@ final class Journeys: XCTestCase {
         return out
     }
 
-    private func waitUntil(_ done: () -> Bool) -> Bool {
-        let deadline = Date() + 5
+    private func waitUntil(timeout: TimeInterval = 5, _ done: () -> Bool) -> Bool {
+        let deadline = Date() + timeout
         while Date() < deadline {
             if done() { return true }
             RunLoop.current.run(until: Date() + 0.1)

@@ -126,7 +126,7 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 			WATCHERS+=($!)
 		fi
 	fi
-	if [ "$t" = testNewReplyShowsInOpenConversation ]; then
+	if [ "$t" = testNewReplyShowsInOpenConversation ] || [ "$t" = testNewReplyStaysUnreadAfterCompose ]; then
 		# A long unread message on the local Dovecot, and a reply delivered once
 		# the journey has opened it and Jolta has marked it read.
 		server="new-reply-$(date +%s)@test.invalid"
