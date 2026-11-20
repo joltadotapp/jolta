@@ -4,6 +4,8 @@ mod cal;
 mod cal_edit;
 mod cal_fact;
 mod cal_holds;
+#[cfg(test)]
+mod tests;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
