@@ -569,6 +569,18 @@ final class AppModel {
         Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/jolta-mcp").path
     }
 
+    /// The Terminal command that links the bundled `jolta` into the PATH. The
+    /// sandbox can't write `/usr/local/bin`, so the user runs it; the link
+    /// follows the app across updates.
+    var cliLinkCommand: String {
+        let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/jolta").path
+        return "sudo mkdir -p /usr/local/bin && sudo ln -sf \(Self.shellQuoted(cli)) /usr/local/bin/jolta"
+    }
+
+    static func shellQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     /// Settings › Agents and Activity reload.
     func agentsChanged() { agentRevision += 1 }
 

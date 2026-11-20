@@ -20,7 +20,7 @@ use jolta_core::{AccountKind, Jolta, MailboxRole, MessageId, secrets, synth};
 #[derive(Parser)]
 #[command(name = "jolta", version, about = "Jolta mail core, from the command line")]
 struct Cli {
-    /// Data directory; defaults to the app group container shared with Jolta.app.
+    /// Data directory; defaults to ~/Library/Application Support/Jolta, the one Jolta.app uses.
     #[arg(long, env = "JOLTA_DATA_DIR", global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]

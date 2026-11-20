@@ -133,6 +133,8 @@ sign "$SPARKLE/Updater.app"
 sign "$APP/Contents/Frameworks/Sparkle.framework"
 sign --entitlements apple/jolta-mcp.entitlements "$APP/Contents/MacOS/jolta-mcp"
 sign --entitlements apple/jolta-ai.entitlements "$APP/Contents/MacOS/jolta-ai"
+# The command-line tool runs outside the sandbox, as the user, under the identifier of scripts/build-cli.sh.
+sign --identifier app.jolta.cli "$APP/Contents/Helpers/jolta"
 if [ $TIME_SENSITIVE = 1 ]; then
     # Xcode signs with apple/Jolta.entitlements, which Debug builds share; Time Sensitive and the
     # identifiers the profile matches on are added here, with the profile that allows them.

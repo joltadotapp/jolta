@@ -11,6 +11,7 @@
 		A1000000000000000000F003 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000D002 /* Sparkle */; };
 		A1000000000000000000F002 /* jolta-mcp in Embed jolta-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A03 /* jolta-mcp */; };
 		A1000000000000000000F004 /* jolta-ai in Embed jolta-mcp */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A05 /* jolta-ai */; };
+		A1000000000000000000F005 /* jolta in Embed jolta */ = {isa = PBXBuildFile; fileRef = A10000000000000000000A08 /* jolta */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,6 +31,7 @@
 		A10000000000000000000A04 /* jolta-mcp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "jolta-mcp.entitlements"; sourceTree = "<group>"; };
 		A10000000000000000000A05 /* jolta-ai */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "jolta-ai"; path = "Helpers/jolta-ai"; sourceTree = "<group>"; };
 		A10000000000000000000A06 /* jolta-ai.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "jolta-ai.entitlements"; sourceTree = "<group>"; };
+		A10000000000000000000A08 /* jolta */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = jolta; path = Helpers/jolta; sourceTree = "<group>"; };
 		A10000000000000000000A07 /* JoltaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JoltaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -44,6 +46,17 @@
 				A1000000000000000000F004 /* jolta-ai in Embed jolta-mcp */,
 			);
 			name = "Embed jolta-mcp";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000C06 /* Embed jolta */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Helpers;
+			dstSubfolderSpec = 1;
+			files = (
+				A1000000000000000000F005 /* jolta in Embed jolta */,
+			);
+			name = "Embed jolta";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -83,6 +96,7 @@
 				A10000000000000000000A03 /* jolta-mcp */,
 				A10000000000000000000A06 /* jolta-ai.entitlements */,
 				A10000000000000000000A05 /* jolta-ai */,
+				A10000000000000000000A08 /* jolta */,
 				A10000000000000000000E02 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -107,6 +121,7 @@
 				A10000000000000000000C02 /* Frameworks */,
 				A10000000000000000000C03 /* Resources */,
 				A10000000000000000000C04 /* Embed jolta-mcp */,
+				A10000000000000000000C06 /* Embed jolta */,
 				A10000000000000000000C05 /* Sign jolta-mcp */,
 			);
 			buildRules = (
@@ -220,7 +235,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# The helper gets its own sandbox and the app group, so an agent can launch it.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/jolta-mcp.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/jolta-mcp\"\n# jolta-ai runs local models inside the app's own sandbox, which it inherits.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/jolta-ai.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/jolta-ai\"\n";
+			shellScript = "# The helper gets its own sandbox and the app group, so an agent can launch it.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/jolta-mcp.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/jolta-mcp\"\n# jolta-ai runs local models inside the app's own sandbox, which it inherits.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --entitlements \"${PROJECT_DIR}/jolta-ai.entitlements\" \"${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/jolta-ai\"\n# The command-line tool runs unsandboxed, as the user, under the identifier scripts/build-cli.sh gives it, so Keychain items it made stay readable.\ncodesign --force --options runtime --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --identifier app.jolta.cli \"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/jolta\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

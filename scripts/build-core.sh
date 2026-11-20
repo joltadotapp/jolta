@@ -78,6 +78,14 @@ for t in $TARGETS; do MCP_BINS="$MCP_BINS $ROOT/target/$t/$PROFILE/jolta-mcp"; d
 # shellcheck disable=SC2086
 lipo -create $MCP_BINS -output "$HELPERS/jolta-mcp"
 
+# jolta, the command-line tool, ships in Jolta.app/Contents/Helpers for Terminal and agents.
+# shellcheck disable=SC2086
+cargo build -p jolta-cli $TARGET_FLAGS $CARGO_FLAGS
+CLI_BINS=""
+for t in $TARGETS; do CLI_BINS="$CLI_BINS $ROOT/target/$t/$PROFILE/jolta"; done
+# shellcheck disable=SC2086
+lipo -create $CLI_BINS -output "$HELPERS/jolta"
+
 # jolta-ai, the helper that runs local models. Always optimised: llama.cpp is
 # unusably slow in a debug build. Apple silicon only; on Intel the helper
 # answers every request with "needs Apple silicon".
@@ -88,4 +96,4 @@ for t in $TARGETS; do AI_BINS="$AI_BINS $ROOT/target/$t/release/jolta-ai"; done
 # shellcheck disable=SC2086
 lipo -create $AI_BINS -output "$HELPERS/jolta-ai"
 
-echo "JoltaFFI, jolta-mcp and jolta-ai ($PROFILE: $TARGETS) written to $PKG and $HELPERS"
+echo "JoltaFFI, jolta-mcp, jolta and jolta-ai ($PROFILE: $TARGETS) written to $PKG and $HELPERS"

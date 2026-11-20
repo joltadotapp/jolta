@@ -131,6 +131,45 @@ struct AgentPairing: View {
     }
 }
 
+/// The `jolta` command-line tool ships inside the app. The sandbox can't put
+/// it on the PATH, so the row shows the command that does and copies it.
+private struct CommandLineToolRow: View {
+    let command: String
+    @State private var copied = false
+
+    var body: some View {
+        SettingsBlock {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Command-line tool").font(.system(size: 13, weight: .medium))
+                        Text(command.contains("/AppTranslocation/")
+                             ? "Move Jolta to Applications first, then come back here."
+                             : "Run this in Terminal to use jolta there. Agents with shell access can use it too.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color(Theme.text3))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Button(copied ? "Copied" : "Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(command, forType: .string)
+                        copied = true
+                    }
+                }
+                Text(command)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color(Theme.text2))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
+            }
+        }
+    }
+}
+
 /// Settings › Agents: which agents may do what, and a switch to stop them all.
 struct AgentsSettings: View {
     let model: AppModel
@@ -152,6 +191,7 @@ struct AgentsSettings: View {
                 SettingsRow(title: "Connect an agent", detail: model.mcpStatus) {
                     Button("Add Agent…") { pairing = .init(agent: nil) }
                 }
+                CommandLineToolRow(command: model.cliLinkCommand)
             }
             SettingsSection("Connected agents") {
                 ForEach(agents, id: \.id) { a in

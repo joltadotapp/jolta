@@ -24,6 +24,7 @@ How Jolta fits together: the shape the code should have.
  │  └──────────────────────────────────────────────────────────────────────────┘ │
  │                                                     ▲ Unix socket (app group) │
  │  Contents/MacOS/jolta-mcp  (stdio ⇄ socket bridge) ──┘                         │
+ │  Contents/Helpers/jolta    (command-line tool, unsandboxed, opens the store)  │
  └───────────────────────────────────────────────────────────────────────────────┘
         │ IMAP/SMTP (TLS)          │ HTTPS (Graph, OAuth)         ▲ stdio
         ▼                          ▼                              │
@@ -41,8 +42,8 @@ rust-toolchain.toml     1.99
 crates/
   core/                 lib: all mail logic, modules listed below
   ffi/                  lib (staticlib): thin #[uniffi::export] wrappers over core
-  cli/                  bin `jolta`: dev tool to add accounts, sync, search, show,
-                        and generate a synthetic mailbox for timing
+  cli/                  bin `jolta`: add accounts, sync, search, show, and generate a synthetic
+                        mailbox for timing; ships in Jolta.app/Contents/Helpers
   mcp-bridge/           bin `jolta-mcp`: sends the agent's token, then copies stdio to the app's Unix socket
   ai-helper/            bin `jolta-ai`: runs a local model with llama.cpp, one request at a time
   uniffi-bindgen/       bin `uniffi-bindgen-swift`: writes the Swift bindings from the compiled library
@@ -291,6 +292,14 @@ The main window is 640 points wide at least. `MailColumns` in `apple/Jolta/Conte
 Mail's single-key commands are one table, `Command` in `apple/Jolta/Keymap.swift`. The key router (`KeyRouter` in `Window.swift`, a local key-down monitor that steps aside while an editable text view has the keyboard) hands a key to the list's handler, which looks it up there; the palette's shortcut column, the shortcut sheet and the Message menu read the same table. A Message menu item runs `AppModel.run` like its key and names the key in its title. It has no key equivalent, because one without ⌘ can fire while a text field has the keyboard. A right-click on a list row builds its menu in `MessageList.Coordinator.menuNeedsUpdate`: Archive, Trash, read and star act on the clicked conversation without opening it (or on the selection when the click is in it), and Snooze…, Move to… and Label… first move the cursor there, since their pickers work on the conversation under the cursor. An event's right-click menu comes from `CalendarModel.menu(for:)` in the week (`menu(for:)` of the two canvases), the month and the agenda (`MenuEntries` in a SwiftUI context menu): Open, Edit, Duplicate, Delete and, where the core says the event can be answered, Accept, Maybe and Decline. Space and ⇧Space in the list scroll the open conversation by a page (`ReaderPage.scroll`, a `scrollBy` in the page, smooth unless Reduce Motion is on), and ⌘F (Conversation › Find in Conversation…) opens the reader's find bar, which uses `WKWebView.find` and so only tells whether the text occurs, not how often. Edit › Undo (⌘Z) undoes typing when the text view with the keyboard has any to undo, else the last mail or calendar action (`AppModel.undoFromMenu`).
 
 The empty inbox takes its colors from the theme too (`Scenery` in `apple/Jolta/Scenery.swift`): a sky and two hills for dawn, day, dusk and night, plus the bolt's colors. Each sky is mixed from the theme's own blue, cyan, green, magenta and orange toward its background or text color. A dark theme's sky stays dark at every hour, so an empty inbox never lights up a dark screen; the hour only tints it. A light theme gets the full day, pale by day and dark at night. Graphite Light keeps its hand-drawn skies. Contrast floors keep the words at 4.5:1 against the sky and the bolt at 4:1. The screen still draws with Core Animation layers and two small Core Graphics images, so a theme change only sets layer colors and redraws those two images.
+
+## Command-line tool
+
+`jolta` (crates/cli) ships in `Jolta.app/Contents/Helpers/jolta`. `Contents/MacOS` would hold it next to the main executable `Jolta`, and the default case-insensitive APFS can't keep both names in one folder. `scripts/build-core.sh` builds it into `apple/Helpers` next to `jolta-mcp` and `jolta-ai`, the Xcode phase "Embed jolta" copies it, and "Sign jolta-mcp" signs it. `scripts/release.sh` signs it with Developer ID and a timestamp before the app.
+
+It runs without a sandbox, as the user, and opens `~/Library/Application Support/Jolta` (or `--data-dir`) directly. Every build signs it with the identifier `app.jolta.cli` and the hardened runtime, without entitlements, as `scripts/build-cli.sh` does. A Keychain item's access list trusts the signing identity, so a bundled Debug build reads the items a `build-cli.sh` build made without a prompt (Google Workspace test folder, 2026-11-20). A Developer ID build is a different identity: it asks once for items a Development build or the app made.
+
+The sandboxed app can't write `/usr/local/bin`, so Settings › Agents › Command-line tool shows the command that links it there, built from the running bundle's path in single quotes, and a Copy button. The link follows the app across Sparkle updates, which replace the bundle at the same path. `jolta ai` with the local model looks for `jolta-ai` next to itself (or `JOLTA_AI_HELPER`); the bundled `jolta-ai` inherits the app's sandbox and can't start from the CLI.
 
 ## MCP
 
