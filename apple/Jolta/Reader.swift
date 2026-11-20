@@ -44,6 +44,9 @@ final class ReaderPage {
     private let navigator: Navigator
     /// The last page shown, loaded again if its web content process ends.
     private var shown: String?
+    /// Counts page loads. Each page carries its number, so an update meant
+    /// for an earlier page leaves a newer one alone.
+    private(set) var generation = 0
     private static var ruleList: WKContentRuleList?
 
     /// Built on first use: SwiftUI makes a `ReaderPage` each time a view that
@@ -188,15 +191,17 @@ final class ReaderPage {
         }
     }
 
-    /// Loads a rendered conversation; `then` runs once it has loaded, or
-    /// once the load failed or was replaced by the next one.
-    func show(html: String, then done: (@MainActor () -> Void)? = nil) {
+    /// Loads a rendered conversation; `then` runs once it has loaded (true),
+    /// or once the load failed or was replaced by the next one.
+    func show(html: String, then done: (@MainActor (Bool) -> Void)? = nil) {
         shown = html
+        generation += 1
         var page = html
         // Here rather than in the core's `appCss`: a page loads again, with
         // images, from HTML rendered before the theme last changed.
         if let head = page.range(of: "</head>") {
-            page.insert(contentsOf: "<style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>\(images.style)", at: head.lowerBound)
+            page.insert(contentsOf: "<meta name=\"jolta-page\" content=\"\(generation)\"><style id=\"jolta-theme\">\(ReaderStyle.themeCSS)</style>\(images.style)",
+                        at: head.lowerBound)
         }
         let html = page
         let navigation = webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
@@ -206,11 +211,11 @@ final class ReaderPage {
         let debug = false
         #endif
         guard debug || done != nil else { return }
-        guard let navigation else { done?(); return }
+        guard let navigation else { done?(false); return }
         var log = "html \(html.count) chars\n"
         navigator.track(navigation, event: { log += "event \($0)\n" }) { [weak self] error in
             if let error { log += "load error \(error)\n" }
-            done?()
+            done?(error == nil)
             #if DEBUG
             guard debug, let self else { return }
             let events = log
@@ -231,11 +236,12 @@ final class ReaderPage {
     /// changed are replaced and new ones added with a "New" mark, which
     /// earlier new ones lose once they have been in view. Returns the new
     /// messages whose header is not wholly in view; nil when the page can't
-    /// be updated and has to load again.
-    func update(html: String) async -> [Int64]? {
-        guard let previous = shown else { return nil }
+    /// be updated and has to load again, or `page` is no longer on screen.
+    func update(html: String, page: Int) async -> [Int64]? {
+        guard page == generation, let previous = shown else { return nil }
         shown = html
         let script = """
+        if (document.head.querySelector('meta[name="jolta-page"]')?.content !== page) return null;
         const parse = (text) => new DOMParser().parseFromString(text, "text/html");
         const fresh = parse(html);
         const key = (d) => d.querySelector(":scope > .jolta-body")?.id;
@@ -289,7 +295,7 @@ final class ReaderPage {
         if (moved) scrollBy(0, moved.closest("details.jolta-message").getBoundingClientRect().top - top);
         return added.filter((d) => d.querySelector(":scope > summary").getBoundingClientRect().bottom > innerHeight).map((d) => key(d).slice(1));
         """
-        let arguments: [String: Any] = ["html": html, "previous": previous, "images": images.css]
+        let arguments: [String: Any] = ["html": html, "previous": previous, "images": images.css, "page": String(page)]
         guard let below = await call(script, arguments: arguments) as? [String] else { return nil }
         return below.compactMap(Int64.init)
     }
@@ -801,19 +807,21 @@ struct ReaderView: View {
             opening = true
             startMessage = thread.startMessageId
         }
-        let (start, threadID) = (opening ? startMessage : nil, thread.threadId)
+        let (start, threadID, messages) = (opening ? startMessage : nil, thread.threadId, thread.messages.map(\.id))
         reader.images.allowed = allowedImages
         loads += 1
         let load = loads
         loading = true
-        reader.show(html: thread.html) {
+        reader.show(html: thread.html) { loaded in
             guard load == loads else { return }
             loading = false
-            if opening { model.conversationShown(threadID) }
+            if arriving { withAnimation(Theme.quick) { arriving = false } }
+            // A page that didn't load showed nothing to read; the next one opens.
+            guard loaded else { return }
+            if opening { model.conversationShown(threadID, messages: messages) }
             opening = false
             // A page loaded anew has lost the marks of replies still below.
             if !unseenReplies.isEmpty { reader.markNew(unseenReplies.map(\.id)) }
-            if arriving { withAnimation(Theme.quick) { arriving = false } }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
             let expanded = model.expandedMessages
@@ -827,10 +835,10 @@ struct ReaderView: View {
     /// place, so the reader keeps its place; another conversation loads.
     private func refresh() {
         guard shownThread == thread.threadId, !loading else { return render() }
-        let (html, messages, load) = (thread.html, thread.messages, loads)
+        let (html, messages, load, page) = (thread.html, thread.messages, loads, reader.generation)
         reader.images.allowed = allowedImages
         Task {
-            let update = await reader.update(html: html)
+            let update = await reader.update(html: html, page: page)
             // Another page loaded meanwhile, maybe another conversation's.
             guard load == loads else { return }
             guard let update else { return render() }
