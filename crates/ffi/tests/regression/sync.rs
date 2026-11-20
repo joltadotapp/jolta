@@ -483,6 +483,24 @@ fn new_mail_after_the_server_drops_the_connection() {
     });
 }
 
+/// Mail that reaches the inbox while IDLE is down, between the server
+/// dropping the connection and IDLE's reconnect two seconds later, comes in
+/// once IDLE is back. IDLE only reports what arrives after it starts.
+#[test]
+fn mail_that_arrives_while_idle_is_down() {
+    if !available() {
+        return;
+    }
+    let server = Mailbox::new();
+    let app = App::unstarted();
+    server.sign_in(&app);
+    wait(20, "the first sync finished", || app.events.seen("synced"));
+
+    server.drop_connections();
+    server.append("INBOX", &Mail::new("ann@test.invalid", &server.user, "In the gap", "Body."));
+    wait(20, "the new mail shows", || inbox_has(&app, "In the gap"));
+}
+
 /// Found on 2026-11-09: while every round failed, the worker waited out its
 /// backoff, up to five minutes, before trying again, so a message sent then
 /// stayed in the outbox past its undo window until Sync now.

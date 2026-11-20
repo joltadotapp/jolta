@@ -126,6 +126,37 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 			WATCHERS+=($!)
 		fi
 	fi
+	if [ "$t" = testNewReplyShowsInOpenConversation ]; then
+		# A long unread message on the local Dovecot, and a reply delivered once
+		# the journey has opened it and Jolta has marked it read.
+		server="new-reply-$(date +%s)@test.invalid"
+		if echo jolta-test | "$JOLTA" --data-dir "$dir" account add "$server" --imap-host 127.0.0.1 --imap-port 31143 \
+			--smtp-host 127.0.0.1 --smtp-port 31025 --password-stdin >/dev/null 2>&1; then
+			ref=$(sqlite3 "$dir/jolta.sqlite" "SELECT secret_ref FROM account WHERE address = '$server'")
+			security delete-generic-password -s app.jolta.mac -a "$ref" >/dev/null 2>&1
+			SECRETS+=("$ref")
+			deliver='import imaplib, sys, email.utils
+user, kind = sys.argv[1], sys.argv[2]
+if kind == "first":
+    head = "From: Ann Berg <ann@test.invalid>\r\nSubject: Spring order terms\r\nMessage-ID: <spring-1@test.invalid>\r\n"
+    body = "\r\n".join(f"Paragraph {i}: the supplier sent the updated terms for the spring order." for i in range(1, 80))
+else:
+    head = "From: Bo Nilsson <bo@test.invalid>\r\nSubject: Re: Spring order terms\r\nMessage-ID: <spring-2@test.invalid>\r\nIn-Reply-To: <spring-1@test.invalid>\r\nReferences: <spring-1@test.invalid>\r\n"
+    body = "Thanks, I will send the signed copy tomorrow."
+raw = f"{head}To: <{user}>\r\nDate: {email.utils.formatdate(localtime=True)}\r\n\r\n{body}\r\n"
+m = imaplib.IMAP4("127.0.0.1", 31143)
+m.login(user, "jolta-test")
+m.append("INBOX", "", None, raw.encode())'
+			python3 -I -c "$deliver" "$server" first
+			(
+				until [ "$(sqlite3 "$dir/jolta.sqlite" "SELECT flags & 1 FROM message WHERE subject = 'Spring order terms'" 2>/dev/null)" = 1 ]; do
+					sleep 0.5
+				done
+				python3 -I -c "$deliver" "$server" reply
+			) &
+			WATCHERS+=($!)
+		fi
+	fi
 	if [ "$t" = testWideImageFitsAndZooms ] || [ "$t" = testWideLayoutFitsTheReader ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/14-wide-screenshot.eml" "$FIXTURES/15-wide-layout.eml" >/dev/null
 	fi

@@ -361,10 +361,11 @@ final class Journeys: XCTestCase {
     /// local Dovecot (`scripts/test-servers.sh up`), and `scripts/ui-tests.sh`
     /// delivers a message there once the inbox is empty. The account's
     /// password goes in through Settings, so the Keychain item is Jolta's own.
-    func testNewMailAtInboxZeroStaysUnread() throws {
-        let app = try launch()
+    /// Enters the password of the account on the local Dovecot whose
+    /// address starts with `prefix`, so Jolta keeps its own Keychain item.
+    private func signInToDovecot(_ app: XCUIApplication, prefix: String) throws {
         app.typeKey(",", modifierFlags: .command)
-        let page = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'inbox-zero-'")).firstMatch
+        let page = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)).firstMatch
         guard page.waitForExistence(timeout: 5) else {
             throw XCTSkip("No account on the local Dovecot; start it with scripts/test-servers.sh up")
         }
@@ -378,6 +379,11 @@ final class Journeys: XCTestCase {
         app.buttons["Save"].firstMatch.click()
         XCTAssertTrue(text(app, "Saved.").waitForExistence(timeout: 15), "the server takes the password")
         app.typeKey("w", modifierFlags: .command)
+    }
+
+    func testNewMailAtInboxZeroStaysUnread() throws {
+        let app = try launch()
+        try signInToDovecot(app, prefix: "inbox-zero-")
 
         text(app, "Lunch on Friday").click()
         app.typeKey("a", modifierFlags: .command)
@@ -389,6 +395,29 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "1 unread").exists, "it stays unread")
         let body = app.webViews.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "look at the plan")).firstMatch
         XCTAssertFalse(body.exists, "the reader leaves it unopened")
+    }
+
+    /// A reply that arrives while a long conversation is open lands below
+    /// the reader's view without moving it. A pill names the sender, and
+    /// clicking it scrolls the reply into view, which takes the pill away.
+    func testNewReplyShowsInOpenConversation() throws {
+        let app = try launch()
+        try signInToDovecot(app, prefix: "new-reply-")
+        let row = text(app, "Spring order terms")
+        XCTAssertTrue(row.waitForExistence(timeout: 30), "the conversation syncs")
+        row.click()
+        let reader = app.webViews.firstMatch
+        XCTAssertTrue(reader.waitForExistence(timeout: 5), "the conversation opens")
+        XCTAssertTrue(text(app, "2 messages").waitForExistence(timeout: 60), "the reply reaches the open conversation")
+        let pill = app.buttons["reader-new-replies"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5), "a pill says a reply arrived below the view")
+        XCTAssertTrue(pill.label.hasPrefix("New reply from Bo Nilsson"), "it names the sender: \(pill.label)")
+        let first = reader.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@", "Paragraph 1:")).firstMatch
+        XCTAssertTrue(first.isHittable, "the reader stays at the top of the conversation")
+        pill.click()
+        XCTAssertTrue(pill.waitForNonExistence(timeout: 5), "the pill goes once the reply is in view")
+        let reply = reader.staticTexts.matching(NSPredicate(format: "value CONTAINS %@", "signed copy tomorrow")).firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 5) && reply.isHittable, "the reply is in view")
     }
 
     /// With Mark as read set to Never, a conversation stays unread however
