@@ -721,6 +721,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             Ok(())
         }
         CalCommand::Sync { calendar } => {
+            let _lock = crate::lock_folder(jolta)?;
             let calendars = match calendar {
                 Some(id) => vec![jolta.store.read(|c| store::calendar(c, CalendarId(id)))?],
                 None => sync::shown(jolta)?,
@@ -1022,6 +1023,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
             Ok(())
         }
         CalCommand::Rsvp { event, accept, maybe, decline: _, note, no_reply, occurrence } => {
+            let _lock = crate::lock_folder(jolta)?;
             let answer = if accept {
                 Answer::Accept
             } else if maybe {

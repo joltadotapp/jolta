@@ -815,7 +815,10 @@ fn read_password(from_stdin: bool, address: &str) -> Result<String> {
     Ok(password)
 }
 
+/// Syncs beside no engine: a slower sync could save an older delta link
+/// over the engine's newer one, or take out mail the engine just added.
 async fn sync(jolta: &Jolta, account: Option<String>, bodies: bool) -> Result<()> {
+    let _lock = lock_folder(jolta)?;
     let accounts = match account {
         Some(spec) => vec![jolta.store.read(|c| store::find_account(c, &spec))?],
         None => jolta
