@@ -202,3 +202,22 @@ fn the_app_takes_over_syncing_when_the_cli_stops() {
     drop(cli);
     assert!(app.core.start().unwrap(), "the app's engine starts once jolta watch is gone");
 }
+
+/// IMAP fetches the newest messages first, so an older reply can be stored
+/// after a newer one. The reader still shows the conversation oldest first.
+#[test]
+fn a_conversation_reads_in_date_order_whatever_order_it_arrived_in() {
+    let app = App::new();
+    let me = app.account("me@test.invalid");
+    let ask = Mail::new("Ann Berg <ann@test.invalid>", "me@test.invalid", "Autumn order", "Can you confirm the order?").at(now() - 7200);
+    let answer = Mail::reply(&ask, "Bo Nilsson <bo@test.invalid>", "Confirmed.");
+    let thanks = Mail::reply(&answer, "Cleo Dahl <cleo@test.invalid>", "Thank you both.");
+    let first = app.deliver(&me, MailboxRole::Inbox, &thanks);
+    app.deliver(&me, MailboxRole::Inbox, &ask);
+    app.deliver(&me, MailboxRole::Inbox, &answer);
+    let thread = app.thread_of(first);
+    let view = app.open(thread);
+    assert_eq!(view.messages.iter().map(|m| m.from.as_str()).collect::<Vec<_>>(), ["Ann Berg", "Bo Nilsson", "Cleo Dahl"]);
+    let (thank, confirm) = (view.html.find("Thank you both.").unwrap(), view.html.find("Confirmed.").unwrap());
+    assert!(confirm < thank, "the page shows the older reply first");
+}

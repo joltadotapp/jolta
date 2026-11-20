@@ -964,6 +964,18 @@ input[value^="a"] { background: url(http://evil.test/5) }
     }
 
     #[test]
+    fn a_sender_cannot_use_the_readers_own_classes() {
+        let raw = b"Subject: t\r\nContent-Type: text/html\r\n\r\n<div class=\"jolta-new-mark note JOLTA-quoted\">New</div>\
+            <div class=\"jolta-plain\">&gt; not plain</div><span class=\"jolta-new\">x</span>\r\n";
+        let out = render_thread(&[view(raw)], "");
+        let body = &out.html[out.html.find("id=\"m1\"").unwrap()..];
+        assert!(body.contains("<div class=\"note\">New</div>"), "other classes stay: {body}");
+        for reserved in ["jolta-new", "JOLTA-quoted", "jolta-plain\">&gt;"] {
+            assert!(!body.contains(reserved), "{reserved} is dropped: {body}");
+        }
+    }
+
+    #[test]
     fn style_cannot_close_its_tag() {
         assert!(!filter_css("a{color:red}</style><script>x</script>", "#m1").contains("</style>"));
     }

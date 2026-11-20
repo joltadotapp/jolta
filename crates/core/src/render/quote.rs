@@ -714,6 +714,43 @@ mod tests {
     }
 
     #[test]
+    fn text_written_in_a_gmail_or_yahoo_container_before_its_quote_stays_shown() {
+        let gmail = html(&format!(
+            "<div>Here they are.</div><div class=\"gmail_quote\"><div class=\"gmail_attr\">On Mon, 3 Nov 2026, Ann Example wrote:</div>\
+             <div>Note that the board moved to Monday morning.</div><blockquote class=\"gmail_quote\">{ANN}</blockquote></div>"
+        ));
+        assert_shown(&[html(ANN), gmail]);
+
+        let yahoo = html(&format!(
+            "<div>Here they are.</div><div class=\"yahoo_quoted\"><div>Note that the board moved to Monday morning.</div>\
+             <div>On Monday, November 3, 2026 at 09:12:00 CET, Ann Example wrote:</div><div><div dir=\"ltr\">{ANN}</div></div></div>"
+        ));
+        assert_shown(&[html(ANN), yahoo]);
+    }
+
+    #[test]
+    fn an_emoji_or_check_mark_typed_into_the_quote_stays_shown() {
+        for mark in ["👍", "✓", "✗"] {
+            let reply = html(&format!(
+                "<div>See below.</div><div><br><blockquote type=\"cite\"><div>Hi Bob,</div><div><br></div>\
+                 <div>Can you send me the Q3 numbers before Thursday?</div><div>{mark}</div><div>The board meets on Friday morning.</div>\
+                 <div><br></div><div>Thanks,</div><div>Ann</div></blockquote></div>"
+            ));
+            assert_shown(&[html(ANN), reply]);
+        }
+    }
+
+    #[test]
+    fn punctuation_typed_into_the_quote_still_folds() {
+        let reply = html(&format!(
+            "<div>Here they are.</div><div><br><blockquote type=\"cite\"><div>Hi Bob,</div><div>--</div><div>...</div>\
+             <div>Can you send me the Q3 numbers before Thursday? The board meets on Friday morning.</div>\
+             <div><br></div><div>Thanks,</div><div>Ann</div></blockquote></div>"
+        ));
+        assert_folds(&[html(ANN), reply], &["Here they are"], &["board meets"]);
+    }
+
+    #[test]
     fn a_forward_of_mail_outside_the_conversation_stays_shown() {
         let forward = html(
             "<div>Bob, see what Carol wrote about the numbers.</div><div id=\"appendonsend\"></div><hr style=\"display:inline-block;width:98%\">\
