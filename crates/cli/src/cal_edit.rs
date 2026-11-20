@@ -426,7 +426,7 @@ async fn submit(jolta: &Jolta, edit: Edit, send: &Send) -> Result<()> {
 
 /// Sends what is due and prints the op; with `wait`, until it is settled
 /// and the invitations it queued have left the outbox.
-async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Result<()> {
+pub(crate) async fn settle_op(jolta: &Jolta, id: CalendarOpId, wait: bool) -> Result<()> {
     loop {
         let sent = crate::cal::send_calendar_ops(jolta).await?;
         let op = jolta.store.read(|c| store::calendar_op(c, id))?;
