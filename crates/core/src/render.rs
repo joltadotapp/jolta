@@ -10,6 +10,8 @@
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use mail_parser::{MessageParser, MessagePart, PartKind};
 
@@ -493,6 +495,12 @@ fn matching_brace(s: &str, open: usize) -> Option<usize> {
 }
 
 fn sanitizer() -> ammonia::Builder<'static> {
+    sanitizer_for(None)
+}
+
+/// With a message, its image sources name it (`cid:<id>/…`,
+/// `x-remote:<id>/…`) and the counter counts its remote images.
+fn sanitizer_for(message: Option<(i64, Arc<AtomicU32>)>) -> ammonia::Builder<'static> {
     let mut b = ammonia::Builder::default();
     b.add_tags(["font", "center", "span", "div", "table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption", "col", "colgroup", "u", "s", "strike"])
         .rm_tags(["img"])
@@ -508,18 +516,30 @@ fn sanitizer() -> ammonia::Builder<'static> {
         .url_relative(ammonia::UrlRelative::Deny)
         .link_rel(Some("noopener noreferrer"))
         .strip_comments(true)
-        .attribute_filter(|element, attribute, value| match (element, attribute) {
+        .attribute_filter(move |element, attribute, value| match (element, attribute) {
             (_, "style") => {
                 let filtered = filter_declarations(value);
                 (!filtered.is_empty()).then_some(Cow::Owned(filtered))
             }
             (_, "background") => None,
             ("img", "src") => {
-                let lower = value.trim().to_ascii_lowercase();
-                if lower.starts_with("cid:") || lower.starts_with("data:image/") {
+                let value = value.trim();
+                let lower = value.to_ascii_lowercase();
+                if lower.starts_with("data:image/") {
                     Some(Cow::Borrowed(value))
+                } else if lower.starts_with("cid:") {
+                    Some(match &message {
+                        Some((id, _)) => Cow::Owned(format!("cid:{id}/{}", &value[4..])),
+                        None => Cow::Borrowed(value),
+                    })
                 } else if lower.starts_with("http://") || lower.starts_with("https://") {
-                    Some(Cow::Owned(format!("{REMOTE_SCHEME}:{}", value.trim())))
+                    Some(Cow::Owned(match &message {
+                        Some((id, remote)) => {
+                            remote.fetch_add(1, Ordering::Relaxed);
+                            format!("{REMOTE_SCHEME}:{id}/{value}")
+                        }
+                        None => format!("{REMOTE_SCHEME}:{value}"),
+                    }))
                 } else {
                     None
                 }
@@ -583,13 +603,10 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let mut css = String::new();
     let mut remote_by_message = Vec::with_capacity(messages.len());
     let mut files_message = None;
-    let clean_builder = sanitizer();
     let mut conversation = quote::Conversation::default();
     for m in messages {
-        let (clean, styles) = clean_body(m.raw, &clean_builder);
-        let mut clean = clean
-            .replace("src=\"cid:", &format!("src=\"cid:{}/", m.id))
-            .replace(&format!("src=\"{REMOTE_SCHEME}:"), &format!("src=\"{REMOTE_SCHEME}:{}/", m.id));
+        let remote = Arc::new(AtomicU32::new(0));
+        let (mut clean, styles) = clean_body(m.raw, &sanitizer_for(Some((m.id, remote.clone()))));
         if messages.len() > 1 {
             clean = conversation.fold(clean);
         }
@@ -625,7 +642,7 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
         } else {
             format!("<span class=\"jolta-clip\" title=\"{n} attachment{s}\">{CLIP}{n}</span>", n = files.len(), s = if files.len() > 1 { "s" } else { "" })
         };
-        remote_by_message.push(clean.matches(&format!("src=\"{REMOTE_SCHEME}:")).count() as u32);
+        remote_by_message.push(remote.load(Ordering::Relaxed));
         let scope = format!("#m{}", m.id);
         for s in &styles {
             css.push_str(&filter_css(s, &scope));
@@ -700,7 +717,7 @@ fn listed(raw: &[u8], clean: &str, id: i64) -> Vec<Attachment> {
 /// Writes the attachments the reader lists for a message into `dir`. A name
 /// already there gets " 2", " 3" before its extension. Returns the paths.
 pub fn save_listed(raw: &[u8], id: i64, dir: &std::path::Path) -> crate::Result<Vec<std::path::PathBuf>> {
-    let clean = clean_body(raw, &sanitizer()).0.replace("src=\"cid:", &format!("src=\"cid:{id}/"));
+    let clean = clean_body(raw, &sanitizer_for(Some((id, Default::default())))).0;
     let mut saved = Vec::new();
     for f in listed(raw, &clean, id) {
         let Some((name, _, bytes)) = attachment_bytes(raw, f.index as usize) else { continue };
