@@ -397,7 +397,7 @@ async fn main() -> Result<()> {
         Command::McpServe { socket } => {
             let t0 = Instant::now();
             let sink: jolta_core::engine::Sink = Arc::new(move |e| eprintln!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
-            let engine = jolta_core::engine::Engine::start(jolta.clone(), sink.clone(), tokio::runtime::Handle::current())?;
+            let engine = crate::start_engine(&jolta, sink.clone())?;
             eprintln!("MCP server on {}", socket.display());
             jolta_core::mcp::serve(&socket, jolta.clone(), engine, sink).await?;
             Ok(())
@@ -420,7 +420,7 @@ async fn main() -> Result<()> {
         Command::Watch => {
             let t0 = Instant::now();
             let sink: jolta_core::engine::Sink = Arc::new(move |e| println!("{:>8.2}s  {e:?}", t0.elapsed().as_secs_f64()));
-            let _engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+            let _engine = crate::start_engine(&jolta, sink)?;
             tokio::signal::ctrl_c().await?;
             Ok(())
         }
@@ -560,7 +560,7 @@ async fn send_compose(jolta: &Jolta, c: &jolta_core::compose::Compose) -> Result
     let sink: jolta_core::engine::Sink = Arc::new(move |e| {
         let _ = events.send(e);
     });
-    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+    let engine = crate::start_engine(jolta, sink)?;
     let t0 = Instant::now();
     let id = engine.send(c, None, None)?;
     println!("queued as outbox {id}: to {} cc {} subject {:?}", c.to, c.cc, c.subject);
@@ -605,7 +605,7 @@ async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, u
         return Ok(());
     }
     let sink: jolta_core::engine::Sink = Arc::new(|_| {});
-    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+    let engine = crate::start_engine(jolta, sink)?;
     let t0 = Instant::now();
     let account = jolta.store.read(|c| {
         Ok(c.query_row("SELECT account_id FROM thread WHERE id = ?1", [thread], |r| r.get::<_, jolta_core::AccountId>(0))?)
@@ -635,11 +635,20 @@ async fn act(jolta: &Jolta, action: ActionArg, thread: i64, from: Option<i64>, u
     Ok(())
 }
 
+/// Starts the sync engine. Jolta.app runs its own on the same data folder,
+/// and two would both send the outbox, so this fails while the app runs.
+fn start_engine(jolta: &Jolta, sink: jolta_core::engine::Sink) -> Result<Arc<jolta_core::engine::Engine>> {
+    match jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current()) {
+        Err(jolta_core::Error::EngineBusy) => bail!("Jolta is open and syncing this data folder. Quit Jolta, or use --no-wait where the command has it."),
+        started => Ok(started?),
+    }
+}
+
 /// Runs an action over a whole list through the engine and waits until
 /// every account has sent its queued ops.
 async fn list_action(jolta: &Jolta, action: impl FnOnce(&jolta_core::engine::Engine) -> Result<usize>) -> Result<()> {
     let sink: jolta_core::engine::Sink = Arc::new(|_| {});
-    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+    let engine = crate::start_engine(jolta, sink)?;
     let last: i64 = jolta.store.read(|c| Ok(c.query_row("SELECT coalesce(max(id), 0) FROM op", [], |r| r.get(0))?))?;
     let t0 = Instant::now();
     let ops = action(&engine)?;

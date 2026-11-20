@@ -1158,11 +1158,13 @@ impl Core {
     }
 
     /// Starts syncing every account and keeps it up to date (IDLE, queued
-    /// actions, periodic full syncs) until the app quits.
-    pub fn start(&self) -> Result<()> {
+    /// actions, periodic full syncs) until the app quits. Returns false while
+    /// another process, such as `jolta watch`, syncs this data folder; the
+    /// app then calls again later.
+    pub fn start(&self) -> Result<bool> {
         let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
         if engine.is_some() {
-            return Ok(());
+            return Ok(true);
         }
         let (order, listener) = (self.order.clone(), self.listener.clone());
         let sink: jolta_core::engine::Sink = Arc::new(move |event| {
@@ -1199,12 +1201,15 @@ impl Core {
             };
             listener.on_event(event);
         });
-        *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
-        let started = Engine::start(self.jolta.clone(), sink, self.runtime.handle().clone())?;
+        let started = match Engine::start(self.jolta.clone(), sink.clone(), self.runtime.handle().clone()) {
+            Err(jolta_core::Error::EngineBusy) => return Ok(false),
+            started => started?,
+        };
+        *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
         started.set_background(self.background.clone());
         *engine = Some(started);
         self.background.catch_up(&self.jolta);
-        Ok(())
+        Ok(true)
     }
 
     /// Applies an action to a thread right away and sends it to the server.
@@ -1949,7 +1954,7 @@ impl Core {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .ok_or_else(|| CoreError::Failed { message: "the core has not been started".into() })
+            .ok_or_else(|| CoreError::Failed { message: "Another program, such as jolta watch, is syncing this data folder. Jolta takes over when it stops.".into() })
     }
 }
 

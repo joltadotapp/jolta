@@ -350,7 +350,7 @@ final class AppModel {
         }
         reloadAccounts()
         reloadAway()
-        try core.start()
+        let syncing = try core.start()
         Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification) {
                 self?.core.checkAway()
@@ -368,7 +368,7 @@ final class AppModel {
         }
         core.setForeground(active: NSApp?.isActive ?? false)
         startNotifications()
-        startMCP()
+        if syncing { startMCP() } else { waitForEngine() }
         power.start(core: core)
         AddressBook.load(into: core)
         notifier.onOpen = { [weak self] threadID in
@@ -550,6 +550,27 @@ final class AppModel {
     /// The MCP socket lives in the app group container, where the sandboxed
     /// jolta-mcp helper can reach it. A test store serves its own socket,
     /// `jolta-<folder>.sock`, so a check never takes over the real one.
+    /// Another program, such as `jolta watch`, syncs the data folder. The
+    /// list and reader work from the store meanwhile; Jolta's own engine
+    /// starts as soon as that program ends.
+    private func waitForEngine() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard let self else { return }
+                do {
+                    guard try core.start() else { continue }
+                } catch {
+                    show(Toast(text: "Jolta couldn't start syncing: \(error)", undo: nil))
+                    return
+                }
+                core.setForeground(active: NSApp?.isActive ?? false)
+                startMCP()
+                return
+            }
+        }
+    }
+
     private func startMCP() {
         guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup) else {
             mcpStatus = "MCP is off: no app group container"

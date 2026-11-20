@@ -1207,7 +1207,7 @@ impl Outgoing {
         let sink: jolta_core::engine::Sink = std::sync::Arc::new(move |e| {
             let _ = tx.send(e);
         });
-        Ok(Outgoing { engine: jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?, events })
+        Ok(Outgoing { engine: crate::start_engine(jolta, sink)?, events })
     }
 
     /// Sends the account's outbox and waits until a mail has left.

@@ -67,7 +67,7 @@ pub struct App {
 impl App {
     pub fn new() -> App {
         let app = App::unstarted();
-        app.core.start().expect("the engine starts");
+        assert!(app.core.start().expect("the engine starts"), "no other engine runs on the folder");
         app
     }
 

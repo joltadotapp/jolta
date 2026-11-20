@@ -454,7 +454,7 @@ async fn send_mail(jolta: &Jolta, id: CalendarOpId) -> Result<()> {
         Ok(c.query_row("SELECT account_id FROM outbox WHERE id = ?1", [rows[0].0], |r| r.get(0))?)
     })?;
     let sink: jolta_core::engine::Sink = std::sync::Arc::new(|_| {});
-    let engine = jolta_core::engine::Engine::start(jolta.clone(), sink, tokio::runtime::Handle::current())?;
+    let engine = crate::start_engine(jolta, sink)?;
     let started = std::time::Instant::now();
     while !waiting(jolta)?.is_empty() {
         if started.elapsed() > std::time::Duration::from_secs(180) {

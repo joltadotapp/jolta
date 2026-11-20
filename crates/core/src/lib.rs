@@ -66,6 +66,9 @@ pub enum Error {
     Unavailable(String),
     #[error("{0}")]
     Other(String),
+    /// Another process runs the sync engine on this data folder.
+    #[error("another Jolta is syncing this data folder")]
+    EngineBusy,
 }
 
 impl Error {

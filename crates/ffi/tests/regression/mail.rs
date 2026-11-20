@@ -179,3 +179,21 @@ fn trashing_a_snoozed_thread_cancels_its_wake_up() {
     let due = app.jolta.store.read(|c| jolta_core::store::due_snoozes(c, me.id, now() + 120)).unwrap();
     assert!(due.is_empty(), "the retired snooze is not due again");
 }
+
+/// While `jolta watch` syncs the data folder, the app opens on what is
+/// stored, and its own engine starts once the command ends.
+#[test]
+fn the_app_takes_over_syncing_when_the_cli_stops() {
+    let app = App::unstarted();
+    let me = app.account("me@test.invalid");
+    app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Lunch?", "Noon at the usual place."));
+    let cli = tokio::runtime::Runtime::new().unwrap();
+    let watch = jolta_core::engine::Engine::start(app.jolta.clone(), std::sync::Arc::new(|_| {}), cli.handle().clone()).unwrap();
+
+    assert!(!app.core.start().unwrap(), "the app's engine waits while jolta watch runs");
+    assert_eq!(app.subjects("in:inbox"), ["Lunch?"], "the stored mail shows meanwhile");
+
+    drop(watch);
+    drop(cli);
+    assert!(app.core.start().unwrap(), "the app's engine starts once jolta watch is gone");
+}
