@@ -72,10 +72,16 @@ impl Conversation {
 }
 
 fn words(text: &str) -> impl Iterator<Item = u64> + '_ {
-    text.split(char::is_whitespace).filter(|w| w.chars().any(char::is_alphanumeric)).map(|w| {
+    text.split(char::is_whitespace).filter(|w| w.chars().any(shows_meaning)).map(|w| {
         let shown = w.chars().filter(|c| !matches!(c, '\u{ad}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}'));
         shown.flat_map(char::to_lowercase).fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x100_0000_01b3))
     })
+}
+
+/// A letter, a digit, or a symbol such as an emoji or a check mark: a
+/// character an answer can consist of, unlike punctuation and `>` marks.
+fn shows_meaning(c: char) -> bool {
+    c.is_alphanumeric() || !(c.is_ascii() || matches!(c, '\u{a0}'..='\u{bf}' | '\u{2000}'..='\u{206f}' | '\u{3000}'..='\u{303f}' | '\u{fe00}'..='\u{fe0f}'))
 }
 
 fn runs(words: &[u64]) -> impl Iterator<Item = u64> + '_ {
@@ -224,13 +230,7 @@ impl<'a> Body<'a> {
             .enumerate()
             .filter(|(_, e)| e.tag == "blockquote" || e.class.split_whitespace().any(|c| classes.contains(&c)))
             .filter(|(_, e)| self.holds_details(e.parent))
-            .map(|(i, e)| {
-                let header_end = match e.tag.as_str() {
-                    "blockquote" => e.inner,
-                    _ => self.elements[i + 1..].iter().take_while(|d| d.start < e.close).find(|d| d.tag == "blockquote").map_or(e.inner, |d| d.start),
-                };
-                Quote { start: self.extend_back(i, true), end: e.end, header_end }
-            })
+            .map(|(i, e)| Quote { start: self.extend_back(i, true), end: e.end, header_end: e.inner })
             .collect()
     }
 

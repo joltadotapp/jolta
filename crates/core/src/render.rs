@@ -44,20 +44,20 @@ pub struct Attachment {
 }
 
 /// The message's HTML body, or its text body converted to HTML.
-fn body_html(raw: &[u8]) -> String {
+/// A message's body as the reader shows it, sanitized, and its style
+/// blocks. Plain text skips the sanitizer, which would drop the reader's
+/// classes, as `text_to_html` escapes it all.
+fn clean_body(raw: &[u8], sanitizer: &ammonia::Builder) -> (String, Vec<String>) {
     let raw = crate::smime::readable(raw);
     let Some(msg) = MessageParser::new().parse(&raw[..]) else {
-        return text_to_html(&String::from_utf8_lossy(&raw));
+        return (text_to_html(&String::from_utf8_lossy(&raw)), Vec::new());
     };
     let root = msg.root();
-    if let Some(part) = root.html_body().next() {
-        if matches!(part.kind(), PartKind::Html) {
-            if let Some(html) = part.text() {
-                return html.into_owned();
-            }
-        }
+    if let Some(html) = root.html_body().next().filter(|p| matches!(p.kind(), PartKind::Html)).and_then(|p| p.text()) {
+        let (html, styles) = extract_styles(&html);
+        return (sanitizer.clean(&html).to_string(), styles);
     }
-    root.body_text(0).map(|t| text_to_html(&t)).unwrap_or_default()
+    (root.body_text(0).map(|t| text_to_html(&t)).unwrap_or_default(), Vec::new())
 }
 
 pub fn text_to_html(text: &str) -> String {
@@ -67,7 +67,7 @@ pub fn text_to_html(text: &str) -> String {
         if quoted {
             out.push_str("<span class=\"jolta-quote\">");
         }
-        out.push_str(&ammonia::clean_text(line));
+        out.push_str(&line.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
         if quoted {
             out.push_str("</span>");
         }
@@ -524,6 +524,11 @@ fn sanitizer() -> ammonia::Builder<'static> {
                 }
             }
             ("a", "href") if value.trim().to_ascii_lowercase().starts_with("data:") => None,
+            // The reader's own markup and scripts go by `jolta-` classes.
+            (_, "class") => {
+                let kept: Vec<&str> = value.split_whitespace().filter(|c| !c.to_ascii_lowercase().starts_with("jolta-")).collect();
+                (!kept.is_empty()).then(|| Cow::Owned(kept.join(" ")))
+            }
             _ => Some(Cow::Borrowed(value)),
         });
     b
@@ -580,8 +585,8 @@ pub fn render_thread(messages: &[MessageView], app_css: &str) -> Rendered {
     let clean_builder = sanitizer();
     let mut conversation = quote::Conversation::default();
     for m in messages {
-        let (html, styles) = extract_styles(&body_html(m.raw));
-        let mut clean = clean_builder.clean(&html).to_string().replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
+        let (clean, styles) = clean_body(m.raw, &clean_builder);
+        let mut clean = clean.replace("src=\"cid:", &format!("src=\"cid:{}/", m.id));
         if messages.len() > 1 {
             clean = conversation.fold(clean);
         }
@@ -692,7 +697,7 @@ fn listed(raw: &[u8], clean: &str, id: i64) -> Vec<Attachment> {
 /// Writes the attachments the reader lists for a message into `dir`. A name
 /// already there gets " 2", " 3" before its extension. Returns the paths.
 pub fn save_listed(raw: &[u8], id: i64, dir: &std::path::Path) -> crate::Result<Vec<std::path::PathBuf>> {
-    let clean = sanitizer().clean(&body_html(raw)).to_string().replace("src=\"cid:", &format!("src=\"cid:{id}/"));
+    let clean = clean_body(raw, &sanitizer()).0.replace("src=\"cid:", &format!("src=\"cid:{id}/"));
     let mut saved = Vec::new();
     for f in listed(raw, &clean, id) {
         let Some((name, _, bytes)) = attachment_bytes(raw, f.index as usize) else { continue };
