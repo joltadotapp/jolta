@@ -129,6 +129,9 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 	if [ "$t" = testWideImageFitsAndZooms ] || [ "$t" = testWideLayoutFitsTheReader ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/14-wide-screenshot.eml" "$FIXTURES/15-wide-layout.eml" >/dev/null
 	fi
+	if [ "$t" = testLoadedImagesStayLoaded ]; then
+		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/17-autumn-images.eml" "$FIXTURES/18-winter-images.eml" >/dev/null
+	fi
 	if [ "$t" = testWideImageInScaledMailFitsAndZooms ]; then
 		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$FIXTURES/16-wide-screenshot-wide-signature.eml" >/dev/null
 	fi

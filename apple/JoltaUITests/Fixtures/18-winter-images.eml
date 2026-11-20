@@ -1,0 +1,10 @@
+From: Outdoor Shop <deals@shop.invalid>
+To: me@test.invalid
+Subject: Winter boots
+Date: Wed, 28 Oct 2026 10:00:00 +0100
+Message-ID: <ui-18@test.invalid>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<p>Winter boots are back in stock.</p>
+<p><img src="http://127.0.0.1:9/boots.png" alt="Boots banner" width="200" height="80"></p>

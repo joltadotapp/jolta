@@ -474,6 +474,29 @@ final class Journeys: XCTestCase {
                       "both columns are in view: \(left.frame) and \(right.frame) in \(reader.frame)")
     }
 
+    /// Images the user loaded in a conversation stay loaded when they come
+    /// back to it, and another conversation from the same sender still
+    /// blocks its own.
+    func testLoadedImagesStayLoaded() throws {
+        let app = try launch()
+        let blocked = text(app, "1 remote image blocked")
+        // A list row: the reader's title has the same text.
+        let row = { (subject: String) in app.tables.firstMatch.staticTexts.matching(NSPredicate(format: "value BEGINSWITH %@", subject)).firstMatch }
+        row("Autumn catalogue").click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(blocked.waitForExistence(timeout: 10), "the reader blocks the catalogue's image")
+        app.buttons["Load Images"].firstMatch.click()
+        XCTAssertTrue(waitUntil { !blocked.exists }, "Load Images loads it")
+        row("Winter boots").click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(blocked.waitForExistence(timeout: 10), "another conversation from the same sender still blocks its image")
+        row("Autumn catalogue").click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(text(app, "Our autumn catalogue is out").waitForExistence(timeout: 10), "the reader shows the catalogue again")
+        RunLoop.current.run(until: Date() + 1)
+        XCTAssertFalse(blocked.exists, "the catalogue's image is still loaded")
+    }
+
     /// Clicks the middle of the part of `element` that `container` shows.
     private func click(visiblePartOf element: XCUIElement, in container: XCUIElement) {
         let shown = element.frame.intersection(container.frame)
