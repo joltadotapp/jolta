@@ -125,6 +125,54 @@ async fn a_waiting_edit_sends_once_the_folder_is_free() {
     assert_eq!(folder.state(op), OpState::Done, "the command waited for the folder and sent the op");
 }
 
+/// With --wait, an edit that another program claimed and then left
+/// mid-send, as when `jolta watch` stops, goes back in the queue and sends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_edit_takes_over_an_op_left_mid_send() {
+    let mut folder = Synced::new("wait-claimed");
+    let op = folder.queue_local_edit();
+    folder.jolta.store.write(|tx| Ok(tx.execute("UPDATE calendar_op SET state = 'sending' WHERE id = ?1", [op.0])?)).unwrap();
+    folder.release_after(0).join().unwrap();
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(20), crate::cal_edit::wait_for_op(&folder.jolta, op, std::time::Duration::from_secs(5))).await;
+    waited.expect("the command doesn't wait forever on an abandoned claim").expect("sent once taken over");
+    assert_eq!(folder.state(op), OpState::Done);
+}
+
+/// With --wait, an edit whose invitation the mail server refused for good
+/// fails and says so, rather than reporting it sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_edit_reports_an_invitation_that_failed() {
+    let mut folder = Synced::new("wait-failed-mail");
+    let op = folder.queue_local_edit();
+    folder.release_after(0).join().unwrap();
+    folder
+        .jolta
+        .store
+        .write(|tx| {
+            let new = store::NewAccount {
+                kind: jolta_core::AccountKind::Imap,
+                address: "me@test.invalid".into(),
+                display_name: "me".into(),
+                username: "me@test.invalid".into(),
+                imap_host: String::new(),
+                imap_port: 993,
+                smtp_host: String::new(),
+                smtp_port: 465,
+            };
+            let account = store::insert_account(tx, &new)?;
+            tx.execute(
+                "INSERT INTO outbox (account_id, blob, message_id, sender, recipients, send_after, state, error, created)
+                 VALUES (?1, 'b', '<m@test>', 'me@test.invalid', 'ann@test.invalid', 0, 'failed', '550 no such user', 0)",
+                [account.id.0],
+            )?;
+            store::set_calendar_op_outbox(tx, op, &[tx.last_insert_rowid()])?;
+            store::settle_calendar_op(tx, op, OpState::Done)
+        })
+        .unwrap();
+    let failed = crate::cal_edit::wait_for_op(&folder.jolta, op, std::time::Duration::from_secs(1)).await.expect_err("the invitation didn't go");
+    assert!(failed.to_string().contains("ann@test.invalid") && failed.to_string().contains("550 no such user"), "{failed}");
+}
+
 /// With --wait, an edit gives up on a folder that stays busy, and says the
 /// change is saved and still queued.
 #[tokio::test(flavor = "multi_thread")]
