@@ -442,14 +442,25 @@ impl Core {
             .spawn(async move { respond::answer(&jolta, &request).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        if let (Some(account), Ok(engine)) = (outcome.mailed_from, self.running_engine()) {
-            engine.wake(account);
-        }
+        let text = self.mailed(outcome.mailed_from, outcome.text);
         if let (true, Some(scheduler)) = (outcome.queued, self.scheduler()) {
             scheduler.ops_queued();
         }
         self.calendar_changed(outcome.calendar);
-        Ok(outcome.text)
+        Ok(text)
+    }
+
+    /// Sends the reply a toast says Jolta emailed. While another program
+    /// syncs the data folder, the reply waits for it, so the toast says so.
+    fn mailed(&self, from: Option<jolta_core::AccountId>, text: String) -> String {
+        match (from, self.running_engine()) {
+            (Some(account), Ok(engine)) => {
+                engine.wake(account);
+                text
+            }
+            (Some(_), Err(_)) => text.replace("Jolta emailed", "Jolta will email"),
+            (None, _) => text,
+        }
     }
 }
 
@@ -482,10 +493,7 @@ impl Core {
             .spawn(async move { proposal::decline(&jolta, jolta_core::MessageId(message_id)).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        if let (Some(account), Ok(engine)) = (done.mailed_from, self.running_engine()) {
-            engine.wake(account);
-        }
-        Ok(done.text)
+        Ok(self.mailed(done.mailed_from, done.text))
     }
 
     /// Takes the meeting a cancellation's card names out of the calendar,
