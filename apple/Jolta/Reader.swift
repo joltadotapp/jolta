@@ -777,16 +777,18 @@ struct ReaderView: View {
     @State private var findMissed = false
     @FocusState private var findFocused: Bool
 
-    private var trusted: Bool {
-        guard let trustOverride, trustOverride.sender == thread.imageSender else { return thread.imagesTrusted }
-        return trustOverride.trusted
+    /// The messages whose own sender is trusted. An image sender sent every
+    /// message with remote images, so trusting it here covers them all.
+    private var trustedImages: Set<Int64> {
+        guard let trustOverride, trustOverride.sender == thread.imageSender else { return Set(thread.trustedImageMessages) }
+        return trustOverride.trusted ? Set(thread.remoteImageMessages) : []
     }
-    private var imagesLoaded: Bool { !thread.remoteImageMessages.isEmpty && model.imagesLoaded.isSuperset(of: thread.remoteImageMessages) }
-    private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
-    /// The messages whose remote images load: all of them for a trusted
-    /// sender, else those the user loaded.
+    private var trusted: Bool { !thread.imageSender.isEmpty && !trustedImages.isEmpty }
+    private var imagesBlocked: Bool { thread.remoteImages > 0 && !allowedImages.isSuperset(of: thread.remoteImageMessages) }
+    /// The messages whose remote images load: those from a trusted sender
+    /// and those the user loaded.
     private var allowedImages: Set<Int64> {
-        trusted ? Set(thread.remoteImageMessages) : model.imagesLoaded.intersection(thread.remoteImageMessages)
+        trustedImages.union(model.imagesLoaded.intersection(thread.remoteImageMessages))
     }
 
     private func render() {
@@ -1003,7 +1005,7 @@ struct ReaderView: View {
             }
             return items
         }
-        if trusted, !thread.imageSender.isEmpty {
+        if trusted {
             return [.button("Stop Loading Images from \(thread.imageSender)") { trustSender(false) }]
         }
         return []

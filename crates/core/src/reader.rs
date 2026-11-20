@@ -29,10 +29,7 @@ pub struct ThreadDetail {
     pub subject: String,
     pub messages: Vec<ThreadMessage>,
     pub rendered: Rendered,
-    /// Who sent the remote images, when one sender sent them all.
-    pub image_sender: Option<String>,
-    /// Whether every message with remote images comes from a trusted sender.
-    pub images_trusted: bool,
+    pub images: ImageTrust,
     /// Every invitation the user can answer, oldest first. Y, M and N answer
     /// the last one whose message is expanded.
     pub invitations: Vec<OpenInvitation>,
@@ -117,7 +114,7 @@ pub fn start_message(messages: &[ThreadMessage]) -> Option<MessageId> {
 }
 
 /// Whose remote images load without the user asking.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ImageTrust {
     /// The one sender of every message with remote images, for Always Load
     /// Images. None when there are several, or one has no sender address.
@@ -134,10 +131,10 @@ pub fn image_trust(messages: &[ThreadMessage], remote: &[u32], trusted: impl Fn(
     let mut senders: Vec<&String> = with_images.iter().map(|(_, a)| a).filter(|a| !a.is_empty()).collect();
     senders.sort_unstable();
     senders.dedup();
-    let all = !senders.is_empty() && senders.iter().all(|a| trusted(a));
+    let unsigned = with_images.iter().any(|(_, a)| a.is_empty());
     ImageTrust {
-        sender: (senders.len() == 1).then(|| senders[0].clone()),
-        trusted: if all { with_images.iter().map(|(m, _)| m.id).collect() } else { Vec::new() },
+        sender: (senders.len() == 1 && !unsigned).then(|| senders[0].clone()),
+        trusted: with_images.iter().filter(|(_, a)| !a.is_empty() && trusted(a)).map(|(m, _)| m.id).collect(),
     }
 }
 
@@ -220,23 +217,27 @@ pub async fn open_thread(jolta: &Jolta, thread: ThreadId, app_css: &str, utc_off
         })
         .collect();
     let rendered = render::render_thread(&views, app_css);
-    let mut senders: Vec<String> = messages
+    let senders: std::collections::HashSet<String> = messages
         .iter()
         .zip(&rendered.remote_by_message)
         .filter(|(m, n)| **n > 0 && !m.from_addr.is_empty())
         .map(|(m, _)| m.from_addr.to_ascii_lowercase())
         .collect();
-    senders.sort_unstable();
-    senders.dedup();
-    let check = senders.clone();
-    let images_trusted = !check.is_empty()
-        && jolta
-            .store
-            .read_async(move |c| check.iter().try_fold(true, |all, a| Ok(all && store::is_sender_trusted(c, a)?)))
-            .await?;
-    let image_sender = (senders.len() == 1).then(|| senders.remove(0));
+    let trusted_senders: std::collections::HashSet<String> = jolta
+        .store
+        .read_async(move |c| {
+            let mut trusted = std::collections::HashSet::new();
+            for a in senders {
+                if store::is_sender_trusted(c, &a)? {
+                    trusted.insert(a);
+                }
+            }
+            Ok(trusted)
+        })
+        .await?;
+    let images = image_trust(&messages, &rendered.remote_by_message, |a| trusted_senders.contains(a));
     let start = start_message(&messages);
-    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, image_sender, images_trusted, invitations, proposals, start })
+    Ok(ThreadDetail { thread_id: thread, subject, messages, rendered, images, invitations, proposals, start })
 }
 
 /// The invitation cards of each message, empty for most.

@@ -121,7 +121,8 @@ pub struct ThreadView {
     pub remote_image_messages: Vec<i64>,
     /// The one sender of this conversation's remote images, or empty.
     pub image_sender: String,
-    pub images_trusted: bool,
+    /// The messages with remote images whose own sender is trusted.
+    pub trusted_image_messages: Vec<i64>,
     /// The conversation comes from a mailing list that can be left.
     pub mailing_list: bool,
     /// The last message whose attachments the reader lists, for Save all.
@@ -1128,8 +1129,8 @@ impl Core {
                 .map(|(m, _)| m.id.0)
                 .collect(),
             files_message_id: detail.rendered.files_message,
-            image_sender: detail.image_sender.unwrap_or_default(),
-            images_trusted: detail.images_trusted,
+            image_sender: detail.images.sender.unwrap_or_default(),
+            trusted_image_messages: detail.images.trusted.iter().map(|m| m.0).collect(),
             invitations: detail.invitations.into_iter().map(Into::into).collect(),
             proposals: detail.proposals.into_iter().map(Into::into).collect(),
             messages: detail
