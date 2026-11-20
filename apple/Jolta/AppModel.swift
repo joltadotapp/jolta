@@ -69,7 +69,7 @@ final class AppModel {
         didSet {
             guard mode != oldValue else { return }
             modeChanged()
-            readRepliesSoon()
+            readShownSoon()
         }
     }
     /// Today's calendar beside the mail, toggled with ⇧C.
@@ -95,7 +95,7 @@ final class AppModel {
             readerUp = false
             // The reader beside the list shows what the cursor was on.
             if !singleColumn { markShownSoon() }
-            readRepliesSoon()
+            readShownSoon()
         }
     }
     /// In one column, the conversation is over the list. Moving the cursor
@@ -250,7 +250,7 @@ final class AppModel {
             if compose != nil, mode == .calendar { mode = .mail }
             // The reader skipped calendar changes while compose covered it.
             if compose == nil, oldValue != nil { refreshOpenThread() }
-            if (compose == nil) != (oldValue == nil) { readRepliesSoon() }
+            if (compose == nil) != (oldValue == nil) { readShownSoon() }
         }
     }
     /// The AI settings, and the models that can run on this Mac.
@@ -266,17 +266,25 @@ final class AppModel {
     /// The search field has the keyboard, so ⌘J searches with AI.
     var searchFocused = false
     private(set) var aiSearching = false
-    private var markReadTask: Task<Void, Never>?
     /// Counts re-renders of the open conversation, so only the latest one
     /// shows. Opening and closing a conversation count too.
     @ObservationIgnored private var refreshes = 0
     /// The conversation whose page the reader last loaded, and the messages on it.
     @ObservationIgnored private var shownPage: (thread: Int64, messages: [Int64])?
-    /// Replies that arrived while their conversation was open and have since
-    /// come into view. They count as read once the app is active for the
-    /// mark-read delay; until then they stay unread in the list.
-    private var repliesInView: [Int64] = []
-    private var replyReadTask: Task<Void, Never>?
+    /// The open conversation's messages the reader has shown: those on the
+    /// page it opened with, and replies that arrived while it was open and
+    /// have since come into view. They count as read once the reader has
+    /// shown them, with the app active, for the mark-read delay; until then
+    /// they stay unread in the list.
+    private var shownUnread: [Int64] = []
+    private var markReadTask: Task<Void, Never>?
+    /// Replies that arrived while the conversation was open below the
+    /// reader's view, oldest first, each until it comes into view. Kept here,
+    /// so a reader built anew, as after Compose, marks them new again.
+    var unseenReplies: [ReaderMessage] = []
+    /// Where the open of the conversation on screen started, so a reader
+    /// built anew starts there too, not at a reply that arrived since.
+    @ObservationIgnored private(set) var openStart: (thread: Int64, message: Int64?)?
     /// The user archived, moved or undid something, so the list's next
     /// change may move the cursor on to the next conversation.
     @ObservationIgnored var userChangedList = false
@@ -376,7 +384,7 @@ final class AppModel {
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification) {
                 self?.core.checkAway()
                 self?.core.setForeground(active: true)
-                self?.readRepliesSoon()
+                self?.readShownSoon()
                 if let toast = self?.noticeToast {
                     self?.noticeToast = nil
                     self?.show(toast)
@@ -386,7 +394,7 @@ final class AppModel {
         Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(named: NSApplication.didResignActiveNotification) {
                 self?.core.setForeground(active: false)
-                self?.readRepliesSoon()
+                self?.readShownSoon()
             }
         }
         core.setForeground(active: NSApp?.isActive ?? false)
@@ -801,14 +809,14 @@ final class AppModel {
         guard singleColumn, !readerUp else { return }
         readerUp = true
         markShownSoon()
-        readRepliesSoon()
+        readShownSoon()
     }
 
     /// Esc in one column: back from the conversation to the list. False when the list already shows.
     func backToList() -> Bool {
         guard singleColumn, readerUp, compose == nil else { return false }
         readerUp = false
-        readRepliesSoon()
+        readShownSoon()
         return true
     }
 
@@ -1375,6 +1383,9 @@ final class AppModel {
         markReadTask?.cancel()
         refreshes += 1
         shownPage = nil
+        shownUnread = []
+        unseenReplies = []
+        openStart = nil
         selectedThreadID = nil
         selectedThreads = []
         openThread = nil
@@ -1389,25 +1400,21 @@ final class AppModel {
     /// been on screen as long as the setting asks: the messages on that page,
     /// not a reply that arrives meanwhile.
     private func markShownSoon() {
-        markReadTask?.cancel()
-        guard let delay = markRead.delay, let (threadID, messages) = shownPage, selectedThreadID == threadID,
-              !singleColumn || readerUp else { return }
-        markReadTask = Task {
-            if delay > .zero { try? await Task.sleep(for: delay) }
-            guard !Task.isCancelled, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
-            _ = try? core.markReadShown(threadId: threadID, messageIds: messages)
-        }
+        guard let (threadID, messages) = shownPage, selectedThreadID == threadID else { return }
+        shownUnread += messages.filter { !shownUnread.contains($0) }
+        readShownSoon()
     }
 
     /// The reader scrolled a reply that arrived while it was open into view.
     func replyCameIntoView(_ message: Int64) {
-        repliesInView.append(message)
-        readRepliesSoon()
+        shownUnread.append(message)
+        readShownSoon()
     }
 
-    /// The reader loaded the page of a conversation it opened, with these messages.
+    /// The reader loaded the page of a conversation it opened, with these
+    /// messages. Replies still below its view wait until they come into view.
     func conversationShown(_ threadID: Int64, messages: [Int64]) {
-        shownPage = (threadID, messages)
+        shownPage = (threadID, messages.filter { m in !unseenReplies.contains { $0.id == m } })
         markShownSoon()
     }
 
@@ -1417,18 +1424,18 @@ final class AppModel {
         mode == .mail && (!singleColumn || readerUp) && compose == nil && !isMultiSelection && openFailure == nil
     }
 
-    /// Starts the mark-read delay for the replies in view, while the app is
-    /// active and the reader shows. Leaving the app or the reader stops it;
-    /// coming back starts it again.
-    private func readRepliesSoon() {
-        replyReadTask?.cancel()
-        guard let threadID = selectedThreadID, openThread?.threadId == threadID, !repliesInView.isEmpty,
+    /// Starts the mark-read delay for the messages the reader has shown,
+    /// while the app is active and the reader shows. Leaving the app or the
+    /// reader stops it; coming back starts it again.
+    private func readShownSoon() {
+        markReadTask?.cancel()
+        guard let threadID = selectedThreadID, openThread?.threadId == threadID, !shownUnread.isEmpty,
               let delay = markRead.delay, NSApp.isActive, readerShows else { return }
-        replyReadTask = Task {
+        markReadTask = Task {
             if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled, NSApp.isActive, readerShows, selectedThreadID == threadID, openThread?.threadId == threadID else { return }
-            _ = try? core.markReadShown(threadId: threadID, messageIds: repliesInView)
-            repliesInView = []
+            _ = try? core.markReadShown(threadId: threadID, messageIds: shownUnread)
+            shownUnread = []
         }
     }
 
@@ -1438,8 +1445,9 @@ final class AppModel {
             rsvpPanel = nil
             rsvpMessage = nil
             expandedMessages = [:]
-            repliesInView = []
-            replyReadTask?.cancel()
+            shownUnread = []
+            unseenReplies = []
+            openStart = nil
             shownPage = nil
         }
         refreshes += 1
@@ -1463,6 +1471,7 @@ final class AppModel {
                     // The reader starts the mark-read delay once it loads the
                     // page of a conversation it opens; one it shows already is in view.
                     let shown = openThread?.threadId == threadID
+                    if openStart?.thread != threadID { openStart = (threadID, view.startMessageId) }
                     openThread = view
                     if shown { markShownSoon() }
                     let ms = (ContinuousClock.now - opening).components

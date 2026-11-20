@@ -774,9 +774,6 @@ struct ReaderView: View {
     /// it is in.
     @State private var opening = false
     @State private var startMessage: Int64?
-    /// Replies that arrived while open below the reader's view, oldest
-    /// first, each until it comes into view.
-    @State private var unseenReplies: [ReaderMessage] = []
     /// The find bar (⌘F), what it looks for, and whether that occurs nowhere.
     @State private var finding = false
     @State private var findText = ""
@@ -808,9 +805,8 @@ struct ReaderView: View {
             arriving = shownThread != nil && Theme.quick != nil
             shownThread = thread.threadId
             trustOverride = nil
-            unseenReplies = []
             opening = true
-            startMessage = thread.startMessageId
+            startMessage = model.openStart?.thread == thread.threadId ? model.openStart?.message : thread.startMessageId
         }
         let (start, threadID, messages) = (opening ? startMessage : nil, thread.threadId, thread.messages.map(\.id))
         reader.images.allowed = allowedImages
@@ -826,7 +822,7 @@ struct ReaderView: View {
             if opening { model.conversationShown(threadID, messages: messages) }
             opening = false
             // A page loaded anew has lost the marks of replies still below.
-            if !unseenReplies.isEmpty { reader.markNew(unseenReplies.map(\.id)) }
+            if !model.unseenReplies.isEmpty { reader.markNew(model.unseenReplies.map(\.id)) }
             // Read once the page is in, so a message expanded or collapsed
             // while it loaded stays that way.
             let expanded = model.expandedMessages
@@ -840,29 +836,29 @@ struct ReaderView: View {
     /// place, so the reader keeps its place; another conversation loads.
     private func refresh() {
         guard shownThread == thread.threadId, !loading else { return render() }
-        let (html, messages, load, page) = (thread.html, thread.messages, loads, reader.generation)
+        let (html, messages, load, page, threadID) = (thread.html, thread.messages, loads, reader.generation, thread.threadId)
         reader.images.allowed = allowedImages
         Task {
             let update = await reader.update(html: html, page: page)
             // Another page loaded meanwhile, maybe another conversation's.
-            guard load == loads else { return }
+            guard load == loads, model.openThread?.threadId == threadID else { return }
             guard let update else { return render() }
-            let below = messages.filter { m in update.contains(m.id) && !unseenReplies.contains { $0.id == m.id } }
-            withAnimation(Theme.quick) { unseenReplies += below }
+            let below = messages.filter { m in update.contains(m.id) && !model.unseenReplies.contains { $0.id == m.id } }
+            withAnimation(Theme.quick) { model.unseenReplies += below }
             if model.answerChoices != AnswerChoices() || model.pendingAnswer != nil { reflect() }
         }
     }
 
     /// A reply that arrived while open came into view.
     private func seen(_ message: Int64) {
-        withAnimation(Theme.quick) { unseenReplies.removeAll { $0.id == message } }
+        withAnimation(Theme.quick) { model.unseenReplies.removeAll { $0.id == message } }
         model.replyCameIntoView(message)
     }
 
     /// Over the reader's foot while replies that arrived are below its view.
     @ViewBuilder private var newRepliesPill: some View {
-        if let first = unseenReplies.first {
-            let title = unseenReplies.count == 1 ? "New reply from \(first.from)" : "\(unseenReplies.count) new replies"
+        if let first = model.unseenReplies.first {
+            let title = model.unseenReplies.count == 1 ? "New reply from \(first.from)" : "\(model.unseenReplies.count) new replies"
             Button {
                 reader.reveal(message: first.id, smooth: Theme.quick != nil)
             } label: {

@@ -129,7 +129,7 @@ m.append("INBOX", "", None, open(sys.argv[3], "rb").read())' "$server" jolta-tes
 	if [ "$t" = testNewReplyShowsInOpenConversation ] || [ "$t" = testNewReplyStaysUnreadAfterCompose ]; then
 		# A long unread message on the local Dovecot, and a reply delivered once
 		# the journey has opened it and Jolta has marked it read.
-		server="new-reply-$(date +%s)@test.invalid"
+		server="new-reply-$(date +%s)-$t@test.invalid"
 		if echo jolta-test | "$JOLTA" --data-dir "$dir" account add "$server" --imap-host 127.0.0.1 --imap-port 31143 \
 			--smtp-host 127.0.0.1 --smtp-port 31025 --password-stdin >/dev/null 2>&1; then
 			ref=$(sqlite3 "$dir/jolta.sqlite" "SELECT secret_ref FROM account WHERE address = '$server'")
