@@ -211,6 +211,8 @@ final class AppModel {
     /// Messages of the open conversation the user expanded (true) or
     /// collapsed, as the reader reports them.
     var expandedMessages: [Int64: Bool] = [:]
+    /// Messages whose remote images the user loaded, until Jolta quits.
+    var imagesLoaded: Set<Int64> = []
     var selectedThreadID: Int64?
     /// Threads selected in the list, in list order. With more than one,
     /// actions apply to all of them and the reader shows how many.

@@ -605,7 +605,6 @@ struct ReaderView: View {
     var onSaveAll: (Int64) -> Void = { _ in }
     var onUnsubscribe: () -> Void = {}
     @State private var reader = ReaderPage()
-    @State private var imagesLoaded = false
     /// Set when the user trusts or stops trusting the sender in this view.
     @State private var trustOverride: Bool?
     @State private var shownThread: Int64?
@@ -618,6 +617,7 @@ struct ReaderView: View {
     @FocusState private var findFocused: Bool
 
     private var trusted: Bool { trustOverride ?? thread.imagesTrusted }
+    private var imagesLoaded: Bool { !thread.remoteImageMessages.isEmpty && model.imagesLoaded.isSuperset(of: thread.remoteImageMessages) }
     private var imagesBlocked: Bool { thread.remoteImages > 0 && !imagesLoaded && !trusted }
 
     private func render() {
@@ -625,7 +625,6 @@ struct ReaderView: View {
             // Not the first one, which comes with the reader itself, and not under Reduce Motion.
             arriving = shownThread != nil && Theme.quick != nil
             shownThread = thread.threadId
-            imagesLoaded = false
             trustOverride = nil
         }
         reader.images.allowsRemote = imagesLoaded || trusted
@@ -777,7 +776,7 @@ struct ReaderView: View {
     }
 
     private func loadImages() {
-        imagesLoaded = true
+        model.imagesLoaded.formUnion(thread.remoteImageMessages)
         render()
     }
 
@@ -785,7 +784,11 @@ struct ReaderView: View {
         guard !thread.imageSender.isEmpty else { return }
         try? core.setSenderTrusted(address: thread.imageSender, trusted: trust)
         trustOverride = trust
-        imagesLoaded = trust
+        if trust {
+            model.imagesLoaded.formUnion(thread.remoteImageMessages)
+        } else {
+            model.imagesLoaded.subtract(thread.remoteImageMessages)
+        }
         render()
     }
 
