@@ -1208,7 +1208,10 @@ impl Core {
         *self.engine_sink.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
         started.set_background(self.background.clone());
         *engine = Some(started);
+        drop(engine);
         self.background.catch_up(&self.jolta);
+        // Another program may have synced while this engine waited.
+        self.changed();
         Ok(true)
     }
 
@@ -1450,12 +1453,24 @@ impl Core {
         Ok(self.running_engine()?.cancel_send(token)?.map(Into::into))
     }
 
+    /// Works while another program syncs the data folder: the draft is
+    /// stored, and whichever engine runs uploads it.
     pub fn save_draft(&self, compose: ComposeData) -> Result<i64> {
-        Ok(self.running_engine()?.save_draft(&compose.into())?)
+        let compose = compose.into();
+        match self.running_engine() {
+            Ok(engine) => Ok(engine.save_draft(&compose)?),
+            Err(_) => Ok(self.jolta.store.write(|tx| store::save_draft(tx, &compose))?),
+        }
     }
 
     pub fn discard_draft(&self, draft_id: i64) -> Result<()> {
-        Ok(self.running_engine()?.discard_draft(draft_id)?)
+        match self.running_engine() {
+            Ok(engine) => Ok(engine.discard_draft(draft_id)?),
+            Err(_) => Ok(self.jolta.store.write(|tx| {
+                store::discard_draft(tx, draft_id)?;
+                jolta_core::calendar::holds::act::discarded(tx, draft_id)
+            })?),
+        }
     }
 
     /// The draft a conversation holds in Drafts, to edit in compose. Saving

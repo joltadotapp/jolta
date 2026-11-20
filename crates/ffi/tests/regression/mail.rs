@@ -192,6 +192,11 @@ fn the_app_takes_over_syncing_when_the_cli_stops() {
 
     assert!(!app.core.start().unwrap(), "the app's engine waits while jolta watch runs");
     assert_eq!(app.subjects("in:inbox"), ["Lunch?"], "the stored mail shows meanwhile");
+    let mut draft = app.core.new_compose(None).unwrap();
+    draft.subject = "Half-written".into();
+    draft.body = "Closing compose keeps this.".into();
+    let id = app.core.save_draft(draft).expect("closing compose saves the draft meanwhile");
+    assert_eq!(app.core.draft(id).unwrap().expect("the draft is stored").subject, "Half-written");
 
     drop(watch);
     drop(cli);

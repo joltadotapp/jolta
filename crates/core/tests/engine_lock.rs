@@ -16,7 +16,7 @@ fn a_second_engine_waits_until_the_first_is_gone() {
 
     let (app, other) = (tokio::runtime::Runtime::new().unwrap(), tokio::runtime::Runtime::new().unwrap());
     let first = start(&app).expect("the first engine starts");
-    assert!(start(&other).is_err(), "a second engine must not start on the same data folder while the first runs");
+    assert!(matches!(start(&other), Err(jolta_core::Error::EngineBusy)), "a second engine must not start on the same data folder while the first runs");
 
     drop(first);
     drop(app);

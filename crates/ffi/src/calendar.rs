@@ -442,8 +442,8 @@ impl Core {
             .spawn(async move { respond::answer(&jolta, &request).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        if let Some(account) = outcome.mailed_from {
-            self.running_engine()?.wake(account);
+        if let (Some(account), Ok(engine)) = (outcome.mailed_from, self.running_engine()) {
+            engine.wake(account);
         }
         if let (true, Some(scheduler)) = (outcome.queued, self.scheduler()) {
             scheduler.ops_queued();
@@ -482,8 +482,8 @@ impl Core {
             .spawn(async move { proposal::decline(&jolta, jolta_core::MessageId(message_id)).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
-        if let Some(account) = done.mailed_from {
-            self.running_engine()?.wake(account);
+        if let (Some(account), Ok(engine)) = (done.mailed_from, self.running_engine()) {
+            engine.wake(account);
         }
         Ok(done.text)
     }
