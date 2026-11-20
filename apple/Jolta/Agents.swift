@@ -137,36 +137,45 @@ private struct CommandLineToolRow: View {
     let command: String
     @State private var copied = false
 
+    /// macOS runs a quarantined app from a temporary copy; a link to it would break.
+    private var translocated: Bool { command.contains("/AppTranslocation/") }
+
     var body: some View {
         SettingsBlock {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 20) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Command-line tool").font(.system(size: 13, weight: .medium))
-                        Text(command.contains("/AppTranslocation/")
-                             ? "Move Jolta to Applications first, then come back here."
-                             : "Run this in Terminal to use jolta there. Agents with shell access can use it too.")
+                        Text(translocated
+                             ? "Quit Jolta, move it to Applications and open it again to set this up."
+                             : "Run this in Terminal to use jolta there. Anything that runs it, agents included, has your full access: agent permissions, the pause switch and Activity don't apply.")
                             .font(.system(size: 12))
                             .foregroundStyle(Color(Theme.text3))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 12)
-                    Button(copied ? "Copied" : "Copy") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(command, forType: .string)
-                        copied = true
+                    if !translocated {
+                        Button(copied ? "Copied" : "Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(command, forType: .string)
+                            copied = true
+                        }
                     }
                 }
-                Text(command)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Color(Theme.text2))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
+                if !translocated { commandText }
             }
         }
+    }
+
+    private var commandText: some View {
+        Text(command)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(Color(Theme.text2))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(Theme.bg)))
     }
 }
 
