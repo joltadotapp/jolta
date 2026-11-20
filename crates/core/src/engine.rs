@@ -107,10 +107,16 @@ pub struct Engine {
     calendars: Arc<Scheduler>,
     notices: Arc<Notices>,
     background: Mutex<Option<Arc<Background>>>,
-    _lock: Arc<crate::FolderLock>,
+    lock: Arc<crate::FolderLock>,
 }
 
 impl Engine {
+    /// The data folder's lock this engine holds: proof for a write to a
+    /// provider that the program which syncs the folder makes it.
+    pub fn folder(&self) -> Arc<crate::FolderLock> {
+        self.lock.clone()
+    }
+
     /// Starts a worker and an IDLE task for every account that has a server.
     /// Fails with `EngineBusy` while another process holds the data folder.
     pub fn start(jolta: Jolta, sink: Sink, runtime: tokio::runtime::Handle) -> Result<Arc<Engine>> {
@@ -138,7 +144,7 @@ impl Engine {
             calendars,
             notices,
             background: Mutex::new(None),
-            _lock: lock,
+            lock,
         });
         let weak = Arc::downgrade(&engine);
         engine.calendars.on_mail(Box::new(move |account| {

@@ -371,6 +371,41 @@ fn an_invitation_answered_while_another_program_syncs() {
     assert_eq!(app.count("SELECT count(*) FROM outbox"), 1, "the reply waits in the outbox");
 }
 
+/// While `jolta watch` syncs the data folder, the app writes nothing to a
+/// calendar provider beside it: changes to an added copy, turning calendar
+/// on and out of office say so, and a new feed waits for watch's next round
+/// for its first download.
+#[test]
+fn calendar_writes_wait_while_another_program_syncs() {
+    let app = App::unstarted();
+    let me = app.account("me@test.invalid");
+    let day = next_monday(tz::here());
+    let invite = app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Invitation: Review", "Join us.").attach("invite.ics", &invitation("review@test.invalid", "ann@test.invalid", day, "REQUEST", 0)));
+    let cancel = app.deliver(&me, MailboxRole::Inbox, &Mail::new("ann@test.invalid", "me@test.invalid", "Cancelled: Review", "Off.").attach("invite.ics", &invitation("review@test.invalid", "ann@test.invalid", day, "CANCEL", 1)));
+    let server = Feed::serve(feed(day, "Standup"));
+    let cli = tokio::runtime::Runtime::new().unwrap();
+    let _watch = jolta_core::engine::Engine::start(app.jolta.clone(), Arc::new(|_| {}), cli.handle().clone()).unwrap();
+    assert!(!app.core.start().unwrap(), "the app's engine waits while jolta watch runs");
+
+    let busy = |what: &str, result: Result<String, jolta_ffi::CoreError>| {
+        let err = result.expect_err(what).to_string();
+        assert!(err.contains("Another program, such as jolta watch, is syncing this data folder."), "{what}: {err}");
+    };
+    busy("add to calendar", block_on(app.core.add_to_calendar(invite.0, None)));
+    busy("update the added copy", block_on(app.core.update_added_copy(invite.0)));
+    busy("remove from calendar", block_on(app.core.remove_cancelled(cancel.0)));
+    busy("end out of office", block_on(app.core.end_away(vec![me.id.0])));
+    let draft = app.core.away_draft(None).unwrap();
+    busy("set out of office", block_on(app.core.set_away(draft)));
+    let on = block_on(app.core.set_calendar_enabled(me.id.0, true)).map(|_| String::new());
+    busy("turn calendar on", on);
+    let consent = block_on(app.core.begin_calendar_consent(me.id.0)).map(|_| String::new());
+    busy("calendar consent", consent);
+
+    let info = block_on(app.core.subscribe_calendar(server.url.clone())).unwrap();
+    assert_eq!((info.events, info.sync_error.as_deref()), (0, None), "subscribed; the first download waits for watch");
+}
+
 /// An invitation part for `uid` from `organizer` to the test account, on
 /// `day` from 14:00 to 15:00 UTC.
 fn invitation(uid: &str, organizer: &str, day: NaiveDate, method: &str, sequence: u32) -> String {

@@ -140,12 +140,12 @@ struct Resolved {
 /// answer again, said the same way, tells the organizer nothing new: a
 /// reply still waiting goes now, and one sent stays the only one. Any
 /// other answer takes back a reply still waiting.
-pub async fn answer(jolta: &Jolta, req: &Request) -> Result<Outcome> {
-    answer_at(jolta, req, Utc::now()).await
+pub async fn answer(jolta: &Jolta, folder: Option<&crate::FolderLock>, req: &Request) -> Result<Outcome> {
+    answer_at(jolta, folder, req, Utc::now()).await
 }
 
 /// `answer` as at `now`, which picks the occurrence a series' card shows.
-async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<Outcome> {
+async fn answer_at(jolta: &Jolta, folder: Option<&crate::FolderLock>, req: &Request, now: DateTime<Utc>) -> Result<Outcome> {
     let here = tz::here();
     let proposing = req.proposal.is_some();
     if proposing && req.answer == Answer::Accept {
@@ -202,7 +202,7 @@ async fn answer_at(jolta: &Jolta, req: &Request, now: DateTime<Utc>) -> Result<O
             queued = jolta.store.read_async(move |c| store::answer_waiting(c, calendar, &uid, false)).await?;
         } else {
             let scope = rid.map_or(Scope::Series, Scope::Occurrence);
-            queued = rsvp::answer_or_queue(jolta, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
+            queued = rsvp::answer_or_queue(jolta, folder, &Rsvp { event: copy.event, answer: req.answer, note: req.note.clone(), notify, scope, proposal: req.proposal }).await?;
         }
     }
 
@@ -553,7 +553,7 @@ pub(crate) mod tests {
     }
 
     fn run(j: &Jolta, req: Request) -> Result<Outcome> {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(answer_at(j, &req, now()))
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(answer_at(j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &req, now()))
     }
 
     /// (sender, recipients, seconds until it goes, raw) of each queued mail.
@@ -1264,7 +1264,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let friday = || proposing(message, Answer::Maybe, "2026-11-13 15:00", "2026-11-13 15:45");
-        let done = answer_at(&j, &friday(), now()).await.unwrap();
+        let done = answer_at(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &friday(), now()).await.unwrap();
         assert_eq!((done.mailed_from, done.calendar), (Some(AccountId(1)), Some(calendar)), "{}", done.text);
         assert!(done.text.ends_with(" with a maybe. Jolta emailed Ann."), "{}", done.text);
         let mailed = outbox(&j);
@@ -1277,7 +1277,7 @@ pub(crate) mod tests {
         assert_eq!(copy.event.my_response(), Some(Response::Tentative), "the copy follows the answer");
         assert_eq!(copy.event.span, sent.event.span, "the proposal doesn't move the copy");
 
-        answer_at(&j, &friday(), now()).await.unwrap();
+        answer_at(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &friday(), now()).await.unwrap();
         assert_eq!(outbox(&j).len(), 1, "the same proposal again is no second mail");
         assert_eq!(server.await.unwrap(), ["PUT /cal/copy.ics If-Match \"1\"", "PUT /cal/copy.ics If-Match \"2\""], "each time quietly, over the version Jolta holds");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
@@ -1311,7 +1311,7 @@ pub(crate) mod tests {
         j.store.write(|tx| store::apply_item(tx, calendar, "invite.ics", Some("\"1\""), &[sent.event.clone()], Some(&blob), &series::Horizon::around(now(), tz::here())).map(|_| ())).unwrap();
         let ops_of = |j: &Jolta| j.store.read(|c| store::calendar_ops(c, 10)).unwrap();
 
-        let done = answer_at(&j, &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
+        let done = answer_at(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
         assert!(done.queued, "{}", done.text);
         assert_eq!(done.text, "Accepted. Jolta emailed Ann. It reaches your calendar as soon as Jolta reaches it.");
         assert_eq!(outbox(&j).len(), 1, "the reply mail waits in the outbox as ever");
@@ -1323,7 +1323,7 @@ pub(crate) mod tests {
         assert!(marked, "not synced yet");
         assert_eq!(card_answer(&j, message, raw), Some(Response::Accepted));
 
-        let again = answer_at(&j, &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
+        let again = answer_at(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &request(message, Answer::Accept, None, true, false), now()).await.unwrap();
         assert!(again.queued, "the same answer again says it still waits: {}", again.text);
         assert_eq!((ops_of(&j).len(), outbox(&j).len()), (1, 1), "one op, one mail");
 
@@ -1369,11 +1369,82 @@ pub(crate) mod tests {
             })
             .unwrap();
         for answer in [Answer::Accept, Answer::Decline] {
-            assert!(answer_at(&j, &request(message, answer, None, true, false), now()).await.unwrap().queued);
+            assert!(answer_at(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &request(message, answer, None, true, false), now()).await.unwrap().queued);
         }
         let ops = j.store.read(|c| store::calendar_ops(c, 10)).unwrap();
         let answers: Vec<Option<Answer>> = ops.iter().map(|o| match &o.write { crate::calendar::ops::Write::Answer { answered, .. } => Some(answered.answer), _ => None }).collect();
         assert_eq!(answers, [Some(Answer::Decline)], "the decline alone waits");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// Answered without the data folder's lock, while another program syncs
+    /// the folder, the answer waits in the calendar ops for that program
+    /// and never reaches the server from here, though the server answers.
+    #[tokio::test]
+    async fn an_answer_given_beside_another_program_waits_for_it() {
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta("respond-beside");
+        let raw = mail!("google-request.eml");
+        let message = import(&j, raw);
+        let sent = invitation::find(raw, &[crate::calendar::invitation::tests::ME.to_string()]).remove(0);
+        let blob = j.blobs.put(invitation::calendar_text(raw, &sent.event.uid).unwrap().as_bytes()).unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let port = server.local_addr().unwrap().port();
+        j.store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, format!("http://127.0.0.1:{port}/cal/")])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&format!("http://127.0.0.1:{port}/")))?;
+                store::apply_item(tx, calendar, "invite.ics", Some("\"1\""), &[sent.event.clone()], Some(&blob), &series::Horizon::around(now(), tz::here())).map(|_| ())
+            })
+            .unwrap();
+        let _watch = crate::FolderLock::take(&j.data_dir).unwrap();
+
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), answer_at(&j, None, &request(message, Answer::Accept, None, true, false), now())).await;
+        let done = answered.expect("the answer doesn't wait on the server").unwrap();
+        assert!(done.queued, "{}", done.text);
+        assert_eq!(done.text, "Accepted. Jolta emailed Ann. It reaches your calendar as soon as Jolta reaches it.");
+        assert_eq!(waiting(&j), [(None, Answer::Accept)], "queued for the program that syncs");
+        assert_eq!(server.accept().map(|_| ()).unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "nothing reached the server");
+        std::fs::remove_dir_all(&j.data_dir).unwrap();
+    }
+
+    /// A copy the user added elsewhere follows an answer only from the
+    /// program that syncs the folder; beside it, the toast says the copy
+    /// stayed as it was.
+    #[tokio::test]
+    async fn an_added_copy_stays_while_another_program_syncs() {
+        crate::secrets::use_memory_store();
+        crate::secrets::set_password("a1", "pw").unwrap();
+        let (j, calendar) = jolta("respond-added-beside");
+        let raw = mail!("google-request.eml");
+        let message = import(&j, raw);
+        let sent = invitation::find(raw, &[crate::calendar::invitation::tests::ME.to_string()]).remove(0);
+        let uid = sent.event.uid.clone();
+        let blob = j.blobs.put(invitation::calendar_text(raw, &uid).unwrap().as_bytes()).unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let port = server.local_addr().unwrap().port();
+        let added = store::AddedCopy { calendar_id: calendar, remote_id: "copy.ics".into(), organizer: "ann@example.com".into(), written: Vec::new() };
+        j.store
+            .write(|tx| {
+                tx.execute("UPDATE calendar SET remote_id = ?2 WHERE id = ?1", rusqlite::params![calendar, format!("http://127.0.0.1:{port}/cal/")])?;
+                store::set_caldav_url(tx, AccountId(1), Some(&format!("http://127.0.0.1:{port}/")))?;
+                store::apply_item(tx, calendar, "copy.ics", Some("\"1\""), &[sent.event.clone()], Some(&blob), &series::Horizon::around(now(), tz::here()))?;
+                store::remember_added(tx, AccountId(1), &uid, &added)
+            })
+            .unwrap();
+        let _watch = crate::FolderLock::take(&j.data_dir).unwrap();
+
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), answer_at(&j, None, &request(message, Answer::Accept, None, true, false), now())).await;
+        let done = answered.expect("the answer doesn't wait on the server").unwrap();
+        assert_eq!(
+            done.text,
+            "Accepted. Jolta emailed Ann. The copy in your calendar didn't change: another program, such as jolta watch, is syncing this data folder."
+        );
+        assert_eq!(outbox(&j).len(), 1, "the reply mail waits in the outbox as ever");
+        assert_eq!(server.accept().map(|_| ()).unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "nothing reached the server");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }
 
@@ -1423,7 +1494,7 @@ pub(crate) mod tests {
         let (j, _, rows) = offline_copy("respond-offline-alone", &ics);
         let second = rows.iter().find(|(rid, _)| rid.contains("1119")).unwrap().1;
         let rsvp = Rsvp { event: second, answer: Answer::Accept, note: None, notify: true, scope: Scope::Series, proposal: None };
-        assert!(rsvp::answer_or_queue(&j, &rsvp).await.unwrap());
+        assert!(rsvp::answer_or_queue(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &rsvp).await.unwrap());
         let queued = waiting(&j);
         assert!(queued.len() == 1 && queued[0].0.as_deref().is_some_and(|r| r.contains("1119")), "{queued:?}");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
@@ -1438,9 +1509,9 @@ pub(crate) mod tests {
         let master = rows[0].1;
         let at = |s: &str| Moment::Time(crate::calendar::Local { wall: chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap(), zone: crate::calendar::Zone::Tz(chrono_tz::UTC) });
         let one = Rsvp { event: master, answer: Answer::Decline, note: None, notify: true, scope: Scope::Occurrence(at("2026-11-19 10:00")), proposal: None };
-        assert!(rsvp::answer_or_queue(&j, &one).await.unwrap());
+        assert!(rsvp::answer_or_queue(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &one).await.unwrap());
         let all = Rsvp { scope: Scope::Series, answer: Answer::Accept, ..one };
-        assert!(rsvp::answer_or_queue(&j, &all).await.unwrap());
+        assert!(rsvp::answer_or_queue(&j, Some(&crate::FolderLock::take(&j.data_dir).unwrap()), &all).await.unwrap());
         assert_eq!(waiting(&j), [(None, Answer::Accept)], "the series answer alone");
         std::fs::remove_dir_all(&j.data_dir).unwrap();
     }

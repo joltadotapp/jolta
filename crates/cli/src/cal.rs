@@ -925,7 +925,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 proposal: None,
             };
             let t = Instant::now();
-            let done = respond::answer(jolta, &request).await?;
+            let done = respond::answer(jolta, Some(&engine.engine.folder()), &request).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
             if done.queued {
                 println!("Queued in the calendar ops; `jolta cal ops --send` sends it once the server can be reached.");
@@ -971,7 +971,7 @@ pub async fn run(jolta: &Jolta, cmd: CalCommand) -> Result<()> {
                 proposal: Some(rsvp::Proposal { start, end }),
             };
             let t = Instant::now();
-            let done = respond::answer(jolta, &request).await?;
+            let done = respond::answer(jolta, Some(&engine.engine.folder()), &request).await?;
             println!("{} ({:.2} s)", done.text, t.elapsed().as_secs_f64());
             match done.mailed_from {
                 Some(account) => engine.send(account, t).await,

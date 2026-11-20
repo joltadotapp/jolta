@@ -437,9 +437,11 @@ impl Core {
         let note = Some(options.note.trim().to_string()).filter(|n| !n.is_empty());
         let request = respond::Request { subject, answer: answer.into(), note, notify: options.notify, occurrence_only: options.occurrence_only, proposal };
         let jolta = self.jolta.clone();
+        // Without the engine another program syncs the folder: the answer is queued for it.
+        let folder = self.running_engine().ok().map(|e| e.folder());
         let outcome = self
             .runtime
-            .spawn(async move { respond::answer(&jolta, &request).await })
+            .spawn(async move { respond::answer(&jolta, folder.as_deref(), &request).await })
             .await
             .map_err(|e| CoreError::Failed { message: e.to_string() })??;
         let text = self.mailed(outcome.mailed_from, outcome.text);

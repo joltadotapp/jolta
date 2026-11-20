@@ -141,7 +141,7 @@ pub async fn answer(jolta: &Jolta, rsvp: &Rsvp) -> Result<()> {
 /// the copy still waits to be sent: then the answer is kept in the store
 /// and queued behind it, to go through the provider once (`ops::queue_answer`).
 /// True when it was queued.
-pub async fn answer_or_queue(jolta: &Jolta, rsvp: &Rsvp) -> Result<bool> {
+pub async fn answer_or_queue(jolta: &Jolta, _folder: Option<&crate::FolderLock>, rsvp: &Rsvp) -> Result<bool> {
     let event = rsvp.event;
     let waits = jolta
         .store
