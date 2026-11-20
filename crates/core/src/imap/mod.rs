@@ -852,11 +852,21 @@ pub async fn apply_op(jolta: &Jolta, session: &mut Session, caps: Caps, op: &sto
 pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
     let mut session = connect_to(account, &Endpoint { answer_within: None, ..Endpoint::imap(account) }).await?;
     session.examine("INBOX").await?;
+    // async-imap sends what the server reports while IDLE starts and ends to
+    // this channel rather than to `wait`.
+    let unsolicited = session.unsolicited_responses.clone();
+    let reported = || {
+        let mut any = false;
+        while unsolicited.try_recv().is_ok() {
+            any = true;
+        }
+        any
+    };
     let mut caught_up = false;
     loop {
         let mut handle = session.idle();
         handle.init().await?;
-        if !caught_up {
+        if reported() || !caught_up {
             changed();
             caught_up = true;
         }
@@ -864,13 +874,7 @@ pub async fn idle_inbox(account: &Account, changed: impl Fn()) -> Result<()> {
         let response = wait.await?;
         drop(stop);
         session = handle.done().await?;
-        // async-imap sends what the server reports while IDLE starts and
-        // ends to this channel rather than to `wait`.
-        let mut reported = false;
-        while session.unsolicited_responses.try_recv().is_ok() {
-            reported = true;
-        }
-        if reported || matches!(response, async_imap::extensions::idle::IdleResponse::NewData(_)) {
+        if reported() || matches!(response, async_imap::extensions::idle::IdleResponse::NewData(_)) {
             changed();
         }
     }
