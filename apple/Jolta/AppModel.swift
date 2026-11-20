@@ -164,6 +164,9 @@ final class AppModel {
     private(set) var listRevision = 0
     private(set) var syncing: Set<Int64> = []
     private(set) var lastSynced: Date?
+    /// Another program, such as `jolta watch`, syncs the data folder, so the
+    /// lists show what was stored until Jolta takes over.
+    private(set) var waitingForEngine = false
     private(set) var lastError: String?
     /// Each account's last sync failure, until that account syncs again.
     private(set) var syncErrors: [Int64: String] = [:]
@@ -547,13 +550,11 @@ final class AppModel {
 
     static let appGroup = "RWQLHW7V7V.app.jolta"
 
-    /// The MCP socket lives in the app group container, where the sandboxed
-    /// jolta-mcp helper can reach it. A test store serves its own socket,
-    /// `jolta-<folder>.sock`, so a check never takes over the real one.
     /// Another program, such as `jolta watch`, syncs the data folder. The
     /// list and reader work from the store meanwhile; Jolta's own engine
     /// starts as soon as that program ends.
     private func waitForEngine() {
+        waitingForEngine = true
         Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
@@ -564,6 +565,7 @@ final class AppModel {
                     show(Toast(text: "Jolta couldn't start syncing: \(error)", undo: nil))
                     return
                 }
+                waitingForEngine = false
                 core.setForeground(active: NSApp?.isActive ?? false)
                 startMCP()
                 return
@@ -571,6 +573,9 @@ final class AppModel {
         }
     }
 
+    /// The MCP socket lives in the app group container, where the sandboxed
+    /// jolta-mcp helper can reach it. A test store serves its own socket,
+    /// `jolta-<folder>.sock`, so a check never takes over the real one.
     private func startMCP() {
         guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup) else {
             mcpStatus = "MCP is off: no app group container"
@@ -1175,9 +1180,13 @@ final class AppModel {
     func editScheduled(_ message: ScheduledInfo) {
         // Replacing an open message would lose it, or its schedule.
         if compose != nil { closeCompose() }
-        guard let back = try? core.cancelSend(token: message.token) else {
-            return show(Toast(text: "Already sent", undo: nil))
+        let back: ComposeData?
+        do {
+            back = try core.cancelSend(token: message.token)
+        } catch {
+            return show(Toast(text: "\(error)", undo: nil))
         }
+        guard let back else { return show(Toast(text: "Already sent", undo: nil)) }
         openCompose(back)
         composeSchedule = Reminder(at: message.sendAt, label: PaletteView.when(message.sendAt))
         reloadAccounts()

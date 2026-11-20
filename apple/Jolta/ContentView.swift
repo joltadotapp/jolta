@@ -554,6 +554,7 @@ struct SyncFooter: View {
     let model: AppModel
 
     private var status: String {
+        if model.waitingForEngine { return "Another program is syncing. Jolta takes over when it stops." }
         if !model.syncing.isEmpty { return "Syncing…" }
         if let date = model.lastSynced { return "All accounts synced, \(date.formatted(date: .omitted, time: .shortened))" }
         return model.accounts.isEmpty ? "No accounts yet" : "Up to date"
@@ -595,6 +596,7 @@ struct SyncFooter: View {
                     Circle().fill(Color(Theme.text2)).frame(width: 6, height: 6)
                     Text(status).lineLimit(2)
                 }
+                .help(model.waitingForEngine ? "Another program, such as jolta watch, is syncing this data folder. Jolta takes over when it stops." : "")
             }
         }
         .font(.system(size: Theme.small))
