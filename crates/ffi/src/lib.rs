@@ -783,7 +783,20 @@ pub struct SignIn {
     waiting: Mutex<Option<tokio::task::AbortHandle>>,
     jolta: Jolta,
     runtime: tokio::runtime::Handle,
-    engine: Option<Arc<Engine>>,
+    /// The app's engine slot, read when the sign-in finishes: an engine
+    /// started meanwhile, as when the app took over from `jolta watch`,
+    /// may have read the accounts before this one was saved.
+    engine: SharedEngine,
+}
+
+type SharedEngine = Arc<Mutex<Option<Arc<Engine>>>>;
+
+/// The engine running now. Read it after saving an account: `Core::start`
+/// holds the slot while the engine reads the accounts, so an engine found
+/// here may have missed the account and takes it now, and one that starts
+/// later reads it from the store.
+fn running(engine: &SharedEngine) -> Option<Arc<Engine>> {
+    engine.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[uniffi::export]
@@ -820,7 +833,7 @@ impl SignIn {
             if let SignInFor::Calendar(account) = purpose {
                 jolta_core::oauth::save_grant(&account, &signed)?;
                 let list = jolta_core::calendar::sync::enable(&jolta, account.id).await?;
-                if let Some(engine) = engine {
+                if let Some(engine) = running(&engine) {
                     list.iter().filter(|c| c.shown).for_each(|c| engine.calendars().sync(c.id));
                     engine.calendars().check_away();
                 }
@@ -832,7 +845,7 @@ impl SignIn {
                 _ => None,
             };
             let account = jolta_core::oauth::save_account(&jolta, provider, &signed, again)?;
-            if let Some(engine) = engine {
+            if let Some(engine) = running(&engine) {
                 engine.add_account(account.clone());
             }
             Ok::<_, jolta_core::Error>(AccountInfo::from(account))
@@ -861,7 +874,7 @@ pub struct Core {
     listener: Arc<dyn CoreListener>,
     /// Shared with AI's background queue, whose results can change what is
     /// important and so the badge.
-    engine: Arc<Mutex<Option<Arc<Engine>>>>,
+    engine: SharedEngine,
     engine_sink: Mutex<Option<jolta_core::engine::Sink>>,
     /// The last list's full thread order, so pages deep in a long list are
     /// slices instead of re-scans. Cleared whenever stored mail changes.
@@ -1813,7 +1826,7 @@ impl Core {
         imap_host: String,
         smtp_host: String,
     ) -> Result<AccountInfo> {
-        let (jolta, engine) = (self.jolta.clone(), self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone());
+        let (jolta, engine) = (self.jolta.clone(), self.engine.clone());
         let setup = jolta_core::imap::ImapSetup {
             address,
             password,
@@ -1824,7 +1837,7 @@ impl Core {
         self.runtime
             .spawn(async move {
                 let account = jolta_core::imap::add_account(&jolta, setup).await?;
-                if let Some(engine) = engine {
+                if let Some(engine) = running(&engine) {
                     engine.add_account(account.clone());
                 }
                 Ok::<_, jolta_core::Error>(AccountInfo::from(account))
@@ -1876,7 +1889,7 @@ impl Core {
             waiting: Mutex::new(None),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
-            engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            engine: self.engine.clone(),
         }))
     }
 }
@@ -1904,7 +1917,7 @@ impl Core {
             waiting: Mutex::new(None),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
-            engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            engine: self.engine.clone(),
         }))
     }
 

@@ -154,7 +154,7 @@ impl Core {
             waiting: Mutex::new(None),
             jolta: self.jolta.clone(),
             runtime: self.runtime.handle().clone(),
-            engine: self.engine.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            engine: self.engine.clone(),
         }))
     }
 
