@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 struct ComposeView: View {
     @Bindable var model: AppModel
     @State private var showCc = false
+    /// Attachment sizes by path, read off the main thread: a file on a slow share must not stall typing.
+    @State private var fileSizes: [String: String] = [:]
     @FocusState private var focus: Field?
     @State private var saveTask: Task<Void, Never>?
     /// Writing with AI (⌘J), while its bar is open.
@@ -184,7 +186,7 @@ struct ComposeView: View {
                                 FileIcon(core: model.core, name: file.name, mimeType: file.mimeType)
                                 VStack(alignment: .leading, spacing: 0) {
                                     Text(file.name).font(.system(size: 12.5, weight: .medium)).lineLimit(1).frame(maxWidth: 220, alignment: .leading)
-                                    if let size = Self.size(of: file) {
+                                    if let size = fileSizes[file.path] {
                                         Text(size).font(.system(size: 11.5)).foregroundStyle(Color(Theme.text3))
                                     }
                                 }
@@ -210,6 +212,10 @@ struct ComposeView: View {
                 .scrollIndicators(.never)
                 .padding(.top, 14)
                 .padding(.bottom, 6)
+                .task(id: draft.wrappedValue.attachments.map(\.path)) {
+                    let paths = draft.wrappedValue.attachments.map(\.path)
+                    fileSizes = await Task.detached { Self.sizes(of: paths) }.value
+                }
             }
 
             if let writer {
@@ -326,9 +332,13 @@ struct ComposeView: View {
     }
 
     /// The file's size on disk, as the reader shows a received file's.
-    private static func size(of file: ComposeFile) -> String? {
-        guard let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.size] as? UInt64 else { return nil }
-        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    private nonisolated static func sizes(of paths: [String]) -> [String: String] {
+        var sizes: [String: String] = [:]
+        for path in paths {
+            guard let bytes = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64 else { continue }
+            sizes[path] = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+        }
+        return sizes
     }
 
     private func attach() {
