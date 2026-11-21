@@ -183,6 +183,16 @@ m.append("INBOX", "", None, raw.encode())'
 		sqlite3 "$dir/jolta.sqlite" "UPDATE account SET kind = 'gmail'"
 		printf '{"me@test.invalid": {"vacation": {"enableAutoReply": true, "responseBodyPlainText": "Back on Monday."}}}' >"$dir/away.json"
 	fi
+	if [ "$t" = testArchiveAllWhileHovering ]; then
+		mkdir -p "$dir/extra"
+		for i in $(seq -w 1 40); do
+			min=$((10#$i))
+			printf 'From: Ann Berg <ann@test.invalid>\r\nTo: me@test.invalid\r\nSubject: Extra message %s\r\nDate: Thu, 01 Oct 2026 09:%02d:00 +0100\r\nMessage-ID: <ui-extra-%s@test.invalid>\r\n\r\nBody %s.\r\n' \
+				"$i" "$min" "$i" "$i" >"$dir/extra/$i.eml"
+		done
+		"$JOLTA" --data-dir "$dir" import me@test.invalid inbox "$dir"/extra/*.eml >/dev/null
+		rm -rf "$dir/extra"
+	fi
 	ONLY+=("-only-testing:JoltaUITests/Journeys/$t")
 done
 

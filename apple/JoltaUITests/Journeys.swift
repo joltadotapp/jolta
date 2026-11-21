@@ -71,6 +71,24 @@ final class Journeys: XCTestCase {
         XCTAssertTrue(text(app, "Lunch on Friday").waitForExistence(timeout: 5), "z brings it back")
     }
 
+    /// Selecting every conversation in a scrolled inbox with ⌘A and archiving
+    /// them with E while the pointer hovers a row empties the inbox cleanly.
+    func testArchiveAllWhileHovering() throws {
+        let app = try launch()
+        let rows = rowCount(app)
+        XCTAssertGreaterThan(rows, 30, "the inbox has enough rows to scroll")
+        text(app, "Lunch on Friday").click()
+        for _ in 0..<25 { app.typeKey("j", modifierFlags: []) }
+        let hovered = text(app, "Extra message 20")
+        XCTAssertTrue(hovered.waitForExistence(timeout: 5), "scrolling brings the lower rows into view")
+        hovered.hover()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeKey("e", modifierFlags: [])
+        XCTAssertTrue(waitUntil { rowCount(app) == 0 }, "⌘A then E archives every conversation without crashing")
+        app.typeKey("z", modifierFlags: [])
+        XCTAssertTrue(waitUntil { rowCount(app) == rows }, "Z brings them back")
+    }
+
     /// The Message menu archives as E does, and Edit › Undo (⌘Z) takes it
     /// back while no text field has typing to undo.
     func testMessageMenuAndUndo() throws {
