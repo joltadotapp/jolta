@@ -124,9 +124,11 @@ struct MessageList: NSViewRepresentable {
                 model.shownListQuery = model.listQuery
                 let opened = model.selectedThreadID.flatMap { model.rows(of: [$0]).first }
                 let row = opened ?? 0
-                table.scrollRowToVisible(row)
-                if count > 0, opened != nil || switched {
-                    table.selectRowIndexes([row], byExtendingSelection: false)
+                if count > 0 {
+                    table.scrollRowToVisible(row)
+                    if opened != nil || switched {
+                        table.selectRowIndexes([row], byExtendingSelection: false)
+                    }
                 }
                 if !reportedLaunch, count > 0 {
                     reportedLaunch = true
@@ -497,13 +499,24 @@ final class KeyTableView: NSTableView {
     private(set) var hoverRow = -1 {
         didSet {
             guard hoverRow != oldValue else { return }
-            for row in [oldValue, hoverRow] where row >= 0 {
+            let rows = numberOfRows
+            for row in [oldValue, hoverRow] where row >= 0 && row < rows {
                 (rowView(atRow: row, makeIfNecessary: false) as? ThreadRowView)?.hovering = row == hoverRow
             }
         }
     }
     private var hoverArea: NSTrackingArea?
     private var scrollObserver: NSObjectProtocol?
+
+    override func noteNumberOfRowsChanged() {
+        super.noteNumberOfRowsChanged()
+        if hoverRow >= numberOfRows { hoverRow = -1 }
+    }
+
+    override func reloadData() {
+        super.reloadData()
+        if hoverRow >= numberOfRows { hoverRow = -1 }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
